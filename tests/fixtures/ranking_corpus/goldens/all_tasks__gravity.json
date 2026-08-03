@@ -1,0 +1,247 @@
+{
+  "admitted_by": {
+    "entity:1": "score",
+    "entity:2": "score",
+    "entity:3": "score",
+    "fact:1": "score",
+    "person:1": "score",
+    "person:2": "score"
+  },
+  "breakdowns": {
+    "entity:1": {
+      "admitted_by": "score",
+      "components": [
+        {
+          "evidence": "none",
+          "evidence_refs": [],
+          "key": "recency",
+          "label": "Last activity ~21 days ago",
+          "value": 0.268883
+        },
+        {
+          "evidence": "none",
+          "evidence_refs": [],
+          "key": "kind",
+          "label": "Tool",
+          "value": 0.126759
+        },
+        {
+          "evidence": "none",
+          "evidence_refs": [],
+          "key": "confidence_gate",
+          "label": "Trusted confidence",
+          "value": -0.144044
+        },
+        {
+          "evidence": "none",
+          "evidence_refs": [],
+          "key": "context",
+          "label": "Ranking for: Planning",
+          "value": -0.02516
+        }
+      ],
+      "node_id": "entity:1",
+      "total": 0.2264
+    },
+    "entity:2": {
+      "admitted_by": "score",
+      "components": [
+        {
+          "evidence": "none",
+          "evidence_refs": [],
+          "key": "recency",
+          "label": "Last activity ~21 days ago",
+          "value": 0.268883
+        },
+        {
+          "evidence": "none",
+          "evidence_refs": [],
+          "key": "kind",
+          "label": "Tool",
+          "value": 0.126759
+        },
+        {
+          "evidence": "none",
+          "evidence_refs": [],
+          "key": "confidence_gate",
+          "label": "Trusted confidence",
+          "value": -0.144044
+        },
+        {
+          "evidence": "none",
+          "evidence_refs": [],
+          "key": "context",
+          "label": "Ranking for: Planning",
+          "value": -0.02516
+        }
+      ],
+      "node_id": "entity:2",
+      "total": 0.2264
+    },
+    "entity:3": {
+      "admitted_by": "score",
+      "components": [
+        {
+          "evidence": "none",
+          "evidence_refs": [],
+          "key": "recency",
+          "label": "Last activity ~21 days ago",
+          "value": 0.268883
+        },
+        {
+          "evidence": "none",
+          "evidence_refs": [],
+          "key": "kind",
+          "label": "Tool",
+          "value": 0.126759
+        },
+        {
+          "evidence": "none",
+          "evidence_refs": [],
+          "key": "confidence_gate",
+          "label": "Trusted confidence",
+          "value": -0.144044
+        },
+        {
+          "evidence": "none",
+          "evidence_refs": [],
+          "key": "context",
+          "label": "Ranking for: Planning",
+          "value": -0.02516
+        }
+      ],
+      "node_id": "entity:3",
+      "total": 0.2264
+    },
+    "fact:1": {
+      "admitted_by": "score",
+      "components": [
+        {
+          "evidence_refs": [
+            "fact:1"
+          ],
+          "key": "due",
+          "label": "Open commitment without a due date",
+          "value": 0.443446
+        },
+        {
+          "evidence": "none",
+          "evidence_refs": [],
+          "key": "recency",
+          "label": "Recently appeared",
+          "value": 0.239733
+        },
+        {
+          "evidence": "none",
+          "evidence_refs": [],
+          "key": "kind",
+          "label": "Open task",
+          "value": 0.065927
+        },
+        {
+          "evidence": "none",
+          "evidence_refs": [],
+          "key": "confidence_gate",
+          "label": "Trusted confidence",
+          "value": -0.00274
+        },
+        {
+          "evidence": "none",
+          "evidence_refs": [],
+          "key": "context",
+          "label": "Ranking for: Planning",
+          "value": 0.149273
+        }
+      ],
+      "node_id": "fact:1",
+      "total": 0.8956
+    },
+    "person:1": {
+      "admitted_by": "score",
+      "components": [
+        {
+          "evidence": "none",
+          "evidence_refs": [],
+          "key": "recency",
+          "label": "Last activity ~21 days ago",
+          "value": 0.20071
+        },
+        {
+          "evidence": "none",
+          "evidence_refs": [],
+          "key": "kind",
+          "label": "Person (high kind weight)",
+          "value": 0.162629
+        },
+        {
+          "evidence": "none",
+          "evidence_refs": [],
+          "key": "confidence_gate",
+          "label": "Trusted confidence",
+          "value": -0.043009
+        },
+        {
+          "evidence": "none",
+          "evidence_refs": [],
+          "key": "context",
+          "label": "Ranking for: Planning",
+          "value": 0.032033
+        }
+      ],
+      "node_id": "person:1",
+      "total": 0.3524
+    },
+    "person:2": {
+      "admitted_by": "score",
+      "components": [
+        {
+          "evidence": "none",
+          "evidence_refs": [],
+          "key": "recency",
+          "label": "Last activity ~21 days ago",
+          "value": 0.20071
+        },
+        {
+          "evidence": "none",
+          "evidence_refs": [],
+          "key": "kind",
+          "label": "Person (high kind weight)",
+          "value": 0.162629
+        },
+        {
+          "evidence": "none",
+          "evidence_refs": [],
+          "key": "confidence_gate",
+          "label": "Trusted confidence",
+          "value": -0.043009
+        },
+        {
+          "evidence": "none",
+          "evidence_refs": [],
+          "key": "context",
+          "label": "Ranking for: Planning",
+          "value": 0.032033
+        }
+      ],
+      "node_id": "person:2",
+      "total": 0.3524
+    }
+  },
+  "focus_ids": [
+    "fact:1",
+    "person:1",
+    "person:2",
+    "entity:1",
+    "entity:2",
+    "entity:3"
+  ],
+  "focus_order": [
+    "fact:1",
+    "person:1",
+    "person:2",
+    "entity:1",
+    "entity:2",
+    "entity:3"
+  ],
+  "scorer": "gravity"
+}

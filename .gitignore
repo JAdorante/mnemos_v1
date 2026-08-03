@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+.credentials.env
+*.sqlite
+*.db
+# Runtime data lives in the ROOT data/ dir — ignore its contents, but SHIP the
+# checked-in default table(s). Root-anchored (/data/) so package data dirs such as
+# desktop_agent/data/ are NOT matched and stay tracked/distributable.
+/data/*
+!/data/model_prices.json
+sessions/
+
+.DS_Store
+.vscode/*.log

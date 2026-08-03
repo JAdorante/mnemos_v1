@@ -1,0 +1,157 @@
+{
+  "_comment": "Shipped launchable-app registry. Machine-specific install locations are expressed as env-var TOKENS (%LOCALAPPDATA%, %PROGRAMFILES%, %PROGRAMFILES(X86)%, %WINDIR%, ${VAR}, ~) so the SAME file resolves on any machine. Add apps or point a key at a different install via a user overlay (QUILL_DESKTOP_APPS, default ~/.quill/apps.json) — no code edit. Per app: platforms (os.name values that may run it), candidates (probed in order; first that exists wins), optional launch_args (trusted built-in args), capabilities (what the agent may do with it).",
+
+  "cursor": {
+    "platforms": ["nt", "posix"],
+    "candidates": ["%LOCALAPPDATA%\\Programs\\cursor\\Cursor.exe", "cursor"],
+    "capabilities": {
+      "display_name": "Cursor",
+      "launch": true,
+      "open_jailed_files": [".py", ".md", ".txt", ".json", ".js", ".ts", ".html", ".css"],
+      "opens_dirs": true,
+      "pixel_ui": "approval_required",
+      "shell": "limited",
+      "network": true,
+      "risk": "medium",
+      "demo_safe": true,
+      "notes": "Code editor; opens a jailed project folder or source file."
+    }
+  },
+
+  "code": {
+    "platforms": ["nt", "posix"],
+    "candidates": ["%LOCALAPPDATA%\\Programs\\Microsoft VS Code\\Code.exe", "%PROGRAMFILES%\\Microsoft VS Code\\Code.exe", "code"],
+    "capabilities": {
+      "display_name": "VS Code",
+      "launch": true,
+      "open_jailed_files": [".py", ".md", ".txt", ".json", ".js", ".ts", ".html", ".css"],
+      "opens_dirs": true,
+      "pixel_ui": "approval_required",
+      "shell": "limited",
+      "network": true,
+      "risk": "medium",
+      "demo_safe": true,
+      "notes": "Code editor; opens a jailed project folder or source file."
+    }
+  },
+
+  "notepad": {
+    "platforms": ["nt"],
+    "candidates": ["notepad", "%WINDIR%\\System32\\notepad.exe"],
+    "capabilities": {
+      "display_name": "Notepad",
+      "launch": true,
+      "open_jailed_files": [".txt", ".md", ".log", ".json", ".csv", ".ini"],
+      "opens_dirs": false,
+      "pixel_ui": "approval_required",
+      "shell": false,
+      "network": false,
+      "risk": "low",
+      "demo_safe": true,
+      "notes": "Plain-text editor; opens a single jailed text file."
+    }
+  },
+
+  "explorer": {
+    "platforms": ["nt"],
+    "candidates": ["explorer", "%WINDIR%\\explorer.exe"],
+    "capabilities": {
+      "display_name": "File Explorer",
+      "launch": true,
+      "open_jailed_files": [],
+      "opens_dirs": true,
+      "pixel_ui": "off",
+      "shell": false,
+      "network": false,
+      "risk": "low",
+      "demo_safe": true,
+      "notes": "File manager; reveals a jailed folder."
+    }
+  },
+
+  "chrome": {
+    "platforms": ["nt", "posix"],
+    "candidates": ["%PROGRAMFILES%\\Google\\Chrome\\Application\\chrome.exe", "%PROGRAMFILES(X86)%\\Google\\Chrome\\Application\\chrome.exe", "chrome", "google-chrome", "chromium"],
+    "capabilities": {
+      "display_name": "Chrome",
+      "launch": true,
+      "open_jailed_files": [".html", ".htm", ".pdf", ".svg", ".txt"],
+      "opens_dirs": false,
+      "pixel_ui": "approval_required",
+      "shell": false,
+      "network": true,
+      "risk": "medium",
+      "demo_safe": true,
+      "notes": "Browser; opens a jailed local file. Network-capable."
+    }
+  },
+
+  "terminal": {
+    "platforms": ["nt"],
+    "candidates": ["%LOCALAPPDATA%\\Microsoft\\WindowsApps\\wt.exe", "wt"],
+    "capabilities": {
+      "display_name": "Windows Terminal",
+      "launch": true,
+      "open_jailed_files": [],
+      "opens_dirs": false,
+      "pixel_ui": "off",
+      "shell": false,
+      "network": false,
+      "risk": "low",
+      "demo_safe": true,
+      "notes": "Opens a terminal window for the human; the agent cannot type into it — commands go through run_command. Takes no target."
+    }
+  },
+
+  "flstudio": {
+    "platforms": ["nt", "posix"],
+    "candidates": ["%PROGRAMFILES%\\Image-Line\\FL Studio 2024\\FL64.exe", "%PROGRAMFILES%\\Image-Line\\FL Studio 2025\\FL64.exe", "%PROGRAMFILES%\\Image-Line\\FL Studio 21\\FL64.exe", "%PROGRAMFILES%\\Image-Line\\FL Studio 20\\FL64.exe", "%PROGRAMFILES(X86)%\\Image-Line\\FL Studio 2024\\FL64.exe", "FL64"],
+    "capabilities": {
+      "display_name": "FL Studio",
+      "launch": true,
+      "open_jailed_files": [".flp", ".wav", ".mp3", ".mid", ".midi"],
+      "opens_dirs": false,
+      "pixel_ui": "approval_required",
+      "shell": false,
+      "network": false,
+      "risk": "medium",
+      "demo_safe": true,
+      "notes": "DAW; opens a jailed project/audio/MIDI file. Full composition needs pixel UI."
+    }
+  },
+
+  "claude": {
+    "platforms": ["nt", "posix"],
+    "candidates": ["%LOCALAPPDATA%\\AnthropicClaude\\claude.exe", "%LOCALAPPDATA%\\AnthropicClaude\\Claude.exe", "%LOCALAPPDATA%\\Programs\\claude\\Claude.exe", "claude"],
+    "capabilities": {
+      "display_name": "Claude",
+      "launch": true,
+      "open_jailed_files": [],
+      "opens_dirs": false,
+      "pixel_ui": "approval_required",
+      "shell": false,
+      "network": true,
+      "risk": "medium",
+      "demo_safe": true,
+      "notes": "Claude desktop app. Chat via pixel UI; takes no jailed file target."
+    }
+  },
+
+  "phonelink": {
+    "platforms": ["nt"],
+    "candidates": ["%WINDIR%\\explorer.exe", "explorer"],
+    "launch_args": ["shell:AppsFolder\\Microsoft.YourPhone_8wekyb3d8bbwe!App"],
+    "capabilities": {
+      "display_name": "Phone Link",
+      "launch": true,
+      "open_jailed_files": [],
+      "opens_dirs": false,
+      "pixel_ui": "special",
+      "shell": false,
+      "network": true,
+      "risk": "medium",
+      "demo_safe": true,
+      "notes": "iPhone SMS/calls bridge; opened by AUMID, takes no jailed file/folder target."
+    }
+  }
+}

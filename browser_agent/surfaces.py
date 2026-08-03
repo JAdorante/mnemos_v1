@@ -1,0 +1,140 @@
+"""General-purpose surface heuristics for the browser agent.
+
+Detects chat/messaging SPAs from URL structure, host tips, and router
+intent/site — never from contact display names. Used for vision gating,
+messaging mode, and recovery (auto-read on click spirals).
+"""
+from __future__ import annotations
+
+import re
+from urllib.parse import urlsplit
+
+from .credentials import host_from_url
+
+# Hosts that are primarily web chat / DM UIs (registrable domain, no www).
+CHAT_HOSTS = frozenset({
+    "snapchat.com",
+    "web.whatsapp.com",
+    "whatsapp.com",
+    "discord.com",
+    "telegram.org",
+    "web.telegram.org",
+    "messenger.com",
+    "facebook.com",  # Messenger often under facebook.com/messages
+    "instagram.com",
+    "slack.com",
+    "teams.microsoft.com",
+    "chat.google.com",
+    "messages.google.com",
+})
+
+# URL path cues that any host may use for an open conversation / inbox.
+_CHAT_PATH_RE = re.compile(
+    r"(?:^|/)(?:web|chat|chats|messages?|msg|dms?|conversations?|"
+    r"inbox|channel|channels)(?:/|$)",
+    re.I,
+)
+
+_CHAT_INTENT_RE = re.compile(
+    r"\b(send_chat|read_chat|web_chat|direct_message|\bdm\b|imessage|"
+    r"snapchat|whatsapp|discord|telegram|messenger|slack|"
+    r"send.?message|read.?message|chat.?message)\b",
+    re.I,
+)
+
+
+def path_of(url: str) -> str:
+    try:
+        return urlsplit(url or "").path or ""
+    except Exception:
+        return ""
+
+
+def is_chat_host(url: str | None = None, host: str | None = None) -> bool:
+    h = (host or host_from_url(url or "") or "").lower()
+    if not h:
+        return False
+    if h in CHAT_HOSTS:
+        return True
+    parts = h.split(".")
+    for i in range(len(parts) - 1):
+        if ".".join(parts[i:]) in CHAT_HOSTS:
+            return True
+    return False
+
+
+def is_open_conversation_url(url: str | None) -> bool:
+    """True when the URL looks like a specific thread (not just the app shell)."""
+    from urllib.parse import urlsplit as _urlsplit
+    try:
+        parts = _urlsplit(url or "")
+    except Exception:
+        return False
+    path = parts.path or ""
+    if not path or path in ("/", ""):
+        # Query-only deep links (e.g. wa.me / send?phone=) on chat hosts.
+        return bool(parts.query) and is_chat_host(url)
+    # /web alone is the shell; /web/<id> is a thread.
+    if re.match(r"^/web/?$", path, re.I):
+        return False
+    if _CHAT_PATH_RE.search(path):
+        segs = [s for s in path.strip("/").split("/") if s]
+        return len(segs) >= 2
+    # Chat host with a non-root path (e.g. /send, /channels/123).
+    if is_chat_host(url) and len([s for s in path.strip("/").split("/") if s]) >= 1:
+        return True
+    return False
+
+
+def is_chat_surface(
+    url: str | None = None,
+    *,
+    intent: str | None = None,
+    site: str | None = None,
+    has_provider_tip: bool = False,
+) -> bool:
+    """Should this turn use chat-oriented perception / recovery?"""
+    if has_provider_tip and is_chat_host(url):
+        return True
+    if is_chat_host(url):
+        return True
+    if is_open_conversation_url(url):
+        return True
+    hay = f"{intent or ''} {site or ''} {url or ''}"
+    if _CHAT_INTENT_RE.search(hay):
+        return True
+    return False
+
+
+def looks_like_chat(scan: dict | None) -> bool:
+    """Structural chat detection from a live page scan — works on hosts that
+    aren't in CHAT_HOSTS (self-hosted Mattermost/Rocket.Chat, new apps).
+
+    Cues: a message-log region, a composer (editable textbox), and a column of
+    selectable conversation rows. Require the composer plus at least one other
+    signal so search boxes on ordinary sites don't qualify.
+    """
+    if not scan:
+        return False
+    sig = scan.get("chat_signals") or {}
+    composers = int(sig.get("composers") or 0)
+    if not composers:
+        return False
+    if sig.get("has_log"):
+        return True
+    if int(sig.get("list_rows") or 0) >= 5 and any(
+            e.get("selected") for e in scan.get("elements", [])):
+        return True
+    return False
+
+
+def wants_early_vision(url: str | None, *, escalate: bool = False,
+                       scan: dict | None = None) -> bool:
+    """Attach a screenshot early on chat SPAs (message bodies often aren't AX)."""
+    if escalate:
+        return True
+    if is_chat_host(url) or is_open_conversation_url(url):
+        return True
+    if looks_like_chat(scan):
+        return True
+    return False
