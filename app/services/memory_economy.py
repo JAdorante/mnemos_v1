@@ -208,7 +208,7 @@ def sweep(store=None, *, now: float | None = None) -> dict:
     result: dict[str, Any] = {
         "enabled": cfg.enabled, "compaction": cfg.compaction,
         "scored": 0, "absorbed": 0, "candidates": 0, "compacted": 0,
-        "skipped_open": 0,
+        "skipped_open": 0, "vector_gc": None,
     }
     if not cfg.enabled:
         result["reason"] = "disabled"
@@ -295,6 +295,15 @@ def sweep(store=None, *, now: float | None = None) -> dict:
         growth_snapshot(store, now=now)
     except Exception as exc:
         print(f"[memory_economy] growth snapshot failed ({exc}).")
+
+    # Plan 6.6: drop stale Lance rows for dead facts + periodic optimize.
+    try:
+        from app.services import memory as memory_svc
+        result["vector_gc"] = memory_svc.vector_gc(store, now=now)
+    except Exception as exc:
+        print(f"[memory_economy] vector_gc failed ({exc}).")
+        result["vector_gc"] = {"ok": False, "error": str(exc)}
+
     try:
         store.add_economy_run(result)
     except Exception as exc:
@@ -332,7 +341,9 @@ def status(store=None) -> dict:
             "compact_after_days": cfg.compact_after_days,
             "retention_threshold": cfg.retention_threshold,
             "compact_max_per_run": cfg.compact_max_per_run,
+            "vector_gc_after_days": getattr(cfg, "vector_gc_after_days", 30.0),
         },
+        "vector_gc": getattr(cfg, "vector_gc", True),
     }
     if store is None:
         try:

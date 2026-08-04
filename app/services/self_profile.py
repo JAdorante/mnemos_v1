@@ -56,6 +56,25 @@ def is_self_name(name: str) -> bool:
     return (name or "").strip().lower() in _SELF_TOKENS
 
 
+def speaker_is_enrolled_user(speaker: str, store=None) -> bool:
+    """True when the turn's speaker label is the enrolled user (plan 2.1).
+
+    `owner='me'` may map to the self node only when this is True; otherwise
+    'me' is the labeled speaker of that turn (or unresolved if unknown).
+    """
+    spk = (speaker or "").strip()
+    if not spk or spk.lower() == "unknown speaker":
+        return False
+    try:
+        from app.services.identity import user_identity
+        name = (user_identity(store).get("name") or "").strip()
+    except Exception:
+        return False
+    if not name:
+        return False
+    return spk.casefold() == name.casefold()
+
+
 def self_person_id(store=None) -> int | None:
     """The user's own person row id — resolved from this install's identity
     (onboarding sheet / accepted memory), created on first use, cached.

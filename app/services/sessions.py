@@ -37,6 +37,9 @@ class Session:
     event_ids: list[int] = field(default_factory=list)  # flattened provenance
     n_turns: int = 0
     n_utterances: int = 0
+    # Meeting Layer P1 — set by meeting_join.attach_calendar during rebuild.
+    calendar_event_id: str | None = None
+    meeting_meta: dict | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -45,6 +48,8 @@ class Session:
             "event_ids": self.event_ids, "n_turns": self.n_turns,
             "n_utterances": self.n_utterances,
             "duration_s": round(self.end - self.start, 2),
+            "calendar_event_id": self.calendar_event_id,
+            "meeting_meta": self.meeting_meta,
         }
 
 
@@ -81,12 +86,21 @@ def group_sessions(turns: list[dict], max_gap_s: float) -> list[Session]:
 
 def rebuild(store: Store | None = None) -> int:
     """Recompute the sessions table from the current turns. Returns session count.
-    Rebuilds turns first if they're empty, so a fresh DB doesn't no-op silently."""
+    Rebuilds turns first if they're empty, so a fresh DB doesn't no-op silently.
+
+    Meeting Layer P1: after grouping, join overlapping calendar events so the
+    session inherits title/attendees (idempotent — re-derived every rebuild).
+    """
     store = store or get_store()
     if store.turn_count() == 0 and settings.consolidation.enabled:
         from app.services import consolidation
         consolidation.rebuild(store)
     turns = store.recent_turns(1_000_000)
     sessions = group_sessions(turns, settings.consolidation.session_gap_s)
+    try:
+        from app.services import meeting_join
+        meeting_join.link_sessions(store, sessions)
+    except Exception as exc:
+        print(f"[sessions] calendar join skipped ({exc}).")
     store.replace_sessions(sessions)
     return len(sessions)

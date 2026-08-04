@@ -143,11 +143,19 @@ window.VinceoApprovals = {
         const body = new URLSearchParams();
         for (const [k, v] of fd.entries()) body.set(k, String(v));
         body.set('as_json', '1');
-        fetch('/approvals/resolve', {
+        const action = form.getAttribute('action') || '/approvals/resolve';
+        fetch(action, {
           method: 'POST',
           headers: {'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json'},
           body: body.toString(),
-        }).then(() => {
+        }).then(async (r) => {
+          let j = {};
+          try { j = await r.json(); } catch (e) {}
+          if (!r.ok || j.ok === false) {
+            const msg = (j && j.error) || ('approval refused (' + r.status + ')');
+            try { window.dispatchEvent(new CustomEvent('vinceo:approval-refused', {detail: j})); } catch (e) {}
+            console.warn('[approval]', msg);
+          }
           this.refresh();
           try { window.dispatchEvent(new CustomEvent('vinceo:approval-resolved')); } catch (e) {}
         }).catch(() => { form.submit(); });
@@ -196,6 +204,9 @@ def collect_state(agent_worker=None) -> dict[str, Any]:
         "outbound": False,
         "created_at": None,
         "sig": "0",
+        "packet_id": None,
+        "payload_hash": None,
+        "expires_at": None,
     }
     if agent_worker is None:
         return empty
@@ -272,7 +283,10 @@ def collect_state(agent_worker=None) -> dict[str, Any]:
     if not steps and intent:
         steps = [intent]
 
-    sig = f"{kind}|{summary}|{queued}|{bool(awaiting)}"
+    packet_id = (packet or {}).get("packet_id")
+    payload_hash = (packet or {}).get("payload_hash")
+    expires_at = (packet or {}).get("expires_at")
+    sig = f"{kind}|{summary}|{queued}|{bool(awaiting)}|{packet_id}|{payload_hash}"
     return {
         "pending": True,
         "summary": summary,
@@ -289,11 +303,19 @@ def collect_state(agent_worker=None) -> dict[str, Any]:
         "sig": sig,
         "offer": offer,
         "packet": packet,
+        "packet_id": packet_id,
+        "payload_hash": payload_hash,
+        "expires_at": expires_at,
     }
 
 
 def render_banner_html(state: dict[str, Any] | None = None, *, next_url: str = "/") -> str:
-    """SSR banner. Hidden when nothing pending; real forms always present for no-JS."""
+    """SSR banner. Hidden when nothing pending; real forms always present for no-JS.
+
+    When a bound approval packet is present, Yes/No POST to
+    `/approval/{packet_id}/decide` with `payload_hash` (plan 0.6). Offers
+    without a packet keep the legacy `/approvals/resolve` path.
+    """
     s = state or {"pending": False}
     on = " on" if s.get("pending") else ""
     aria = "false" if s.get("pending") else "true"
@@ -303,21 +325,47 @@ def render_banner_html(state: dict[str, Any] | None = None, *, next_url: str = "
     more_hidden = "" if queued > 0 else " hidden"
     more_txt = f"+{queued} more" if queued > 0 else ""
     next_u = _esc(next_url)
+    pid = s.get("packet_id")
+    phash = _esc(s.get("payload_hash") or "")
+    if pid is not None and s.get("payload_hash"):
+        action = f"/approval/{int(pid)}/decide"
+        yes_fields = (
+            f'<input type="hidden" name="payload_hash" value="{phash}">'
+            f'<input type="hidden" name="decision" value="approve">'
+            f'<input type="hidden" name="approved_via" value="button">'
+            f'<input type="hidden" name="next" value="{next_u}">'
+        )
+        no_fields = (
+            f'<input type="hidden" name="payload_hash" value="{phash}">'
+            f'<input type="hidden" name="decision" value="cancel">'
+            f'<input type="hidden" name="approved_via" value="button">'
+            f'<input type="hidden" name="next" value="{next_u}">'
+        )
+    else:
+        action = "/approvals/resolve"
+        yes_fields = (
+            f'<input type="hidden" name="accept" value="1">'
+            f'<input type="hidden" name="next" value="{next_u}">'
+        )
+        no_fields = (
+            f'<input type="hidden" name="accept" value="0">'
+            f'<input type="hidden" name="next" value="{next_u}">'
+        )
     return f"""\
-<aside id="vinceoApproval" class="{on.strip()}" aria-hidden="{aria}" role="status">
+<aside id="vinceoApproval" class="{on.strip()}" aria-hidden="{aria}" role="status"
+       data-packet-id="{_esc(pid) if pid is not None else ''}"
+       data-payload-hash="{phash}">
   <span class="ap-dot" aria-hidden="true"></span>
   <span class="ap-sum">{summary}</span>
   <span class="ap-age">{age}</span>
   <a class="ap-more" href="/chat"{more_hidden}>{more_txt}</a>
   <div class="ap-actions">
-    <form method="post" action="/approvals/resolve" class="approval-form" style="display:inline">
-      <input type="hidden" name="accept" value="1">
-      <input type="hidden" name="next" value="{next_u}">
+    <form method="post" action="{action}" class="approval-form" style="display:inline">
+      {yes_fields}
       <button type="submit" class="go">Yes — proceed</button>
     </form>
-    <form method="post" action="/approvals/resolve" class="approval-form" style="display:inline">
-      <input type="hidden" name="accept" value="0">
-      <input type="hidden" name="next" value="{next_u}">
+    <form method="post" action="{action}" class="approval-form" style="display:inline">
+      {no_fields}
       <button type="submit" class="quiet">Not now</button>
     </form>
     <a class="review" href="/chat">Review</a>
@@ -360,7 +408,11 @@ def inject_page(html_page: str, *, next_url: str = "/", agent_worker=None) -> st
 
 
 def resolve(agent_worker, accept: bool) -> dict[str, Any]:
-    """Forward yes/no to the existing offer / ask_human paths."""
+    """Forward yes/no to the existing offer / ask_human paths.
+
+    When a bound approval packet is pending, prefer the hash-checked decide
+    path (plan 0.6) so a bare Yes cannot authorize a stale packet.
+    """
     if agent_worker is None:
         return {"ok": False, "error": "agent disabled"}
     try:
@@ -369,6 +421,16 @@ def resolve(agent_worker, accept: bool) -> dict[str, Any]:
         state = {}
     # Prefer structured approval / ask_human when awaiting.
     if state.get("awaiting"):
+        pkt = state.get("packet") if isinstance(state.get("packet"), dict) else {}
+        pid, phash = pkt.get("packet_id"), pkt.get("payload_hash")
+        if pid is not None and phash and hasattr(agent_worker, "decide_approval"):
+            try:
+                return agent_worker.decide_approval(
+                    int(pid), str(phash),
+                    "approve" if accept else "cancel",
+                    approved_via="button")
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
         try:
             text = "yes" if accept else "no"
             return agent_worker.handle_reply(text)
@@ -376,5 +438,21 @@ def resolve(agent_worker, accept: bool) -> dict[str, Any]:
             return {"ok": False, "error": str(exc)}
     try:
         return agent_worker.resolve_todo(bool(accept))
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def decide(agent_worker, packet_id: int, payload_hash: str, decision: str, *,
+           user_edit: str | None = None, fields: dict | None = None,
+           approved_via: str = "button") -> dict[str, Any]:
+    """Bound decide entry point used by POST /approval/{id}/decide."""
+    if agent_worker is None:
+        return {"ok": False, "error": "agent disabled"}
+    if not hasattr(agent_worker, "decide_approval"):
+        return {"ok": False, "error": "decide_approval unavailable"}
+    try:
+        return agent_worker.decide_approval(
+            int(packet_id), str(payload_hash or ""), decision,
+            user_edit=user_edit, fields=fields, approved_via=approved_via)
     except Exception as exc:
         return {"ok": False, "error": str(exc)}

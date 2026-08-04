@@ -433,6 +433,11 @@ button:disabled,.btn:disabled{cursor:default}
 }
 #vinceoRecBar .rec-chip.paused{color:var(--mut);font-weight:500}
 #vinceoRecBar .rec-chip .act{font:10px/1 var(--mono);color:var(--mut);letter-spacing:.04em;text-transform:uppercase}
+#vinceoRecBar .rec-chip.meeting-on{
+  background:rgba(11,19,32,.92);color:#F8F6F1;border-color:rgba(11,19,32,.5);
+  cursor:default;
+}
+#vinceoRecBar .rec-chip.meeting-on .dot{background:#E8A07A}
 #vinceoRecBar .rec-consent-btn{
   border:1px solid rgba(184,115,51,.4);background:rgba(184,115,51,.1);
   color:var(--navy);border-radius:12px;padding:9px 14px;font:600 12px var(--font);

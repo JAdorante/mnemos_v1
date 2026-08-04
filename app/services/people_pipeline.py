@@ -1,7 +1,9 @@
 """People Intelligence v2 — mention ledger, candidate resolution, contacts.
 
-Feature-flagged via QUILL_PEOPLE_V2. When off, callers fall back to legacy
-resolver.resolve_person. When on:
+Feature-flagged via QUILL_PEOPLE_V2 (code default ON after plan 2.3 golden
+gate). When off (`QUILL_PEOPLE_V2=0`), callers fall back to the legacy
+`resolution.resolver.resolve_person` path — kept for one release as the
+kill-switch / rollback. When on:
 
   * every owner/party string becomes a PersonMention
   * identity resolves to a candidate set (auto / leave_open / create_new)
@@ -9,6 +11,12 @@ resolver.resolve_person. When on:
   * contact points are written as evidence-linked rows
 
 LLM is never the resolver — deterministic scoring only.
+
+Thresholds are calibrated by `scripts/eval_entity_resolution.py` against
+`tests/fixtures/goldens/entity_resolution.jsonl` (merge-error ≈ 0). Override
+with QUILL_PEOPLE_AUTO_RESOLVE / QUILL_PEOPLE_AUTO_MARGIN /
+QUILL_PEOPLE_CREATE_NEW for experiments; do not loosen without re-running
+the golden gate.
 """
 from __future__ import annotations
 
@@ -21,23 +29,229 @@ from app.services import name_quality as nq
 from app.services import self_profile
 from app.services import source_policy as sp
 from app.services.person_details import (
-    _EMAIL, _PHONE, _contact_belongs, _name_tokens, _phone_ok,
+    ATTR_MIN, _EMAIL, _PHONE, _name_tokens, _phone_ok,
+    contact_attribution_score,
 )
 from app.services.resolution import _prefix_match, resolver
 
 PIPELINE_VERSION = "people_v2.1"
 EXTRACTOR_VERSION = "owner_party_v1"
 
-# Thresholds (calibrate later on bench)
+# Thresholds — calibrated on entity_resolution golden (plan 2.3).
+# Env overrides: QUILL_PEOPLE_AUTO_RESOLVE / _AUTO_MARGIN / _CREATE_NEW.
 _AUTO_RESOLVE = 0.92
 _AUTO_MARGIN = 0.15
 _CREATE_NEW = 0.85
 _CREATE_RELEVANCE = 0.55
-_ATTR_MIN = 2.0
+_ATTR_MIN = ATTR_MIN  # plan 2.4 — auto-write floor; below → review
+
+
+def _thr_auto_resolve() -> float:
+    return float(os.getenv("QUILL_PEOPLE_AUTO_RESOLVE", str(_AUTO_RESOLVE)))
+
+
+def _thr_auto_margin() -> float:
+    return float(os.getenv("QUILL_PEOPLE_AUTO_MARGIN", str(_AUTO_MARGIN)))
+
+
+def _thr_create_new() -> float:
+    return float(os.getenv("QUILL_PEOPLE_CREATE_NEW", str(_CREATE_NEW)))
 
 
 def enabled() -> bool:
-    return os.getenv("QUILL_PEOPLE_V2", "0") not in ("0", "false", "False")
+    # Plan 2.3: code default ON after merge-error ≈ 0 on entity-resolution golden.
+    # Kill-switch: QUILL_PEOPLE_V2=0 → legacy resolver.resolve_person.
+    return os.getenv("QUILL_PEOPLE_V2", "1") not in ("0", "false", "False")
+
+
+def score_person_candidates(display: str, people: list[dict]) -> list[tuple[dict | None, float, dict]]:
+    """Deterministic candidate scores for a mention against a people roster.
+
+    Pure scoring — no DB writes. Used by resolve_person_mention and the
+    plan 2.3 threshold-sweep eval.
+    """
+    scored: list[tuple[dict | None, float, dict]] = []
+    key = (display or "").lower()
+    for p in people:
+        names = [p["name"], *(p.get("aliases") or [])]
+        pos, neg, feats = 0.0, 0.0, {}
+        if any(n.lower() == key for n in names):
+            pos, feats["exact"] = 3.0, True
+        elif any(_prefix_match(display, n) for n in names):
+            pos, feats["prefix"] = 1.8, True
+        else:
+            mt = set(re.findall(r"\w{3,}", key))
+            pt: set[str] = set()
+            for n in names:
+                pt |= set(re.findall(r"\w{3,}", n.lower()))
+            if mt and pt:
+                j = len(mt & pt) / len(mt | pt)
+                if j >= 0.5:
+                    pos, feats["jaccard"] = 1.2 * j, j
+        if pos <= 0:
+            continue
+        score = _sigmoid(pos - neg)
+        scored.append((p, score, {"pos": pos, "neg": neg, **feats}))
+    scored.sort(key=lambda x: -x[1])
+    return scored
+
+
+def _attendee_name_match(mention: str, attendee_name: str) -> bool:
+    """First-name or full-name match between a spoken mention and invite CN."""
+    m = (mention or "").strip().lower()
+    a = (attendee_name or "").strip().lower()
+    if not m or not a:
+        return False
+    if m == a or _prefix_match(mention, attendee_name) or _prefix_match(attendee_name, mention):
+        return True
+    m_toks = re.findall(r"\w+", m)
+    a_toks = re.findall(r"\w+", a)
+    if not m_toks or not a_toks:
+        return False
+    # "Sarah" ↔ "Sarah Chen"
+    if len(m_toks) == 1 and m_toks[0] == a_toks[0]:
+        return True
+    return m_toks[0] == a_toks[0] and (
+        len(m_toks) == 1 or m_toks[-1] == a_toks[-1])
+
+
+def matching_attendees(mention: str, attendees: list[dict] | None) -> list[dict]:
+    """Attendees whose CN/email local-part matches the spoken mention."""
+    out: list[dict] = []
+    for a in attendees or []:
+        if not isinstance(a, dict):
+            continue
+        name = a.get("name") or ""
+        email = (a.get("email") or "").strip().lower()
+        local = email.split("@", 1)[0] if email else ""
+        if _attendee_name_match(mention, name):
+            out.append(a)
+        elif local and _attendee_name_match(mention, local.replace(".", " ")):
+            out.append(a)
+    return out
+
+
+def apply_attendee_boosts(
+    display: str,
+    scored: list[tuple[dict | None, float, dict]],
+    people: list[dict],
+    attendees: list[dict] | None,
+    store,
+) -> list[tuple[dict | None, float, dict]]:
+    """Boost / inject roster candidates that match calendar attendees.
+
+    An in-attendee-list first name with a known email is near-conclusive
+    identity evidence (Meeting Layer P1 resolution prior).
+    """
+    matched = matching_attendees(display, attendees)
+    if not matched:
+        return scored
+
+    by_id = {int(p["id"]): p for p in people if p.get("id") is not None}
+    score_map: dict[int, tuple[dict | None, float, dict]] = {}
+    for p, sc, feats in scored:
+        if p is not None and p.get("id") is not None:
+            score_map[int(p["id"])] = (p, sc, dict(feats))
+
+    for att in matched:
+        email = (att.get("email") or "").strip().lower()
+        pid: int | None = None
+        if email:
+            try:
+                pid = store.find_person_by_contact("email", email)
+            except Exception:
+                pid = None
+        # Fall back to roster name match against the invite CN.
+        if pid is None and att.get("name"):
+            an = (att.get("name") or "").strip().lower()
+            for p in people:
+                names = [p["name"], *(p.get("aliases") or [])]
+                if any(n.lower() == an for n in names) or any(
+                        _prefix_match(att.get("name") or "", n) for n in names):
+                    pid = int(p["id"])
+                    break
+        if pid is None or pid not in by_id:
+            continue
+        p = by_id[pid]
+        prev = score_map.get(pid)
+        # Strong prior: treat as near-exact when email-backed.
+        pos = 4.5 if email else 3.5
+        feats = {"attendee": True, "attendee_email": bool(email),
+                 "pos": pos, "neg": 0.0}
+        if prev:
+            feats = {**prev[2], **feats, "pos": max(prev[2].get("pos", 0), pos)}
+        score_map[pid] = (p, _sigmoid(pos), feats)
+
+    out = list(score_map.values())
+    # Keep any unscored non-person rows (shouldn't happen) + resorted.
+    for p, sc, feats in scored:
+        if p is None or p.get("id") is None:
+            out.append((p, sc, feats))
+        elif int(p["id"]) not in score_map:
+            out.append((p, sc, feats))
+    # Dedup by person id
+    seen: set[int] = set()
+    deduped: list[tuple[dict | None, float, dict]] = []
+    for p, sc, feats in sorted(out, key=lambda x: -x[1]):
+        if p is None:
+            deduped.append((p, sc, feats))
+            continue
+        pid = int(p["id"])
+        if pid in seen:
+            continue
+        seen.add(pid)
+        deduped.append((p, sc, feats))
+    return deduped
+
+
+def decide_from_scores(
+    scored: list[tuple[dict | None, float, dict]],
+    *,
+    relationship_boost: float,
+    create_person_candidates: bool,
+    auto_resolve: float | None = None,
+    auto_margin: float | None = None,
+    create_new: float | None = None,
+) -> tuple[str, dict | None, float]:
+    """Apply threshold policy to precomputed scores.
+
+    Returns (decision, chosen_person_row_or_None, confidence).
+    `chosen_person_row` is None for create_new / leave_open / reject.
+    """
+    auto_t = _thr_auto_resolve() if auto_resolve is None else float(auto_resolve)
+    margin_t = _thr_auto_margin() if auto_margin is None else float(auto_margin)
+    create_t = _thr_create_new() if create_new is None else float(create_new)
+    relevance = float(relationship_boost)
+
+    if not create_person_candidates:
+        top = scored[0] if scored else None
+        if (top and top[0] is not None and top[2].get("exact")
+                and top[1] >= auto_t):
+            return "auto_resolve", top[0], float(top[1])
+        return "reject", None, 0.2
+
+    work = list(scored)
+    if not work:
+        new_score = 0.93 if relevance >= _CREATE_RELEVANCE else 0.4
+    else:
+        new_score = max(0.15, 0.9 - (work[0][1] * 0.7))
+        if relevance >= _CREATE_RELEVANCE and work[0][1] < 0.70:
+            new_score = max(new_score, 0.88)
+    work.append((None, new_score, {"new": True}))
+    work.sort(key=lambda x: -x[1])
+
+    top = work[0]
+    second = work[1] if len(work) > 1 else (None, 0.0, {})
+    top_score, second_score = top[1], second[1]
+    margin = top_score - second_score
+    conf = top_score
+
+    if (top[0] is not None and top_score >= auto_t and margin >= margin_t):
+        return "auto_resolve", top[0], conf
+    if (top[0] is None and top_score >= create_t
+            and relevance >= _CREATE_RELEVANCE):
+        return "create_new", None, conf
+    return "leave_open", None, conf
 
 
 @dataclass
@@ -60,11 +274,16 @@ def resolve_person_mention(
     grammatical_role: str = "unknown",
     now: float | None = None,
     relationship_boost: float = 0.6,
+    attendee_priors: list[dict] | None = None,
 ) -> ResolveResult:
     """Resolve a name mention under People v2 policy.
 
     Returns person_id or None (leave_open / reject / policy deny). Always
     persists a PersonMention when event_id is set and extract_mentions allows.
+
+    `attendee_priors`: optional calendar invitees [{name, email}, ...] from a
+    calendar-linked session (Meeting Layer P1). Matching attendees boost
+    existing people (email-backed ≈ conclusive) and suppress create_new.
     """
     ts = now if now is not None else time.time()
     raw = (name or "").strip()
@@ -127,49 +346,86 @@ def resolve_person_mention(
               if not p.get("canonical_person_id")
               and not p.get("hide_from_people")]
 
-    scored: list[tuple[dict | None, float, dict]] = []
-    key = display.lower()
-    for p in people:
-        names = [p["name"], *(p.get("aliases") or [])]
-        pos, neg, feats = 0.0, 0.0, {}
-        if any(n.lower() == key for n in names):
-            pos, feats["exact"] = 3.0, True
-        elif any(_prefix_match(display, n) for n in names):
-            pos, feats["prefix"] = 1.8, True
-        else:
-            # cheap token overlap
-            mt = set(re.findall(r"\w{3,}", key))
-            pt = set()
-            for n in names:
-                pt |= set(re.findall(r"\w{3,}", n.lower()))
-            if mt and pt:
-                j = len(mt & pt) / len(mt | pt)
-                if j >= 0.5:
-                    pos, feats["jaccard"] = 1.2 * j, j
-        if pos <= 0:
-            continue
-        # Negative: different multi-token first names that only prefix-match wrongly
-        # already blocked by _prefix_match.
-        score = _sigmoid(pos - neg)
-        scored.append((p, score, {"pos": pos, "neg": neg, **feats}))
+    scored = score_person_candidates(display, people)
+    if attendee_priors:
+        scored = apply_attendee_boosts(
+            display, scored, people, attendee_priors, store)
+        # Invite match raises relevance so create_new is less attractive when
+        # an existing attendee-linked person is in the candidate set.
+        if matching_attendees(display, attendee_priors):
+            relationship_boost = max(float(relationship_boost), 0.9)
+    auto_t = _thr_auto_resolve()
+    margin_t = _thr_auto_margin()
+    # When an attendee boost produced a strong hit, slightly loosen margin so
+    # a first-name mention of the invitee wins over create_new.
+    if any((feats or {}).get("attendee") for _, _, feats in scored):
+        margin_t = min(margin_t, 0.08)
+        auto_t = min(auto_t, 0.90)
+    decision, chosen_row, conf = decide_from_scores(
+        scored,
+        relationship_boost=relationship_boost,
+        create_person_candidates=policy.create_person_candidates,
+        auto_resolve=auto_t,
+        auto_margin=margin_t,
+        create_new=_thr_create_new(),
+    )
 
-    scored.sort(key=lambda x: -x[1])
+    chosen: int | None = None
+    relevance = float(relationship_boost)
 
-    if not policy.create_person_candidates:
-        # Knowledge-only surfaces (news / feeds): bind to EXISTING people on
-        # exact match; never mint Bill-Clinton-from-TMZ as a contact.
-        top = scored[0] if scored else None
-        chosen: int | None = None
-        decision = "reject"
-        conf = 0.2
-        if (top and top[0] is not None and top[2].get("exact")
-                and top[1] >= _AUTO_RESOLVE):
-            decision = "auto_resolve"
-            chosen = int(top[0]["id"])
+    if decision == "auto_resolve" and chosen_row is not None:
+        chosen = int(chosen_row["id"])
+        store.touch_person(chosen, ts, alias=display)
+        if policy.create_person_candidates:
+            _bump_promotion(store, chosen, relevance, ts)
+    elif decision == "create_new":
+        # Prefer the invite CN over a bare first-name mention when minting.
+        mint_name = display
+        mint_email = ""
+        matched = matching_attendees(display, attendee_priors)
+        if matched:
+            cn = (matched[0].get("name") or "").strip()
+            if cn:
+                mint_name = cn
+            mint_email = (matched[0].get("email") or "").strip().lower()
+        chosen = store.insert_person(
+            mint_name, ts=ts,
+            actor_type="human_person",
+            promotion_state="candidate",
+        )
+        if mint_name.lower() != display.lower():
             store.touch_person(chosen, ts, alias=display)
-            conf = float(top[1])
-        mid = None
-        if event_id is not None:
+        if mint_email:
+            try:
+                store.upsert_contact_point(
+                    person_id=chosen, type_="email",
+                    value_display=mint_email, value_normalized=mint_email,
+                    confidence=0.95, attribution_method="calendar_attendee",
+                    verification_status="unverified",
+                    source_event_id=event_id, evidence_quote=None,
+                    discourse_role="attendee", ts=ts,
+                    created_by="meeting_join",
+                    pipeline_version=PIPELINE_VERSION,
+                )
+            except Exception:
+                pass
+
+    # Rebuild the ranked list with the new-person prior for decision logging
+    # (mirrors decide_from_scores when create is allowed).
+    log_scored = list(scored)
+    if policy.create_person_candidates:
+        if not log_scored:
+            new_score = 0.93 if relevance >= _CREATE_RELEVANCE else 0.4
+        else:
+            new_score = max(0.15, 0.9 - (log_scored[0][1] * 0.7))
+            if relevance >= _CREATE_RELEVANCE and log_scored[0][1] < 0.70:
+                new_score = max(new_score, 0.88)
+        log_scored.append((None, new_score, {"new": True}))
+        log_scored.sort(key=lambda x: -x[1])
+
+    mid = None
+    if event_id is not None:
+        if not policy.create_person_candidates:
             mid = store.insert_person_mention(
                 event_id=event_id, raw_text=raw, normalized_text=display,
                 discourse_role=discourse_role, grammatical_role=grammatical_role,
@@ -183,52 +439,8 @@ def resolve_person_mention(
                 resolution_confidence=conf,
                 relationship_relevance=0.15 if not chosen else float(relationship_boost),
             )
-        return ResolveResult(chosen, decision, mention_id=mid, confidence=conf)
+            return ResolveResult(chosen, decision, mention_id=mid, confidence=conf)
 
-    # New-person prior: high when relationship-relevant and no strong match
-    # (task owner / commitment party should mint a candidate, not leave_open).
-    if not scored:
-        new_score = 0.93 if relationship_boost >= _CREATE_RELEVANCE else 0.4
-    else:
-        new_score = max(0.15, 0.9 - (scored[0][1] * 0.7))
-        # Only prefer create when existing matches are weak — not when
-        # ambiguous strong candidates should leave_open for review.
-        if (relationship_boost >= _CREATE_RELEVANCE
-                and scored[0][1] < 0.70):
-            new_score = max(new_score, 0.88)
-    scored.append((None, new_score, {"new": True}))
-    scored.sort(key=lambda x: -x[1])
-
-    top = scored[0]
-    second = scored[1] if len(scored) > 1 else (None, 0.0, {})
-    top_score, second_score = top[1], second[1]
-    margin = top_score - second_score
-
-    decision = "leave_open"
-    chosen: int | None = None
-    conf = top_score
-    relevance = float(relationship_boost)
-
-    if (top[0] is not None and top_score >= _AUTO_RESOLVE
-            and margin >= _AUTO_MARGIN):
-        decision = "auto_resolve"
-        chosen = int(top[0]["id"])
-        store.touch_person(chosen, ts, alias=display)
-        _bump_promotion(store, chosen, relevance, ts)
-    elif (top[0] is None and top_score >= _CREATE_NEW
-          and relevance >= _CREATE_RELEVANCE):
-        decision = "create_new"
-        chosen = store.insert_person(
-            display, ts=ts,
-            actor_type="human_person",
-            promotion_state="candidate",
-        )
-    else:
-        decision = "leave_open"
-        chosen = None
-
-    mid = None
-    if event_id is not None:
         mid = store.insert_person_mention(
             event_id=event_id, raw_text=raw, normalized_text=display,
             discourse_role=discourse_role, grammatical_role=grammatical_role,
@@ -241,8 +453,7 @@ def resolve_person_mention(
             resolution_confidence=conf,
             relationship_relevance=relevance,
         )
-        # Persist candidates
-        for rank, (p, score, feats) in enumerate(scored[:8]):
+        for rank, (p, score, feats) in enumerate(log_scored[:8]):
             store.insert_identity_candidate(
                 mention_id=mid,
                 person_id=(int(p["id"]) if p else None),
@@ -256,12 +467,23 @@ def resolve_person_mention(
         store.insert_resolution_decision(
             mention_id=mid, decision=decision,
             chosen_person_id=chosen, confidence=conf,
-            threshold_policy=f"auto>={_AUTO_RESOLVE}/margin>={_AUTO_MARGIN}",
+            threshold_policy=f"auto>={auto_t}/margin>={margin_t}",
             resolver_version=PIPELINE_VERSION,
             decided_at=ts,
         )
 
     return ResolveResult(chosen, decision, mention_id=mid, confidence=conf)
+
+
+@dataclass
+class AttrWriteResult:
+    """Plan 2.4 write-path decision for one contact value."""
+    action: str  # write|review|deny_policy|skip
+    kind: str
+    value: str
+    score: float
+    contact_point_id: int | None = None
+    reason: str = ""
 
 
 def attribute_contacts_from_text(
@@ -276,59 +498,114 @@ def attribute_contacts_from_text(
     event_source: str = "",
     window: str = "",
 ) -> list[int]:
-    """Write PersonContactPoint rows when attribution is strong enough."""
+    """Write PersonContactPoint rows when attribution clears ATTR_MIN.
+
+    Weaker positive scores are routed to review (kg_adjudications
+    kind='contact_review') — never auto-written. Policy-denied surfaces
+    (news / article-mentioned / social / terminal) write nothing.
+    """
+    details = attribute_contacts_detailed(
+        text, store=store, person_id=person_id, person_name=person_name,
+        event_id=event_id, now=now, discourse_role=discourse_role,
+        event_source=event_source, window=window)
+    return [d.contact_point_id for d in details
+            if d.action == "write" and d.contact_point_id]
+
+
+def attribute_contacts_detailed(
+    text: str,
+    *,
+    store,
+    person_id: int | None,
+    person_name: str,
+    event_id: int | None,
+    now: float | None = None,
+    discourse_role: str = "unknown",
+    event_source: str = "",
+    window: str = "",
+) -> list[AttrWriteResult]:
+    """Full write/review/deny decisions for contact values in `text`."""
     if not enabled() or not person_id or not (text or "").strip():
         return []
-    # Gate only when we know the surface — callers without source (legacy /
-    # tests) still attribute; news/social/terminal pass event_source+window.
     if event_source or window:
         policy = sp.policy_for_event(
             event_source=event_source, window=window, text=text)
         if not policy.extract_contacts:
-            return []
+            return [AttrWriteResult(
+                action="deny_policy", kind="*", value="", score=0.0,
+                reason=f"source_class={policy.source_class}")]
     ts = now if now is not None else time.time()
     tokens = _name_tokens(person_name, [])
-    created: list[int] = []
+    out: list[AttrWriteResult] = []
+
+    def _decide(kind: str, value: str, start: int, end: int,
+                *, conf: float, method: str, norm: str) -> None:
+        score = contact_attribution_score(
+            text, kind=kind, value=value, start=start, end=end, tokens=tokens)
+        if score <= 0:
+            out.append(AttrWriteResult(
+                action="skip", kind=kind, value=value, score=score,
+                reason="no_link"))
+            return
+        if score < _ATTR_MIN:
+            # Ambiguous / weak — review, do not auto-write (plan 2.4).
+            try:
+                store.log_adjudication(
+                    kind="contact_review", decision="review",
+                    decided_by="auto",
+                    node_a=int(person_id),
+                    model_score=float(score),
+                    features={
+                        "person_name": person_name,
+                        "kind": kind,
+                        "value": value,
+                        "score": score,
+                        "event_id": event_id,
+                        "quote": (text or "")[:240],
+                        "discourse_role": discourse_role,
+                        "reason": f"score<{_ATTR_MIN}",
+                    },
+                )
+            except Exception:
+                pass
+            out.append(AttrWriteResult(
+                action="review", kind=kind, value=value, score=score,
+                reason=f"score<{_ATTR_MIN}"))
+            return
+        cid = store.upsert_contact_point(
+            person_id=person_id, type_=kind,
+            value_display=value, value_normalized=norm,
+            confidence=conf, attribution_method=method,
+            verification_status="attributed",
+            source_event_id=event_id, evidence_quote=text[:240],
+            discourse_role=discourse_role, ts=ts,
+            created_by="system", pipeline_version=PIPELINE_VERSION,
+        )
+        out.append(AttrWriteResult(
+            action="write", kind=kind, value=value, score=score,
+            contact_point_id=cid, reason="score>=ATTR_MIN"))
 
     for m in _EMAIL.finditer(text):
-        email = m.group(0)
-        if not _contact_belongs(
-                text, kind="email", value=email,
-                start=m.start(), end=m.end(), tokens=tokens):
+        email = m.group(0).rstrip(".,;:)>\"'")
+        if "@" not in email:
             continue
-        cid = store.upsert_contact_point(
-            person_id=person_id, type_="email",
-            value_display=email, value_normalized=email.lower(),
-            confidence=0.85, attribution_method="possessive_or_reach_or_local",
-            verification_status="attributed",
-            source_event_id=event_id, evidence_quote=text[:240],
-            discourse_role=discourse_role, ts=ts,
-            created_by="system", pipeline_version=PIPELINE_VERSION,
-        )
-        if cid:
-            created.append(cid)
+        # Re-bound end so score patterns see the cleaned value.
+        end = m.start() + len(email)
+        _decide(
+            "email", email, m.start(), end,
+            conf=0.85, method="possessive_or_reach_or_local",
+            norm=email.lower())
 
     for m in _PHONE.finditer(text):
-        phone = m.group(1)
+        phone = m.group(1).strip().rstrip(".,;:)")
         if not _phone_ok(phone, text):
             continue
-        if not _contact_belongs(
-                text, kind="phone", value=phone,
-                start=m.start(), end=m.end(), tokens=tokens):
-            continue
         norm = re.sub(r"[^\d+]", "", phone)
-        cid = store.upsert_contact_point(
-            person_id=person_id, type_="phone",
-            value_display=phone.strip(), value_normalized=norm,
-            confidence=0.8, attribution_method="possessive_or_reach",
-            verification_status="attributed",
-            source_event_id=event_id, evidence_quote=text[:240],
-            discourse_role=discourse_role, ts=ts,
-            created_by="system", pipeline_version=PIPELINE_VERSION,
-        )
-        if cid:
-            created.append(cid)
-    return created
+        _decide(
+            "phone", phone, m.start(), m.start() + len(phone),
+            conf=0.8, method="possessive_or_reach", norm=norm)
+
+    return out
 
 
 def contacts_roster(store, *, limit: int = 40) -> list[dict]:

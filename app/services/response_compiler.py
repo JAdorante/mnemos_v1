@@ -180,6 +180,22 @@ def _parse_fences(text: str) -> tuple[str, list[dict[str, Any]]]:
         elif stype == "title":
             sections.append({"type": "title", "text": _strip_md_inline(body)})
         else:
+            if stype in ("confirmed", "likely", "conflicting", "missing"):
+                items = []
+                for line in body.splitlines():
+                    bm = _BULLET.match(line.strip()) or re.match(
+                        r"^(.+)$", line.strip())
+                    if bm and line.strip():
+                        items.append(_strip_md_inline(
+                            bm.group(3) if bm.lastindex and bm.lastindex >= 3
+                            else bm.group(1)
+                        ))
+                sections.append({
+                    "type": stype,
+                    "title": stype.capitalize(),
+                    "items": [i for i in items if i],
+                })
+                return "\n"
             mapped = {
                 "takeaway": "takeaway",
                 "explanation": "explanation",
@@ -511,11 +527,17 @@ def compile_response(
     *,
     sources: list | None = None,
     kind: str = "result",
+    evidence: dict[str, list[str]] | None = None,
+    answer_check: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Compile plain assistant text into a semantic document.
 
     Returns None when the reply should stay as a plain bubble (very short,
     non-result, or empty).
+
+    `evidence` (optional) is confirmed/likely/conflicting/missing token
+    buckets from answer_check — appended as typed sections when not already
+    present via ::: fences in the text.
     """
     raw = (text or "").strip()
     if not raw or kind not in ("result", "ask", "system"):
@@ -538,7 +560,10 @@ def compile_response(
     # Drop empty
     cleaned: list[dict[str, Any]] = []
     for s in sections:
-        if s.get("type") in ("list", "next_actions"):
+        if s.get("type") in (
+            "list", "next_actions", "confirmed", "likely",
+            "conflicting", "missing",
+        ):
             if s.get("items"):
                 cleaned.append(s)
         elif s.get("type") == "formula":
@@ -550,6 +575,17 @@ def compile_response(
         elif (s.get("text") or "").strip():
             cleaned.append(s)
     sections = cleaned
+
+    # Merge structured evidence buckets when fences didn't already supply them.
+    if evidence:
+        try:
+            from app.services.answer_check import buckets_to_sections
+            have = {s.get("type") for s in sections}
+            for sec in buckets_to_sections(evidence):
+                if sec.get("type") not in have and sec.get("items"):
+                    sections.append(sec)
+        except Exception:
+            pass
 
     if not sections:
         return None
@@ -564,7 +600,7 @@ def compile_response(
 
     grounding = _sources_summary(sources)
 
-    return {
+    out: dict[str, Any] = {
         "version": VERSION,
         "id": _cache_key(raw),
         "educational": educational,
@@ -572,3 +608,8 @@ def compile_response(
         "actions": actions,
         "grounding": grounding,
     }
+    if answer_check:
+        out["answer_check"] = answer_check
+    elif evidence:
+        out["answer_check"] = {"buckets": evidence}
+    return out

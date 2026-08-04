@@ -96,6 +96,19 @@ body{
 }
 #constEmpty .empty-act:hover{text-decoration:underline}
 #worldCap{font:12px var(--mono);color:var(--mut);margin:8px 0 0}
+.notepad-box{
+  width:100%;min-height:72px;resize:vertical;border:1px solid var(--line);
+  border-radius:10px;padding:10px 12px;font:14px/1.45 var(--font);color:var(--text);
+  background:var(--panel);
+}
+.notepad-box:focus{outline:2px solid rgba(184,115,51,.35);outline-offset:1px}
+.jot-list{margin-top:10px;display:flex;flex-direction:column;gap:6px;max-height:180px;overflow:auto}
+.jot-item{
+  font-size:13px;line-height:1.4;padding:6px 0;border-top:1px solid var(--line);
+  color:var(--text);
+}
+.jot-item:first-child{border-top:0;padding-top:0}
+.jot-item .when{font:11px var(--mono);color:var(--mut);margin-top:2px}
 .skel{display:flex;flex-wrap:wrap;gap:8px}
 .skel .bone{
   height:36px;min-width:88px;flex:1 1 120px;max-width:180px;border-radius:12px;
@@ -112,10 +125,11 @@ body{
 .empty-state a{color:var(--navy);font-weight:500}
 .hz{display:flex;flex-wrap:wrap;gap:8px}
 .hz .chip{
-  border:1px solid var(--line);border-radius:999px;padding:6px 12px;font-size:13px;
-  background:var(--panel);color:var(--navy);
+  border:1px solid var(--line);border-radius:12px;padding:8px 12px;font-size:13px;
+  background:var(--panel);color:var(--navy);max-width:100%;
 }
 .hz .chip .when{font:11px var(--mono);color:var(--acc);margin-right:6px}
+.hz .chip .meta{font:11px var(--mono);color:var(--mut);margin-top:3px;line-height:1.35}
 .wm{display:flex;flex-wrap:wrap;gap:8px}
 .wm .slot{
   border:1px solid var(--line);border-radius:12px;padding:8px 12px;font-size:13px;
@@ -229,6 +243,18 @@ body{
       <div class="wm" id="wmList"><div class="skel" aria-hidden="true"><span class="bone"></span><span class="bone"></span><span class="bone"></span></div></div>
     </section>
 
+    <section class="band" id="secNotepad">
+      <h2>Meeting notes</h2>
+      <p class="lead" id="noteLead">Rough notes during a call become importance anchors — not fabricated quotes.</p>
+      <textarea class="notepad-box" id="noteBox" placeholder="pricing — pushback&#10;follow up with Sarah on deck" rows="3"></textarea>
+      <div class="actions" style="margin-top:10px">
+        <button type="button" class="go" id="noteSave">Save note</button>
+        <span class="pill" id="noteStatus" hidden></span>
+        <a class="btnish" id="noteOpenEnhanced" href="/meetings" hidden>Open enhanced note</a>
+      </div>
+      <div class="jot-list" id="jotList"></div>
+    </section>
+
     <section class="band" id="secHorizon">
       <h2>Coming up</h2>
       <p class="lead">Horizon strip — what you are likely to need next.</p>
@@ -300,12 +326,85 @@ async function loadShell() {
 
   renderProposal(data.proposal, data.queued_offers || 0, data.waiting_on, data.approval_packet);
   renderWm((data.attention && data.attention.wm) || []);
+  renderNotepad(data.notepad || {}, data.latest_meeting_note || null);
   renderHorizon((data.attention && data.attention.horizon) || []);
   renderRisk((data.attention && data.attention.at_risk) || []);
   renderWorld(data.world || {});
   renderForgot(data.forgotten || []);
   updateMastLine(data);
 }
+
+let _noteSessionId = null;
+function renderNotepad(np, latestNote) {
+  _noteSessionId = np.session_id || null;
+  const lead = document.getElementById('noteLead');
+  if (np.title) {
+    lead.textContent = (np.calendar_linked ? 'Live notes for ' : 'Notes · ')
+      + np.title + ' — jots lift what matters in the transcript.';
+  } else {
+    lead.textContent = 'Rough notes during a call become importance anchors — not fabricated quotes.';
+  }
+  const enh = document.getElementById('noteOpenEnhanced');
+  if (latestNote && latestNote.href) {
+    enh.hidden = false;
+    enh.href = latestNote.href;
+    enh.textContent = 'Open: ' + (latestNote.title || 'enhanced note');
+  } else {
+    enh.hidden = true;
+  }
+  const list = document.getElementById('jotList');
+  const jots = np.jots || [];
+  if (!jots.length) {
+    list.innerHTML = '<div class="jot-item" style="color:var(--mut)">No notes yet this session.</div>';
+    return;
+  }
+  list.innerHTML = jots.map(j => {
+    const when = j.time ? new Date(j.time * 1000).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '';
+    return '<div class="jot-item">' + VinceoEsc(j.text || '')
+      + (when ? '<div class="when">' + VinceoEsc(when) + '</div>' : '')
+      + '</div>';
+  }).join('');
+}
+
+async function saveNote() {
+  const box = document.getElementById('noteBox');
+  const status = document.getElementById('noteStatus');
+  const text = (box.value || '').trim();
+  if (!text) return;
+  const btn = document.getElementById('noteSave');
+  btn.disabled = true;
+  status.hidden = false;
+  status.textContent = 'Saving…';
+  try {
+    const body = {text: text};
+    if (_noteSessionId) body.session_id = _noteSessionId;
+    const r = await fetch('/session/note', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      status.textContent = err.detail || 'Could not save';
+      return;
+    }
+    box.value = '';
+    status.textContent = 'Saved';
+    setTimeout(() => { status.hidden = true; }, 1600);
+    loadShell();
+  } catch (e) {
+    status.textContent = 'Could not save';
+  } finally {
+    btn.disabled = false;
+  }
+}
+document.getElementById('noteSave').onclick = saveNote;
+document.getElementById('noteBox').addEventListener('keydown', e => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+    e.preventDefault();
+    saveNote();
+  }
+});
 
 function updateMastLine(data) {
   const el = document.getElementById('tagLine');
@@ -405,14 +504,20 @@ function renderWm(slots) {
 function renderHorizon(items) {
   const el = document.getElementById('hzList');
   if (!items.length) {
-    el.innerHTML = '<div class="empty-state">No horizon items. Connect your calendar in Setup and upcoming commitments appear here. '
+    el.innerHTML = '<div class="empty-state">Nothing on the horizon yet. Open loops and upcoming calendar items appear here. '
       + '<a href="/onboarding?step=rhythm">Open rhythm setup</a></div>';
     return;
   }
-  el.innerHTML = items.map(i =>
-    '<div class="chip"><span class="when">' + VinceoEsc(i.when_label || '')
-    + '</span>' + VinceoEsc(i.label || '') + '</div>'
-  ).join('');
+  el.innerHTML = items.map(i => {
+    const why = (i.reason || []).slice(0, 2).join(' · ');
+    const kind = i.loop_kind || i.source || '';
+    const meta = [i.when_label || '', kind === 'open_loop' ? '' : kind,
+      why].filter(Boolean).join(' · ');
+    return '<div class="chip"><span class="when">' + VinceoEsc(i.when_label || '')
+      + '</span>' + VinceoEsc(i.label || '')
+      + (meta ? ('<div class="meta">' + VinceoEsc(meta) + '</div>') : '')
+      + '</div>';
+  }).join('');
 }
 
 function renderRisk(items) {

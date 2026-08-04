@@ -164,5 +164,70 @@ class TranscriptContextTests(unittest.TestCase):
         ex.assert_called_once()
 
 
+class WorkingContextComposeTests(unittest.TestCase):
+    """Plan 3.1 — compose(ctx=working_memory.current()) boosts active person."""
+
+    def test_active_wm_person_boosted_without_naming(self) -> None:
+        import tempfile
+        import time
+        from pathlib import Path
+
+        from app.services import grounding as gr
+        from app.services import working_memory as wm
+        from app.storage import Store
+
+        with tempfile.TemporaryDirectory() as td:
+            store = Store(db_path=Path(td) / "t.db",
+                          audio_dir=Path(td) / "audio")
+            try:
+                pid = store.resolve_person("Scott Reeves", ts=time.time())
+                store.add_commitment(
+                    "Scott will send the term sheet Friday",
+                    from_person_id=pid, confidence=0.9,
+                    extracted_at=time.time())
+                # Seed WM with Scott as the active person — question won't name him.
+                wm.persist_slots(store, [{
+                    "slot": 0, "node_type": "person", "node_id": pid,
+                    "node_key": f"person:{pid}",
+                    "entered_at": time.time(), "score": 0.85,
+                    "cluster_head": 1, "cluster_n": 1,
+                    "reason": {"label": "Scott Reeves", "kind": "person",
+                               "why": ["Lit by what you're doing right now"]},
+                }])
+                ctx = wm.current(store)
+                self.assertEqual(ctx["person_labels"], ["Scott Reeves"])
+                with mock.patch("app.services.grounding._semantic_section",
+                                return_value=([], [])), \
+                     mock.patch("app.services.grounding._activity_section",
+                                return_value=[]):
+                    out = gr.compose(
+                        "What's the status on that?",
+                        store=store, ctx=ctx, record_attention=False)
+                labels = [s["label"] for s in out["sources"]]
+                self.assertTrue(
+                    any(l.startswith("person graph") and "Scott" in l
+                        for l in labels),
+                    f"expected active Scott person graph, got {labels}")
+                self.assertIn("Scott", out["block"])
+            finally:
+                store.close()
+
+    def test_session_followup_still_puts_session_before_memory(self) -> None:
+        """Regression: session transcript ordering from earlier tests."""
+        from browser_agent.orchestrator import Agent
+        agent = Agent.__new__(Agent)
+        agent._log = mock.Mock()
+        agent.transcript = [
+            {"goal": "how do you work?", "result": "Functionality overview here."},
+        ]
+        agent._memory_provider = lambda _g: "RELEVANT MEMORIES:\n- Venture Pulse CRM"
+        agent._memory_context = lambda g: (
+            "RELEVANT MEMORIES FROM vinceo.ai:\n- Venture Pulse CRM\n\n")
+        ctx = Agent._build_ctx(
+            agent, "Can you recall the description of how you work?")
+        self.assertLess(ctx.find("SESSION CONVERSATION"),
+                        ctx.find("Venture Pulse"))
+
+
 if __name__ == "__main__":
     unittest.main()

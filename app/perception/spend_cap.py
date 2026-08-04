@@ -30,7 +30,7 @@ DEFAULT_BUDGET_USD_DAY = 2.0
 # cloud VLM (ClaudeVLM/Gemini log task="vision"); the rest are the always-on
 # text jobs. Chat/plan are absent on purpose (user-initiated).
 DEFAULT_AMBIENT_TASKS = ("vision", "extract", "reflect", "activity",
-                         "screen_extract", "consolidate")
+                         "screen_extract", "consolidate", "enhance")
 
 
 def budget_usd_day() -> float:

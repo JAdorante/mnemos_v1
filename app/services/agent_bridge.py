@@ -212,9 +212,9 @@ def _make_memory_provider(limit: int = 5, min_score: float = 0.15, sink=None):
     the desktop-activity trail (see services/grounding.py). The email-ish
     drafting rule stays here: it's an agent-drafting concern, not retrieval.
 
-    `sink` (a dict) receives {"sources": [...]} on every call — the worker
-    attaches it to the goal's result event so the UI can show which grounding
-    sections the answer drew from ("show sources").
+    `sink` (a dict) receives {"sources": [...], "block": str} on every call —
+    the worker attaches sources to the goal's result event ("show sources")
+    and runs answer_check against the context block before compile.
     """
     try:
         from app.services import grounding as _grounding
@@ -227,9 +227,11 @@ def _make_memory_provider(limit: int = 5, min_score: float = 0.15, sink=None):
         g = _grounding.compose(goal, semantic_limit=limit,
                                min_score=min_score,
                                email_guard=emailish)
+        block = g["block"]
         if sink is not None:
             sink["sources"] = g.get("sources") or []
-        block = g["block"]
+            sink["block"] = block or ""
+            sink["question"] = goal or ""
         if not block:
             return ""
         lines = [
@@ -316,21 +318,19 @@ def _make_source_provider():
 
 
 def _planner_enabled() -> bool:
-    """Global gate for the Personal Agent Layer (Phase 5): plan EVERY goal. Off by
-    default; flip with QUILL_PLANNER=1. The QUILL_ env prefix is kept post-rebrand."""
-    return os.environ.get("QUILL_PLANNER", "0") not in ("0", "false", "False")
+    """Global gate for the Personal Agent Layer (plan 5.2): plan EVERY goal.
+    Code default ON (QUILL_PLANNER=1) after approval binding graduated to
+    enforce. Set QUILL_PLANNER=0 for core-workflow-only gating."""
+    return os.environ.get("QUILL_PLANNER", "1") not in ("0", "false", "False")
 
 
 def _should_plan(text: str, fact_id: int | None, surface: str | None) -> bool:
     """Decide whether this goal is compiled by the Personal Agent Layer (#5).
 
-    Global QUILL_PLANNER=1 plans everything (unchanged). Otherwise the planner is
-    on by DEFAULT for the locked core workflows only (follow-up email, meeting
-    brief, to-do -> action) and off for everything else — so grounded drafting/
-    briefing lands where it pays without routing arbitrary goals through the
-    planner. A to-do action already forced onto a dedicated surface (a phone text,
-    a desktop command) stays on its fast raw path — it's already well-routed and
-    doesn't need compilation."""
+    Global QUILL_PLANNER (default on, plan 5.2) plans everything. With
+    QUILL_PLANNER=0 the planner stays on only for locked core workflows
+    (follow-up email, meeting brief, to-do -> action). A to-do already forced
+    onto a dedicated surface (phone text, desktop) stays on its raw path."""
     if _planner_enabled():
         return True
     try:
@@ -450,7 +450,22 @@ class AgentWorker:
 
     # --- emit / state ------------------------------------------------------
     def _emit(self, kind: str, text: str, *, distill_id: str | None = None,
-              sources: list | None = None, packet: dict | None = None) -> None:
+              sources: list | None = None, packet: dict | None = None,
+              context: str | None = None, question: str | None = None) -> None:
+        # Deterministic answer-check (plan 3.2) before compile — may rewrite text.
+        check_meta = None
+        if kind == "result" and (context or "").strip():
+            try:
+                from app.services.answer_check import check_answer
+                checked = check_answer(
+                    text, context or "",
+                    question=question or "",
+                    sources=sources,
+                )
+                check_meta = checked.to_dict()
+                text = checked.text
+            except Exception:
+                check_meta = None
         with self.lock:
             ev: dict = {"id": self.next_id, "kind": kind, "text": text}
             if distill_id:
@@ -460,12 +475,26 @@ class AgentWorker:
             # Structured approval folio for the chat Seal UI (text stays for logs).
             pkt = packet if packet is not None else _parse_approval_packet(text)
             if kind == "ask" and pkt:
+                # Attach packet_id + payload_hash so Approve/Cancel/Edit buttons
+                # can POST a bound decide (plan 0.6).
+                pending = self._pending_approval_packet_unlocked()
+                if pending:
+                    if pending.get("packet_id") is not None:
+                        pkt["packet_id"] = pending["packet_id"]
+                    if pending.get("payload_hash"):
+                        pkt["payload_hash"] = pending["payload_hash"]
+                    if pending.get("expires_at") is not None:
+                        pkt["expires_at"] = pending["expires_at"]
                 ev["packet"] = pkt
             # Semantic response document — presentation is a frontend concern.
             if kind == "result":
                 try:
                     from app.services.response_compiler import compile_response
-                    compiled = compile_response(text, sources=sources, kind=kind)
+                    evidence = (check_meta or {}).get("buckets")
+                    compiled = compile_response(
+                        text, sources=sources, kind=kind,
+                        evidence=evidence, answer_check=check_meta,
+                    )
                     if compiled:
                         ev["compiled"] = compiled
                 except Exception:
@@ -514,6 +543,126 @@ class AgentWorker:
             self._answer_fast = text
         self._emit("user", text)
         self._answer_ev_fast.set()
+
+    def _pending_approval_packet_unlocked(self) -> dict | None:
+        """Read the in-flight approval packet from whichever lane is awaiting.
+
+        Caller must hold `self.lock` OR tolerate a racy None (emit path).
+        """
+        for ag in (getattr(self, "agent", None), getattr(self, "fast_agent", None)):
+            if ag is None:
+                continue
+            pending = getattr(ag, "_pending_approval_packet", None)
+            if pending:
+                return dict(pending)
+        return None
+
+    def pending_approval_packet(self) -> dict | None:
+        with self.lock:
+            return self._pending_approval_packet_unlocked()
+
+    def decide_approval(self, packet_id: int, payload_hash: str, decision: str, *,
+                        user_edit: str | None = None,
+                        fields: dict | None = None,
+                        approved_via: str = "button") -> dict:
+        """Bound Approve/Cancel/Edit (plan 0.6).
+
+        Requires `{packet_id, payload_hash}` to match the pending packet (and
+        the store row when present). Stale/drifted/expired hashes refuse.
+        Negation (`cancel`) still wins without re-checking execute args.
+        `edit` mints a replacement packet with a new hash after the verdict.
+        """
+        decision = (decision or "").strip().lower()
+        if decision in ("yes", "y", "ok", "approve", "approved"):
+            decision = "approve"
+        elif decision in ("no", "n", "deny", "denied", "cancel", "stop"):
+            decision = "cancel"
+        elif decision not in ("approve", "cancel", "edit"):
+            return {"ok": False, "error": f"unknown decision {decision!r}"}
+
+        with self.lock:
+            awaiting = self.awaiting or self.awaiting_fast
+            use_fast = bool(self.awaiting_fast and not self.awaiting)
+            pending = self._pending_approval_packet_unlocked()
+            ag = self.fast_agent if use_fast else self.agent
+
+        if not awaiting:
+            return {"ok": False, "error": "nothing is awaiting a decision"}
+        if not pending:
+            return {"ok": False, "error": "no pending approval packet"}
+
+        pending_id = pending.get("packet_id")
+        pending_hash = pending.get("payload_hash") or ""
+        if pending_id is not None and int(packet_id) != int(pending_id):
+            return {"ok": False, "error": "packet_id does not match pending approval",
+                    "pending_packet_id": pending_id}
+        if not payload_hash or payload_hash != pending_hash:
+            return {"ok": False, "error": "payload_hash mismatch — approval is stale",
+                    "reason": "drift"}
+
+        # Prefer DB as source of truth when the packet was persisted.
+        row = None
+        try:
+            store = None
+            if ag is not None:
+                rec = getattr(ag, "_recorder", None)
+                getter = getattr(rec, "_s", None)
+                if callable(getter):
+                    store = getter()
+                if store is None:
+                    store = getattr(rec, "_store", None)
+            if store is None:
+                from app.storage import get_store
+                store = get_store()
+            if store is not None and packet_id:
+                row = store.get_action_packet(int(packet_id))
+        except Exception:
+            row = None
+        if row is not None:
+            if row.get("decision"):
+                return {"ok": False, "error": "packet already decided",
+                        "decision": row.get("decision")}
+            if row.get("payload_hash") and row["payload_hash"] != payload_hash:
+                return {"ok": False, "error": "payload_hash mismatch — approval is stale",
+                        "reason": "drift"}
+            exp = row.get("expires_at")
+            if exp is not None and time.time() >= float(exp):
+                return {"ok": False, "error": "approval packet expired",
+                        "reason": "expired"}
+        else:
+            exp = pending.get("expires_at")
+            if exp is not None and time.time() >= float(exp):
+                return {"ok": False, "error": "approval packet expired",
+                        "reason": "expired"}
+
+        # Stamp via so _approval_decision records approved_via on the packet.
+        if ag is not None:
+            ag._last_approved_via = approved_via if decision == "approve" else None
+
+        submit = self.submit_answer_fast if use_fast else self.submit_answer
+        if decision == "approve":
+            submit("approve")
+            return {"ok": True, "decision": "approve", "packet_id": packet_id,
+                    "approved_via": approved_via}
+        if decision == "cancel":
+            submit("cancel")
+            return {"ok": True, "decision": "cancel", "packet_id": packet_id}
+        # edit — optionally replace fields before the ask channel sees the reply;
+        # _approval_decision mints the replacement packet with a new hash.
+        if fields and ag is not None and pending_id is not None:
+            # Update pending fields so the mint uses the edited draft.
+            try:
+                p = getattr(ag, "_pending_approval_packet", None) or {}
+                merged = dict(p.get("fields") or {})
+                merged.update({k: v for k, v in fields.items() if v is not None})
+                p = dict(p)
+                p["fields"] = merged
+                ag._pending_approval_packet = p
+            except Exception:
+                pass
+        submit(user_edit or "please revise the draft")
+        return {"ok": True, "decision": "edit", "packet_id": packet_id,
+                "user_edit": user_edit or ""}
 
     # --- proactive offers (from the vision stream or heard tasks) ----------
     def _agent_busy(self) -> bool:
@@ -910,6 +1059,58 @@ class AgentWorker:
                                 "event": event,
                                 "items": [event.get("summary", "")]})
 
+    def propose_commitment_resolve(self, candidate: dict) -> bool:
+        """Plan 4.2 — offer to mark an open commitment completed (never auto)."""
+        text = (candidate.get("text") or "").strip()
+        message = (candidate.get("message") or "").strip() or (
+            f"Mark this commitment completed?\n\n“{text}”\n\n"
+            "Reply 'yes' to complete it, or 'no' to leave it open."
+        )
+        return self._add_offer({
+            "items": [text] if text else [],
+            "title": text[:80],
+            "message": message,
+            "kind": "commitment_resolve",
+            "fact_id": candidate.get("fact_id"),
+            "source": candidate.get("source"),
+            "quote": candidate.get("quote"),
+            "event_id": candidate.get("event_id"),
+            "score": candidate.get("score"),
+            "deliverable_only": True,
+        })
+
+    def propose_meeting_mode(self, event: dict) -> bool:
+        """Meeting Layer P5 — enter hotter capture for a starting calendar event.
+
+        Yes → meeting_mode.enter (side-effect, no agent goal). Retention default
+        is explained plainly so the user sees the transcript vs receipts tradeoff.
+        """
+        title = (event.get("title") or "Meeting").strip()
+        ret = event.get("default_retention") or "transcript_only"
+        if ret == "keep_receipts":
+            trade = ("Default after the call: keep audio receipts for playback. "
+                     "You can switch to transcript-only (delete WAVs) on the note.")
+        else:
+            trade = ("Default after the call: transcript-only — WAVs deleted, "
+                     "note stays. Choose keep-receipts on the note for playback.")
+        message = (
+            f"Meeting starting: “{title}”\n\n"
+            "Enter meeting mode? I'll capture more aggressively for this window "
+            "and show a capturing indicator.\n\n"
+            f"{trade}\n\n"
+            "Reply 'yes' to enter meeting mode, or 'no' to skip."
+        )
+        return self._add_offer({
+            "items": [title],
+            "title": f"Meeting mode · {title}"[:80],
+            "message": message,
+            "kind": "meeting_mode",
+            "calendar_event_id": event.get("calendar_event_id"),
+            "start": event.get("start"),
+            "end": event.get("end"),
+            "deliverable_only": True,
+        })
+
     def propose_reasoner(self, proposal) -> bool:
         """Track D: surface a reasoner proposal (commitment / relationship /
         scheduling) through the same yes/no offer queue as task_offer.
@@ -1036,6 +1237,36 @@ class AgentWorker:
             "draft": draft,
         })
 
+    def _resolve_meeting_mode(self, pend: dict, accept: bool) -> dict:
+        """Meeting Layer P5 — enter/skip meeting mode (no agent goal)."""
+        if not accept:
+            try:
+                from app.services import meeting_mode as _mm
+                _mm.decline_offer(pend)
+            except Exception:
+                pass
+            self._emit("system", "Okay — I'll leave capture as-is.")
+            self._advance_offers()
+            return {"ok": True, "accepted": False}
+        try:
+            from app.services import meeting_mode as _mm
+            out = _mm.accept_offer(pend)
+        except Exception as exc:
+            out = {"ok": False, "error": str(exc)}
+        if out.get("ok"):
+            title = pend.get("title") or "Meeting"
+            self._emit(
+                "result",
+                f"Meeting mode on for “{title}”. Capturing indicator is live — "
+                f"choose transcript-only or keep-receipts when the note lands.")
+        else:
+            self._emit(
+                "error",
+                f"Couldn't enter meeting mode: {out.get('error') or 'unknown'}")
+        self._advance_offers()
+        return {"ok": bool(out.get("ok")), "accepted": True,
+                "meeting_mode": out}
+
     def _resolve_calendar(self, pend: dict, accept: bool) -> dict:
         """Carry out (or skip) a pending calendar-add offer."""
         if not accept:
@@ -1071,6 +1302,8 @@ class AgentWorker:
             return {"ok": False, "error": "no pending offer"}
         if pend.get("kind") == "calendar":
             return self._resolve_calendar(pend, accept)
+        if pend.get("kind") == "meeting_mode":
+            return self._resolve_meeting_mode(pend, accept)
         if (pend.get("kind") or "").startswith("trigger"):
             # trigger | trigger_suggest | trigger_draft — outcome recording,
             # stats, and the action itself live with the trigger engine.
@@ -1082,9 +1315,11 @@ class AgentWorker:
         is_phone = kind == "phone"
         is_anticipation = kind == "anticipation"
         is_homework = kind == "homework"
+        is_commit_resolve = kind == "commitment_resolve"
         # #10: record the offer's OUTCOME (accepted/dismissed) so a falling
         # accept-rate is visible next to the surfaced-rate in /console/cognition.
-        if is_task or is_phone or is_anticipation or is_reasoner:
+        if (is_task or is_phone or is_anticipation or is_reasoner
+                or is_commit_resolve):
             try:
                 from app.services.task_offer import record_offer_outcome
                 items = pend.get("items") or []
@@ -1119,6 +1354,8 @@ class AgentWorker:
         if not accept:
             if is_reasoner:
                 msg = "Okay — I'll skip that suggestion."
+            elif is_commit_resolve:
+                msg = "Okay — I'll leave that commitment open."
             elif is_anticipation:
                 msg = "Okay — I'll skip that suggestion."
             elif is_homework:
@@ -1130,6 +1367,28 @@ class AgentWorker:
             self._emit("system", msg)
             self._advance_offers()
             return {"ok": True, "accepted": False}
+        if is_commit_resolve:
+            from app.services import commitment_complete as cc
+            out = cc.accept_resolve_offer(pend)
+            if out.get("ok"):
+                self._emit(
+                    "result",
+                    f"Marked completed: “{(pend.get('text') or '')[:120]}”")
+            else:
+                self._emit(
+                    "error",
+                    f"Couldn't complete that commitment: "
+                    f"{out.get('error') or 'unknown'}")
+            self._advance_offers()
+            return {
+                "ok": bool(out.get("ok")),
+                "accepted": True,
+                "completed": bool(out.get("ok")),
+                "fact_id": pend.get("fact_id"),
+                "status": out.get("status"),
+                "to_state": out.get("to_state"),
+                "error": out.get("error"),
+            }
         if is_reasoner:
             return self._resolve_reasoner(pend)
         items = pend["items"]
@@ -1286,9 +1545,35 @@ class AgentWorker:
                 or "reply 'approve'" in question.lower()
             )
             if is_approval:
-                if verdict is not None:
-                    submit("approve" if verdict else "cancel")
-                    return {"ok": True, "routed": "agent_answer"}
+                # Negation regex still wins (plan 0.6) — cancel without hash dance.
+                if verdict is False:
+                    submit("cancel")
+                    return {"ok": True, "routed": "agent_answer",
+                            "decision": "cancel"}
+                if verdict is True:
+                    # Typed "approve" resolves to the pending packet id + hash;
+                    # free text alone cannot authorize a stale/drifted packet.
+                    pending = self.pending_approval_packet()
+                    if pending and pending.get("payload_hash"):
+                        pid = pending.get("packet_id")
+                        if pid is None:
+                            # In-memory / NullRecorder — still bind via hash.
+                            with self.lock:
+                                ag = self.fast_agent if use_fast else self.agent
+                                if ag is not None:
+                                    ag._last_approved_via = "typed"
+                            submit("approve")
+                            return {"ok": True, "routed": "agent_answer",
+                                    "decision": "approve", "approved_via": "typed"}
+                        result = self.decide_approval(
+                            int(pid), pending["payload_hash"], "approve",
+                            approved_via="typed")
+                        if not result.get("ok"):
+                            return {**result, "routed": "agent_answer_refused"}
+                        return {**result, "routed": "agent_answer"}
+                    # No pending packet metadata — refuse rather than unbound approve.
+                    return {"ok": False, "error": "no pending approval packet",
+                            "routed": "agent_answer_refused"}
                 # New instruction while gated: cancel the gate, then run the goal.
                 submit("cancel")
                 self._emit(
@@ -1333,6 +1618,23 @@ class AgentWorker:
             awaiting = self.awaiting or self.awaiting_fast
             question = self.question if self.awaiting else self.question_fast
             pkt = _parse_approval_packet(question or "")
+            pending = self._pending_approval_packet_unlocked()
+            if pkt and pending:
+                if pending.get("packet_id") is not None:
+                    pkt["packet_id"] = pending["packet_id"]
+                if pending.get("payload_hash"):
+                    pkt["payload_hash"] = pending["payload_hash"]
+                if pending.get("expires_at") is not None:
+                    pkt["expires_at"] = pending["expires_at"]
+            elif pending and not pkt:
+                pkt = {
+                    "kind": "approval",
+                    "summary": pending.get("summary") or "",
+                    "fields": pending.get("fields") or {},
+                    "packet_id": pending.get("packet_id"),
+                    "payload_hash": pending.get("payload_hash"),
+                    "expires_at": pending.get("expires_at"),
+                }
             state = {
                 "busy": self.busy or self.busy_fast,
                 "busy_browser": self.busy,
@@ -1360,11 +1662,14 @@ class AgentWorker:
     def send(self, text: str, dry_run: str | None = None,
              surface: str | None = None, fact_id: int | None = None,
              display: str | None = None,
-             study_mode: str | None = None) -> None:
+             study_mode: str | None = None,
+             source_fact_ids: list[int] | None = None) -> None:
         """Enqueue a goal. `text` is what the agent runs; `display` (optional)
         is what the chat UI shows as the user bubble — used when Add context
         merged notes into `text` but the bubble should stay short.
-        `study_mode` is the sticky student persona id (lecture_notes, homework…)."""
+        `study_mode` is the sticky student persona id (lecture_notes, homework…).
+        `source_fact_ids` (Meeting P4) cites commitments/decisions so a verified
+        send can complete every id on the packet — not only `fact_id`."""
         self.start()
         # An explicit level wins; otherwise honor an inline /level directive.
         if dry_run is None:
@@ -1373,6 +1678,18 @@ class AgentWorker:
                 text = cleaned or text   # bare "/plan" with no task -> keep original
         if dry_run not in _DRY_RUN_LEVELS:
             dry_run = None
+        fids: list[int] = []
+        for x in (source_fact_ids or []):
+            try:
+                n = int(x)
+            except (TypeError, ValueError):
+                continue
+            if n not in fids:
+                fids.append(n)
+        if fact_id is None and fids:
+            fact_id = fids[0]
+        elif fact_id is not None and int(fact_id) not in fids:
+            fids.insert(0, int(fact_id))
         # Resolve a fast-lane surface: explicit /desktop|/phone, or a heuristic
         # "open <app>" / text/call intent — these must not sit behind Playwright.
         resolved = surface if surface in ("desktop", "phone_link") else None
@@ -1408,7 +1725,8 @@ class AgentWorker:
                "plan": plan,
                "fact_id": fact_id, "multi": multi,
                "display": (display if display is not None else text),
-               "study_mode": study_mode}
+               "study_mode": study_mode,
+               "source_fact_ids": fids}
         if resolved in ("desktop", "phone_link"):
             self.fast_q.put(cmd)
         else:
@@ -1455,11 +1773,13 @@ class AgentWorker:
         result, status = self.agent.run_goal(
             cmd["text"], dry_run=cmd.get("dry_run"), surface=cmd.get("surface"),
             packet=cmd.get("packet"), source_fact_id=cmd.get("fact_id"),
+            source_fact_ids=cmd.get("source_fact_ids"),
             study_mode=cmd.get("study_mode"))
         distill_id = getattr(self.agent, "last_distill_id", None)
+        sources, block, question = self._pop_grounding(self.agent)
         self._emit("result", result or f"(no answer — {status})",
                    distill_id=distill_id,
-                   sources=self._pop_sources(self.agent))
+                   sources=sources, context=block, question=question)
         return result or "", status
 
     def recent_results(self, limit: int = 12) -> list[str]:
@@ -1473,17 +1793,29 @@ class AgentWorker:
                      if e.get("kind") == "result"]
         return texts[-limit:]
 
-    def _pop_sources(self, agent=None) -> list | None:
-        """Grounding sections the goal that just ran drew from (left in that
-        agent's provider sink) — popped so a later result can't show stale
-        sources. Prefer the agent that ran; fall back to worker.grounding_sink
-        for tests / legacy single-sink setups."""
+    def _pop_grounding(self, agent=None) -> tuple[list | None, str | None, str | None]:
+        """Pop grounding sources + context block + question from the agent sink.
+
+        Popped so a later result can't show stale sources / re-check against
+        the wrong block. Prefer the agent that ran; fall back to
+        worker.grounding_sink for tests / legacy single-sink setups.
+        """
         sink = None
         if agent is not None:
             sink = getattr(agent, "grounding_sink", None)
         if sink is None:
             sink = getattr(self, "grounding_sink", None)
-        return (sink or {}).pop("sources", None) or None
+        if not sink:
+            return None, None, None
+        sources = sink.pop("sources", None) or None
+        block = sink.pop("block", None) or None
+        question = sink.pop("question", None) or None
+        return sources, block, question
+
+    def _pop_sources(self, agent=None) -> list | None:
+        """Back-compat: pop sources only (also clears block/question)."""
+        sources, _, _ = self._pop_grounding(agent)
+        return sources
 
     # --- multi-task fan-out (decompose -> route each -> dep-ordered execute) ---
     def _run_multitask(self, cmd: dict) -> None:
@@ -1589,17 +1921,46 @@ class AgentWorker:
         except Exception as exc:
             self._emit("progress", f"[planner] compile failed ({exc}); running as-is.")
             steps = None
+        seeded = [
+            int(x) for x in (cmd.get("source_fact_ids") or []) if x is not None
+        ]
         if not steps:
             result, status = self.agent.run_goal(
                 text, dry_run=cmd.get("dry_run"), surface=cmd.get("surface"),
                 source_fact_id=cmd.get("fact_id"),
+                source_fact_ids=seeded or None,
                 study_mode=cmd.get("study_mode"))
+            sources, block, question = self._pop_grounding(self.agent)
             self._emit("result", result or f"(no answer — {status})",
                        distill_id=getattr(self.agent, "last_distill_id", None),
-                       sources=self._pop_sources(self.agent))
+                       sources=sources, context=block, question=question)
             return result or "", status
         last: tuple[str, str] = ("", "success")
         for step in steps:
+            # RISK_TABLE blocked classes never reach an execution surface —
+            # autonomous dry-run cannot override (plan 0.7).
+            try:
+                from app.services.agent_planner import (
+                    execution_allowed, policy_block_reason,
+                )
+                risk = getattr(step.packet, "risk_level", None)
+                if not execution_allowed(risk):
+                    reason = policy_block_reason(
+                        kind=getattr(step, "intent", "") or "",
+                        goal=step.goal or "")
+                    msg = reason or f"blocked by policy ({risk})"
+                    self._emit("result", f"Refused: {msg}")
+                    last = (msg, "blocked")
+                    continue
+            except Exception:
+                pass
+            # Meeting P4: union caller-cited facts onto the compiled packet.
+            if seeded and step.packet is not None:
+                existing = list(getattr(step.packet, "source_fact_ids", None) or [])
+                for fid in seeded:
+                    if fid not in existing:
+                        existing.append(fid)
+                step.packet.source_fact_ids = existing
             if step.surface == "none":
                 last = (self._deliver_briefing(step), "success")
             else:
@@ -1607,10 +1968,12 @@ class AgentWorker:
                     step.to_goal_text(), dry_run=cmd.get("dry_run"),
                     surface=step.surface, packet=step.packet,
                     source_fact_id=cmd.get("fact_id"),
+                    source_fact_ids=seeded or None,
                     study_mode=cmd.get("study_mode"))
+                sources, block, question = self._pop_grounding(self.agent)
                 self._emit("result", result or f"(no answer — {status})",
                            distill_id=getattr(self.agent, "last_distill_id", None),
-                           sources=self._pop_sources(self.agent))
+                           sources=sources, context=block, question=question)
                 last = (result or "", status)
         return last
 
@@ -1726,10 +2089,12 @@ class AgentWorker:
                         cmd["text"], dry_run=cmd.get("dry_run"),
                         surface=cmd.get("surface"),
                         source_fact_id=cmd.get("fact_id"),
+                        source_fact_ids=cmd.get("source_fact_ids"),
                         study_mode=cmd.get("study_mode"))
+                    sources, block, question = self._pop_grounding(agent)
                     self._emit("result", result or f"(no answer — {status})",
                                distill_id=getattr(agent, "last_distill_id", None),
-                               sources=self._pop_sources(agent))
+                               sources=sources, context=block, question=question)
                 elif typ == "new":
                     if self.fast_agent is not None:
                         self.fast_agent.transcript.clear()

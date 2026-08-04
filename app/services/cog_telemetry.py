@@ -41,6 +41,8 @@ OFFER = "proactive_offer"
 OFFER_OUTCOME = "offer_outcome"     # of surfaced offers, how many were ACCEPTED
 REASONER_OFFER = "reasoner_offer"   # Track D: surfaced vs suppressed reasoner offers
 TRIGGER_OFFER = "trigger_offer"     # standing triggers: surfaced vs suppressed fires
+OPEN_LOOP = "open_loop"             # plan 4.3: open-loop chip surfaced
+OPEN_LOOP_DISMISS = "open_loop_dismiss"  # plan 4.3: user snoozed / dismissed a loop
 
 _WORD = re.compile(r"[a-z0-9$]+")
 
@@ -65,7 +67,9 @@ def span_is_faithful(span: str, source_text: str) -> bool:
 # (False) — lets the console flag "getting chatty" without hardcoding names.
 _HIGHER_IS_BETTER = {FAITHFULNESS: True, GROUNDING: True, OFFER: False,
                      OFFER_OUTCOME: True, REASONER_OFFER: False,
-                     TRIGGER_OFFER: False}
+                     TRIGGER_OFFER: False,
+                     OPEN_LOOP: False,          # more surfaces → watch chatty
+                     OPEN_LOOP_DISMISS: False}  # dismiss rate up → precision down
 
 
 class CogTelemetry:

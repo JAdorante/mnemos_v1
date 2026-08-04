@@ -16,6 +16,10 @@ Every fact the extractor wants to persist passes through gate_fact() first:
                            unrelated; 'update' inserts the new fact and marks
                            the old one superseded ("meeting moved to 3pm"
                            replaces "meeting at 2pm" instead of coexisting)
+  5. field validation     — a malformed email/phone/price/URL/due date is a
+                           drop, deterministic and model-free (plan 1.4)
+  6. assertion class      — quoted/hypothetical speech is routed to `review`
+                           instead of auto-inserted (plan 1.3)
 
 Best-effort by design: when the vector index or the adjudicator model is
 unavailable the gate degrades to plain insert — capture must never lose facts
@@ -35,7 +39,8 @@ from app.config import settings
 class Verdict:
     """What to do with a candidate fact. `action` is one of:
     insert | drop | dedup (refresh dup_fact_id) | supersede (insert, then
-    mark each id in supersede_ids replaced by the new row)."""
+    mark each id in supersede_ids replaced by the new row) | review (never
+    auto-inserted; a quoted/hypothetical assertion needs a human verdict)."""
     action: str
     reason: str = ""
     dup_fact_id: int | None = None
@@ -100,8 +105,13 @@ def _telemetry(action: str, reason: str, kind: str, text: str) -> None:
         pass
 
 
+_REVIEW_ASSERTIONS = ("quoted", "hypothetical")
+
+
 def gate_fact(kind: str, text: str, confidence: float | None,
-              span: str, source_text: str) -> Verdict:
+              span: str, source_text: str, *,
+              assertion: str | None = None,
+              payload: dict | None = None) -> Verdict:
     """Decide what to do with one candidate fact BEFORE it is persisted.
     Pure decision — the caller (extractor._persist) applies it."""
     cfg = settings.facts
@@ -116,10 +126,33 @@ def gate_fact(kind: str, text: str, confidence: float | None,
 
     if cfg.span_gate and (source_text or "").strip():
         from app.services.cog_telemetry import span_is_faithful
+        if not (span or "").strip():
+            # Distinct reason: a missing span is an extraction defect (nothing
+            # to verify), not a failed verification — keep the two queryable.
+            v = Verdict("drop", "empty source_span")
+            _telemetry(v.action, v.reason, kind, text)
+            return v
         if not span_is_faithful(span, source_text):
             v = Verdict("drop", "source_span is not a verbatim quote")
             _telemetry(v.action, v.reason, kind, text)
             return v
+
+    # Plan 1.4: deterministic field validation (email/phone/price/URL/due)
+    # runs before any subjective classing — an objectively malformed field is
+    # dropped regardless of assertion class.
+    from app.services.validators import validate_fact_fields
+    bad_field = validate_fact_fields(kind, text, payload)
+    if bad_field:
+        v = Verdict("drop", bad_field)
+        _telemetry(v.action, v.reason, kind, text)
+        return v
+
+    # Plan 1.3: someone else's quote, or a hypothetical, is never auto-inserted
+    # as if it were a stated fact — a human has to bless it.
+    if assertion in _REVIEW_ASSERTIONS:
+        v = Verdict("review", f"assertion={assertion} requires human review")
+        _telemetry(v.action, v.reason, kind, text)
+        return v
 
     if not cfg.dedup:
         return Verdict("insert")

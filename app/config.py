@@ -521,7 +521,12 @@ class WorkerConfig:
     """Durable background job runner (see services/worker.py)."""
     enabled: bool = _get("QUILL_WORKER", "1") not in ("0", "false", "False")
     poll_interval_s: float = float(_get("QUILL_WORKER_POLL_S", "2.0"))
-    max_attempts: int = int(_get("QUILL_WORKER_MAX_ATTEMPTS", "3"))
+    # Plan 0.10: 5 attempts then dead-letter (was 3).
+    max_attempts: int = int(_get("QUILL_WORKER_MAX_ATTEMPTS", "5"))
+    # Exponential backoff base after a failed attempt: wait base^attempts
+    # seconds (capped) before the job is claimable again.
+    backoff_base_s: float = float(_get("QUILL_WORKER_BACKOFF_BASE_S", "2.0"))
+    backoff_cap_s: float = float(_get("QUILL_WORKER_BACKOFF_CAP_S", "60.0"))
 
 
 @dataclass(frozen=True)
@@ -871,6 +876,11 @@ class EconomyConfig:
     growth_every_s: float = float(_get("QUILL_ECONOMY_GROWTH_S", str(20 * 3600)))
     # Sweep is due when the last run is older than this (boot-enqueue pattern).
     due_after_s: float = float(_get("QUILL_ECONOMY_DUE_S", str(20 * 3600)))
+    # Plan 6.6: drop Lance rows for dismissed/superseded/evidence_removed facts
+    # older than this many days; then run Lance optimize(). Kill with
+    # QUILL_VECTOR_GC=0.
+    vector_gc: bool = _get("QUILL_VECTOR_GC", "1") not in ("0", "false", "False")
+    vector_gc_after_days: float = float(_get("QUILL_VECTOR_GC_DAYS", "30"))
 
 
 @dataclass(frozen=True)

@@ -23,6 +23,7 @@ ModelRouter can route this boundary without touching the extractor.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
@@ -38,6 +39,40 @@ from app.storage import Store, get_store
 # Haiku by default: side-by-side telemetry showed Haiku extraction working at
 # ~1/100th of Opus's spend on this task; set QUILL_EXTRACT_MODEL to override.
 EXTRACTOR_MODEL = os.environ.get("QUILL_EXTRACT_MODEL", "claude-haiku-4-5")
+
+# Stamped on every fact_candidates row (plan 1.1) so goldens / replay can pin
+# which prompt+schema produced the LLM output. Bump when _SYSTEM or _SCHEMA
+# changes in a way that should invalidate prior candidates.
+EXTRACT_PROMPT_VERSION = os.environ.get(
+    "QUILL_EXTRACT_PROMPT_VERSION", "extract-v1")
+EXTRACT_SCHEMA_VERSION = os.environ.get(
+    "QUILL_EXTRACT_SCHEMA_VERSION", "facts-schema-v3")
+
+# LLM output arrays written to fact_candidates (kind → facts dict key).
+_CANDIDATE_KINDS = (
+    ("task", "tasks"),
+    ("commitment", "commitments"),
+    ("claim", "claims"),
+    ("question", "questions"),
+    ("entity", "entities"),
+    ("relation", "relations"),
+)
+
+
+def turn_hash(turn: Turn | dict) -> str:
+    """Stable sha256 for a turn — keys fact_candidates for replay/dedupe."""
+    if isinstance(turn, dict):
+        text = turn.get("text") or ""
+        speaker = turn.get("speaker") or ""
+        eids = turn.get("event_ids") or []
+    else:
+        text = turn.text or ""
+        speaker = turn.speaker or ""
+        eids = turn.event_ids or []
+    payload = json.dumps(
+        {"text": text, "speaker": speaker, "event_ids": list(eids)},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 # Neutral-by-default few-shot example names for the schema descriptions (the
 # general-code invariant: no real contacts baked into logic). Data-driven when
@@ -55,6 +90,11 @@ def _extract_vocab_enabled() -> bool:
 # job short so a hang/crash costs one batch, not the whole backlog; the worker
 # re-enqueues while events remain (see main.py). Large enough to make real progress.
 EXTRACT_BATCH = int(os.environ.get("QUILL_EXTRACT_BATCH", "40"))
+
+# LLM failures per turn before parking extract_status='failed' (plan 0.9).
+# Without a cap, a poisoned transcript is left unmarked forever and every
+# consolidate→extract / settle-nudge pass retries it (nudge spin).
+EXTRACT_MAX_ATTEMPTS = int(os.environ.get("QUILL_EXTRACT_MAX_ATTEMPTS", "3"))
 
 
 def _index_fact(store, fact_id: int, kind: str, text: str, ts: float) -> None:
@@ -76,6 +116,20 @@ def _coerce_due(value) -> str | None:
         s = (str(value).strip() if value is not None else "")
         return s or None
 
+_ASSERTIONS = ("stated_by_user", "stated_by_other", "inferred", "quoted",
+              "hypothetical")
+_ASSERTION_PROP = {
+    "type": "string", "enum": list(_ASSERTIONS),
+    "description": "How this was asserted: stated_by_user (the speaker said "
+    "it about themselves/their own plan), stated_by_other (the speaker "
+    "reported someone else's plan/promise as fact), inferred (implied but not "
+    "directly stated), quoted (the speaker is quoting/relaying what someone "
+    "else said, not asserting it themselves), hypothetical (a maybe/if/would "
+    "— not a real commitment). Tag quoted or hypothetical whenever the "
+    "speech is quoting someone or floating a hypothetical — these are never "
+    "auto-accepted.",
+}
+
 _SCHEMA = {
     "type": "object",
     "properties": {
@@ -94,8 +148,9 @@ _SCHEMA = {
                             "or YYYY-MM-DDTHH:MM:SS. Empty '' if none stated."},
                     "confidence": {"type": "number", "description": "0-1: how clearly this was stated as a real task."},
                     "source_span": {"type": "string", "description": "The verbatim substring of the transcript this came from."},
+                    "assertion": _ASSERTION_PROP,
                 },
-                "required": ["text", "owner", "due", "confidence", "source_span"],
+                "required": ["text", "owner", "due", "confidence", "source_span", "assertion"],
                 "additionalProperties": False,
             },
         },
@@ -115,23 +170,55 @@ _SCHEMA = {
                             "else ''."},
                     "confidence": {"type": "number"},
                     "source_span": {"type": "string", "description": "Verbatim substring this came from."},
+                    "assertion": _ASSERTION_PROP,
                 },
-                "required": ["text", "from_person", "to_person", "due", "confidence", "source_span"],
+                "required": ["text", "from_person", "to_person", "due", "confidence", "source_span", "assertion"],
                 "additionalProperties": False,
             },
         },
         "claims": {
             "type": "array",
             "description": "Notable factual statements worth remembering (a price, a date, "
-            "a decision, a preference) that are NOT tasks or commitments.",
+            "a decision, a preference) that are NOT tasks or commitments. When the "
+            "claim is a clear money/date fact, also fill subject/predicate/object "
+            "(structured belief); otherwise leave those empty and keep text only.",
             "items": {
                 "type": "object",
                 "properties": {
                     "text": {"type": "string"},
                     "confidence": {"type": "number"},
                     "source_span": {"type": "string", "description": "Verbatim substring this came from."},
+                    "assertion": _ASSERTION_PROP,
+                    "subject": {
+                        "type": "string",
+                        "description": "What the claim is about (deal/plan/product/person name). "
+                        "Empty string when not parseable as SPO.",
+                    },
+                    "predicate": {
+                        "type": "string",
+                        "enum": ["costs", "priced_at", "due_on", ""],
+                        "description": "Structured claim link: costs/priced_at for money, "
+                        "due_on for dates. Empty when unparseable.",
+                    },
+                    "object": {
+                        "type": "string",
+                        "description": "Literal value ('$49', '2026-08-15'). Empty when unparseable.",
+                    },
+                    "speaker_is_source": {
+                        "type": "boolean",
+                        "description": "True when the labeled turn speaker is asserting this "
+                        "as their own knowledge; false when they are reporting what someone "
+                        "else said ('David said it's $49').",
+                    },
+                    "resolves_commitment": {
+                        "type": "boolean",
+                        "description": "True when the speaker is reporting that an earlier "
+                        "promise/commitment was already carried out ('I sent the deck', "
+                        "'it's done', 'I already emailed the client'). False otherwise. "
+                        "Never invent a new commitment for these — they resolve an old one.",
+                    },
                 },
-                "required": ["text", "confidence", "source_span"],
+                "required": ["text", "confidence", "source_span", "assertion"],
                 "additionalProperties": False,
             },
         },
@@ -171,33 +258,87 @@ _SCHEMA = {
                 "additionalProperties": False,
             },
         },
+        "questions": {
+            "type": "array",
+            "description": "Open questions someone asked that still need an answer "
+            "('What's the valuation?', 'Did we hear back from the vendor?'). Only explicit "
+            "questions worth tracking — not rhetorical filler.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "The question, cleaned."},
+                    "asked_by": {"type": "string",
+                                 "description": "Who asked — a name, 'me' for the speaker, or ''."},
+                    "confidence": {"type": "number"},
+                    "source_span": {"type": "string",
+                                    "description": "Verbatim substring this came from."},
+                    "assertion": _ASSERTION_PROP,
+                },
+                "required": ["text", "asked_by", "confidence", "source_span", "assertion"],
+                "additionalProperties": False,
+            },
+        },
     },
-    "required": ["tasks", "commitments", "claims", "entities", "relations"],
+    "required": ["tasks", "commitments", "claims", "questions", "entities", "relations"],
     "additionalProperties": False,
 }
 
 _SYSTEM = (
     "You are vinceo.ai's fact extractor. You receive a short passage of transcribed "
-    "speech (one conversational turn) and pull out the structured facts it "
-    "contains: tasks, commitments, and notable claims.\n\n"
+    "speech (one conversational turn) labeled with who spoke, and pull out the "
+    "structured facts it contains: tasks, commitments, notable claims, and open "
+    "questions.\n\n"
+    "Input format: `[<speaker or 'unknown speaker'>]: <spoken text>`.\n\n"
     "Rules:\n"
     "- Extract ONLY what is explicitly stated. Never infer, guess, or invent a "
     "task/commitment that isn't clearly there. An empty array is the correct "
     "answer for small talk, filler, or fragments.\n"
     "- A TASK is a concrete action to be done. A COMMITMENT is a promise one "
     "person made to another. A CLAIM is a notable fact (price, date, decision) "
-    "worth remembering that is neither.\n"
-    "- Use 'me' for the speaker of the turn when they refer to themselves.\n"
+    "worth remembering that is neither. A QUESTION is an explicit open question "
+    "someone asked that still needs an answer — put those in `questions`, not "
+    "claims.\n"
+    "- Ownership is relative to the labeled speaker of THIS turn. Use 'me' for "
+    "owner/from_person/to_person when that labeled speaker refers to themselves "
+    "('I'll send…', 'my task'). Do NOT use 'me' for a different person mentioned "
+    "in the turn — use their name. If the label is 'unknown speaker', still use "
+    "'me' for first-person self-reference in the speech.\n"
     "- An ENTITY is a named non-person thing: a company/org, a project/product, or "
     "a place. A RELATION is an explicitly stated link between two named things "
     "(a person and an org, a project and a company). Only emit a relation when it "
     "is clearly stated — never infer an affiliation from mere co-mention.\n"
-    "- `source_span` MUST be a verbatim substring copied from the passage.\n"
+    "- `source_span` MUST be a verbatim substring of the spoken text AFTER the "
+    "`]: ` label — never include the `[Speaker]:` prefix in source_span.\n"
     "- Prefer precision over recall: when in doubt, leave it out.\n"
     "- Due dates: resolve relative timing against the RIGHT NOW clock in this "
     "prompt; store absolute local ISO (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS). "
     "Never leave a bare weekday like 'Friday' in `due` when the calendar day "
-    "can be resolved."
+    "can be resolved.\n"
+    "- Every task/commitment/claim carries an `assertion` tag for how it was "
+    "asserted: stated_by_user (the speaker asserting about themself/their own "
+    "plan), stated_by_other (the speaker reporting someone else's stated "
+    "plan/promise as fact), inferred (implied, not directly stated), quoted "
+    "(the speaker is quoting or relaying what someone ELSE said — 'she told "
+    "me she'd send it', 'he said \"I'll be there\"'), hypothetical (a maybe/"
+    "if/would-type statement, not a real commitment — 'I might send it "
+    "Friday', 'if we go, I'd book the venue'). Tag quoted or hypothetical "
+    "whenever the speech is quoting someone else or floating a hypothetical — "
+    "never tag those as stated_by_user.\n"
+    "- For CLAIMS that are clear money or date facts, also fill structured "
+    "fields when parseable: subject (what it is about), predicate "
+    "(`costs`/`priced_at` for money, `due_on` for dates), object (the literal "
+    "value like '$49' or '2026-08-15'), and speaker_is_source (true if the "
+    "labeled speaker is asserting it; false if reporting 'X said …'). Leave "
+    "subject/predicate/object as empty strings when not clearly parseable — "
+    "those claims stay as flat text only.\n"
+    "- Set claim `resolves_commitment=true` when the speaker says they already "
+    "sent/finished/completed something they previously promised ('I sent the "
+    "deck', 'it's done', 'I already emailed the client'). Do NOT mint a new "
+    "commitment for those — they resolve an existing one.\n"
+    "- When a USER'S LIVE NOTE block is present, treat it as an importance / "
+    "disambiguation hint only. Prefer extracting the commitments, decisions, "
+    "and claims the note points at — but `source_span` MUST still be a "
+    "verbatim substring of the spoken transcript, never of the note text."
 )
 
 
@@ -218,12 +359,28 @@ class Extractor:
             self._client = anthropic.Anthropic()
         return self._client
 
-    def _extract_text(self, text: str) -> dict[str, Any]:
-        """Call Claude on one turn's text; return {tasks, commitments, claims}.
+    def _extract_text(self, turn_or_text, *, speaker: str | None = None
+                      ) -> dict[str, Any]:
+        """Call Claude on one speaker-labeled turn; return structured facts.
+
+        Accepts a Turn / turn-dict (plan 2.1) or a bare string for document/chat
+        paths. Renders `[<speaker or 'unknown speaker'>]: <text>` so ownership
+        ('me') is relative to the labeled speaker.
 
         Routed through the ModelRouter so the call is logged (latency/tokens/cost)
-        alongside vision — one measurable view of total spend in /console/models."""
+        alongside vision — one measurable view of total spend in /console/models.
+        """
+        from app.services.consolidation import format_turn_transcript
         from app.services.model_router import router
+
+        if isinstance(turn_or_text, Turn):
+            labeled = format_turn_transcript(turn_or_text)
+        elif isinstance(turn_or_text, dict) and "text" in turn_or_text:
+            labeled = format_turn_transcript(turn_or_text)
+        else:
+            text = str(turn_or_text or "")
+            label = (speaker or "").strip() or "unknown speaker"
+            labeled = f"[{label}]: {text.strip()}"
 
         system = _SYSTEM
         # Local clock so "Friday" / "tomorrow" resolve to absolute dues the
@@ -257,9 +414,28 @@ class Extractor:
         except Exception:
             pass
 
+        # Meeting Layer P2: co-timed notepad jots (±90s) as importance anchors.
+        user_content = f"Transcript turn:\n\n{labeled}"
+        try:
+            from app.services import meeting_notes as _mnotes
+            center = None
+            if isinstance(turn_or_text, Turn):
+                center = float(getattr(turn_or_text, "end", None)
+                               or getattr(turn_or_text, "start", None) or 0) or None
+            elif isinstance(turn_or_text, dict):
+                center = float(turn_or_text.get("end")
+                               or turn_or_text.get("start") or 0) or None
+            if center:
+                jots = _mnotes.jot_texts_near(self._ensure_store(), center)
+                block = _mnotes.format_anchor_block(jots)
+                if block:
+                    user_content = f"{user_content}\n\n{block}"
+        except Exception:
+            pass
+
         return router.complete_json(
             "extract", system=system,
-            messages=[{"role": "user", "content": f"Transcript turn:\n\n{text}"}],
+            messages=[{"role": "user", "content": user_content}],
             schema=_SCHEMA, max_tokens=1024, model=EXTRACTOR_MODEL,
         )
 
@@ -295,38 +471,107 @@ class Extractor:
         return settled_turns(rows, now)
 
     # --- persistence ------------------------------------------------------
+    def _attendee_priors_for_turn(self, turn_start: float | None,
+                                  turn_end: float | None) -> list[dict]:
+        """Calendar-invite attendees for a turn inside a linked session (P1)."""
+        if turn_start is None:
+            return []
+        try:
+            from app.services import meeting_join
+            return meeting_join.attendees_for_time(
+                self._ensure_store(), float(turn_start),
+                float(turn_end if turn_end is not None else turn_start))
+        except Exception:
+            return []
+
     def _resolve_person_id(self, name: str, now: float,
                            *, event_id: int | None = None,
                            event_source: str = "",
                            window: str = "",
                            text: str = "",
                            grammatical_role: str = "unknown",
-                           relationship_boost: float = 0.6) -> int | None:
+                           relationship_boost: float = 0.6,
+                           turn_speaker: str | None = None,
+                           turn_start: float | None = None,
+                           turn_end: float | None = None,
+                           attendee_priors: list[dict] | None = None) -> int | None:
         # People v2: mention ledger + candidate resolution. Legacy path when
         # QUILL_PEOPLE_V2=0.
+        # Plan 2.1: 'me' is relative to the labeled turn speaker — maps to the
+        # enrolled user's self node ONLY when that speaker is the enrolled user.
         from app.services import self_profile
         from app.services.people_pipeline import enabled, resolve_person_mention
         from app.services.resolution import resolver
+        store = self._ensure_store()
+        priors = attendee_priors
+        if priors is None and turn_start is not None:
+            priors = self._attendee_priors_for_turn(turn_start, turn_end)
         if self_profile.is_self_name(name):
-            return self_profile.self_person_id(self._ensure_store())
+            return self._resolve_me_relative_to_speaker(
+                turn_speaker, now, event_id=event_id,
+                event_source=event_source, window=window, text=text,
+                grammatical_role=grammatical_role,
+                relationship_boost=relationship_boost)
         if enabled():
             res = resolve_person_mention(
-                name, store=self._ensure_store(), event_id=event_id,
+                name, store=store, event_id=event_id,
                 event_source=event_source or "audio.whisper",
                 window=window, text=text, grammatical_role=grammatical_role,
                 now=now, relationship_boost=relationship_boost,
+                attendee_priors=priors or None,
             )
             # Also attribute contacts from the turn text when we got a person.
             if res.person_id and text:
                 from app.services.people_pipeline import attribute_contacts_from_text
                 attribute_contacts_from_text(
-                    text, store=self._ensure_store(),
+                    text, store=store,
                     person_id=res.person_id, person_name=name,
                     event_id=event_id, now=now,
                     event_source=event_source or "audio.whisper",
                     window=window)
-            return res.person_id
-        return resolver.resolve_person(name, ts=now)
+            if res.person_id:
+                return res.person_id
+        # Bound store — Resolver() defaults to process-global get_store().
+        pid = store.resolve_person(name, ts=now)
+        return int(pid) if pid else None
+
+    def _resolve_me_relative_to_speaker(
+            self, turn_speaker: str | None, now: float, *,
+            event_id: int | None = None, event_source: str = "",
+            window: str = "", text: str = "",
+            grammatical_role: str = "unknown",
+            relationship_boost: float = 0.6) -> int | None:
+        """Map extractor 'me' to a person id relative to the labeled speaker.
+
+        - Speaker is enrolled user → self node
+        - Speaker is another known label → that speaker's person id
+        - Unknown / empty speaker → None (never park 'me' on the user)
+        """
+        from app.services import self_profile
+        from app.services.people_pipeline import enabled, resolve_person_mention
+        from app.services.resolution import resolver
+
+        store = self._ensure_store()
+        spk = (turn_speaker or "").strip()
+        if self_profile.speaker_is_enrolled_user(spk, store):
+            return self_profile.self_person_id(store)
+        if not spk or spk.lower() == "unknown speaker":
+            return None
+        # Other labeled speaker saying "I'll…" — ownership is theirs.
+        if enabled():
+            res = resolve_person_mention(
+                spk, store=store, event_id=event_id,
+                event_source=event_source or "audio.whisper",
+                window=window, text=text or spk,
+                grammatical_role=grammatical_role or "speaker",
+                now=now, relationship_boost=max(relationship_boost, 0.85),
+            )
+            if res.person_id:
+                return res.person_id
+        # Bound store (not the process-global Resolver default) so tests and
+        # multi-DB installs attribute ownership to the right people row.
+        pid = store.resolve_person(spk, ts=now)
+        return int(pid) if pid else None
 
     def _persist_entities(self, facts: dict[str, Any], anchor: int | None,
                           now: float, *, event_source: str = "",
@@ -414,45 +659,155 @@ class Extractor:
 
     def _gate(self, kind: str, item: dict, turn: Turn):
         """Run one candidate fact through the write-time hygiene gate
-        (confidence floor / span faithfulness / dedup / supersede). Returns the
-        Verdict, or an insert verdict on any gate failure — hygiene must never
-        cost a fact."""
+        (field validation / confidence floor / span faithfulness / assertion
+        class / dedup / supersede). Returns the Verdict, or a fallback verdict
+        on any gate failure — hygiene must never cost a fact, but a
+        quoted/hypothetical assertion still never falls back to auto-insert."""
+        assertion = item.get("assertion")
         try:
             from app.services.fact_gate import gate_fact
             return gate_fact(kind, item.get("text") or "",
                              item.get("confidence"),
-                             item.get("source_span", ""), turn.text)
+                             item.get("source_span", ""), turn.text,
+                             assertion=assertion, payload=item)
         except Exception:
+            if assertion in ("quoted", "hypothetical"):
+                class _Review:  # duck-typed review verdict
+                    action = "review"
+                    reason = f"assertion={assertion} requires human review"
+                    dup_fact_id = None
+                    supersede_ids: tuple = ()
+                return _Review()
             class _Insert:  # duck-typed insert verdict
                 action = "insert"
+                reason = ""
                 dup_fact_id = None
                 supersede_ids: tuple = ()
             return _Insert()
 
+    def _event_correlation_id(self, store: Store, event_id: int | None) -> str | None:
+        """Best-effort lookup of the source event's correlation_id (plan 1.5),
+        so every candidate born from a given event traces back to it."""
+        if not event_id:
+            return None
+        try:
+            ev = store.get_event(event_id)
+            if not ev:
+                return None
+            meta = json.loads(ev.get("meta") or "{}")
+            return meta.get("correlation_id") or None
+        except Exception:
+            return None
+
+    def _write_fact_candidates(self, turn: Turn, facts: dict[str, Any],
+                               now: float) -> list[int]:
+        """Land every LLM output row as a fact_candidate (plan 1.1).
+
+        Runs before the hygiene gate so dropped/deduped items still leave an
+        auditable row with prompt_version. `add_fact_candidate` dedupes on
+        turn_hash+kind+payload_json (plan 1.2), so replaying the same turn
+        never creates a twin row. Does not change fact materialization.
+        """
+        store = self._ensure_store()
+        th = turn_hash(turn)
+        anchor = turn.event_ids[0] if turn.event_ids else None
+        speaker = (turn.speaker or "") or None
+        correlation_id = self._event_correlation_id(store, anchor)
+        ids: list[int] = []
+        for kind, key in _CANDIDATE_KINDS:
+            for item in facts.get(key) or []:
+                if not isinstance(item, dict):
+                    continue
+                payload = dict(item)
+                conf = payload.get("confidence")
+                if conf is not None and not isinstance(conf, (int, float)):
+                    conf = None
+                assertion = payload.get("assertion")  # populated in plan 1.3
+                if assertion is not None:
+                    assertion = str(assertion) or None
+                try:
+                    cid = store.add_fact_candidate(
+                        turn_hash=th, kind=kind, payload=payload,
+                        source_span=payload.get("source_span") or None,
+                        speaker=speaker, assertion=assertion,
+                        confidence=float(conf) if conf is not None else None,
+                        model=EXTRACTOR_MODEL,
+                        prompt_version=EXTRACT_PROMPT_VERSION,
+                        schema_version=EXTRACT_SCHEMA_VERSION,
+                        status="pending",
+                        source_event_id=anchor, correlation_id=correlation_id,
+                        created_at=now,
+                    )
+                    ids.append(cid)
+                except Exception as exc:
+                    print(f"[extract] fact_candidate write skipped ({exc})")
+        return ids
+
     def _persist(self, turn: Turn, facts: dict[str, Any], now: float) -> int:
+        """Materialize this turn's LLM output into facts, routed through
+        fact_candidates (plan 1.2): every task/commitment/claim is looked up
+        by its (turn_hash, kind, payload) candidate row, gated, then either
+        materialized or stamped drop/dedup/review — never both. Because
+        `add_fact_candidate` dedupes on that same key, replaying an
+        already-processed turn finds each candidate at a non-'pending' status
+        and skips it, so fact counts stay identical across replays."""
         store = self._ensure_store()
         anchor = turn.event_ids[0] if turn.event_ids else None
+        th = turn_hash(turn)
         n = 0
+
+        # Plan 1.1/1.2: land (or find) every LLM output row as a candidate
+        # before gating — dropped/deduped/reviewed items still leave an
+        # auditable row, and a second pass over the same turn is a no-op.
+        self._write_fact_candidates(turn, facts, now)
+
+        # Meeting Layer P1: resolve once per turn so every mention in the
+        # turn shares the same calendar-attendee prior set.
+        _priors = self._attendee_priors_for_turn(
+            getattr(turn, "start", None), getattr(turn, "end", None))
 
         def _person(name: str, *, role: str = "unknown", boost: float = 0.6) -> int | None:
             return self._resolve_person_id(
                 name, now, event_id=anchor,
                 event_source="audio.whisper", text=turn.text,
-                grammatical_role=role, relationship_boost=boost)
+                grammatical_role=role, relationship_boost=boost,
+                turn_speaker=turn.speaker or "",
+                turn_start=getattr(turn, "start", None),
+                turn_end=getattr(turn, "end", None),
+                attendee_priors=_priors)
 
         def _apply(v, fid: int) -> None:
             # A 'supersede' verdict: the just-inserted fact replaces the old.
             for old in v.supersede_ids:
                 store.supersede_fact(old, fid, now)
 
+        def _candidate(kind: str, item: dict) -> dict | None:
+            try:
+                return store.find_fact_candidate(th, kind, dict(item))
+            except Exception:
+                return None
+
         for t in facts.get("tasks", []):
             if not t.get("text"):
                 continue
+            cand = _candidate("task", t)
+            if cand and cand.get("status") != "pending":
+                continue  # already gated in a prior pass — replay-safe
+            cid = cand["id"] if cand else None
             v = self._gate("task", t, turn)
+            reason = getattr(v, "reason", "") or ""
             if v.action == "drop":
+                if cid:
+                    store.set_fact_candidate_status(cid, "dropped", verdict_reason=reason)
+                continue
+            if v.action == "review":
+                if cid:
+                    store.set_fact_candidate_status(cid, "review", verdict_reason=reason)
                 continue
             if v.action == "dedup":
                 store.touch_fact(v.dup_fact_id, now, t.get("confidence"))
+                if cid:
+                    store.set_fact_candidate_status(cid, "deduped", verdict_reason=reason)
                 continue
             fid = store.add_task(
                 t["text"], source_event_id=anchor,
@@ -462,6 +817,8 @@ class Extractor:
                 due=_coerce_due(t.get("due")), extracted_at=now,
             )
             _apply(v, fid)
+            if cid:
+                store.set_fact_candidate_status(cid, "accepted", verdict_reason=reason)
             _index_fact(store, fid, "task", t["text"], now)
             self._record_faithfulness(t, turn.text)
             # Proactively ask if I should action this heard task (gated by
@@ -472,11 +829,24 @@ class Extractor:
         for c in facts.get("commitments", []):
             if not c.get("text"):
                 continue
+            cand = _candidate("commitment", c)
+            if cand and cand.get("status") != "pending":
+                continue
+            cid = cand["id"] if cand else None
             v = self._gate("commitment", c, turn)
+            reason = getattr(v, "reason", "") or ""
             if v.action == "drop":
+                if cid:
+                    store.set_fact_candidate_status(cid, "dropped", verdict_reason=reason)
+                continue
+            if v.action == "review":
+                if cid:
+                    store.set_fact_candidate_status(cid, "review", verdict_reason=reason)
                 continue
             if v.action == "dedup":
                 store.touch_fact(v.dup_fact_id, now, c.get("confidence"))
+                if cid:
+                    store.set_fact_candidate_status(cid, "deduped", verdict_reason=reason)
                 continue
             fid = store.add_commitment(
                 c["text"], source_event_id=anchor,
@@ -487,17 +857,32 @@ class Extractor:
                 due=_coerce_due(c.get("due")), extracted_at=now,
             )
             _apply(v, fid)
+            if cid:
+                store.set_fact_candidate_status(cid, "accepted", verdict_reason=reason)
             _index_fact(store, fid, "commitment", c["text"], now)
             self._record_faithfulness(c, turn.text)
             n += 1
         for cl in facts.get("claims", []):
             if not cl.get("text"):
                 continue
+            cand = _candidate("claim", cl)
+            if cand and cand.get("status") != "pending":
+                continue
+            cid = cand["id"] if cand else None
             v = self._gate("claim", cl, turn)
+            reason = getattr(v, "reason", "") or ""
             if v.action == "drop":
+                if cid:
+                    store.set_fact_candidate_status(cid, "dropped", verdict_reason=reason)
+                continue
+            if v.action == "review":
+                if cid:
+                    store.set_fact_candidate_status(cid, "review", verdict_reason=reason)
                 continue
             if v.action == "dedup":
                 store.touch_fact(v.dup_fact_id, now, cl.get("confidence"))
+                if cid:
+                    store.set_fact_candidate_status(cid, "deduped", verdict_reason=reason)
                 continue
             fid = store.add_claim(
                 cl["text"], source_event_id=anchor,
@@ -505,18 +890,160 @@ class Extractor:
                 confidence=cl.get("confidence"), extracted_at=now,
             )
             _apply(v, fid)
+            if cid:
+                store.set_fact_candidate_status(cid, "accepted", verdict_reason=reason)
             _index_fact(store, fid, "claim", cl["text"], now)
             self._record_faithfulness(cl, turn.text)
-            # "I prefer …" / "my …" — this claim is about the user personally:
-            # attach it to the self node so the living profile picks it up.
+            # Plan 2.5: parseable SPO claims dual-write into kg_beliefs;
+            # unparseable stay flat facts only.
+            self._persist_claim_belief(
+                cl, fact_id=fid, turn=turn, anchor=anchor, now=now)
+            # First-person claims attach to the self node ONLY when the labeled
+            # speaker is the enrolled user (plan 2.1) — never when Marc says "I…".
             from app.services import self_profile
-            if self_profile.is_first_person(cl["text"]):
+            if (self_profile.is_first_person(cl["text"])
+                    and self_profile.speaker_is_enrolled_user(
+                        turn.speaker or "", store)):
                 self_profile.link_self(store, fid, now)
+            # Plan 4.2 (a): resolve hint → offer only, never auto-complete.
+            if cl.get("resolves_commitment"):
+                try:
+                    from app.services import commitment_complete as cc
+                    cc.offer_matches_for_text(
+                        cl.get("source_span") or cl["text"],
+                        source="speech_resolve",
+                        event_id=anchor, store=store, force=True)
+                except Exception as exc:
+                    print(f"[extractor] resolve offer skipped ({exc}).")
             n += 1
+        for q in facts.get("questions", []):
+            if not q.get("text"):
+                continue
+            cand = _candidate("question", q)
+            if cand and cand.get("status") != "pending":
+                continue
+            cid = cand["id"] if cand else None
+            v = self._gate("question", q, turn)
+            reason = getattr(v, "reason", "") or ""
+            if v.action == "drop":
+                if cid:
+                    store.set_fact_candidate_status(cid, "dropped",
+                                                    verdict_reason=reason)
+                continue
+            if v.action == "review":
+                if cid:
+                    store.set_fact_candidate_status(cid, "review",
+                                                    verdict_reason=reason)
+                continue
+            if v.action == "dedup":
+                store.touch_fact(v.dup_fact_id, now, q.get("confidence"))
+                if cid:
+                    store.set_fact_candidate_status(cid, "deduped",
+                                                    verdict_reason=reason)
+                continue
+            fid = store.add_question(
+                q["text"], source_event_id=anchor,
+                source_span=q.get("source_span", ""),
+                confidence=q.get("confidence"), extracted_at=now,
+            )
+            _apply(v, fid)
+            if cid:
+                store.set_fact_candidate_status(cid, "accepted",
+                                                verdict_reason=reason)
+            _index_fact(store, fid, "question", q["text"], now)
+            self._record_faithfulness(q, turn.text)
+            n += 1
+
+        # Plan 4.2 (a): deterministic "I sent/done" fallback when the model
+        # omitted resolves_commitment — still offer-only.
+        try:
+            from app.services import commitment_complete as cc
+            if cc.looks_like_resolve(turn.text or ""):
+                cc.offer_matches_for_text(
+                    turn.text or "",
+                    source="speech_resolve",
+                    event_id=anchor, store=store)
+        except Exception as exc:
+            print(f"[extractor] resolve scan skipped ({exc}).")
 
         # Entity nodes + asserted relation edges (the graph's non-person side).
         self._persist_entities(facts, anchor, now)
         return n
+
+    def _persist_claim_belief(
+        self, cl: dict, *, fact_id: int, turn: Turn,
+        anchor: int | None, now: float,
+    ) -> None:
+        """Dual-write structured claim → kg_beliefs when SPO is complete."""
+        subj = (cl.get("subject") or "").strip()
+        pred = (cl.get("predicate") or "").strip()
+        obj = (cl.get("object") or "").strip()
+        if not (subj and pred and obj):
+            return
+        from app.services import kg_beliefs
+        if pred not in kg_beliefs._CLAIM_PREDICATES:
+            return
+        store = self._ensure_store()
+        try:
+            from app.services import source_policy as sp
+            pol = sp.policy_for_event(
+                event_source="audio.whisper", text=turn.text or "")
+            source_class = pol.source_class
+        except Exception:
+            source_class = "private_conversation"
+
+        # Subject: person if resolvable, else value/topic entity on THIS store
+        # (never the process-global Resolver — tests and multi-DB installs
+        # must dual-write into the bound Store).
+        subj_pid = self._resolve_person_id(
+            subj, now, event_id=anchor,
+            event_source="audio.whisper", text=turn.text or "",
+            grammatical_role="claim_subject", relationship_boost=0.5,
+            turn_speaker=turn.speaker or "")
+        if subj_pid:
+            subj_type, subj_id = "person", int(subj_pid)
+        else:
+            eid = store.find_entity_exact(subj) or store.resolve_entity(
+                subj, "other", ts=now)
+            if not eid:
+                return
+            subj_type, subj_id = "entity", int(eid)
+
+        # Object: literal money/date value node. Bypass name_quality entity
+        # gates — "$49" is rejected as punctuation by is_plausible_entity,
+        # but is a valid belief object for costs/priced_at/due_on.
+        obj_id = store.find_entity_exact(obj) or store.resolve_entity(
+            obj, "other", ts=now)
+        if not obj_id:
+            return
+
+        speaker = (turn.speaker or "").strip() or None
+        # When speaker_is_source is false and text names a reporter
+        # ("David said…"), prefer that name as the attributed speaker.
+        attributed = speaker
+        sis = cl.get("speaker_is_source")
+        if sis is False:
+            import re
+            m = re.search(
+                r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+said\b",
+                cl.get("text") or "")
+            if m:
+                attributed = m.group(1)
+
+        try:
+            kg_beliefs.record_from_claim(
+                store,
+                subj_type=subj_type, subj_id=subj_id,
+                predicate=pred, obj_type="entity", obj_id=int(obj_id),
+                fact_id=fact_id, source_event_id=anchor,
+                confidence=cl.get("confidence"), ts=now,
+                quote=(cl.get("source_span") or cl.get("text") or "")[:400],
+                source_class=source_class,
+                speaker=attributed,
+                speaker_is_source=bool(sis) if sis is not None else None,
+            )
+        except Exception as exc:
+            print(f"[extract] claim→belief skipped ({exc})")
 
     # --- backfill (populate entities on already-extracted turns) ----------
     def backfill_entities(self, *, limit: int | None = None, min_chars: int = 20,
@@ -542,7 +1069,7 @@ class Extractor:
         processed = ent_seen = rels = 0
         for t in turns:
             try:
-                out = self._extract_text(t["text"])
+                out = self._extract_text(t)  # speaker-labeled (plan 2.1)
             except Exception as exc:
                 print(f"[backfill] LLM error ({exc}); skipping a turn.")
                 continue
@@ -606,7 +1133,7 @@ class Extractor:
         if not turns:
             remaining = len(store.unextracted_events(
                 limit=10000, modality=Modality.AUDIO.value))
-            return {"turns": 0, "facts": 0, "events_marked": 0,
+            return {"turns": 0, "facts": 0, "events_marked": 0, "failed": 0,
                     "remaining": remaining, "next_settle_in": next_settle_in}
 
         from app.services import intent as _intent
@@ -615,8 +1142,10 @@ class Extractor:
         type_route = _ur.route_enabled()          # #6: opt-in, default off
 
         total_facts = 0
-        marked: list[int] = []
+        marked: list[int] = []   # success / skip (status=ok)
+        parked: list[int] = []   # failed after max attempts
         skipped = 0
+        failed = 0
         for turn in turns:
             # #6 (opt-in): a DICTATION turn is verbatim content, not conversation
             # to mine for tasks — skip extraction (the raw transcript is still
@@ -639,10 +1168,21 @@ class Extractor:
                     print(f"[extract] skip (non-actionable): {turn.text[:70]!r}")
                 continue
             try:
-                facts = self._extract_text(turn.text)
+                facts = self._extract_text(turn)  # speaker-labeled (plan 2.1)
             except Exception as exc:
-                print(f"[extract] LLM error on turn ({exc}); leaving it for retry.")
-                continue  # don't mark — retry next pass
+                attempts = store.bump_extract_attempts(turn.event_ids)
+                if attempts >= EXTRACT_MAX_ATTEMPTS:
+                    # Park: mark extracted as failed so consolidate/nudge cannot
+                    # spin forever on a poisoned turn (plan 0.9).
+                    store.park_extract_failed(turn.event_ids, now)
+                    failed += 1
+                    parked.extend(turn.event_ids)
+                    print(f"[extract] LLM error on turn ({exc}); "
+                          f"parked failed after {attempts} attempt(s).")
+                else:
+                    print(f"[extract] LLM error on turn ({exc}); "
+                          f"leaving for retry ({attempts}/{EXTRACT_MAX_ATTEMPTS}).")
+                continue
             n = self._persist(turn, facts, now)
             total_facts += n
             marked.extend(turn.event_ids)
@@ -650,11 +1190,12 @@ class Extractor:
                 print(f"[extract] turn ({turn.n_utterances} utt, "
                       f"{len(turn.event_ids)} ev) -> {n} fact(s): "
                       f"{turn.text[:70]!r}")
-        store.mark_extracted(marked, now)
+        store.mark_extracted(marked, now, status="ok")
         remaining = sum(1 for _, ev in store.unextracted_events(limit=10000)
                         if ev.modality == Modality.AUDIO)
         return {"turns": len(turns), "facts": total_facts,
-                "events_marked": len(marked), "skipped": skipped,
+                "events_marked": len(marked) + len(parked), "skipped": skipped,
+                "failed": failed,
                 "remaining": remaining, "next_settle_in": next_settle_in}
 
 

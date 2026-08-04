@@ -8,12 +8,14 @@ un-indexed events are backfilled into the vector store.
     search(query)  ->  semantic (embeddings + LanceDB)  ->  fallback substring
 
 Retrieval is lifecycle-aware: superseded and dismissed facts are filtered out
-at hydration (their vectors stay in the index — the store row is authoritative),
-and ranking blends cosine with recency so a stale fact and its fresh correction
-stop competing as equals.
+at hydration. Stale vectors for dismissed/superseded/evidence_removed facts
+are dropped by :func:`vector_gc` after a grace window (plan 6.6); ranking
+blends cosine with recency so a stale fact and its fresh correction stop
+competing as equals.
 """
 from __future__ import annotations
 
+import os
 import threading
 import time
 from typing import Any
@@ -30,12 +32,120 @@ FACT_ID_OFFSET = 1_000_000_000
 
 def fact_is_retrievable(f: dict | None) -> bool:
     """A stored fact may surface in search only while it is the living version:
-    not superseded by a newer fact, not dismissed by the human."""
+    not superseded / archived / evidence_removed, not dismissed by the human."""
     if f is None:
         return False
     if (f.get("state") or "active") != "active":
         return False
     return f.get("review") != "dismissed"
+
+
+def vector_gc(store=None, vectors=None, *, now: float | None = None,
+              older_than_days: float | None = None,
+              optimize: bool = True) -> dict[str, Any]:
+    """Drop Lance rows for store facts that are dead longer than the grace
+    window, then compact/prune versions (plan 6.6 / 107 GB incident).
+
+    Targets: ``state IN (superseded, archived, evidence_removed)`` or
+    ``review='dismissed'``, with ``COALESCE(updated_at, extracted_at)`` older
+    than ``QUILL_VECTOR_GC_DAYS`` (default 30). Also sweeps orphaned *event*
+    vectors (SQLite row gone). Kill-switch: ``QUILL_VECTOR_GC=0``.
+    """
+    result: dict[str, Any] = {
+        "ok": True, "dropped_facts": 0, "dropped_orphans": 0,
+        "optimize": None, "fact_ids": [],
+    }
+    # Kill-switch is env-first (call-time) so tests / operators can toggle
+    # without reimporting frozen Settings.
+    if os.environ.get("QUILL_VECTOR_GC", "1") in ("0", "false", "False"):
+        result["reason"] = "disabled"
+        return result
+    try:
+        cfg = settings.economy
+    except Exception:
+        cfg = None
+    if store is None:
+        try:
+            store = get_store()
+        except Exception as exc:
+            return {**result, "ok": False, "reason": f"no_store:{exc}"}
+    if vectors is None:
+        try:
+            from app.vectorstore import get_vectorstore
+            vectors = get_vectorstore()
+        except Exception as exc:
+            return {**result, "ok": False, "reason": f"no_vectors:{exc}"}
+    now = float(now if now is not None else time.time())
+    days = float(older_than_days if older_than_days is not None
+                 else getattr(cfg, "vector_gc_after_days", 30.0) if cfg else 30.0)
+    cutoff = now - max(0.0, days) * 86400.0
+    result["cutoff"] = cutoff
+    result["older_than_days"] = days
+
+    try:
+        fact_ids = store.fact_ids_for_vector_gc(older_than=cutoff)
+    except Exception as exc:
+        return {**result, "ok": False, "reason": f"query:{exc}"}
+    result["fact_ids"] = list(fact_ids)
+    drop_ids = [FACT_ID_OFFSET + int(fid) for fid in fact_ids]
+
+    # Orphaned event vectors (SQLite event gone) — same as startup backfill.
+    try:
+        existing = vectors.list_ids()
+        event_existing = {i for i in existing if i < FACT_ID_OFFSET}
+        live_events = {int(eid) for eid, _ in store.all_with_ids()}
+        orphans = sorted(event_existing - live_events)
+        drop_ids.extend(orphans)
+        result["orphan_event_ids"] = orphans
+    except Exception as exc:
+        print(f"[memory] vector_gc orphan scan skipped ({exc}).")
+        result["orphan_scan"] = str(exc)
+
+    if drop_ids:
+        try:
+            n = vectors.delete_ids(drop_ids)
+            # Count how many of the deletes were fact vs orphan (best-effort).
+            n_facts = min(len(fact_ids), n)
+            result["dropped_facts"] = n_facts
+            result["dropped_orphans"] = max(0, n - n_facts)
+            result["dropped"] = n
+        except Exception as exc:
+            result["ok"] = False
+            result["reason"] = f"delete:{exc}"
+            return result
+
+    if optimize:
+        try:
+            result["optimize"] = vectors.force_optimize()
+        except Exception as exc:
+            result["optimize"] = {"ok": False, "error": str(exc)}
+    return result
+
+
+def erase_event(event_id: int, *, store=None, vectors=None,
+                drop_vectors: bool = True) -> dict[str, Any]:
+    """Memory forget: delete the event, mark citing facts ``evidence_removed``,
+    and immediately drop their Lance rows (plan 6.6)."""
+    if store is None:
+        store = get_store()
+    out = store.erase_event(int(event_id))
+    if not out.get("ok"):
+        return out
+    if drop_vectors:
+        if vectors is None:
+            try:
+                from app.vectorstore import get_vectorstore
+                vectors = get_vectorstore()
+            except Exception as exc:
+                out["vectors"] = {"error": str(exc)}
+                return out
+        ids = [int(event_id)] + [
+            FACT_ID_OFFSET + int(f) for f in (out.get("fact_ids") or [])]
+        try:
+            out["vectors"] = vectors.delete_ids(ids) if ids else 0
+        except Exception as exc:
+            out["vectors"] = {"error": str(exc)}
+    return out
 
 
 def recency_adjusted(score: float, age_days: float, *,

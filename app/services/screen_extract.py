@@ -140,6 +140,16 @@ def run_once() -> dict:
             n = _persist_facts(
                 store, facts, anchor, joined, now,
                 event_source=SOURCE, window=window_blob)
+            # Plan 4.2 (c): Sent-toast / Sent-folder OCR → completion
+            # *candidate* (offer only — never auto-complete).
+            try:
+                from app.services import commitment_complete as cc
+                if cc.looks_like_sent_toast(joined):
+                    cc.offer_matches_for_text(
+                        joined, source="screen_sent",
+                        event_id=anchor, store=store, force=True)
+            except Exception as exc:
+                print(f"[screen_extract] sent-candidate skipped ({exc}).")
         except Exception as exc:
             print(f"[screen_extract] extract failed ({exc}); will retry later.")
             store.mark_extracted(skipped_ids, now)

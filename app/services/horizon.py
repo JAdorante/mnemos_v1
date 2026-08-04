@@ -143,9 +143,6 @@ def predict(store=None, *, now: float | None = None, limit: int = 3) -> list[dic
             return []
 
     events = _next_calendar_events(store, now=now, horizon_s=horizon_s)
-    if not events:
-        return []
-
     people = _people_index(store)
     entities = _entity_index(store)
     items: list[dict] = []
@@ -244,7 +241,25 @@ def predict(store=None, *, now: float | None = None, limit: int = 3) -> list[dic
         if len(items) >= limit:
             break
 
-    items.sort(key=lambda x: (-float(x["p_need"]), float(x["when_s"])))
+    # Plan 4.3: open loops fill remaining horizon slots (also when no calendar).
+    if len(items) < limit:
+        try:
+            from app.services import open_loops
+            for it in open_loops.horizon_items(
+                    store, now=now, limit=limit - len(items), exclude=seen):
+                key = it.get("id") or f"{it.get('node_type')}:{it.get('node_id')}"
+                if key in seen:
+                    continue
+                if float(it.get("p_need") or 0) < min_p:
+                    continue
+                items.append(it)
+                seen.add(key)
+                if len(items) >= limit:
+                    break
+        except Exception as exc:
+            print(f"[horizon] open_loops skipped ({exc}).")
+
+    items.sort(key=lambda x: (-float(x["p_need"]), float(x.get("when_s") or 0)))
     return items[:limit]
 
 
@@ -280,6 +295,8 @@ def refresh(store=None, *, now: float | None = None) -> list[dict]:
                     "reasons": it.get("reason") or [],
                     "when_label": it.get("when_label"),
                     "event_title": it.get("event_title"),
+                    "loop_kind": it.get("loop_kind"),
+                    "evidence": it.get("evidence") or {},
                 },
                 "source": it.get("source") or "calendar",
                 "event_key": it.get("event_key"),
@@ -287,6 +304,11 @@ def refresh(store=None, *, now: float | None = None) -> list[dict]:
         store.replace_attention_predictions(rows)
     except Exception as exc:
         print(f"[horizon] persist skipped ({exc}).")
+    try:
+        from app.services import open_loops
+        open_loops.mark_surfaced(store, items, now=now)
+    except Exception:
+        pass
     try:
         from app.services.attention_ledger import attention_ledger
         attention_ledger.record_horizon(items, store)
@@ -324,6 +346,9 @@ def strip(store=None, *, refresh_first: bool = True) -> dict[str, Any]:
                 "reason": it.get("reason") or [],
                 "source": it.get("source"),
                 "event_title": it.get("event_title"),
+                "loop_kind": it.get("loop_kind"),
+                "evidence": it.get("evidence") or {},
+                "fact_id": it.get("fact_id"),
             }
             for it in items
         ],
@@ -331,8 +356,20 @@ def strip(store=None, *, refresh_first: bool = True) -> dict[str, Any]:
 
 
 def dismiss(store, node_id: str) -> bool:
-    """Strong negative: mark matching prediction dismissed + ledger outcome."""
+    """Strong negative: mark matching prediction dismissed + snooze open loops."""
     ok = False
+    fact_id: int | None = None
+    try:
+        # Accept "fact:12", "12", or "loop:waiting_on_them:12"
+        s = (node_id or "").strip()
+        if s.startswith("fact:"):
+            fact_id = int(s.split(":", 1)[1])
+        elif s.startswith("loop:") and s.count(":") >= 2:
+            fact_id = int(s.rsplit(":", 1)[1])
+        elif s.isdigit():
+            fact_id = int(s)
+    except (TypeError, ValueError):
+        fact_id = None
     try:
         rows = store.list_attention_predictions(limit=20)
         for r in rows:
@@ -340,8 +377,20 @@ def dismiss(store, node_id: str) -> bool:
             if nid == node_id or str(r.get("id")) == str(node_id):
                 store.dismiss_attention_prediction(int(r["id"]))
                 ok = True
+                if fact_id is None and r.get("node_type") == "fact":
+                    try:
+                        fact_id = int(r["node_id"])
+                    except Exception:
+                        pass
     except Exception:
         pass
+    if fact_id is not None:
+        try:
+            from app.services import open_loops
+            if open_loops.snooze(store, int(fact_id), kind="horizon_dismiss"):
+                ok = True
+        except Exception:
+            pass
     try:
         from app.services.attention_ledger import attention_ledger
         attention_ledger.outcome(node_id, "dismiss",

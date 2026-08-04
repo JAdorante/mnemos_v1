@@ -104,6 +104,91 @@ def _name_tokens(name: str, aliases: list[str] | None = None) -> set[str]:
     return tokens
 
 
+# Plan 2.4 / People intel §F — auto-write only when score ≥ τ_attr.
+ATTR_MIN = 2.0
+
+
+def contact_attribution_score(
+    text: str,
+    *,
+    kind: str,
+    value: str,
+    start: int,
+    end: int,
+    tokens: set[str],
+) -> float:
+    """Score how strongly a contact value belongs to `tokens`' person.
+
+    Mirrors people_intelligence_architecture.md §F (possessive / reach-at /
+    local-part; penalties for "will email X at Y" subject confusion).
+    Auto-write when score ≥ ATTR_MIN; weaker scores stay review / unassigned.
+    """
+    if not tokens:
+        return 0.0
+    low = text.lower()
+    val = (value or "").lower()
+    score = 0.0
+
+    for t in tokens:
+        te = re.escape(t)
+        if kind == "email":
+            if re.search(rf"\b{te}'s\s+(?:e-?mail|mail)(?:\s+address)?\b", low):
+                score = max(score, 3.0)
+            if re.search(
+                rf"\b{te}\s+(?:e-?mail|mail)(?:\s+address)?\s+(?:is|:)\s*"
+                rf"{re.escape(val)}",
+                low,
+            ):
+                score = max(score, 3.0)
+            if re.search(
+                rf"\b(?:e-?mail|reach|contact|message)\s+{te}\s+at\s+"
+                rf"{re.escape(val)}",
+                low,
+            ):
+                score = max(score, 2.5)
+            # "X will email Y at addr" — addr is Y's, not X's.
+            if re.search(
+                rf"\b{te}\s+will\s+(?:e-?mail|mail|send)\b", low
+            ) and not re.search(
+                rf"\b(?:e-?mail|reach|contact|message)\s+{te}\s+at\s+", low
+            ):
+                score -= 4.0
+        else:  # phone
+            if re.search(
+                rf"\b{te}'s\s+(?:phone|number|cell|mobile)\b", low):
+                score = max(score, 3.0)
+            if re.search(
+                rf"\b(?:reach|call|text|phone)\s+{te}\s+(?:at|on)\s+"
+                rf"{re.escape(val)}",
+                low,
+            ):
+                score = max(score, 2.5)
+            if re.search(
+                rf"\b{te}\s+(?:phone|number|cell|mobile)\s+(?:is|:)\s*"
+                rf"{re.escape(val)}",
+                low,
+            ):
+                score = max(score, 3.0)
+
+    if kind == "email" and "@" in val and score < ATTR_MIN:
+        local = val.split("@", 1)[0]
+        root = re.split(r"[._+-]", local)[0]
+        if len(root) >= 3 and any(
+            root == t or t.startswith(root) or root.startswith(t)
+            for t in tokens
+        ):
+            # Name must appear OUTSIDE the contact value (local-part alone
+            # matching the email text is circular — "marc@" ≠ mentioning Marc).
+            lo = max(0, start - 60)
+            hi = min(len(text), end + 60)
+            neighborhood = low[lo:start] + " " + low[end:hi]
+            if any(re.search(rf"\b{re.escape(t)}\b", neighborhood)
+                   for t in tokens):
+                score = max(score, 1.5)
+
+    return score
+
+
 def _contact_belongs(
     text: str,
     *,
@@ -113,66 +198,10 @@ def _contact_belongs(
     end: int,
     tokens: set[str],
 ) -> bool:
-    """True only when the email/phone is about THIS person — not a co-mention.
-
-    Accepts possessive / explicit attribution ("Marc's email is …", "reach Marc
-    at …") or an email local-part that matches a name token. Rejects "Justin
-    will email marc@…" when mining Justin.
-    """
-    if not tokens:
-        return False
-    low = text.lower()
-    val = (value or "").lower()
-    for t in tokens:
-        te = re.escape(t)
-        if kind == "email":
-            if re.search(rf"\b{te}'s\s+(?:e-?mail|mail)(?:\s+address)?\b", low):
-                # Possessive in this fact — email in the same fact is theirs.
-                return True
-            if re.search(
-                rf"\b{te}\s+(?:e-?mail|mail)(?:\s+address)?\s+(?:is|:)\s*"
-                rf"{re.escape(val)}",
-                low,
-            ):
-                return True
-            if re.search(
-                rf"\b(?:e-?mail|reach|contact|message)\s+{te}\s+at\s+"
-                rf"{re.escape(val)}",
-                low,
-            ):
-                return True
-        else:  # phone
-            if re.search(
-                rf"\b{te}'s\s+(?:phone|number|cell|mobile)\b", low):
-                return True
-            if re.search(
-                rf"\b(?:reach|call|text|phone)\s+{te}\s+(?:at|on)\s+"
-                rf"{re.escape(val)}",
-                low,
-            ):
-                return True
-            if re.search(
-                rf"\b{te}\s+(?:phone|number|cell|mobile)\s+(?:is|:)\s*"
-                rf"{re.escape(val)}",
-                low,
-            ):
-                return True
-
-    if kind == "email" and "@" in val:
-        local = val.split("@", 1)[0]
-        root = re.split(r"[._+-]", local)[0]
-        if len(root) >= 3 and any(
-            root == t or t.startswith(root) or root.startswith(t)
-            for t in tokens
-        ):
-            # Local-part matches the person — still require name nearby so a
-            # random marc@ in Justin's fact doesn't stick via coincidence.
-            lo = max(0, start - 60)
-            hi = min(len(text), end + 60)
-            neighborhood = low[lo:hi]
-            if any(t in neighborhood for t in tokens):
-                return True
-    return False
+    """True only when attribution score clears ATTR_MIN (auto-write gate)."""
+    return contact_attribution_score(
+        text, kind=kind, value=value, start=start, end=end, tokens=tokens,
+    ) >= ATTR_MIN
 
 
 def _mine_bio(text: str, found: dict[str, dict], fid, quote: str) -> None:

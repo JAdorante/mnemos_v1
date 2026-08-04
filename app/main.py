@@ -10,11 +10,17 @@ from fastapi import FastAPI
 from app.api.routes import router, start_all, stop_all
 from app.config import settings
 from app.events import bus
-from app.services.api_auth import LanApiAuthMiddleware, ensure_api_token
+from app.services.api_auth import (
+    CsrfProtectMiddleware,
+    LanApiAuthMiddleware,
+    ensure_api_token,
+)
 from app.services.memory import memory
 
 app = FastAPI(title="vinceo.ai", version="0.1.0")
 app.add_middleware(LanApiAuthMiddleware)
+# Outer: CSRF runs first (plan 6.4) — cross-origin POSTs rejected.
+app.add_middleware(CsrfProtectMiddleware)
 app.include_router(router)
 
 
@@ -133,8 +139,16 @@ async def _startup() -> None:
                         lambda _p: ranking_promote.run())
         worker.register("meta_memory",
                         lambda _p: meta_memory.run(write_reflections=True))
-        worker.register("horizon_refresh",
-                        lambda _p: _horizon.refresh())
+        def _horizon_refresh_job(_p) -> None:
+            _horizon.refresh()
+            # Meeting Layer P5 — suggest meeting mode when a calendar event starts.
+            try:
+                from app.services import meeting_mode as _mm
+                _mm.consider_offer(memory._ensure_store())
+            except Exception as exc:
+                print(f"[meeting_mode] consider skipped ({exc}).")
+
+        worker.register("horizon_refresh", _horizon_refresh_job)
 
         # Track C: nightly retention sweep (observe-only unless QUILL_COMPACTION).
         from app.services import memory_economy
@@ -193,8 +207,22 @@ async def _startup() -> None:
                 print(f"[sessions] rebuild skipped ({exc}).")
             if extract_on:
                 worker.enqueue("extract", unique=True)  # chain: turns -> facts
+            else:
+                # Meeting Layer P3: still try enhance when extract is off
+                # (may only have prior facts / jots).
+                worker.enqueue("session_enhance", unique=True)
 
         worker.register("consolidate", _consolidate_job)
+
+        # Meeting Layer P3 — settled calendar-linked / ≥5-min sessions → note.
+        def _session_enhance_job(_payload) -> None:
+            from app.services import meeting_enhance
+            try:
+                meeting_enhance.run_once()
+            except Exception as exc:
+                print(f"[meeting_enhance] skipped ({exc}).")
+
+        worker.register("session_enhance", _session_enhance_job)
 
         # Desktop rollup ("what was I doing?"): desktop.screen/click events fold
         # into app-focus activity blocks — the desktop analog of turns->sessions.
@@ -229,6 +257,8 @@ async def _startup() -> None:
                 if res.get("events_marked") and res.get("remaining"):
                     worker.enqueue("extract", unique=True)
                 worker.enqueue("graph", unique=True)   # chain: facts -> edges
+                # Meeting Layer P3: enhance after facts land for settled sessions.
+                worker.enqueue("session_enhance", unique=True)
                 # A turn is captured but not settled yet: schedule a one-shot
                 # re-run for just after it settles, so the last thing said before
                 # a silence surfaces without waiting for the next sound.

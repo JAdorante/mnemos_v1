@@ -7,8 +7,10 @@ and a short transcript is fed forward so follow-ups ("now summarize that") work.
 Recovery ladder (FR-MODEL-3, FR-ACT-3, §9):
 failed verify -> retry-with-wait -> escalate Sonnet->Opus -> re-plan -> ask_human.
 """
+import hashlib
 import json
 import re
+import time
 import uuid
 from pathlib import Path
 from urllib.parse import urlsplit, parse_qsl
@@ -141,6 +143,10 @@ def _lessons_text(skill):
 
 
 _COMMIT_RE = [re.compile(p, re.I) for p in cfg.COMMIT_PATTERNS]
+# Send-class commits only (plan 0.8 duplicate-send). Delete/buy/pay stay
+# irreversible but are not deduped by executed_hash.
+_SEND_CLASS_RE = re.compile(r"\b(send|submit|publish|post)\b", re.I)
+_DUP_SEND_WINDOW_S = 3600.0
 # Compose affordances whose accessible name contains "send" but are INPUTS,
 # not commit buttons — Snapchat Web's "Send a chat" textbox was false-firing
 # the approval gate every turn (live, July 22 2026).
@@ -217,6 +223,13 @@ def _looks_irreversible(name, extra=(), *, role=None, editable=False):
         return False
     return (any(r.search(name) for r in _COMMIT_RE)
             or any(r.search(name) for r in extra))
+
+
+def _looks_send_class(name):
+    """True for send/submit/publish/post commits (duplicate-send refusal)."""
+    if not name or _COMPOSE_NAME_RE.search(name):
+        return False
+    return bool(_SEND_CLASS_RE.search(name))
 
 
 # Heuristic for "the human just pasted a credential where it doesn't belong":
@@ -334,6 +347,56 @@ def _risk_from_route(route):
     return "low"
 
 
+def _canonicalize_fields(fields):
+    """Stable JSON for executable packet args — must match app.storage."""
+    return json.dumps(fields or {}, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=False)
+
+
+def _hash_fields(fields):
+    """sha256 of canonical fields. Prefer the shared app helper when present so
+    browser_agent and storage cannot drift; fall back to the same algorithm for
+    standalone CLI runs that never import app.*."""
+    try:
+        from app.storage import hash_packet_payload
+        return hash_packet_payload(fields)
+    except Exception:
+        return hashlib.sha256(
+            _canonicalize_fields(fields).encode("utf-8")).hexdigest()
+
+
+def _fields_diff(approved, current):
+    """Human-readable key-level diff between the approved packet and about-to-
+    execute args — shown when binding fails closed and we re-ask."""
+    a = dict(approved or {})
+    c = dict(current or {})
+    keys = sorted(set(a) | set(c))
+    lines = []
+    for k in keys:
+        av, cv = a.get(k, ""), c.get(k, "")
+        if (av or "") == (cv or ""):
+            continue
+        lines.append(f"  {k}:\n    approved: {av!r}\n    current:  {cv!r}")
+    return "\n".join(lines) if lines else "  (no field-level diff)"
+
+
+def _policy_block_reason(summary="", fields=None, label=""):
+    """RISK_TABLE check — autonomous may skip the ask, never a blocked class."""
+    fields = fields or {}
+    try:
+        from app.services.agent_planner import policy_block_reason
+        return policy_block_reason(
+            kind=str(fields.get("action") or ""),
+            goal=summary or "",
+            label=label or str(fields.get("action") or ""),
+            summary=summary or "")
+    except Exception:
+        text = f"{summary} {label} {fields.get('action', '')}"
+        if re.search(r"\b(delete|remove|erase|uninstall)\b", text or "", re.I):
+            return "blocked by policy (delete) — autonomous mode cannot override"
+        return None
+
+
 class _NullRecorder:
     """No-op stand-in so the agent runs unrecorded (standalone CLI / one-shot /
     tests) without littering call sites with None-checks. The real Recorder
@@ -396,6 +459,16 @@ class Agent:
         # provider so browser_agent stays importable without app.*; a no-op stub
         # keeps every record_* call safe when the agent runs standalone.
         self._recorder = recorder or _NullRecorder()
+        # Approval binding (plan 0.4): the packet the human just approved, checked
+        # again immediately before the irreversible commit click. Tests may set
+        # `_about_to_execute_fields` to simulate post-approval drift.
+        self._bound_packet = None
+        self._about_to_execute_fields = None
+        # In-memory fallback for duplicate-send when no Store is attached.
+        self._recent_executed_hashes: dict[str, float] = {}
+        # Packet currently shown to the human (set before ask, cleared after
+        # decision). Buttons / typed "approve" resolve against this id+hash.
+        self._pending_approval_packet = None
         # Default dry-run posture for this session (Track B #8); overridable per
         # run_goal(). Falls back to the AGENT_DRY_RUN env default.
         self.dry_run = dry_run if dry_run in cfg.DRY_RUN_LEVELS else cfg.DRY_RUN
@@ -634,9 +707,17 @@ class Agent:
         """Return `fields` with the Source overridden by the verbatim fact from
         vinceo.ai's DB for this run — so the packet can only cite a fact that
         actually exists. No-op (returns a copy unchanged) when there's no fact id
-        or no source provider, i.e. the standalone agent or an ungrounded goal."""
+        or no source provider, i.e. the standalone agent or an ungrounded goal.
+
+        Preserves any pre-seeded `_grounded_source_ids` (e.g. meeting follow-up
+        citing several commitment facts) and unions the primary Source fact so
+        verified-send completion can close every cited commitment.
+        """
         fields = dict(fields or {})
-        self._grounded_source_ids = None
+        prior = [
+            int(x) for x in (getattr(self, "_grounded_source_ids", None) or [])
+            if x is not None
+        ]
         fid = getattr(self, "_source_fact_id", None)
         prov = getattr(self, "_source_provider", None)
         if fid and prov:
@@ -646,7 +727,12 @@ class Agent:
                 src = None
             if src and src.get("block"):
                 fields["source"] = src["block"]
-                self._grounded_source_ids = [src.get("fact_id", fid)]
+                primary = int(src.get("fact_id", fid))
+                ids = [primary] + [x for x in prior if x != primary]
+                self._grounded_source_ids = ids
+                return fields
+        # Keep prior citations even when Source line couldn't be grounded.
+        self._grounded_source_ids = prior or None
         return fields
 
     def _approval_decision(self, summary, fields=None):
@@ -655,12 +741,20 @@ class Agent:
         Returns (decision, feedback) where decision is 'approve' | 'cancel' |
         'edit'. On 'edit', feedback is the user's revision instruction, which the
         caller feeds back so the draft can be revised before re-asking."""
+        fields = dict(fields or {})
+        # Autonomous / approval-off still cannot unlock RISK_TABLE blocked classes
+        # (plan 0.7): bypass the ask, never the policy.
+        blocked = _policy_block_reason(summary, fields)
+        if blocked:
+            self._log(f"   [policy] {blocked}")
+            self._clear_bound_packet()
+            self._pending_approval_packet = None
+            return "cancel", ""
         if not cfg.REQUIRE_APPROVAL or getattr(self, "_autonomous_run", False):
             if getattr(self, "_autonomous_run", False):
                 self._log(f"   [autonomous] auto-approved: {summary}")
             return "approve", ""
         self._log(f"[approval needed] {summary}")
-        fields = dict(fields or {})
         # UI commit-gate (click "Send" looks irreversible): do NOT attach an
         # unrelated memory Source — that polluted Snapchat approvals with
         # random facts. Only ground when this is a structured draft packet.
@@ -688,19 +782,43 @@ class Agent:
             summary=summary, fields=fields or {}, goal=summary,
             execution_surface="browser", risk_level=_risk_from_route(self.last_route),
             source_fact_ids=self._grounded_source_ids)
+        self._set_pending_approval_packet(packet_id, fields or {})
         prompt = ("APPROVAL NEEDED — " + summary
                   + (("\n\n" + packet) if packet else "")
                   + "\n\nReply 'approve' to proceed, 'cancel' to stop, or tell me "
                   "what to change (e.g. \"change the subject to …\") to edit it first.")
         ans = self._ask_fn(prompt)
         decision = _classify_approval(ans)
+        # Prefer via stamped by the decide endpoint (button|typed); fall back
+        # to typed when the reply arrived through the ask channel directly.
+        approved_via = getattr(self, "_last_approved_via", None) or "typed"
+        self._last_approved_via = None
         # Record the verdict. On 'edit' the revision text is the training signal
         # that previously evaporated once the run ended.
         self._recorder.record_decision(
-            packet_id, decision, user_edit=(ans if decision == "edit" else None))
+            packet_id, decision,
+            user_edit=(ans if decision == "edit" else None),
+            approved_via=(approved_via if decision == "approve" else None))
         self._log({"approve": "   approved",
                    "cancel": f"   declined ({ans!r})",
                    "edit": f"   edit requested ({ans!r})"}[decision])
+        if decision == "approve":
+            self._bind_approved_packet(packet_id, fields or {})
+            self._pending_approval_packet = None
+        elif decision == "edit":
+            # Edit voids the old packet and mints a replacement with a new hash
+            # (plan 0.6). Prefer fields the decide endpoint may have updated
+            # (folio subject/body edits) over the pre-ask snapshot.
+            mint_fields = dict(fields or {})
+            pending = getattr(self, "_pending_approval_packet", None) or {}
+            if pending.get("fields"):
+                mint_fields = dict(pending["fields"])
+            self._mint_edit_packet(mint_fields, ans, summary)
+            self._clear_bound_packet()
+            self._pending_approval_packet = None
+        else:
+            self._clear_bound_packet()
+            self._pending_approval_packet = None
         return decision, (ans if decision == "edit" else "")
 
     def _require_approval(self, summary, details=""):
@@ -708,6 +826,325 @@ class Agent:
         request as 'not approved' — the caller re-asks after revising."""
         decision, _ = self._approval_decision(summary, {"details": details})
         return decision == "approve"
+
+    # --- approval binding (plan 0.4) ----------------------------------------
+    def _fetch_packet(self, packet_id):
+        """Best-effort load of an action_packets row via the injected recorder."""
+        if not packet_id:
+            return None
+        try:
+            getter = getattr(self._recorder, "_s", None)
+            store = getter() if callable(getter) else None
+            if store is None:
+                store = getattr(self._recorder, "_store", None)
+            if store is not None and hasattr(store, "get_action_packet"):
+                return store.get_action_packet(packet_id)
+        except Exception as exc:
+            self._log(f"   [approval-bind] packet fetch skipped ({exc})")
+        return None
+
+    def _bind_approved_packet(self, packet_id, fields):
+        """Remember the approved packet so the commit click can re-check it."""
+        fields = dict(fields or {})
+        row = self._fetch_packet(packet_id)
+        if row:
+            self._bound_packet = {
+                "packet_id": packet_id,
+                "fields": dict(row.get("fields") or fields),
+                "payload_hash": row.get("payload_hash") or _hash_fields(fields),
+                "expires_at": row.get("expires_at"),
+            }
+        else:
+            # NullRecorder / standalone: bind in-memory so the gate still works.
+            self._bound_packet = {
+                "packet_id": packet_id,
+                "fields": fields,
+                "payload_hash": _hash_fields(fields),
+                "expires_at": time.time() + 900.0,
+            }
+        self._about_to_execute_fields = None
+
+    def _clear_bound_packet(self):
+        self._bound_packet = None
+        self._about_to_execute_fields = None
+
+    def _set_pending_approval_packet(self, packet_id, fields):
+        """Expose the in-flight packet so UI buttons / typed approve bind to it."""
+        fields = dict(fields or {})
+        row = self._fetch_packet(packet_id) if packet_id else None
+        self._pending_approval_packet = {
+            "packet_id": packet_id,
+            "fields": dict(row.get("fields") or fields) if row else fields,
+            "payload_hash": ((row or {}).get("payload_hash")
+                             or _hash_fields(fields)),
+            "expires_at": (row or {}).get("expires_at") or (time.time() + 900.0),
+            "summary": (row or {}).get("summary") or "",
+        }
+
+    def _mint_edit_packet(self, fields, user_edit, summary):
+        """Mint a replacement packet after an edit verdict (new hash).
+
+        Returns (new_id, new_fields, new_hash). Does not leave the agent
+        awaiting — the executor revises and re-requests approval.
+        """
+        new_fields = dict(fields or {})
+        if user_edit:
+            new_fields["edit_request"] = user_edit
+        new_hash = _hash_fields(new_fields)
+        new_id = self._recorder.record_packet(
+            summary=f"edit: {summary}" if summary else "edit requested",
+            fields=new_fields, goal=summary or "",
+            execution_surface="browser",
+            risk_level=_risk_from_route(self.last_route),
+            source_fact_ids=self._grounded_source_ids)
+        if new_id is not None:
+            self._log(f"   [approval] edit minted packet #{new_id}")
+        return new_id, new_fields, new_hash
+
+    def _approval_bind_check(self, execute_fields=None):
+        """Re-canonicalize about-to-execute args vs the bound packet.
+
+        Returns a dict: `{block, reason, diff, fields, ...}`. `block=True` only
+        in enforce mode on drift/expiry/missing_hash. Shadow mode logs and
+        returns block=False. Mode `off` is a no-op.
+        """
+        mode = getattr(cfg, "APPROVAL_BIND", "off") or "off"
+        empty = {"block": False, "reason": "off", "diff": "",
+                 "fields": {}, "current_fields": {}, "approved_fields": {}}
+        if mode == "off":
+            return empty
+
+        bound = getattr(self, "_bound_packet", None)
+        if not bound:
+            if mode == "shadow":
+                self._log("   [approval-bind/shadow] unbound commit (no packet)")
+            return {**empty, "reason": "unbound"}
+
+        # Prefer DB as source of truth when the packet was persisted.
+        payload_hash = bound.get("payload_hash")
+        expires_at = bound.get("expires_at")
+        approved_fields = dict(bound.get("fields") or {})
+        row = self._fetch_packet(bound.get("packet_id"))
+        if row:
+            payload_hash = row.get("payload_hash") or payload_hash
+            if row.get("expires_at") is not None:
+                expires_at = row.get("expires_at")
+            if row.get("fields"):
+                approved_fields = dict(row["fields"])
+
+        if execute_fields is not None:
+            current = dict(execute_fields)
+        elif getattr(self, "_about_to_execute_fields", None) is not None:
+            current = dict(self._about_to_execute_fields)
+        else:
+            current = dict(approved_fields)
+
+        reason = None
+        if expires_at is not None and time.time() >= float(expires_at):
+            reason = "expired"
+        elif not payload_hash:
+            reason = "missing_hash"
+        elif _hash_fields(current) != payload_hash:
+            reason = "drift"
+
+        if reason is None:
+            return {**empty, "reason": "ok",
+                    "fields": current, "current_fields": current,
+                    "approved_fields": approved_fields}
+
+        diff = (_fields_diff(approved_fields, current)
+                if reason == "drift" else "")
+        self._log(f"   [approval-bind/{mode}] {reason}"
+                  + (f"\n{diff}" if diff else ""))
+        out = {
+            "block": mode == "enforce",
+            "reason": reason,
+            "diff": diff,
+            "fields": current,
+            "current_fields": current,
+            "approved_fields": approved_fields,
+            "shadow": mode == "shadow",
+        }
+        return out
+
+    def _send_exec_hash(self, commit_name):
+        """Canonical hash + packet_id for a send-class commit about to run."""
+        bound = getattr(self, "_bound_packet", None) or {}
+        if getattr(self, "_about_to_execute_fields", None) is not None:
+            fields = dict(self._about_to_execute_fields)
+        elif bound.get("fields"):
+            fields = dict(bound["fields"])
+        else:
+            fields = {"action": f"click '{commit_name}'"}
+        # Prefer the bound payload_hash when current fields still match it —
+        # that is the identity the human approved.
+        h = _hash_fields(fields)
+        if bound.get("payload_hash") and h == bound.get("payload_hash"):
+            h = bound["payload_hash"]
+        return h, bound.get("packet_id")
+
+    def _duplicate_send_check(self, commit_name):
+        """Refuse if a verified same-hash send exists in the last hour (0.8).
+
+        Returns `{block, reason, prior}` — block only for send-class commits
+        with a recent matching executed_hash.
+        """
+        empty = {"block": False, "reason": "n/a", "prior": None, "hash": ""}
+        if not _looks_send_class(commit_name):
+            return empty
+        exec_hash, _pid = self._send_exec_hash(commit_name)
+        if not exec_hash:
+            return empty
+
+        prior = None
+        try:
+            finder = getattr(self._recorder, "find_recent_executed", None)
+            if callable(finder):
+                prior = finder(exec_hash, within_s=_DUP_SEND_WINDOW_S)
+            if prior is None:
+                getter = getattr(self._recorder, "_s", None)
+                store = getter() if callable(getter) else None
+                if store is None:
+                    store = getattr(self._recorder, "_store", None)
+                if store is not None and hasattr(store, "find_recent_executed_hash"):
+                    prior = store.find_recent_executed_hash(
+                        exec_hash, within_s=_DUP_SEND_WINDOW_S)
+        except Exception as exc:
+            self._log(f"   [dup-send] lookup skipped ({exc})")
+
+        if prior is None:
+            # NullRecorder / no DB: check session-local stamps.
+            stamped = (getattr(self, "_recent_executed_hashes", {}) or {}).get(
+                exec_hash)
+            if stamped is not None and (time.time() - stamped) < _DUP_SEND_WINDOW_S:
+                prior = {"id": None, "executed_hash": exec_hash,
+                         "executed_at": stamped}
+
+        if prior is None:
+            return {**empty, "reason": "ok", "hash": exec_hash}
+
+        self._log(
+            f"   [dup-send] refused — same payload already sent within "
+            f"{int(_DUP_SEND_WINDOW_S // 60)}m"
+            + (f" (packet #{prior.get('id')})" if prior.get("id") else ""))
+        return {"block": True, "reason": "duplicate_send", "prior": prior,
+                "hash": exec_hash}
+
+    def _stamp_executed_send(self, commit_name):
+        """Record executed_hash after a verified send-class commit.
+
+        Plan 4.2: after a verified stamp, complete open commitments cited in
+        the packet's source_fact_ids (never on plan-only / dry runs).
+        """
+        if not _looks_send_class(commit_name):
+            return
+        exec_hash, packet_id = self._send_exec_hash(commit_name)
+        if not exec_hash:
+            return
+        now = time.time()
+        self._recent_executed_hashes[exec_hash] = now
+        stamped = False
+        try:
+            setter = getattr(self._recorder, "set_executed_hash", None)
+            if callable(setter) and packet_id is not None:
+                setter(packet_id, exec_hash)
+                self._log(f"   [dup-send] stamped executed_hash on "
+                          f"packet #{packet_id}")
+                stamped = True
+            else:
+                getter = getattr(self._recorder, "_s", None)
+                store = getter() if callable(getter) else None
+                if store is None:
+                    store = getattr(self._recorder, "_store", None)
+                if (store is not None and packet_id is not None
+                        and hasattr(store, "set_packet_executed_hash")):
+                    store.set_packet_executed_hash(packet_id, exec_hash,
+                                                   executed_at=now)
+                    self._log(f"   [dup-send] stamped executed_hash on "
+                              f"packet #{packet_id}")
+                    stamped = True
+        except Exception as exc:
+            self._log(f"   [dup-send] stamp skipped ({exc})")
+        if stamped or exec_hash:
+            self._maybe_complete_commitments_after_send(packet_id)
+
+    def _maybe_complete_commitments_after_send(self, packet_id):
+        """Plan 4.2 (b) — verified send completes cited open commitments."""
+        try:
+            dry = getattr(self, "dry_run", None)
+            if dry in ("plan", "dry"):
+                return
+            fids = list(getattr(self, "_grounded_source_ids", None) or [])
+            if self._source_fact_id is not None:
+                sid = int(self._source_fact_id)
+                if sid not in fids:
+                    fids.append(sid)
+            # Also pull ids from the recorder's last bound packet when present.
+            try:
+                getter = getattr(self._recorder, "last_packet", None)
+                pkt = getter() if callable(getter) else None
+                if pkt is None:
+                    pkt = getattr(self._recorder, "_last_packet", None)
+                extra = (getattr(pkt, "source_fact_ids", None)
+                         if pkt is not None else None)
+                if extra is None and isinstance(pkt, dict):
+                    extra = pkt.get("source_fact_ids")
+                for x in extra or []:
+                    if int(x) not in fids:
+                        fids.append(int(x))
+            except Exception:
+                pass
+            if not fids:
+                return
+            from app.services import commitment_complete as cc
+            done = cc.complete_from_verified_send(
+                fids, packet_id=packet_id, dry_run=dry)
+            if done:
+                self._log(
+                    f"   [commit-resolve] completed {len(done)} commitment(s) "
+                    f"after verified send")
+        except Exception as exc:
+            self._log(f"   [commit-resolve] skipped ({exc})")
+
+    def _run_approval_bind_gate(self, commit_name, gathered):
+        """Apply binding at the irreversible click. Returns
+        (proceed, approved_commit_reset) — proceed=False means the click was
+        refused and the caller should `continue` the step loop.
+        On enforce failure: hard-stop, surface the diff, and re-ask once with
+        the *current* (drifted) fields as the new packet.
+        """
+        bind = self._approval_bind_check()
+        if not bind.get("block"):
+            return True, False
+
+        reason = bind.get("reason") or "bind_failed"
+        diff = bind.get("diff") or ""
+        if diff:
+            gathered.append(
+                f"APPROVAL BINDING FAILED ({reason}) — args drifted after "
+                f"approval:\n{diff}")
+        # Clear the stale binding; re-ask on the about-to-execute fields so a
+        # fresh approve mints a packet whose hash matches what will run.
+        self._clear_bound_packet()
+        summary = (
+            f"approval binding failed ({reason}) before clicking "
+            f"\"{commit_name}\" — re-confirm the current args"
+            + (f":\n{diff}" if diff else ".")
+        )
+        decision, feedback = self._approval_decision(
+            summary, bind.get("current_fields")
+            or {"action": f"click '{commit_name}'"})
+        if decision != "approve":
+            return False, True
+        # Re-check the freshly bound packet (must match current fields).
+        bind2 = self._approval_bind_check(
+            execute_fields=bind.get("current_fields"))
+        if bind2.get("block"):
+            self._log(f"   [approval-bind/enforce] still blocked after "
+                      f"re-approve ({bind2.get('reason')})")
+            self._clear_bound_packet()
+            return False, True
+        return True, True
 
     # --- desktop/OS control (guarded) --------------------------------------
     def _desktop(self):
@@ -738,6 +1175,11 @@ class Agent:
                     and dcfg.desktop_autoapprove("launch_app")):
                 self._log(f"   [auto-launch] {summary}")
                 return True
+            # RISK_TABLE first — autonomous may skip the ask, never policy.
+            blocked = _policy_block_reason(summary, {"action": action or ""})
+            if blocked:
+                self._log(f"   [policy] {blocked}")
+                return False
             if getattr(self, "_autonomous_run", False):
                 if action is None or dcfg.desktop_autoapprove(action):
                     self._log(f"   [autonomous:{dcfg.AGENT_AUTONOMY_DESKTOP}] "
@@ -750,7 +1192,28 @@ class Agent:
                       + "\nReply 'approve' to proceed, or anything else to cancel.")
             return _is_yes(self._ask_fn(prompt))
 
-        self._desktop_driver = DesktopDriver(on_log=self._log, on_approve=_approve)
+        def _record_desktop_packet(fields, summary):
+            return self._recorder.record_packet(
+                summary=summary, fields=fields, goal=summary,
+                execution_surface="desktop",
+                risk_level=_risk_from_route(self.last_route))
+
+        def _get_desktop_packet(packet_id):
+            try:
+                getter = getattr(self._recorder, "_s", None)
+                store = getter() if callable(getter) else None
+                if store is None:
+                    store = getattr(self._recorder, "_store", None)
+                if store is not None and hasattr(store, "get_action_packet"):
+                    return store.get_action_packet(packet_id)
+            except Exception:
+                return None
+            return None
+
+        self._desktop_driver = DesktopDriver(
+            on_log=self._log, on_approve=_approve,
+            on_record_packet=_record_desktop_packet,
+            on_get_packet=_get_desktop_packet)
         return self._desktop_driver
 
     def _desktop_dispatch(self, d, name, args):
@@ -924,7 +1387,13 @@ class Agent:
                     outcome = "refused: " + detail
                 same_act = same_act + 1 if act_sig == last_act_sig else 1
                 last_act_sig = act_sig
-            hist.append((name, args, outcome))
+            # Keep driver evidence (plan 5.1 os.stat) alongside the outcome string.
+            hist.append((name, args, {
+                "detail": outcome,
+                "ok": bool(res.get("ok")),
+                "step_status": res.get("step_status"),
+                "verify": res.get("verify"),
+            }))
             if same_act >= cfg.REPEAT_ACTION_LIMIT and name not in ("ask_human", "done"):
                 self._log("   same desktop action repeated without progress; stopping.")
                 result = result or (
@@ -938,11 +1407,30 @@ class Agent:
         if status == "running":
             status = "stopped"
         result = result or "(desktop task ended without an explicit result)"
-        self._recorder.record_steps([
-            {"step_index": i, "action_type": n, "input": a, "output": r,
-             "status": "done"}
-            for i, (n, a, r) in enumerate(hist)
-        ])
+        # Plan 5.1: write_file carries step_status from os.stat; others stay done.
+        from app.services.outcome_verify import DONE, OUTCOME_UNCERTAIN, VERIFIED
+        step_rows = []
+        for i, (n, a, r) in enumerate(hist):
+            if isinstance(r, dict):
+                out = r.get("detail", r)
+                vnote = None
+                if isinstance(r.get("verify"), dict):
+                    vnote = r["verify"].get("note")
+                st = r.get("step_status")
+                if not st:
+                    if n == "write_file":
+                        st = (VERIFIED if r.get("ok")
+                              and (r.get("verify") or {}).get("ok")
+                              else OUTCOME_UNCERTAIN)
+                    else:
+                        st = DONE
+            else:
+                out, vnote, st = r, None, DONE
+            step_rows.append({
+                "step_index": i, "action_type": n, "input": a,
+                "output": out, "verification": vnote, "status": st,
+            })
+        self._recorder.record_steps(step_rows)
         self.transcript.append({"goal": goal, "result": result})
         self.last_steps, self.last_replans = len(hist), 0
         return result, status
@@ -1094,7 +1582,7 @@ class Agent:
 
     # --- the loop ----------------------------------------------------------
     def run_goal(self, goal, dry_run=None, surface=None, packet=None,
-                 source_fact_id=None, study_mode=None):
+                 source_fact_id=None, study_mode=None, source_fact_ids=None):
         """Bracket the run with vinceo.ai's agent-run log (Phase 5), then delegate.
 
         The heavy lifting is in _run_goal_inner; this thin wrapper opens a run
@@ -1106,6 +1594,9 @@ class Agent:
         (app.services.agent_planner). When present it is persisted up-front,
         linked to this run — so the *intended* action is on record before the
         hands act, not just the approval snapshot the browser agent produces.
+
+        `source_fact_ids` seeds the full citation set for verified-send
+        commitment completion (Meeting Layer P4 follow-up drafts).
 
         `study_mode` is an optional student persona id (lecture_notes, homework…);
         when set it stacks guidance onto router/direct-answer/browser context
@@ -1120,7 +1611,24 @@ class Agent:
         # later ungrounded goal can't inherit a stale citation. A packet from the
         # Personal Agent Layer can supply it too.
         self._source_fact_id = source_fact_id or (
+            (list(source_fact_ids or []) or [None])[0] or
             (getattr(packet, "source_fact_ids", None) or [None])[0])
+        # Plan 4.2 / Meeting P4: keep the full cited set for verified-send
+        # completion (not only the first id used for the Source line).
+        pkt_ids = [
+            int(x) for x in (getattr(packet, "source_fact_ids", None) or [])
+            if x is not None
+        ]
+        for x in (source_fact_ids or []):
+            try:
+                n = int(x)
+            except (TypeError, ValueError):
+                continue
+            if n not in pkt_ids:
+                pkt_ids.append(n)
+        if source_fact_id is not None and int(source_fact_id) not in pkt_ids:
+            pkt_ids.insert(0, int(source_fact_id))
+        self._grounded_source_ids = pkt_ids or None
         cost_before = self.cost()
         self._recorder.start_run(
             goal, surface=surface, dry_run=level,
@@ -1523,6 +2031,18 @@ class Agent:
                               + (packet or args.get("summary", "")))
                     break
                 if getattr(self, "_autonomous_run", False):
+                    blocked = _policy_block_reason(
+                        args.get("summary", ""), args)
+                    if blocked:
+                        entry["result"] = f"blocked by policy: {blocked}"
+                        entry["verified"] = False
+                        hist.append(entry)
+                        self.mem.log_step(self.session_id, self.step, before["url"],
+                                          name, redact(args), act, False,
+                                          "policy blocked", str(shot_path),
+                                          str(ax_path))
+                        stall, consec_reads = 0, 0
+                        continue
                     approved_commit = True
                     entry["result"] = "auto-approved (autonomous)"
                     entry["verified"] = True
@@ -1632,6 +2152,23 @@ class Agent:
                         result = (f"Prepared everything and stopped before clicking "
                                   f"'{elname}' (dry-run: draft-only).")
                         break
+                    # Policy before autonomous skip (plan 0.7): delete/remove
+                    # controls are refused even when the ask is bypassed.
+                    blocked = _policy_block_reason(
+                        label=elname, summary=f"click '{elname}'",
+                        fields={"action": f"click '{elname}'"})
+                    if blocked:
+                        self._log(f"   [policy] {blocked}")
+                        entry["result"] = f"blocked by policy: '{elname}'"
+                        entry["vreason"] = "policy blocked"
+                        entry["verified"] = False
+                        hist.append(entry)
+                        self.mem.log_step(self.session_id, self.step, before["url"],
+                                          name, redact(args), act, False,
+                                          entry["vreason"], str(shot_path),
+                                          str(ax_path))
+                        stall = 0
+                        continue
                     if getattr(self, "_autonomous_run", False):
                         self._log(f"   [autonomous] committing '{elname}' without prompt.")
                     elif approved_commit:
@@ -1659,15 +2196,59 @@ class Agent:
                             stall = 0
                             continue
 
+                    # Approval binding (plan 0.4): re-canonicalize about-to-execute
+                    # args vs the bound packet's payload_hash / expires_at. Shadow
+                    # mode logs only; enforce hard-stops + re-asks with a diff.
+                    proceed, _ = self._run_approval_bind_gate(elname, gathered)
+                    if not proceed:
+                        entry["result"] = (
+                            f"blocked: approval binding failed before "
+                            f"'{elname}'")
+                        entry["vreason"] = "approval binding refused"
+                        entry["verified"] = False
+                        hist.append(entry)
+                        self.mem.log_step(self.session_id, self.step, before["url"],
+                                          name, redact(args), act, False,
+                                          entry["vreason"], str(shot_path),
+                                          str(ax_path))
+                        stall = 0
+                        continue
+
+                    # Duplicate-send refusal (plan 0.8): same verified
+                    # executed_hash within 1h ⇒ hard stop (send-class only).
+                    dup = self._duplicate_send_check(elname)
+                    if dup.get("block"):
+                        entry["result"] = (
+                            f"blocked: duplicate send within 1h "
+                            f"('{elname}')")
+                        entry["vreason"] = "duplicate send refused"
+                        entry["verified"] = False
+                        hist.append(entry)
+                        self.mem.log_step(self.session_id, self.step, before["url"],
+                                          name, redact(args), act, False,
+                                          entry["vreason"], str(shot_path),
+                                          str(ax_path))
+                        stall = 0
+                        continue
+
             res = self.driver.execute(name, args)
+            # Plan 5.1: evidence-anchored verification. LLM judge may guide
+            # control-flow (`verified` bool) but persists as outcome_uncertain.
+            from app.services import outcome_verify as _ov
+            evidence = None
+            after = before  # set below when scanned
             if name in ("scroll", "wait_for"):
-                verified, vnote = res["ok"], "not verified (low-risk action)"
+                evidence = _ov.low_risk_evidence(
+                    res["ok"], "not verified (low-risk action)")
+                verified, vnote = evidence.ok, evidence.note
             elif name == "navigate":
                 # a navigation that landed on a rendered page is success; no need
                 # to ask the verifier (which false-failed on slow-rendering SPAs).
                 after = signature(self.driver.scan())
-                verified = res["ok"] and after.get("count", 0) > 0
-                vnote = "navigated" if verified else "page did not render"
+                ok = res["ok"] and after.get("count", 0) > 0
+                evidence = _ov.dom_evidence(
+                    ok, "navigated" if ok else "page did not render")
+                verified, vnote = evidence.ok, evidence.note
             else:
                 after = signature(self.driver.scan())
                 # SPA chrome: clicking an already-open conversation often leaves
@@ -1680,7 +2261,9 @@ class Agent:
                         and after.get("page_hash") == before.get("page_hash")
                         and after.get("selected") == before.get("selected")
                         and after.get("compose") == before.get("compose")):
-                    verified, vnote = True, "no-op click (page state unchanged)"
+                    evidence = _ov.dom_evidence(
+                        True, "no-op click (page state unchanged)")
+                    verified, vnote = True, evidence.note
                     if not auto_read_done:
                         pt = (scan.get("page_text") or "").strip()
                         if pt:
@@ -1689,11 +2272,17 @@ class Agent:
                             self._log("   no-op click — harvested visible page text.")
                 else:
                     v = self.llm.verify(f"{name} {json.dumps(args)}", before, after)
-                    verified = bool(v.get("satisfied")) and res["ok"]
-                    vnote = v.get("reason", "")
+                    llm_ok = bool(v.get("satisfied")) and res["ok"]
+                    evidence = _ov.llm_only_evidence(
+                        llm_ok, v.get("reason", "") or "llm judge")
+                    # Control-flow: still advance on LLM ok so we don't replan
+                    # every click — but step_status stays outcome_uncertain.
+                    verified, vnote = evidence.ok, evidence.note
             entry["result"] = res["detail"]
             entry["verified"] = verified
             entry["vreason"] = vnote
+            entry["verify_source"] = (evidence.source if evidence else "")
+            entry["step_status"] = _ov.step_record_status(evidence=evidence)
             hist.append(entry)
             self.mem.log_step(self.session_id, self.step, before["url"], name,
                               redact(args), act, verified, vnote, str(shot_path), str(ax_path))
@@ -1701,10 +2290,8 @@ class Agent:
             # An approved irreversible click that visibly changed the page took
             # effect (e.g. the compose window closed after Send) — the task is
             # done. Stop here so it can't re-click and re-prompt endlessly.
-            # Post-commit verification: don't just trust "the page changed" —
-            # confirm the drafted text actually landed (appears in the visible
-            # thread) or the composer emptied. A send that silently failed is
-            # worse than a stall: it's a false positive on an irreversible act.
+            # Plan 5.1: send is verified via Sent-folder / mail evidence, not
+            # LLM opinion or "composer cleared" alone.
             if committed and res["ok"] and (
                     after.get("content_hash") != before.get("content_hash")
                     or after.get("page_hash") != before.get("page_hash")
@@ -1714,24 +2301,34 @@ class Agent:
                            (before.get("compose") or "").split("|")
                            if "=" in p and len(p.split("=", 1)[1]) >= 4]
                 confirm = ""
-                if drafted:
+                if _looks_send_class(commit_name):
                     self.driver.wait_briefly()
                     post = self.driver.scan()
                     post_sig = signature(post)
                     ptext = (post.get("page_text") or "")
-                    appeared = any(d in ptext for d in drafted)
-                    emptied = not post_sig.get("compose")
-                    if appeared or emptied:
-                        confirm = " Confirmed: the message appears in the thread." \
-                            if appeared else \
-                            " Confirmed: the composer cleared after sending."
-                        self._log("   post-commit check: send confirmed.")
+                    sent_ev = _ov.verify_email_sent(
+                        page_text=ptext,
+                        url=str(post.get("url") or post_sig.get("url") or ""),
+                        title=str(post.get("title") or ""),
+                        drafted=drafted,
+                        mail_query=getattr(self, "_mail_query", None),
+                        query={"drafted": drafted, "commit": commit_name},
+                    )
+                    entry["verify_source"] = sent_ev.source
+                    entry["step_status"] = sent_ev.status
+                    entry["vreason"] = (entry.get("vreason") or "") + (
+                        f" | send:{sent_ev.note}" if sent_ev.note else "")
+                    if sent_ev.ok and sent_ev.status == _ov.VERIFIED:
+                        confirm = " Confirmed via Sent folder / mail evidence."
+                        self._log("   post-commit check: send verified "
+                                  f"({sent_ev.source}).")
+                        self._stamp_executed_send(commit_name)
                     else:
-                        confirm = (" NOTE: I could not confirm the message "
-                                   "appeared in the thread — please verify it "
-                                   "actually sent.")
-                        self._log("   post-commit check: could NOT confirm the "
-                                  "send — reporting as unconfirmed.")
+                        confirm = (" NOTE: send not verified via Sent folder — "
+                                   "please confirm it actually sent.")
+                        entry["step_status"] = _ov.OUTCOME_UNCERTAIN
+                        self._log("   post-commit check: no Sent-folder evidence "
+                                  "— outcome_uncertain (not stamping).")
                 self._log(f"   '{commit_name}' completed and the page changed — done.")
                 status = "success"
                 result = result or (
@@ -1818,11 +2415,29 @@ class Agent:
         # Phase 5: fold this run's steps into vinceo.ai's canonical agent-run log, so
         # the trajectory (not just the browser agent's private episodic.db) is
         # inspectable alongside facts, packets, and the human's verdicts.
+        # Plan 5.1: prefer step_status (evidence-anchored); LLM-only → uncertain.
+        from app.services import outcome_verify as _ov
+
+        def _persist_status(h: dict) -> str:
+            if h.get("step_status"):
+                return h["step_status"]
+            src = h.get("verify_source") or ""
+            if src == _ov.SRC_LLM:
+                return _ov.OUTCOME_UNCERTAIN if h.get("verified") else _ov.FAILED
+            if src in (_ov.SRC_DOM, _ov.SRC_STAT, _ov.SRC_SENT, _ov.SRC_CAL,
+                       _ov.SRC_MAIL):
+                return _ov.VERIFIED if h.get("verified") else _ov.FAILED
+            if src == _ov.SRC_LOW_RISK:
+                return _ov.DONE if h.get("verified") else _ov.FAILED
+            if h.get("action") in ("ask_human", "done", "request_approval"):
+                return _ov.DONE
+            return _ov.step_record_status(fallback_verified=h.get("verified"))
+
         self._recorder.record_steps([
             {"step_index": h.get("step"), "action_type": h.get("action"),
              "input": h.get("args"), "output": h.get("result"),
              "verification": h.get("vreason"),
-             "status": ("verified" if h.get("verified") else "failed")}
+             "status": _persist_status(h)}
             for h in hist
         ])
 

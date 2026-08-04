@@ -24,6 +24,18 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
+def canonicalize_packet_fields(fields: dict | None) -> str:
+    """Stable JSON for executable packet args (delegates to storage)."""
+    from app.storage import canonicalize_packet_fields as _canon
+    return _canon(fields)
+
+
+def hash_packet_payload(fields: dict | None) -> str:
+    """sha256 of canonical fields — mint at record, re-check at commit."""
+    from app.storage import hash_packet_payload as _hash
+    return _hash(fields)
+
+
 @dataclass
 class ActionPacket:
     """The structured, source-grounded unit the brain hands to the hands.
@@ -69,12 +81,13 @@ class Recorder:
     def start_run(self, goal: str, *, surface: str | None = None,
                   dry_run: str | None = None, agent_type: str | None = None,
                   intent: str | None = None, risk_level: str | None = None,
-                  source_fact_ids: list | None = None) -> int | None:
+                  source_fact_ids: list | None = None,
+                  correlation_id: str | None = None) -> int | None:
         try:
             rid = self._s().start_agent_run(
                 goal, surface=surface, dry_run=dry_run, agent_type=agent_type,
                 intent=intent, risk_level=risk_level,
-                source_fact_ids=source_fact_ids)
+                source_fact_ids=source_fact_ids, correlation_id=correlation_id)
             self.current_run_id = rid
             return rid
         except Exception as exc:
@@ -133,18 +146,40 @@ class Recorder:
             success_criteria=packet.success_criteria, fallback=packet.fallback)
 
     def record_decision(self, packet_id: int | None, decision: str, *,
-                        user_edit: str | None = None) -> None:
+                        user_edit: str | None = None,
+                        approved_via: str | None = None) -> None:
         """Stamp the packet's decision and log the matching feedback row. On an
-        `edit`, user_edit is the revision instruction — the signal we keep."""
+        `edit`, user_edit is the revision instruction — the signal we keep.
+        `approved_via` is `button` or `typed` (plan 0.6)."""
         try:
             s = self._s()
             if packet_id is not None:
-                s.set_packet_decision(packet_id, decision)
+                s.set_packet_decision(packet_id, decision,
+                                      approved_via=approved_via)
             s.record_agent_feedback(
                 self.current_run_id, self._FB.get(decision, decision),
                 packet_id=packet_id, user_edit=(user_edit or None))
         except Exception as exc:
             print(f"[agent-log] record_decision skipped ({exc}).")
+
+    def set_executed_hash(self, packet_id: int | None, executed_hash: str) -> None:
+        """Stamp verified commit hash for duplicate-send refusal (plan 0.8)."""
+        try:
+            if packet_id is not None and executed_hash:
+                self._s().set_packet_executed_hash(packet_id, executed_hash)
+        except Exception as exc:
+            print(f"[agent-log] set_executed_hash skipped ({exc}).")
+
+    def find_recent_executed(self, executed_hash: str, *,
+                             within_s: float = 3600.0) -> dict | None:
+        """Lookup a verified same-hash send in the last `within_s` seconds."""
+        try:
+            if executed_hash:
+                return self._s().find_recent_executed_hash(
+                    executed_hash, within_s=within_s)
+        except Exception as exc:
+            print(f"[agent-log] find_recent_executed skipped ({exc}).")
+        return None
 
     def record_feedback(self, feedback_type: str, *, packet_id: int | None = None,
                         user_edit: str | None = None, notes: str | None = None) -> None:

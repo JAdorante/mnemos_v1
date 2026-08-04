@@ -9,6 +9,7 @@ with check_same_thread=False and guarded by a lock.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import threading
@@ -22,6 +23,40 @@ from app.config import settings
 from app.events import Event, Modality
 
 _JSON_FIELDS = ("people", "tasks", "entities", "meta")
+
+# Approval-binding window: a packet's executable args are only valid this long
+# after minting (plan 0.3). Commit gates (0.4+) refuse once expires_at passes.
+_PACKET_TTL_S = 900.0
+
+
+def job_backoff_s(attempts: int, *, base_s: float | None = None,
+                  cap_s: float | None = None) -> float:
+    """Seconds to wait before a failed job is claimable again (plan 0.10).
+
+    Exponential in the post-claim attempt count: attempt 1 → base^1, etc.
+    """
+    base = float(base_s if base_s is not None
+                 else settings.worker.backoff_base_s)
+    cap = float(cap_s if cap_s is not None else settings.worker.backoff_cap_s)
+    n = max(1, int(attempts))
+    try:
+        wait = base ** n
+    except OverflowError:
+        wait = cap
+    return float(min(cap, max(0.0, wait)))
+
+
+def canonicalize_packet_fields(fields: dict | None) -> str:
+    """Stable JSON for executable packet args — key-sorted, compact separators."""
+    return json.dumps(fields or {}, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=False)
+
+
+def hash_packet_payload(fields: dict | None) -> str:
+    """sha256 hex of canonicalize_packet_fields(fields). Used at record time and
+    re-checked at the commit gate so drift fails closed."""
+    return hashlib.sha256(
+        canonicalize_packet_fields(fields).encode("utf-8")).hexdigest()
 
 
 def _emb_to_blob(vec) -> bytes:
@@ -99,12 +134,17 @@ class Store:
                     turn_ids     TEXT,              -- JSON list (informational)
                     event_ids    TEXT,              -- JSON list (flattened provenance)
                     n_turns      INTEGER,
-                    n_utterances INTEGER
+                    n_utterances INTEGER,
+                    -- Meeting Layer P1: calendar join (additive; NULL when ad-hoc)
+                    calendar_event_id TEXT,         -- stable calendar uid key
+                    meeting_meta TEXT               -- JSON: title, attendees[], organizer
                 )
                 """
             )
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_sessions_start ON sessions(start)")
+            # idx_sessions_cal is created after the guarded ALTER below — an
+            # existing sessions table may lack calendar_event_id until then.
 
             # --- activities (desktop events -> app-focus blocks) --------------
             # The desktop analog of sessions: desktop.screen + desktop.click
@@ -145,8 +185,9 @@ class Store:
                 CREATE TABLE IF NOT EXISTS facts (
                     id              INTEGER PRIMARY KEY AUTOINCREMENT,
                     kind            TEXT    NOT NULL,   -- task | commitment | claim
+                    text            TEXT,              -- claim text (tasks/commitments keep theirs in typed tables)
                     source_event_id INTEGER,           -- FK -> events.id
-                    source_span     TEXT,              -- the raw text this came from
+                    source_span     TEXT,              -- verbatim provenance quote ONLY (may be empty)
                     confidence      REAL,
                     extracted_at    REAL    NOT NULL,
                     FOREIGN KEY (source_event_id) REFERENCES events(id)
@@ -155,6 +196,56 @@ class Store:
             )
             self._conn.execute("CREATE INDEX IF NOT EXISTS idx_facts_kind ON facts(kind)")
             self._conn.execute("CREATE INDEX IF NOT EXISTS idx_facts_src ON facts(source_event_id)")
+
+            # --- fact_candidates (plan 1.1): raw LLM extract rows before / beside
+            # facts. Every output item lands here with prompt_version so goldens
+            # and /console/trace can replay without depending on gate outcomes.
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS fact_candidates (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    turn_hash       TEXT    NOT NULL,
+                    kind            TEXT    NOT NULL,   -- task|commitment|claim|entity|relation
+                    payload_json    TEXT    NOT NULL,
+                    source_span     TEXT,
+                    speaker         TEXT,
+                    assertion       TEXT,              -- filled by plan 1.3
+                    confidence      REAL,
+                    model           TEXT,
+                    prompt_version  TEXT    NOT NULL,
+                    schema_version  TEXT    NOT NULL,
+                    status          TEXT    NOT NULL DEFAULT 'pending',
+                    verdict_reason  TEXT,
+                    source_event_id INTEGER,
+                    correlation_id  TEXT,              -- plan 1.5: trace_chain lookup key
+                    created_at      REAL    NOT NULL,
+                    FOREIGN KEY (source_event_id) REFERENCES events(id)
+                )
+                """
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_fc_turn ON fact_candidates(turn_hash)")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_fc_status ON fact_candidates(status)")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_fc_kind ON fact_candidates(kind)")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_fc_correlation "
+                "ON fact_candidates(correlation_id)")
+
+            # Claim paraphrase != provenance quote: pre-migration DBs stored a
+            # claim's text IN source_span (add_claim substituted text when the
+            # span was empty, silently breaking the verbatim invariant). The
+            # span column was therefore the only surviving copy of the text —
+            # move it over once, then span carries only real quotes.
+            fcols = {r["name"] for r in
+                     self._conn.execute("PRAGMA table_info(facts)").fetchall()}
+            if fcols and "text" not in fcols:
+                self._conn.execute("ALTER TABLE facts ADD COLUMN text TEXT")
+                self._conn.execute(
+                    "UPDATE facts SET text = source_span WHERE kind = 'claim' "
+                    "AND text IS NULL AND source_span IS NOT NULL AND source_span != ''")
+                self._conn.commit()
 
             # People/entities are resolution targets: the Nth mention of "Chris"
             # should map to one row. `embedding` (npy bytes) is filled in step 3;
@@ -233,10 +324,34 @@ class Store:
                     to_person_id   INTEGER,               -- FK -> people.id
                     due            TEXT,
                     status         TEXT    NOT NULL DEFAULT 'open',
+                    -- Plan 4.1: rich lifecycle; `status` stays derived compat
+                    -- (open|done|cancelled) for list_facts callers.
+                    state          TEXT    NOT NULL DEFAULT 'detected',
+                    completion_evidence_json TEXT,
+                    last_surfaced  REAL,
+                    counterparty_expects INTEGER NOT NULL DEFAULT 0,
                     FOREIGN KEY (fact_id) REFERENCES facts(id)
                 )
                 """
             )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS commitment_transitions (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    fact_id         INTEGER NOT NULL,
+                    from_state      TEXT    NOT NULL,
+                    to_state        TEXT    NOT NULL,
+                    reason          TEXT,
+                    evidence_json   TEXT,
+                    actor           TEXT,
+                    created_at      REAL    NOT NULL,
+                    FOREIGN KEY (fact_id) REFERENCES commitments(fact_id)
+                )
+                """
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_cmt_tx_fact "
+                "ON commitment_transitions(fact_id, created_at)")
 
             # --- durable job queue --------------------------------------------
             # The processing pipeline (consolidate, later extract) runs off this
@@ -246,14 +361,15 @@ class Store:
             self._conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS jobs (
-                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                    kind       TEXT    NOT NULL,          -- consolidate | extract | ...
-                    payload    TEXT,                      -- JSON args (nullable)
-                    status     TEXT    NOT NULL DEFAULT 'pending',  -- pending|running|done|error
-                    attempts   INTEGER NOT NULL DEFAULT 0,
-                    error      TEXT,
-                    created_at REAL    NOT NULL,
-                    updated_at REAL    NOT NULL
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kind         TEXT    NOT NULL,          -- consolidate | extract | ...
+                    payload      TEXT,                      -- JSON args (nullable)
+                    status       TEXT    NOT NULL DEFAULT 'pending',  -- pending|running|done|dead
+                    attempts     INTEGER NOT NULL DEFAULT 0,
+                    error        TEXT,
+                    available_at REAL,                      -- backoff: claimable when <= now
+                    created_at   REAL    NOT NULL,
+                    updated_at   REAL    NOT NULL
                 )
                 """
             )
@@ -368,6 +484,7 @@ class Store:
                     source_fact_ids TEXT,               -- JSON list (provenance -> facts)
                     person_id       INTEGER,            -- FK -> people.id
                     project_id      INTEGER,            -- FK -> entities.id
+                    correlation_id  TEXT,               -- plan 1.5: trace_chain lookup key
                     started_at      REAL    NOT NULL,
                     completed_at    REAL,
                     cost            REAL,
@@ -403,6 +520,12 @@ class Store:
                     success_criteria  TEXT,             -- JSON list
                     fallback          TEXT,
                     decision          TEXT,             -- approve|edit|cancel (NULL=pending)
+                    payload_hash      TEXT,             -- sha256 of canonical fields_json
+                    expires_at        REAL,             -- created_at + TTL; commit refuses after
+                    approved_at       REAL,             -- when human approved (button|typed)
+                    approved_via      TEXT,             -- button | typed
+                    executed_hash     TEXT,             -- hash actually committed (dup-send)
+                    executed_at       REAL,             -- when verified send stamped (1h window)
                     created_at        REAL    NOT NULL,
                     FOREIGN KEY (agent_run_id) REFERENCES agent_runs(id)
                 )
@@ -421,7 +544,7 @@ class Store:
                     input         TEXT,                 -- JSON args (redacted)
                     output        TEXT,                 -- result detail
                     verification  TEXT,                 -- verify note / reason
-                    status        TEXT,                 -- verified | failed | done | ...
+                    status        TEXT,                 -- verified | failed | done | outcome_uncertain | ...
                     created_at    REAL    NOT NULL,
                     FOREIGN KEY (agent_run_id) REFERENCES agent_runs(id)
                 )
@@ -1079,6 +1202,20 @@ class Store:
                     "CREATE INDEX IF NOT EXISTS idx_events_extracted "
                     "ON events(extracted_at)")
                 self._conn.commit()
+            # Extract retry cap (plan 0.9): count LLM failures per event; after
+            # max attempts the turn is parked extract_status='failed' so a
+            # poisoned transcript can't spin the extract/nudge loop forever.
+            cols = {r["name"] for r in
+                    self._conn.execute("PRAGMA table_info(events)").fetchall()}
+            if "extract_attempts" not in cols:
+                self._conn.execute(
+                    "ALTER TABLE events ADD COLUMN extract_attempts "
+                    "INTEGER NOT NULL DEFAULT 0")
+            if "extract_status" not in cols:
+                self._conn.execute(
+                    "ALTER TABLE events ADD COLUMN extract_status TEXT")
+            if "extract_attempts" not in cols or "extract_status" not in cols:
+                self._conn.commit()
             # Track C lifecycle: NULL means 'fresh' (pre-economy rows stay valid
             # without a backfill UPDATE). retention/retention_ts are the nightly
             # score — metadata only, retrieval never filters on them in v1.
@@ -1252,6 +1389,44 @@ class Store:
                     "CREATE INDEX IF NOT EXISTS idx_entities_hidden ON entities(hidden)")
                 self._conn.commit()
 
+            # Approval binding (plan 0.3): hash + expiry on every packet so the
+            # commit gate can refuse drift/stale approvals. Additive only —
+            # pre-migration rows keep NULL hash/expiry (gates treat missing as
+            # unbound legacy; new packets always mint both).
+            apcols = {r["name"] for r in
+                      self._conn.execute("PRAGMA table_info(action_packets)").fetchall()}
+            if apcols:
+                for col, decl in (
+                    ("payload_hash", "TEXT"),
+                    ("expires_at", "REAL"),
+                    ("approved_at", "REAL"),
+                    ("approved_via", "TEXT"),
+                    ("executed_hash", "TEXT"),
+                    ("executed_at", "REAL"),
+                ):
+                    if col not in apcols:
+                        self._conn.execute(
+                            f"ALTER TABLE action_packets ADD COLUMN {col} {decl}")
+                self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_packets_executed_hash "
+                    "ON action_packets(executed_hash)")
+                self._conn.commit()
+
+            # Jobs dead-letter (plan 0.10): available_at for backoff; park
+            # exhausted retries as status='dead' (legacy 'error' renamed).
+            jcols = {r["name"] for r in
+                     self._conn.execute("PRAGMA table_info(jobs)").fetchall()}
+            if jcols and "available_at" not in jcols:
+                self._conn.execute(
+                    "ALTER TABLE jobs ADD COLUMN available_at REAL")
+            if jcols:
+                self._conn.execute(
+                    "UPDATE jobs SET status = 'dead' WHERE status = 'error'")
+                self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_jobs_available "
+                    "ON jobs(status, available_at)")
+                self._conn.commit()
+
             self._conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS person_mentions (
@@ -1365,6 +1540,128 @@ class Store:
             )
             self._conn.commit()
 
+            # correlation_id (plan 1.5): a live DB created before this column
+            # existed needs it added; new writes always resolve/mint one.
+            fccols = {r["name"] for r in
+                      self._conn.execute("PRAGMA table_info(fact_candidates)").fetchall()}
+            if fccols and "correlation_id" not in fccols:
+                self._conn.execute(
+                    "ALTER TABLE fact_candidates ADD COLUMN correlation_id TEXT")
+                self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_fc_correlation "
+                    "ON fact_candidates(correlation_id)")
+                self._conn.commit()
+            arcols = {r["name"] for r in
+                      self._conn.execute("PRAGMA table_info(agent_runs)").fetchall()}
+            if arcols and "correlation_id" not in arcols:
+                self._conn.execute(
+                    "ALTER TABLE agent_runs ADD COLUMN correlation_id TEXT")
+                self._conn.commit()
+
+            # Plan 4.1 — commitment state machine (additive).
+            self._migrate_commitment_state()
+
+            # Meeting Layer P1 — calendar ↔ session join columns (guarded ALTER,
+            # entities.hidden precedent). New CREATE TABLE already includes them.
+            scols = {r["name"] for r in
+                     self._conn.execute("PRAGMA table_info(sessions)").fetchall()}
+            if scols:
+                for col, decl in (
+                    ("calendar_event_id", "TEXT"),
+                    ("meeting_meta", "TEXT"),
+                ):
+                    if col not in scols:
+                        self._conn.execute(
+                            f"ALTER TABLE sessions ADD COLUMN {col} {decl}")
+                self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_sessions_cal "
+                    "ON sessions(calendar_event_id)")
+                self._conn.commit()
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS calendar_events (
+                    id              TEXT PRIMARY KEY,
+                    calendar        TEXT,
+                    uid             TEXT,
+                    title           TEXT,
+                    start           REAL    NOT NULL,
+                    end             REAL    NOT NULL,
+                    all_day         INTEGER NOT NULL DEFAULT 0,
+                    location        TEXT,
+                    organizer_json  TEXT,
+                    attendees_json  TEXT,
+                    source_event_id INTEGER,
+                    updated_at      REAL    NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_cal_events_start "
+                "ON calendar_events(start)")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_cal_events_window "
+                "ON calendar_events(start, end)")
+            self._conn.commit()
+
+    def _migrate_commitment_state(self) -> None:
+        """Add commitments.state + evidence columns and transitions log."""
+        try:
+            cols = {r["name"] for r in
+                    self._conn.execute("PRAGMA table_info(commitments)").fetchall()}
+        except Exception:
+            return
+        if not cols:
+            return
+        altered = False
+        for col, decl in (
+            ("state", "TEXT NOT NULL DEFAULT 'detected'"),
+            ("completion_evidence_json", "TEXT"),
+            ("last_surfaced", "REAL"),
+            ("counterparty_expects", "INTEGER NOT NULL DEFAULT 0"),
+        ):
+            if col not in cols:
+                self._conn.execute(
+                    f"ALTER TABLE commitments ADD COLUMN {col} {decl}")
+                altered = True
+        if altered:
+            # Backfill state from legacy status (SQLite DEFAULT fills 'detected').
+            self._conn.execute(
+                """
+                UPDATE commitments SET state = CASE status
+                    WHEN 'done' THEN 'completed'
+                    WHEN 'cancelled' THEN 'cancelled'
+                    ELSE 'active'
+                END
+                """
+            )
+            self._conn.execute(
+                """
+                UPDATE commitments SET state = 'superseded'
+                WHERE status = 'cancelled' AND fact_id IN (
+                    SELECT id FROM facts WHERE state = 'superseded'
+                )
+                """
+            )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS commitment_transitions (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                fact_id         INTEGER NOT NULL,
+                from_state      TEXT    NOT NULL,
+                to_state        TEXT    NOT NULL,
+                reason          TEXT,
+                evidence_json   TEXT,
+                actor           TEXT,
+                created_at      REAL    NOT NULL,
+                FOREIGN KEY (fact_id) REFERENCES commitments(fact_id)
+            )
+            """
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_cmt_tx_fact "
+            "ON commitment_transitions(fact_id, created_at)")
+        self._conn.commit()
+
     # ------------------------------ audio clips --------------------------
     def save_wav(self, audio: np.ndarray, ts: float, sample_rate: int,
                  *, suffix: str = "") -> str:
@@ -1384,6 +1681,21 @@ class Store:
 
     # ------------------------------ events -------------------------------
     def insert(self, event: Event) -> int:
+        # Plan 1.5: every event carries a correlation_id so a fact/candidate/
+        # agent_run derived from it can be traced back with trace_chain().
+        # Mutates the caller's meta in place so it sees the minted id too.
+        if event.meta is None:
+            event.meta = {}
+        if not event.meta.get("correlation_id"):
+            import uuid
+            event.meta["correlation_id"] = uuid.uuid4().hex
+        # Plan 6.1: deterministic privacy_class for egress gating.
+        try:
+            from app.services.privacy_class import stamp_event
+            stamp_event(event)
+        except Exception as exc:
+            print(f"[storage] privacy_class stamp skipped ({exc}).")
+            event.meta.setdefault("privacy_class", "internal")
         d = event.to_dict()
         row = {k: (json.dumps(d[k]) if k in _JSON_FIELDS else d[k]) for k in (
             "time", "modality", "raw", "summary", "source", "confidence",
@@ -1433,6 +1745,38 @@ class Store:
                 sql += " AND time >= ?"
                 args.append(float(since))
             sql += " ORDER BY time DESC LIMIT ?"
+            args.append(int(limit))
+            rows = self._conn.execute(sql, args).fetchall()
+        out = []
+        for r in rows:
+            try:
+                meta = json.loads(r["meta"] or "{}")
+            except Exception:
+                meta = {}
+            out.append({
+                "id": int(r["id"]), "time": r["time"],
+                "modality": r["modality"], "raw": r["raw"] or "",
+                "summary": r["summary"] or "", "source": r["source"] or "",
+                "meta": meta,
+            })
+        return out
+
+    def events_in_window(
+        self, t0: float, t1: float, *, source: str | None = None,
+        modality: str | None = None, limit: int = 100,
+    ) -> list[dict]:
+        """Events with time in [t0, t1], oldest-first (Meeting Layer P2 jots)."""
+        with self._lock:
+            sql = ("SELECT id, time, modality, raw, summary, source, meta "
+                   "FROM events WHERE time >= ? AND time <= ?")
+            args: list = [float(t0), float(t1)]
+            if source:
+                sql += " AND source = ?"
+                args.append(source)
+            if modality:
+                sql += " AND modality = ?"
+                args.append(modality)
+            sql += " ORDER BY time ASC LIMIT ?"
             args.append(int(limit))
             rows = self._conn.execute(sql, args).fetchall()
         out = []
@@ -1547,16 +1891,228 @@ class Store:
             rows = self._conn.execute(sql, params).fetchall()
         return [(int(r["id"]), self._row_to_event(r)) for r in rows]
 
-    def mark_extracted(self, event_ids: list[int], ts: float) -> None:
+    def mark_extracted(self, event_ids: list[int], ts: float,
+                       *, status: str = "ok") -> None:
         if not event_ids:
             return
         placeholders = ",".join("?" for _ in event_ids)
         with self._lock:
             self._conn.execute(
-                f"UPDATE events SET extracted_at = ? WHERE id IN ({placeholders})",
-                [ts, *event_ids],
+                f"UPDATE events SET extracted_at = ?, extract_status = ? "
+                f"WHERE id IN ({placeholders})",
+                [ts, status, *event_ids],
             )
             self._conn.commit()
+
+    def bump_extract_attempts(self, event_ids: list[int]) -> int:
+        """Increment extract_attempts for each id; return the max after bump."""
+        if not event_ids:
+            return 0
+        placeholders = ",".join("?" for _ in event_ids)
+        with self._lock:
+            self._conn.execute(
+                f"UPDATE events SET extract_attempts = extract_attempts + 1 "
+                f"WHERE id IN ({placeholders})",
+                event_ids,
+            )
+            row = self._conn.execute(
+                f"SELECT MAX(extract_attempts) AS m FROM events "
+                f"WHERE id IN ({placeholders})",
+                event_ids,
+            ).fetchone()
+            self._conn.commit()
+        return int(row["m"] or 0) if row is not None else 0
+
+    def park_extract_failed(self, event_ids: list[int], ts: float) -> None:
+        """Park a poisoned turn: mark extracted with status failed (no retry)."""
+        self.mark_extracted(event_ids, ts, status="failed")
+
+    def erase_event(self, event_id: int, *, vacuum: bool = False) -> dict:
+        """Forget one event; citing facts become ``state='evidence_removed'``.
+
+        Distinct from :meth:`erase_events_window` (privacy true-erasure that
+        deletes fact rows). Memory forget keeps the fact shell so the removal
+        is auditable; ``vector_gc`` drops the Lance row after the grace window.
+        Returns ``{event_id, fact_ids, events, relations}``.
+        """
+        import time as _time
+        eid = int(event_id)
+        now = _time.time()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id FROM events WHERE id = ?", (eid,)).fetchone()
+            if row is None:
+                return {"event_id": eid, "fact_ids": [], "events": 0,
+                        "relations": 0, "ok": False, "reason": "missing"}
+            fact_ids = [int(r["id"]) for r in self._conn.execute(
+                "SELECT id FROM facts WHERE source_event_id = ?",
+                (eid,)).fetchall()]
+            n_rel = self._conn.execute(
+                "DELETE FROM relations WHERE "
+                "(subj_type='event' AND subj_id = ?) OR "
+                "(obj_type='event' AND obj_id = ?)",
+                (eid, eid)).rowcount
+            if fact_ids:
+                marks = ",".join("?" for _ in fact_ids)
+                self._conn.execute(
+                    f"UPDATE facts SET state = 'evidence_removed', "
+                    f"updated_at = ?, source_event_id = NULL "
+                    f"WHERE id IN ({marks})",
+                    [now, *fact_ids])
+                self._conn.execute(
+                    f"UPDATE tasks SET status = 'cancelled' "
+                    f"WHERE fact_id IN ({marks}) AND status = 'open'",
+                    fact_ids)
+                for fid in fact_ids:
+                    crow = self._conn.execute(
+                        "SELECT state FROM commitments WHERE fact_id = ?",
+                        (fid,)).fetchone()
+                    if crow and (crow["state"] or "") in (
+                            "detected", "active", "in_progress", "waiting"):
+                        try:
+                            self._transition_commitment_unlocked(
+                                fid, "cancelled",
+                                reason="evidence_removed",
+                                evidence={"source": "erase_event",
+                                          "event_id": eid},
+                                actor="system", ts=now)
+                        except Exception:
+                            self._conn.execute(
+                                "UPDATE commitments SET status = 'cancelled', "
+                                "state = 'cancelled' WHERE fact_id = ?",
+                                (fid,))
+            # Drop any archived original for this event (compaction undo trail).
+            try:
+                self._conn.execute(
+                    "DELETE FROM events_archive WHERE event_id = ?", (eid,))
+            except Exception:
+                pass
+            n_events = self._conn.execute(
+                "DELETE FROM events WHERE id = ?", (eid,)).rowcount
+            self._conn.commit()
+            if vacuum:
+                try:
+                    self._conn.execute("VACUUM")
+                except Exception as exc:
+                    print(f"[storage] post-erase VACUUM skipped ({exc}).")
+        return {"event_id": eid, "fact_ids": fact_ids, "events": int(n_events),
+                "relations": int(n_rel), "ok": True}
+
+    def strip_event_audio(self, event_ids: list[int]) -> dict:
+        """Meeting Layer P5 — delete WAV receipts; keep transcript text.
+
+        Clears ``audio_path`` / enhanced paths on the event. Marks citing facts
+        ``state='evidence_removed'`` for vector_gc, but does **not** cancel open
+        commitments/tasks (ledger + note stay usable; playback is gone).
+        """
+        import time as _time
+        from pathlib import Path as _Path
+
+        ids = sorted({int(x) for x in (event_ids or []) if x is not None})
+        if not ids:
+            return {"ok": True, "n_files": 0, "n_events": 0, "n_facts": 0,
+                    "paths": []}
+        now = _time.time()
+        removed_paths: list[str] = []
+        n_events = 0
+        fact_ids: list[int] = []
+        with self._lock:
+            marks = ",".join("?" for _ in ids)
+            rows = self._conn.execute(
+                f"SELECT id, meta, audio_path FROM events WHERE id IN ({marks})",
+                ids).fetchall()
+            for row in rows:
+                try:
+                    meta = json.loads(row["meta"] or "{}")
+                except (ValueError, TypeError):
+                    meta = {}
+                if not isinstance(meta, dict):
+                    meta = {}
+                paths = []
+                for key in ("audio_path", "enhanced_audio_path"):
+                    p = meta.get(key) or ""
+                    if p:
+                        paths.append(str(p))
+                    meta.pop(key, None)
+                col_ap = row["audio_path"] if "audio_path" in row.keys() else None
+                if col_ap:
+                    paths.append(str(col_ap))
+                meta["audio_stripped"] = True
+                meta["audio_stripped_at"] = now
+                self._conn.execute(
+                    "UPDATE events SET meta = ?, audio_path = NULL WHERE id = ?",
+                    (json.dumps(meta), int(row["id"])))
+                n_events += 1
+                for p in paths:
+                    if p and p not in removed_paths:
+                        removed_paths.append(p)
+            # Mark citing facts evidence_removed (index GC) without cancelling
+            # open commitments/tasks — transcript-only notes stay functional.
+            frows = self._conn.execute(
+                f"SELECT id FROM facts WHERE source_event_id IN ({marks})",
+                ids).fetchall()
+            fact_ids = [int(r["id"]) for r in frows]
+            if fact_ids:
+                fmarks = ",".join("?" for _ in fact_ids)
+                self._conn.execute(
+                    f"UPDATE facts SET state = 'evidence_removed', "
+                    f"updated_at = ? WHERE id IN ({fmarks})",
+                    [now, *fact_ids])
+            # Drop audio_paths references on turns (best-effort JSON rewrite).
+            try:
+                turns = self._conn.execute(
+                    "SELECT id, audio_paths FROM turns").fetchall()
+                drop = set(removed_paths)
+                for t in turns:
+                    try:
+                        aps = json.loads(t["audio_paths"] or "[]")
+                    except Exception:
+                        continue
+                    if not aps:
+                        continue
+                    kept = [p for p in aps if p not in drop]
+                    if len(kept) != len(aps):
+                        self._conn.execute(
+                            "UPDATE turns SET audio_paths = ? WHERE id = ?",
+                            (json.dumps(kept), int(t["id"])))
+            except Exception:
+                pass
+            self._conn.commit()
+        n_files = 0
+        for p in removed_paths:
+            try:
+                path = _Path(p)
+                if path.is_file():
+                    path.unlink()
+                    n_files += 1
+            except Exception as exc:
+                print(f"[storage] strip audio unlink skipped ({p}: {exc}).")
+        return {
+            "ok": True, "n_files": n_files, "n_events": n_events,
+            "n_facts": len(fact_ids), "fact_ids": fact_ids,
+            "paths": removed_paths, "event_ids": ids,
+        }
+
+    def fact_ids_for_vector_gc(self, *, older_than: float,
+                               limit: int = 5000) -> list[int]:
+        """Fact ids whose store row is dismissed/superseded/archived/
+        evidence_removed and whose lifecycle clock is at or before
+        ``older_than`` (unix ts). Used by plan 6.6 ``vector_gc``."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT id FROM facts
+                WHERE (
+                    state IN ('superseded', 'archived', 'evidence_removed')
+                    OR review = 'dismissed'
+                )
+                AND COALESCE(updated_at, extracted_at) <= ?
+                ORDER BY COALESCE(updated_at, extracted_at) ASC
+                LIMIT ?
+                """,
+                (float(older_than), int(limit)),
+            ).fetchall()
+        return [int(r["id"]) for r in rows]
 
     def erase_events_window(self, t0: float, t1: float,
                             source_like: str = "desktop.%",
@@ -2951,6 +3507,172 @@ class Store:
             self._conn.commit()
             return row["fact_id"] if row else None
 
+    # ------------------------------ fact_candidates (plan 1.1/1.2) -------
+    @staticmethod
+    def _candidate_payload_json(payload: dict | None) -> str:
+        return json.dumps(payload or {}, sort_keys=True,
+                          separators=(",", ":"), ensure_ascii=False)
+
+    def _find_fact_candidate_locked(self, turn_hash: str, kind: str,
+                                    payload_json: str) -> sqlite3.Row | None:
+        return self._conn.execute(
+            "SELECT * FROM fact_candidates WHERE turn_hash = ? AND kind = ? "
+            "AND payload_json = ? ORDER BY id ASC LIMIT 1",
+            (turn_hash, kind, payload_json)).fetchone()
+
+    def find_fact_candidate(self, turn_hash: str, kind: str,
+                            payload: dict | None = None) -> dict | None:
+        """Exact match on canonical payload_json (plan 1.2 dedupe key)."""
+        payload_json = self._candidate_payload_json(payload)
+        with self._lock:
+            row = self._find_fact_candidate_locked(turn_hash, kind, payload_json)
+        if not row:
+            return None
+        d = dict(row)
+        try:
+            d["payload"] = json.loads(d.get("payload_json") or "{}")
+        except Exception:
+            d["payload"] = {}
+        return d
+
+    def add_fact_candidate(
+        self, *, turn_hash: str, kind: str, payload: dict | None = None,
+        source_span: str | None = None, speaker: str | None = None,
+        assertion: str | None = None, confidence: float | None = None,
+        model: str | None = None, prompt_version: str,
+        schema_version: str, status: str = "pending",
+        verdict_reason: str | None = None,
+        source_event_id: int | None = None,
+        correlation_id: str | None = None,
+        created_at: float | None = None,
+    ) -> int:
+        """Persist one raw LLM extract row for replay / goldens / trace.
+
+        Dedupes on turn_hash+kind+payload_json: a second write of the same
+        candidate (e.g. a replayed pass) returns the existing row's id instead
+        of inserting a twin, so downstream materialization sees one candidate
+        per distinct LLM output — the key that makes replay idempotent."""
+        import time as _t
+
+        now = float(created_at) if created_at is not None else _t.time()
+        payload_json = self._candidate_payload_json(payload)
+        with self._lock:
+            existing = self._find_fact_candidate_locked(turn_hash, kind, payload_json)
+            if existing:
+                return int(existing["id"])
+            cur = self._conn.execute(
+                """
+                INSERT INTO fact_candidates
+                    (turn_hash, kind, payload_json, source_span, speaker,
+                     assertion, confidence, model, prompt_version,
+                     schema_version, status, verdict_reason, source_event_id,
+                     correlation_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (turn_hash, kind, payload_json, source_span, speaker,
+                 assertion, confidence, model, prompt_version, schema_version,
+                 status, verdict_reason, source_event_id, correlation_id, now),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def list_fact_candidates(self, *, turn_hash: str | None = None,
+                             status: str | None = None,
+                             limit: int = 200) -> list[dict]:
+        """Recent candidates, optionally filtered by turn_hash / status."""
+        sql = "SELECT * FROM fact_candidates WHERE 1=1"
+        params: list = []
+        if turn_hash is not None:
+            sql += " AND turn_hash = ?"
+            params.append(turn_hash)
+        if status is not None:
+            sql += " AND status = ?"
+            params.append(status)
+        sql += " ORDER BY id ASC LIMIT ?"
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["payload"] = json.loads(d.get("payload_json") or "{}")
+            except Exception:
+                d["payload"] = {}
+            out.append(d)
+        return out
+
+    def set_fact_candidate_status(self, candidate_id: int, status: str,
+                                  *, verdict_reason: str | None = None) -> None:
+        """Stamp gate / materialize outcome onto a candidate (plan 1.2+)."""
+        if not candidate_id:
+            return
+        with self._lock:
+            if verdict_reason is not None:
+                self._conn.execute(
+                    "UPDATE fact_candidates SET status = ?, verdict_reason = ? "
+                    "WHERE id = ?",
+                    (status, verdict_reason, candidate_id))
+            else:
+                self._conn.execute(
+                    "UPDATE fact_candidates SET status = ? WHERE id = ?",
+                    (status, candidate_id))
+            self._conn.commit()
+
+    def trace_chain(self, correlation_id: str) -> dict:
+        """Full audit chain for one correlation_id (plan 1.5): the source
+        events it was minted on, the raw fact_candidates rows, the facts
+        materialized from those same events, and any agent_runs tagged with
+        the same id — so a fact (or an agent action) traces back to the exact
+        utterance that produced it. A stale/missing id returns empty lists."""
+        if not correlation_id:
+            return {"correlation_id": correlation_id, "events": [],
+                    "candidates": [], "facts": [], "agent_runs": []}
+        with self._lock:
+            ev_rows = self._conn.execute(
+                "SELECT * FROM events WHERE meta LIKE ?",
+                (f'%"correlation_id": "{correlation_id}"%',)).fetchall()
+            cand_rows = self._conn.execute(
+                "SELECT * FROM fact_candidates WHERE correlation_id = ? "
+                "ORDER BY id ASC", (correlation_id,)).fetchall()
+            run_rows = self._conn.execute(
+                "SELECT * FROM agent_runs WHERE correlation_id = ? "
+                "ORDER BY id ASC", (correlation_id,)).fetchall()
+            event_ids = [int(r["id"]) for r in ev_rows]
+            fact_rows = []
+            if event_ids:
+                placeholders = ",".join("?" * len(event_ids))
+                fact_rows = self._conn.execute(
+                    f"SELECT * FROM facts WHERE source_event_id IN "
+                    f"({placeholders}) ORDER BY id ASC", event_ids).fetchall()
+
+        events = []
+        for r in ev_rows:
+            try:
+                meta = json.loads(r["meta"] or "{}")
+            except Exception:
+                meta = {}
+            events.append({
+                "id": int(r["id"]), "time": r["time"], "modality": r["modality"],
+                "raw": r["raw"] or "", "summary": r["summary"] or "",
+                "source": r["source"] or "", "meta": meta,
+            })
+        candidates = []
+        for r in cand_rows:
+            d = dict(r)
+            try:
+                d["payload"] = json.loads(d.get("payload_json") or "{}")
+            except Exception:
+                d["payload"] = {}
+            candidates.append(d)
+        return {
+            "correlation_id": correlation_id,
+            "events": events,
+            "candidates": candidates,
+            "facts": [dict(r) for r in fact_rows],
+            "agent_runs": [dict(r) for r in run_rows],
+        }
+
     # ------------------------------ facts --------------------------------
     def add_task(self, text: str, *, source_event_id: int | None = None,
                  source_span: str = "", confidence: float | None = None,
@@ -2992,7 +3714,8 @@ class Store:
             fid = int(cur.lastrowid)
             self._conn.execute(
                 "INSERT INTO commitments (fact_id, text, from_person_id, to_person_id, "
-                "due, status) VALUES (?, ?, ?, ?, ?, 'open')",
+                "due, status, state, counterparty_expects) "
+                "VALUES (?, ?, ?, ?, ?, 'open', 'detected', 0)",
                 (fid, text, from_person_id, to_person_id, due),
             )
             self._conn.commit()
@@ -3006,12 +3729,30 @@ class Store:
     def add_claim(self, text: str, *, source_event_id: int | None = None,
                   source_span: str = "", confidence: float | None = None,
                   extracted_at: float) -> int:
-        """A claim is a fact with no typed detail table — text lives in the span."""
+        """A claim is a fact with no typed detail table — text lives in
+        facts.text. `source_span` is strictly the verbatim provenance quote:
+        empty when there is none (user-typed claims), never a paraphrase
+        substitute — extracted claims with no span are the gate's job to drop."""
         with self._lock:
             cur = self._conn.execute(
-                "INSERT INTO facts (kind, source_event_id, source_span, confidence, "
-                "extracted_at) VALUES ('claim', ?, ?, ?, ?)",
-                (source_event_id, source_span or text, confidence, extracted_at),
+                "INSERT INTO facts (kind, text, source_event_id, source_span, "
+                "confidence, extracted_at) VALUES ('claim', ?, ?, ?, ?, ?)",
+                (text, source_event_id, source_span, confidence, extracted_at),
+            )
+            fid = int(cur.lastrowid)
+            self._conn.commit()
+        self.record_node_access("fact", fid, extracted_at)
+        return fid
+
+    def add_question(self, text: str, *, source_event_id: int | None = None,
+                     source_span: str = "", confidence: float | None = None,
+                     extracted_at: float) -> int:
+        """Open question from extraction (plan 4.3) — flat fact, kind=question."""
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO facts (kind, text, source_event_id, source_span, "
+                "confidence, extracted_at) VALUES ('question', ?, ?, ?, ?, ?)",
+                (text, source_event_id, source_span, confidence, extracted_at),
             )
             fid = int(cur.lastrowid)
             self._conn.commit()
@@ -4466,9 +5207,13 @@ class Store:
                COALESCE(f.updated_at, f.extracted_at) AS updated_at,
                e.time AS source_time, e.modality AS source_modality,
                e.source AS event_source,
-               COALESCE(t.text, c.text, f.source_span) AS text,
+               COALESCE(t.text, c.text, NULLIF(f.text, ''), f.source_span) AS text,
                COALESCE(t.status, c.status) AS status,
                COALESCE(t.due, c.due) AS due,
+               c.state AS commitment_state,
+               c.completion_evidence_json AS completion_evidence_json,
+               c.last_surfaced AS last_surfaced,
+               c.counterparty_expects AS counterparty_expects,
                pt.canonical_name AS owner,
                pf.canonical_name AS from_person,
                pto.canonical_name AS to_person
@@ -4536,14 +5281,47 @@ class Store:
         """Record the human verdict. 'dismissed' also cancels the typed row."""
         if review not in ("approved", "dismissed", "edited"):
             raise ValueError(f"invalid review: {review}")
+        import time as _time
+        now = _time.time()
         with self._lock:
+            # updated_at stamps dismiss/edit so vector_gc can age the row.
             cur = self._conn.execute(
-                "UPDATE facts SET review = ? WHERE id = ?", (review, fact_id))
+                "UPDATE facts SET review = ?, updated_at = ? WHERE id = ?",
+                (review, now, fact_id))
             if review == "dismissed":
-                for tbl in ("tasks", "commitments"):
-                    self._conn.execute(
-                        f"UPDATE {tbl} SET status = 'cancelled' WHERE fact_id = ?",
-                        (fact_id,))
+                self._conn.execute(
+                    "UPDATE tasks SET status = 'cancelled' WHERE fact_id = ?",
+                    (fact_id,))
+                crow = self._conn.execute(
+                    "SELECT state FROM commitments WHERE fact_id = ?",
+                    (fact_id,)).fetchone()
+                if crow:
+                    try:
+                        self._transition_commitment_unlocked(
+                            fact_id, "cancelled",
+                            reason="dismiss",
+                            evidence={"source": "user_dismiss"},
+                            actor="user", ts=_time.time())
+                    except Exception:
+                        # Fall back to status-only if already terminal.
+                        self._conn.execute(
+                            "UPDATE commitments SET status = 'cancelled', "
+                            "state = 'cancelled' WHERE fact_id = ?",
+                            (fact_id,))
+            elif review == "approved":
+                # Promote detected → active (review stays the human verdict).
+                crow = self._conn.execute(
+                    "SELECT state FROM commitments WHERE fact_id = ?",
+                    (fact_id,)).fetchone()
+                if crow and (crow["state"] or "") == "detected":
+                    try:
+                        self._transition_commitment_unlocked(
+                            fact_id, "active",
+                            reason="approve",
+                            evidence={"source": "user_approve"},
+                            actor="user", ts=_time.time())
+                    except Exception:
+                        pass
             self._conn.commit()
             return cur.rowcount > 0
 
@@ -4696,10 +5474,26 @@ class Store:
                 "UPDATE facts SET state = 'archived', updated_at = ? "
                 "WHERE id = ? AND state = 'active'", (ts, fact_id))
             if cur.rowcount:
-                for tbl in ("tasks", "commitments"):
-                    self._conn.execute(
-                        f"UPDATE {tbl} SET status = 'cancelled' "
-                        "WHERE fact_id = ? AND status = 'open'", (fact_id,))
+                self._conn.execute(
+                    "UPDATE tasks SET status = 'cancelled' "
+                    "WHERE fact_id = ? AND status = 'open'", (fact_id,))
+                crow = self._conn.execute(
+                    "SELECT state FROM commitments WHERE fact_id = ?",
+                    (fact_id,)).fetchone()
+                if crow and (crow["state"] or "") in (
+                        "detected", "active", "in_progress", "waiting"):
+                    try:
+                        self._transition_commitment_unlocked(
+                            fact_id, "cancelled",
+                            reason="archive",
+                            evidence={"source": "archive_fact"},
+                            actor="system", ts=ts)
+                    except Exception:
+                        self._conn.execute(
+                            "UPDATE commitments SET status = 'cancelled', "
+                            "state = 'cancelled' "
+                            "WHERE fact_id = ? AND status = 'open'",
+                            (fact_id,))
             self._conn.commit()
             return cur.rowcount > 0
 
@@ -4715,10 +5509,27 @@ class Store:
                 "updated_at = ? WHERE id = ? AND state = 'active'",
                 (new_id, ts, old_id))
             if cur.rowcount:
-                for tbl in ("tasks", "commitments"):
-                    self._conn.execute(
-                        f"UPDATE {tbl} SET status = 'cancelled' "
-                        "WHERE fact_id = ? AND status = 'open'", (old_id,))
+                self._conn.execute(
+                    "UPDATE tasks SET status = 'cancelled' "
+                    "WHERE fact_id = ? AND status = 'open'", (old_id,))
+                crow = self._conn.execute(
+                    "SELECT state FROM commitments WHERE fact_id = ?",
+                    (old_id,)).fetchone()
+                if crow and (crow["state"] or "") in (
+                        "detected", "active", "in_progress", "waiting"):
+                    try:
+                        self._transition_commitment_unlocked(
+                            old_id, "superseded",
+                            reason="supersede",
+                            evidence={"source": "supersede_fact",
+                                      "superseded_by": int(new_id)},
+                            actor="system", ts=ts)
+                    except Exception:
+                        self._conn.execute(
+                            "UPDATE commitments SET status = 'cancelled', "
+                            "state = 'superseded' "
+                            "WHERE fact_id = ? AND status = 'open'",
+                            (old_id,))
             self._conn.commit()
             return cur.rowcount > 0
 
@@ -4744,22 +5555,173 @@ class Store:
         """Set the lifecycle status on whichever typed row backs this fact.
         Bumps facts.updated_at (same as set_fact_due): a completion is a
         lifecycle moment — recency ranking and the trigger signal scan
-        (task_done / progress_on) both key off it."""
+        (task_done / progress_on) both key off it.
+
+        Commitments (plan 4.1) route through the state machine; `status` is
+        kept as a derived compat column. Tasks keep the tri-state update.
+        """
         if status not in ("open", "done", "cancelled"):
             raise ValueError(f"invalid status: {status}")
         import time as _time
+        from app.services import commitment_state as cs
         with self._lock:
-            n = 0
-            for tbl in ("tasks", "commitments"):
-                cur = self._conn.execute(
-                    f"UPDATE {tbl} SET status = ? WHERE fact_id = ?", (status, fact_id))
-                n += cur.rowcount
+            crow = self._conn.execute(
+                "SELECT state, status FROM commitments WHERE fact_id = ?",
+                (fact_id,)).fetchone()
+            if crow:
+                to_state = cs.state_for_status(status)
+                evidence = None
+                reason = f"set_status:{status}"
+                if to_state == "completed":
+                    evidence = {"source": "user_mark_done"}
+                    reason = "user_done"
+                elif to_state == "cancelled":
+                    evidence = {"source": "set_fact_status"}
+                    reason = "user_cancel"
+                elif to_state == "active":
+                    reason = "reopen"
+                    evidence = {"source": "user_reopen"}
+                self._transition_commitment_unlocked(
+                    fact_id, to_state, reason=reason,
+                    evidence=evidence, actor="user", ts=_time.time())
+                self._conn.commit()
+                return True
+            cur = self._conn.execute(
+                "UPDATE tasks SET status = ? WHERE fact_id = ?", (status, fact_id))
+            n = cur.rowcount
             if n:
                 self._conn.execute(
                     "UPDATE facts SET updated_at = ? WHERE id = ?",
                     (_time.time(), fact_id))
             self._conn.commit()
             return n > 0
+
+    def transition_commitment(
+        self, fact_id: int, to_state: str, *,
+        reason: str | None = None,
+        evidence: dict | str | None = None,
+        actor: str = "user",
+        ts: float | None = None,
+    ) -> dict:
+        """Apply a legal commitment state transition (plan 4.1).
+
+        Completing requires cited evidence. Returns
+        `{ok, fact_id, from_state, to_state, status}`.
+        """
+        import time as _time
+        ts = float(ts if ts is not None else _time.time())
+        with self._lock:
+            out = self._transition_commitment_unlocked(
+                fact_id, to_state, reason=reason, evidence=evidence,
+                actor=actor, ts=ts)
+            self._conn.commit()
+            return out
+
+    def _transition_commitment_unlocked(
+        self, fact_id: int, to_state: str, *,
+        reason: str | None = None,
+        evidence: dict | str | None = None,
+        actor: str = "user",
+        ts: float,
+    ) -> dict:
+        """Caller must hold `self._lock`. Does not commit."""
+        import json
+        from app.services import commitment_state as cs
+        from app.services.commitment_state import TransitionError
+
+        row = self._conn.execute(
+            "SELECT state, status, completion_evidence_json FROM commitments "
+            "WHERE fact_id = ?", (fact_id,)).fetchone()
+        if not row:
+            raise TransitionError(f"no commitment for fact_id={fact_id}")
+        from_state = (row["state"] or "detected").strip().lower()
+        to_state = (to_state or "").strip().lower()
+        cs.require_legal(from_state, to_state)
+        ev = cs.normalize_evidence(evidence)
+        if to_state == "completed" and not cs.evidence_ok_for_completed(ev):
+            raise TransitionError(
+                "completed requires completion evidence "
+                "(evidence_event_id/source/note)"
+            )
+        if from_state == to_state:
+            return {
+                "ok": True, "fact_id": int(fact_id),
+                "from_state": from_state, "to_state": to_state,
+                "status": cs.status_for(to_state), "noop": True,
+            }
+        compat = cs.status_for(to_state)
+        evidence_json = json.dumps(ev) if ev else None
+        if to_state == "completed":
+            self._conn.execute(
+                "UPDATE commitments SET state = ?, status = ?, "
+                "completion_evidence_json = ? WHERE fact_id = ?",
+                (to_state, compat, evidence_json, fact_id))
+        else:
+            self._conn.execute(
+                "UPDATE commitments SET state = ?, status = ? WHERE fact_id = ?",
+                (to_state, compat, fact_id))
+        self._conn.execute(
+            "INSERT INTO commitment_transitions "
+            "(fact_id, from_state, to_state, reason, evidence_json, actor, "
+            "created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (fact_id, from_state, to_state, reason, evidence_json,
+             actor, float(ts)))
+        self._conn.execute(
+            "UPDATE facts SET updated_at = ? WHERE id = ?",
+            (float(ts), fact_id))
+        return {
+            "ok": True, "fact_id": int(fact_id),
+            "from_state": from_state, "to_state": to_state,
+            "status": compat, "noop": False,
+        }
+
+    def list_commitment_transitions(
+        self, fact_id: int, *, limit: int = 50,
+    ) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, fact_id, from_state, to_state, reason, "
+                "evidence_json, actor, created_at "
+                "FROM commitment_transitions WHERE fact_id = ? "
+                "ORDER BY created_at DESC, id DESC LIMIT ?",
+                (fact_id, limit)).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            raw = d.get("evidence_json")
+            if isinstance(raw, str) and raw.strip():
+                try:
+                    import json
+                    d["evidence"] = json.loads(raw)
+                except Exception:
+                    d["evidence"] = None
+            else:
+                d["evidence"] = None
+            out.append(d)
+        return out
+
+    def touch_commitment_surfaced(
+        self, fact_id: int, ts: float | None = None,
+    ) -> bool:
+        """Record last_surfaced for open-loop snooze (plan 4.3)."""
+        import time as _time
+        ts = float(ts if ts is not None else _time.time())
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE commitments SET last_surfaced = ? WHERE fact_id = ?",
+                (ts, fact_id))
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def set_counterparty_expects(
+        self, fact_id: int, expects: bool,
+    ) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE commitments SET counterparty_expects = ? WHERE fact_id = ?",
+                (1 if expects else 0, fact_id))
+            self._conn.commit()
+            return cur.rowcount > 0
 
     def set_fact_due(self, fact_id: int, due: str | None, ts: float) -> bool:
         """Set/clear the due field on whichever typed row backs this fact,
@@ -4975,19 +5937,25 @@ class Store:
     # ------------------------------ sessions -----------------------------
     def replace_sessions(self, sessions: list) -> None:
         """Atomically swap the whole sessions table for a freshly-computed set."""
-        payload = [
-            (s.start, s.end, json.dumps(s.speakers), s.text,
-             json.dumps(s.turn_ids), json.dumps(s.event_ids),
-             s.n_turns, s.n_utterances)
-            for s in sessions
-        ]
+        payload = []
+        for s in sessions:
+            meta = getattr(s, "meeting_meta", None)
+            cal_id = getattr(s, "calendar_event_id", None)
+            payload.append((
+                s.start, s.end, json.dumps(s.speakers), s.text,
+                json.dumps(s.turn_ids), json.dumps(s.event_ids),
+                s.n_turns, s.n_utterances,
+                cal_id,
+                json.dumps(meta) if meta is not None else None,
+            ))
         with self._lock:
             self._conn.execute("DELETE FROM sessions")
             self._conn.executemany(
                 """
                 INSERT INTO sessions (start, end, speakers, text, turn_ids,
-                                      event_ids, n_turns, n_utterances)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                      event_ids, n_turns, n_utterances,
+                                      calendar_event_id, meeting_meta)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 payload,
             )
@@ -4998,8 +5966,15 @@ class Store:
             rows = self._conn.execute(
                 "SELECT * FROM sessions ORDER BY start DESC LIMIT ?", (limit,)
             ).fetchall()
-        return [
-            {
+        out = []
+        for r in rows:
+            try:
+                meta = json.loads(r["meeting_meta"]) if r["meeting_meta"] else None
+            except Exception:
+                meta = None
+            keys = r.keys()
+            out.append({
+                "id": int(r["id"]),
                 "start": r["start"], "end": r["end"],
                 "speakers": json.loads(r["speakers"] or "[]"),
                 "text": r["text"],
@@ -5007,14 +5982,122 @@ class Store:
                 "event_ids": json.loads(r["event_ids"] or "[]"),
                 "n_turns": r["n_turns"], "n_utterances": r["n_utterances"],
                 "duration_s": round((r["end"] or 0) - (r["start"] or 0), 2),
-            }
-            for r in rows
-        ]
+                "calendar_event_id": (
+                    r["calendar_event_id"] if "calendar_event_id" in keys
+                    else None),
+                "meeting_meta": meta,
+            })
+        return out
 
     def session_count(self) -> int:
         with self._lock:
             return int(self._conn.execute(
                 "SELECT COUNT(*) FROM sessions").fetchone()[0])
+
+    # --------------------------- calendar events -------------------------
+    def upsert_calendar_event(
+        self, *, event_id: str, calendar: str | None, uid: str | None,
+        title: str | None, start: float, end: float, all_day: bool = False,
+        location: str | None = None, organizer: dict | None = None,
+        attendees: list | None = None, source_event_id: int | None = None,
+        updated_at: float | None = None,
+    ) -> None:
+        """Insert or replace one normalized calendar event (Meeting Layer P1)."""
+        import time as _time
+        ts = float(updated_at if updated_at is not None else _time.time())
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO calendar_events (
+                    id, calendar, uid, title, start, end, all_day, location,
+                    organizer_json, attendees_json, source_event_id, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    calendar=excluded.calendar,
+                    uid=excluded.uid,
+                    title=excluded.title,
+                    start=excluded.start,
+                    end=excluded.end,
+                    all_day=excluded.all_day,
+                    location=excluded.location,
+                    organizer_json=excluded.organizer_json,
+                    attendees_json=excluded.attendees_json,
+                    source_event_id=COALESCE(excluded.source_event_id,
+                                             calendar_events.source_event_id),
+                    updated_at=excluded.updated_at
+                """,
+                (event_id, calendar, uid, title, float(start), float(end),
+                 1 if all_day else 0, location,
+                 json.dumps(organizer) if organizer is not None else None,
+                 json.dumps(attendees or []),
+                 source_event_id, ts),
+            )
+            self._conn.commit()
+
+    def list_calendar_events(
+        self, *, start_min: float | None = None, start_max: float | None = None,
+        limit: int = 500,
+    ) -> list[dict]:
+        """Calendar events overlapping an optional window, oldest-first."""
+        with self._lock:
+            sql = "SELECT * FROM calendar_events WHERE 1=1"
+            args: list = []
+            # Overlap: event.end >= window_start AND event.start <= window_end
+            if start_min is not None:
+                sql += " AND end >= ?"
+                args.append(float(start_min))
+            if start_max is not None:
+                sql += " AND start <= ?"
+                args.append(float(start_max))
+            sql += " ORDER BY start ASC LIMIT ?"
+            args.append(int(limit))
+            rows = self._conn.execute(sql, args).fetchall()
+        out = []
+        for r in rows:
+            try:
+                organizer = json.loads(r["organizer_json"]) if r["organizer_json"] else None
+            except Exception:
+                organizer = None
+            try:
+                attendees = json.loads(r["attendees_json"] or "[]")
+            except Exception:
+                attendees = []
+            out.append({
+                "id": r["id"], "calendar": r["calendar"], "uid": r["uid"],
+                "title": r["title"], "start": r["start"], "end": r["end"],
+                "all_day": bool(r["all_day"]), "location": r["location"],
+                "organizer": organizer, "attendees": attendees,
+                "source_event_id": r["source_event_id"],
+                "updated_at": r["updated_at"],
+            })
+        return out
+
+    def find_person_by_contact(
+        self, type_: str, value_normalized: str,
+    ) -> int | None:
+        """Active contact-point lookup (email/phone → person_id)."""
+        key = (value_normalized or "").strip().lower()
+        if not key:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT person_id FROM person_contact_points "
+                "WHERE type=? AND value_normalized=? AND status='active' "
+                "ORDER BY confidence DESC LIMIT 1",
+                (type_, key),
+            ).fetchone()
+            if row:
+                return int(row["person_id"])
+            # Fallback: user-asserted person_attrs email/phone.
+            if type_ in ("email", "phone"):
+                row = self._conn.execute(
+                    "SELECT person_id FROM person_attrs "
+                    "WHERE key=? AND lower(value)=? LIMIT 1",
+                    (type_, key),
+                ).fetchone()
+                if row:
+                    return int(row["person_id"])
+        return None
 
     # ----------------------------- activities ----------------------------
     def replace_activities(self, activities: list) -> None:
@@ -5125,19 +6208,30 @@ class Store:
             return int(cur.lastrowid)
 
     def claim_job(self) -> dict | None:
-        """Atomically take the oldest pending job -> running. None if idle."""
+        """Atomically take the oldest claimable pending job -> running.
+
+        Jobs in backoff (available_at > now) stay pending but are skipped until
+        the backoff window elapses (plan 0.10).
+        """
         import time as _t
 
         now = _t.time()
         with self._lock:
             row = self._conn.execute(
-                "SELECT * FROM jobs WHERE status = 'pending' ORDER BY id LIMIT 1"
+                """
+                SELECT * FROM jobs
+                 WHERE status = 'pending'
+                   AND (available_at IS NULL OR available_at <= ?)
+                 ORDER BY id LIMIT 1
+                """,
+                (now,),
             ).fetchone()
             if row is None:
                 return None
             self._conn.execute(
                 "UPDATE jobs SET status = 'running', attempts = attempts + 1, "
-                "updated_at = ? WHERE id = ?", (now, row["id"]),
+                "available_at = NULL, updated_at = ? WHERE id = ?",
+                (now, row["id"]),
             )
             self._conn.commit()
             return {"id": int(row["id"]), "kind": row["kind"],
@@ -5148,24 +6242,37 @@ class Store:
 
         with self._lock:
             self._conn.execute(
-                "UPDATE jobs SET status = 'done', error = NULL, updated_at = ? "
-                "WHERE id = ?", (_t.time(), job_id),
+                "UPDATE jobs SET status = 'done', error = NULL, "
+                "available_at = NULL, updated_at = ? WHERE id = ?",
+                (_t.time(), job_id),
             )
             self._conn.commit()
 
     def fail_job(self, job_id: int, error: str, max_attempts: int) -> str:
-        """Requeue (pending) if attempts remain, else park as error. Returns the
-        resulting status."""
+        """Requeue with backoff if attempts remain, else park as dead.
+
+        Returns the resulting status (`pending` or `dead`).
+        """
         import time as _t
 
+        now = _t.time()
         with self._lock:
             row = self._conn.execute(
                 "SELECT attempts FROM jobs WHERE id = ?", (job_id,)).fetchone()
             attempts = int(row["attempts"]) if row else max_attempts
-            status = "error" if attempts >= max_attempts else "pending"
+            if attempts >= max_attempts:
+                status = "dead"
+                available_at = None
+            else:
+                status = "pending"
+                available_at = now + job_backoff_s(attempts)
             self._conn.execute(
-                "UPDATE jobs SET status = ?, error = ?, updated_at = ? WHERE id = ?",
-                (status, error[:1000], _t.time(), job_id),
+                """
+                UPDATE jobs SET status = ?, error = ?, available_at = ?,
+                                updated_at = ?
+                 WHERE id = ?
+                """,
+                (status, error[:1000], available_at, now, job_id),
             )
             self._conn.commit()
             return status
@@ -5176,7 +6283,8 @@ class Store:
         would otherwise be lost forever. Returns how many were recovered."""
         with self._lock:
             cur = self._conn.execute(
-                "UPDATE jobs SET status = 'pending' WHERE status = 'running'")
+                "UPDATE jobs SET status = 'pending', available_at = NULL "
+                "WHERE status = 'running'")
             self._conn.commit()
             return cur.rowcount
 
@@ -5184,16 +6292,33 @@ class Store:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT status, COUNT(*) AS n FROM jobs GROUP BY status").fetchall()
-        stats = {"pending": 0, "running": 0, "done": 0, "error": 0}
+        stats = {"pending": 0, "running": 0, "done": 0, "dead": 0, "error": 0}
         for r in rows:
             stats[r["status"]] = int(r["n"])
+        # Legacy rows may still say 'error' until migrate runs; surface as dead.
+        stats["dead"] = int(stats.get("dead", 0)) + int(stats.get("error", 0))
         return stats
 
     def recent_jobs(self, limit: int = 20) -> list[dict]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT id, kind, status, attempts, error, updated_at "
-                "FROM jobs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+                "SELECT id, kind, status, attempts, error, available_at, "
+                "updated_at FROM jobs ORDER BY id DESC LIMIT ?",
+                (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def dead_jobs(self, limit: int = 20) -> list[dict]:
+        """Poisoned jobs parked after max attempts (console dead-letter view)."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT id, kind, status, attempts, error, available_at,
+                       created_at, updated_at
+                  FROM jobs
+                 WHERE status IN ('dead', 'error')
+                 ORDER BY updated_at DESC LIMIT ?
+                """,
+                (limit,)).fetchall()
         return [dict(r) for r in rows]
 
     # ------------------------------ audio telemetry (#9) -----------------
@@ -5304,7 +6429,8 @@ class Store:
                         risk_level: str | None = None, dry_run: str | None = None,
                         source_fact_ids: list | None = None,
                         person_id: int | None = None,
-                        project_id: int | None = None) -> int:
+                        project_id: int | None = None,
+                        correlation_id: str | None = None) -> int:
         import time as _t
 
         with self._lock:
@@ -5312,11 +6438,13 @@ class Store:
                 """
                 INSERT INTO agent_runs
                     (goal, agent_type, surface, intent, risk_level, status,
-                     dry_run, source_fact_ids, person_id, project_id, started_at)
-                VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?)
+                     dry_run, source_fact_ids, person_id, project_id,
+                     correlation_id, started_at)
+                VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?)
                 """,
                 (goal, agent_type, surface, intent, risk_level, dry_run,
-                 json.dumps(source_fact_ids or []), person_id, project_id, _t.time()),
+                 json.dumps(source_fact_ids or []), person_id, project_id,
+                 correlation_id, _t.time()),
             )
             self._conn.commit()
             return int(cur.lastrowid)
@@ -5327,7 +6455,7 @@ class Store:
         if not run_id:
             return
         allowed = {"agent_type", "surface", "intent", "risk_level", "dry_run",
-                   "person_id", "project_id", "source_fact_ids"}
+                   "person_id", "project_id", "source_fact_ids", "correlation_id"}
         sets, params = [], []
         for k, v in fields.items():
             if k not in allowed or v is None:
@@ -5376,50 +6504,179 @@ class Store:
                              suggested_agent: str | None = None,
                              execution_surface: str | None = None,
                              success_criteria: list | None = None,
-                             fallback: str | None = None) -> int:
+                             fallback: str | None = None,
+                             ttl_s: float | None = None) -> int:
         import time as _t
 
+        now = _t.time()
+        payload_hash = hash_packet_payload(fields)
+        expires_at = now + (ttl_s if ttl_s is not None else _PACKET_TTL_S)
+        # Persist the same canonical bytes we hashed so a later re-read of
+        # fields_json round-trips to the same payload_hash (commit gate 0.4).
+        fields_json = canonicalize_packet_fields(fields)
         with self._lock:
             cur = self._conn.execute(
                 """
                 INSERT INTO action_packets
                     (agent_run_id, goal, summary, fields_json, context_json,
                      source_fact_ids, approval_required, risk_level, suggested_agent,
-                     execution_surface, success_criteria, fallback, decision, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+                     execution_surface, success_criteria, fallback, decision,
+                     payload_hash, expires_at, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
                 """,
-                (agent_run_id, goal, summary, json.dumps(fields or {}),
+                (agent_run_id, goal, summary, fields_json,
                  json.dumps(context or []), json.dumps(source_fact_ids or []),
                  1 if approval_required else 0, risk_level, suggested_agent,
                  execution_surface, json.dumps(success_criteria or []), fallback,
-                 _t.time()),
+                 payload_hash, expires_at, now),
             )
             self._conn.commit()
             return int(cur.lastrowid)
 
-    def set_packet_decision(self, packet_id: int, decision: str) -> None:
+    def set_packet_decision(self, packet_id: int, decision: str, *,
+                            approved_via: str | None = None) -> None:
+        """Stamp a human verdict. Approvals also record approved_at/via (plan 0.6)."""
         if not packet_id:
             return
+        import time as _t
+
+        with self._lock:
+            if decision == "approve":
+                self._conn.execute(
+                    """
+                    UPDATE action_packets
+                       SET decision = ?, approved_at = ?, approved_via = ?
+                     WHERE id = ?
+                    """,
+                    (decision, _t.time(),
+                     approved_via if approved_via in ("button", "typed") else approved_via,
+                     packet_id))
+            else:
+                self._conn.execute(
+                    "UPDATE action_packets SET decision = ? WHERE id = ?",
+                    (decision, packet_id))
+            self._conn.commit()
+
+    def get_action_packet(self, packet_id: int) -> dict | None:
+        """One action_packets row, fields_json parsed into `fields`."""
+        if not packet_id:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM action_packets WHERE id = ?",
+                (packet_id,)).fetchone()
+        if row is None:
+            return None
+        d = dict(row)
+        try:
+            d["fields"] = json.loads(d.get("fields_json") or "{}")
+        except Exception:
+            d["fields"] = {}
+        return d
+
+    def set_packet_executed_hash(self, packet_id: int, executed_hash: str,
+                                 *, executed_at: float | None = None) -> None:
+        """Stamp the hash that was actually committed (plan 0.8 dup-send)."""
+        if not packet_id or not executed_hash:
+            return
+        import time as _t
+
+        when = float(executed_at) if executed_at is not None else _t.time()
         with self._lock:
             self._conn.execute(
-                "UPDATE action_packets SET decision = ? WHERE id = ?",
-                (decision, packet_id))
+                """
+                UPDATE action_packets
+                   SET executed_hash = ?, executed_at = ?
+                 WHERE id = ?
+                """,
+                (executed_hash, when, packet_id))
             self._conn.commit()
+
+    def find_recent_executed_hash(self, executed_hash: str, *,
+                                  within_s: float = 3600.0) -> dict | None:
+        """Most recent packet with this executed_hash stamped in the window.
+
+        Used to refuse a duplicate send-class commit within an hour (plan 0.8).
+        """
+        if not executed_hash:
+            return None
+        import time as _t
+
+        cutoff = _t.time() - float(within_s)
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT * FROM action_packets
+                 WHERE executed_hash = ?
+                   AND executed_at IS NOT NULL
+                   AND executed_at >= ?
+                 ORDER BY executed_at DESC LIMIT 1
+                """,
+                (executed_hash, cutoff)).fetchone()
+        if row is None:
+            return None
+        d = dict(row)
+        try:
+            d["fields"] = json.loads(d.get("fields_json") or "{}")
+        except Exception:
+            d["fields"] = {}
+        return d
+
+    def latest_pending_packet(self, agent_run_id: int | None = None) -> dict | None:
+        """Most recent action_packets row still awaiting a human decision."""
+        with self._lock:
+            if agent_run_id is not None:
+                row = self._conn.execute(
+                    """
+                    SELECT * FROM action_packets
+                     WHERE decision IS NULL AND agent_run_id = ?
+                     ORDER BY id DESC LIMIT 1
+                    """, (agent_run_id,)).fetchone()
+            else:
+                row = self._conn.execute(
+                    """
+                    SELECT * FROM action_packets
+                     WHERE decision IS NULL
+                     ORDER BY id DESC LIMIT 1
+                    """).fetchone()
+        if row is None:
+            return None
+        d = dict(row)
+        try:
+            d["fields"] = json.loads(d.get("fields_json") or "{}")
+        except Exception:
+            d["fields"] = {}
+        return d
 
     def record_agent_steps(self, agent_run_id: int, steps: list[dict]) -> int:
         """Bulk-insert step rows. Each dict may carry step_index / action_type /
-        input / output / verification / status; `input` is JSON-encoded."""
+        input / output / verification / status; `input` is JSON-encoded.
+
+        Plan 5.1: soft-normalize status — unknown/empty → outcome_uncertain
+        (LLM-only default); never invent `verified` here."""
         if not agent_run_id or not steps:
             return 0
         import time as _t
+        try:
+            from app.services.outcome_verify import normalize_status, OUTCOME_UNCERTAIN
+        except Exception:
+            def normalize_status(status, *, default="outcome_uncertain"):
+                return (status or default)
+            OUTCOME_UNCERTAIN = "outcome_uncertain"
 
         now = _t.time()
-        rows = [
-            (agent_run_id, s.get("step_index"), s.get("action_type"),
-             json.dumps(s.get("input")), s.get("output"), s.get("verification"),
-             s.get("status"), now)
-            for s in steps
-        ]
+        rows = []
+        for s in steps:
+            st = s.get("status")
+            if not st:
+                st = OUTCOME_UNCERTAIN
+            else:
+                st = normalize_status(st, default=OUTCOME_UNCERTAIN)
+            rows.append(
+                (agent_run_id, s.get("step_index"), s.get("action_type"),
+                 json.dumps(s.get("input")), s.get("output"),
+                 s.get("verification"), st, now)
+            )
         with self._lock:
             self._conn.executemany(
                 """

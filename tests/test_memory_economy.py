@@ -4,14 +4,23 @@ preserving compaction + restore, growth snapshots, and the console routes.
 Safety contract under test: compaction never runs unless explicitly enabled
 (flag or manual endpoint), never touches events backing open work, always
 archives the original first, and restore() brings the raw back verbatim (I-1).
+
+Plan 6.6: vector_gc drops Lance rows for dismissed/superseded/evidence_removed
+facts past the grace window; erase_event marks facts evidence_removed;
+Lance optimize bounds version bloat.
 """
 from __future__ import annotations
 
+import os
 import tempfile
 import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+# Isolate the economy suite from the live Lance index (vector_gc re-enabled
+# inside VectorGcTests with an injected temp store).
+os.environ["QUILL_VECTOR_GC"] = "0"
 
 from app.events import Event, Modality
 from app.storage import Store
@@ -362,6 +371,199 @@ class EconomyEndpointTests(unittest.TestCase):
         r = self.client.post("/today/restore", json={"event_id": eid})
         self.assertEqual(r.status_code, 200)
         self.assertEqual(self.store.get_event(eid)["raw"], "shell restore me")
+
+
+# --- plan 6.6: vector_gc + evidence_removed + Lance optimize ---------------
+
+class EvidenceRemovedTests(unittest.TestCase):
+    def test_erase_event_marks_facts_evidence_removed(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = _mk_store(td)
+            try:
+                eid = _add_event(store, age_days=2, raw="source utterance")
+                fid = store.add_claim(
+                    "Marc owes the deck", source_event_id=eid,
+                    source_span="owes the deck", confidence=0.9,
+                    extracted_at=NOW - DAY)
+                out = store.erase_event(eid)
+                self.assertTrue(out["ok"])
+                self.assertIn(fid, out["fact_ids"])
+                self.assertIsNone(store.get_event(eid))
+                fact = store.get_fact(fid)
+                self.assertIsNotNone(fact)
+                self.assertEqual(fact["state"], "evidence_removed")
+                # Source link cleared — event is gone.
+                self.assertTrue(
+                    fact.get("source_event_id") in (None, 0)
+                    or fact.get("source_event_id") is None)
+                from app.services.memory import fact_is_retrievable
+                self.assertFalse(fact_is_retrievable(fact))
+            finally:
+                store.close()
+
+    def test_memory_erase_drops_vectors(self):
+        from app.services import memory as memory_svc
+        from app.services.memory import FACT_ID_OFFSET
+        from app.vectorstore import VectorStore
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as td:
+            store = _mk_store(td)
+            vs = VectorStore(path=str(Path(td) / "lance"), dim=8)
+            try:
+                eid = _add_event(store, age_days=1, raw="indexed episode")
+                fid = store.add_claim(
+                    "claim text", source_event_id=eid,
+                    source_span="claim text", confidence=0.8,
+                    extracted_at=NOW)
+                vec = np.zeros(8, dtype=np.float32)
+                vec[0] = 1.0
+                vs.add(eid, NOW, "audio", "indexed episode", vec)
+                vs.add(FACT_ID_OFFSET + fid, NOW, "fact:claim", "claim text", vec)
+                self.assertIn(eid, vs.list_ids())
+                self.assertIn(FACT_ID_OFFSET + fid, vs.list_ids())
+
+                out = memory_svc.erase_event(eid, store=store, vectors=vs)
+                self.assertTrue(out["ok"])
+                self.assertEqual(store.get_fact(fid)["state"], "evidence_removed")
+                ids = vs.list_ids()
+                self.assertNotIn(eid, ids)
+                self.assertNotIn(FACT_ID_OFFSET + fid, ids)
+            finally:
+                store.close()
+
+
+class VectorGcTests(unittest.TestCase):
+    def setUp(self):
+        self._prev = os.environ.get("QUILL_VECTOR_GC")
+        os.environ["QUILL_VECTOR_GC"] = "1"
+
+    def tearDown(self):
+        if self._prev is None:
+            os.environ["QUILL_VECTOR_GC"] = "0"
+        else:
+            os.environ["QUILL_VECTOR_GC"] = self._prev
+
+    def test_gc_drops_old_dismissed_and_superseded(self):
+        from app.services import memory as memory_svc
+        from app.services.memory import FACT_ID_OFFSET
+        from app.vectorstore import VectorStore
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as td:
+            store = _mk_store(td)
+            vs = VectorStore(path=str(Path(td) / "lance"), dim=8)
+            try:
+                eid = _add_event(store, age_days=40, raw="old")
+                old_ts = NOW - 40 * DAY
+                fid_dismiss = store.add_claim(
+                    "dismiss me", source_event_id=eid,
+                    source_span="dismiss me", confidence=0.7,
+                    extracted_at=old_ts)
+                fid_super = store.add_claim(
+                    "old version", source_event_id=eid,
+                    source_span="old version", confidence=0.7,
+                    extracted_at=old_ts)
+                fid_keep = store.add_claim(
+                    "still active", source_event_id=eid,
+                    source_span="still active", confidence=0.9,
+                    extracted_at=NOW)
+                store.review_fact(fid_dismiss, "dismissed")
+                # Age the dismiss stamp past the grace window.
+                with store._lock:
+                    store._conn.execute(
+                        "UPDATE facts SET updated_at = ? WHERE id = ?",
+                        (old_ts, fid_dismiss))
+                    store._conn.commit()
+                store.supersede_fact(fid_super, fid_keep, old_ts)
+
+                vec = np.zeros(8, dtype=np.float32)
+                vec[0] = 1.0
+                for fid in (fid_dismiss, fid_super, fid_keep):
+                    vs.add(FACT_ID_OFFSET + fid, old_ts, "fact:claim",
+                           "x", vec)
+
+                res = memory_svc.vector_gc(
+                    store, vs, now=NOW, older_than_days=30, optimize=True)
+                self.assertTrue(res["ok"])
+                self.assertIn(fid_dismiss, res["fact_ids"])
+                self.assertIn(fid_super, res["fact_ids"])
+                self.assertNotIn(fid_keep, res["fact_ids"])
+                ids = vs.list_ids()
+                self.assertNotIn(FACT_ID_OFFSET + fid_dismiss, ids)
+                self.assertNotIn(FACT_ID_OFFSET + fid_super, ids)
+                self.assertIn(FACT_ID_OFFSET + fid_keep, ids)
+                self.assertTrue((res.get("optimize") or {}).get("ok"))
+            finally:
+                store.close()
+
+    def test_gc_skips_recent_dismiss(self):
+        from app.services import memory as memory_svc
+        from app.services.memory import FACT_ID_OFFSET
+        from app.vectorstore import VectorStore
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as td:
+            store = _mk_store(td)
+            vs = VectorStore(path=str(Path(td) / "lance"), dim=8)
+            try:
+                eid = _add_event(store, age_days=1, raw="fresh")
+                fid = store.add_claim(
+                    "just dismissed", source_event_id=eid,
+                    source_span="just dismissed", confidence=0.8,
+                    extracted_at=NOW)
+                store.review_fact(fid, "dismissed")
+                vec = np.zeros(8, dtype=np.float32)
+                vec[0] = 1.0
+                vs.add(FACT_ID_OFFSET + fid, NOW, "fact:claim", "x", vec)
+                res = memory_svc.vector_gc(
+                    store, vs, now=NOW, older_than_days=30, optimize=False)
+                self.assertTrue(res["ok"])
+                self.assertNotIn(fid, res["fact_ids"])
+                self.assertIn(FACT_ID_OFFSET + fid, vs.list_ids())
+            finally:
+                store.close()
+
+    def test_lance_optimize_bounds_versions(self):
+        """Periodic optimize keeps version count from growing unboundedly."""
+        from app.vectorstore import VectorStore
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as td:
+            vs = VectorStore(path=str(Path(td) / "lance"), dim=4)
+            vs._optimize_every = 3
+            vec = np.zeros(4, dtype=np.float32)
+            vec[0] = 1.0
+            for i in range(1, 8):
+                vs.add(i, float(i), "audio", f"row-{i}", vec)
+            st = vs.lance_status()
+            self.assertTrue(st.get("ok"))
+            # After commits with optimize_every=3, versions stay near the
+            # budget rather than equaling every single-row commit.
+            self.assertLessEqual(int(st["versions"]), 6)
+            forced = vs.force_optimize()
+            self.assertTrue(forced.get("ok"))
+            st2 = vs.lance_status()
+            self.assertLessEqual(int(st2["versions"]), int(st["versions"]))
+
+
+class VectorGcEndpointTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from app.api.routes import router
+        app = FastAPI()
+        app.include_router(router)
+        cls.client = TestClient(app)
+
+    def test_vector_gc_endpoint(self):
+        with patch("app.services.memory.vector_gc",
+                   return_value={"ok": True, "dropped_facts": 0}) as gc:
+            r = self.client.post("/console/economy/vector-gc")
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json().get("ok"))
+        gc.assert_called_once()
 
 
 if __name__ == "__main__":

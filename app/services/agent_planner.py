@@ -46,6 +46,7 @@ Design commitments (why it's shaped this way):
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 
 from app.services.agent_log import ActionPacket
@@ -74,12 +75,32 @@ RISK_TABLE: dict[str, str] = {
     "delete":   "blocked",
     "remove":   "blocked",
 }
+# Shell/OS realizations of blocked RISK_TABLE kinds. Desktop guards consult
+# this so delete/remove stay blocked in EVERY mode (incl. autonomous) from one
+# policy source (plan 0.7). Elevation/shell-escape verbs stay in desktop's
+# own BLOCKED_VERBS — those are not RISK_TABLE action kinds.
+SHELL_KIND: dict[str, str] = {
+    "rm": "delete", "rmdir": "delete", "rd": "delete",
+    "del": "delete", "erase": "delete",
+}
 _SENSITIVE = ("medical", "health", "financial", "bank", "ssn", "password")
+# UI / free-text labels that mean a blocked RISK_TABLE kind. Autonomous mode
+# may skip the ask, never these.
+_BLOCKED_LABEL_RE = re.compile(
+    r"\b(delete|remove|uninstall|erase|destroy|trash|move to trash|"
+    r"permanently delete)\b",
+    re.I,
+)
 
 
 def classify_risk(action_kind: str, *, goal: str = "") -> tuple[str, bool]:
     """(risk_level, approval_required). approval_required is True for anything
-    at/above medium, or any brush with a sensitive domain."""
+    at/above medium, or any brush with a sensitive domain.
+
+    `blocked` still reports approval_required=True for back-compat callers, but
+    execution surfaces must call `is_policy_blocked` / `execution_allowed` —
+    autonomous mode bypasses the ask, never a blocked class (plan 0.7).
+    """
     kind = (action_kind or "").strip().lower()
     risk = RISK_TABLE.get(kind, "medium")
     if any(w in (goal or "").lower() for w in _SENSITIVE) and risk == "low":
@@ -94,6 +115,50 @@ def risk_of(goal: str) -> tuple[str, bool]:
     readiness scorer (#10) and any other gate should call THIS, so 'how risky is
     this action' has exactly one definition (the RISK_TABLE above)."""
     return classify_risk(_action_kind_of(goal), goal=goal)
+
+
+def kind_for_shell_verb(verb: str) -> str | None:
+    """Map a shell/OS verb onto a RISK_TABLE action kind, or None."""
+    v = (verb or "").strip().lower()
+    for suffix in (".exe", ".cmd", ".bat", ".ps1", ".com"):
+        if v.endswith(suffix):
+            v = v[: -len(suffix)]
+    return SHELL_KIND.get(v)
+
+
+def is_policy_blocked(*, kind: str = "", goal: str = "",
+                      label: str = "", summary: str = "") -> bool:
+    """True if RISK_TABLE forbids this action in every mode (incl. autonomous).
+
+    One policy source for browser commit gates + desktop mutating gates.
+    """
+    text = " ".join(x for x in (kind, goal, label, summary) if x)
+    k = (kind or "").strip().lower()
+    if not k:
+        k = _action_kind_of(goal or label or summary)
+    if RISK_TABLE.get(k) == "blocked":
+        return True
+    # UI commit controls / free-text that clearly name a blocked kind.
+    if _BLOCKED_LABEL_RE.search(text or ""):
+        return True
+    return False
+
+
+def policy_block_reason(*, kind: str = "", goal: str = "",
+                        label: str = "", summary: str = "") -> str | None:
+    """Human-readable refusal when `is_policy_blocked`, else None."""
+    if not is_policy_blocked(kind=kind, goal=goal, label=label, summary=summary):
+        return None
+    k = (kind or "").strip().lower() or _action_kind_of(goal or label or summary)
+    if RISK_TABLE.get(k) != "blocked":
+        k = "delete" if _BLOCKED_LABEL_RE.search(
+            " ".join(x for x in (goal, label, summary) if x) or "") else k
+    return f"blocked by policy ({k}) — autonomous mode cannot override"
+
+
+def execution_allowed(risk_level: str | None) -> bool:
+    """False for RISK_TABLE `blocked` — never hand to an execution surface."""
+    return (risk_level or "").strip().lower() != "blocked"
 
 
 # ---------------------------------------------------------------------------
@@ -616,10 +681,16 @@ class PersonalAgentLayer:
                 pass
 
         # What we owe / are owed — the open commitments feed the "why".
+        # Plan 4.2: also put their fact_ids on the packet so a verified send
+        # can complete the cited commitment (never from plan-only).
         try:
             ctx.open_commitments = store.list_facts(kind="commitment", status="open",
                                                     limit=k_facts,
                                                     actionable=True)
+            for c in ctx.open_commitments or []:
+                fid = c.get("fact_id")
+                if fid is not None and int(fid) not in ctx.source_fact_ids:
+                    ctx.source_fact_ids.append(int(fid))
         except Exception:
             pass
 
@@ -882,10 +953,16 @@ _VERB_HINTS = {
 
 def _action_kind_of(goal: str) -> str:
     g = (goal or "").lower()
-    for hint, kind in _VERB_HINTS.items():
-        if hint in g:
+    hits = [kind for hint, kind in _VERB_HINTS.items() if hint in g]
+    if not hits:
+        return "read"
+    # Prefer RISK_TABLE blocked kinds when several hints match — "delete the
+    # old draft email" must not classify as send just because "email" appears
+    # (plan 0.7: blocked classes blocked everywhere).
+    for kind in hits:
+        if RISK_TABLE.get(kind) == "blocked":
             return kind
-    return "read"
+    return hits[0]
 
 
 def _context_lines(ctx: SelectedContext) -> list[str]:
@@ -900,17 +977,28 @@ def _context_lines(ctx: SelectedContext) -> list[str]:
 
 
 def _enabled() -> bool:
-    return os.environ.get("QUILL_PLANNER", "0") not in ("0", "false", "False")
+    """Global planner gate (plan 5.2). Default ON once approval binding is
+    enforce; set QUILL_PLANNER=0 to restore core-workflow-only gating."""
+    return os.environ.get("QUILL_PLANNER", "1") not in ("0", "false", "False")
+
+
+def approval_binding_is_enforce() -> bool:
+    """True when plan 0.4 binding is default-on (enforce). Used by graduation
+    checks — planner code default assumes this posture."""
+    raw = os.environ.get("QUILL_APPROVAL_BIND")
+    if raw is None or not str(raw).strip():
+        return True  # code default
+    v = str(raw).strip().lower()
+    if v in ("0", "off", "false", "no", "shadow", "log"):
+        return False
+    return v in ("enforce", "on", "1", "true", "yes")
 
 
 # ---------------------------------------------------------------------------
-# #5 — planner ON for CORE WORKFLOWS ONLY (not a global switch).
+# #5 — core-workflow allowlist (still used when QUILL_PLANNER=0).
 # ---------------------------------------------------------------------------
-# The full planner (QUILL_PLANNER=1) routes EVERY goal through compilation — too
-# broad to trust yet. Instead we turn it on by default for a small, locked set of
-# high-value workflows where the grounding clearly pays and the approval gates are
-# well understood, and leave everything else on today's raw path. This is the
-# "walk before run" the roadmap asks for: prove value on three workflows, widen later.
+# Plan 5.2 graduates the global planner to ON by default (with approval binding
+# enforce). QUILL_PLANNER=0 restores the earlier "core workflows only" walk.
 #
 #   follow_up_email  a writing/send/reply/draft goal -> WritingCompiler drafts it
 #                    from memory (the open commitment, last thread, tone). A 'send'

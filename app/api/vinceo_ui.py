@@ -26,6 +26,30 @@ window.VinceoMemory = {
   }
 };
 
+/* Plan 6.4 — attach double-submit CSRF header on state-changing fetches. */
+(function () {
+  function csrfFromCookie() {
+    try {
+      const m = document.cookie.match(/(?:^|; )quill_csrf=([^;]*)/);
+      return m ? decodeURIComponent(m[1]) : '';
+    } catch (e) { return ''; }
+  }
+  const _fetch = window.fetch.bind(window);
+  window.fetch = function (input, init) {
+    init = init ? Object.assign({}, init) : {};
+    const method = String(init.method || 'GET').toUpperCase();
+    if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
+      const headers = new Headers(init.headers || {});
+      if (!headers.has('X-CSRF-Token') && !headers.has('x-csrf-token')) {
+        const tok = csrfFromCookie();
+        if (tok) headers.set('X-CSRF-Token', tok);
+      }
+      init.headers = headers;
+    }
+    return _fetch(input, init);
+  };
+})();
+
 window.VinceoReduceMotion = () =>
   window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
@@ -699,10 +723,31 @@ window.VinceoConstellation = {
         const sources = data.sources || [];
         if (sources.length) {
           html += '<div class="const-edit-list"><div class="const-edit-hint">Evidence</div>';
-          sources.slice(0, 8).forEach(s => {
+          sources.slice(0, 8).forEach((s, idx) => {
             html += '<div class="const-ev-row"><span class="const-ev-ch">'
-              + VinceoEsc(s.modality || s.channel || 'source') + '</span>'
-              + '<div>' + VinceoEsc((s.text || '').slice(0, 160) || '—') + '</div></div>';
+              + VinceoEsc(s.modality || s.channel || 'source') + '</span>';
+            html += '<div class="const-ev-body">';
+            const hl = s.span_highlight;
+            if (hl && (hl.match || hl.before || hl.after)) {
+              html += '<div class="const-ev-transcript">'
+                + VinceoEsc(hl.before || '')
+                + '<mark class="span-hl">' + VinceoEsc(hl.match || '') + '</mark>'
+                + VinceoEsc(hl.after || '') + '</div>';
+            } else {
+              html += '<div>' + VinceoEsc((s.text || s.transcript || '').slice(0, 200) || '—') + '</div>';
+              if (s.source_span) {
+                html += '<div class="const-ev-quote">“' + VinceoEsc(s.source_span) + '”</div>';
+              }
+            }
+            const play = s.play_path || s.enhanced_audio || s.audio_path;
+            if (play) {
+              const aid = 'const-ev-audio-' + idx;
+              html += '<button type="button" class="const-link-btn const-play-moment" '
+                + 'data-act="play-moment" data-audio-id="' + aid + '">Play the moment</button>';
+              html += '<audio id="' + aid + '" class="const-ev-audio" controls preload="none" src="/artifact?path='
+                + encodeURIComponent(play) + '"></audio>';
+            }
+            html += '</div></div>';
           });
           html += '</div>';
         } else {
@@ -1290,6 +1335,15 @@ window.VinceoConstellation = {
           state.selected = null; state.linkFrom = null;
           panel.hidden = true; panel.innerHTML = ''; return;
         }
+        if (act === 'play-moment') {
+          const aid = t.getAttribute('data-audio-id');
+          const audio = aid && panel.querySelector('[id="' + aid + '"]');
+          if (audio) {
+            try { audio.play(); } catch (err) {}
+            audio.scrollIntoView({block: 'nearest'});
+          }
+          return;
+        }
         if (act === 'do-focus' && state.selected) {
           state.focusId = state.selected;
           const b = toolbar && toolbar.querySelector('[data-act=focus]');
@@ -1584,8 +1638,11 @@ window.VinceoRenderFolio = function (packet, opts) {
     html += '<div style="margin:12px 0 0 18px;font:12px var(--mono);color:var(--mut)">'
       + esc(opts.meta) + '</div>';
   }
+  const pid = (packet && packet.packet_id != null) ? String(packet.packet_id) : '';
+  const phash = (packet && packet.payload_hash) ? String(packet.payload_hash) : '';
   html += '<div class="seal-row" style="display:flex;gap:10px;margin:16px 0 4px 18px;'
-    + 'align-items:center;flex-wrap:wrap">';
+    + 'align-items:center;flex-wrap:wrap" data-packet-id="' + esc(pid)
+    + '" data-payload-hash="' + esc(phash) + '">';
   html += '<button type="button" class="seal-approve">Hold to seal</button>';
   html += '<button type="button" class="seal-cancel btn" style="background:transparent;'
     + 'border:1px solid var(--line);border-radius:10px;padding:8px 14px;cursor:pointer">'
@@ -1605,6 +1662,10 @@ window.VinceoResponse = {
     mistake: {label: 'Common mistake', icon: '!'},
     note: {label: 'Note', icon: '·'},
     summary: {label: 'Summary', icon: '◎'},
+    confirmed: {label: 'Confirmed', icon: '✓'},
+    likely: {label: 'Likely', icon: '~'},
+    conflicting: {label: 'Conflicting', icon: '≠'},
+    missing: {label: 'Missing', icon: '?'},
   },
   emphasize(text, terms) {
     let html = esc(text || '');
@@ -1651,7 +1712,9 @@ window.VinceoResponse = {
     if (t === 'code') {
       return '<pre class="rd-code" tabindex="0"><code>' + esc(sec.text || '') + '</code></pre>';
     }
-    if (t === 'list' || t === 'next_actions') {
+    if (t === 'list' || t === 'next_actions'
+        || t === 'confirmed' || t === 'likely'
+        || t === 'conflicting' || t === 'missing') {
       const items = sec.items || [];
       if (!items.length) return '';
       if (t === 'next_actions') {
@@ -1659,6 +1722,15 @@ window.VinceoResponse = {
           + '<span class="rd-card-icon" aria-hidden="true">→</span>Next steps</div>'
           + '<ul class="rd-list">' + items.map(i => '<li>' + esc(i) + '</li>').join('')
           + '</ul></div>';
+      }
+      if (t === 'confirmed' || t === 'likely' || t === 'conflicting' || t === 'missing') {
+        const meta = this.CARD[t] || this.CARD.note;
+        const label = sec.title || meta.label;
+        return '<aside class="rd-card ' + t + '" role="note">'
+          + '<div class="rd-card-head"><span class="rd-card-icon" aria-hidden="true">'
+          + meta.icon + '</span>' + esc(label) + '</div>'
+          + '<ul class="rd-list">' + items.map(i => '<li>' + esc(i) + '</li>').join('')
+          + '</ul></aside>';
       }
       return '<ul class="rd-list">' + items.map(i => '<li>' + esc(i) + '</li>').join('') + '</ul>';
     }
@@ -1863,6 +1935,12 @@ window.VinceoCapture = {
       const box = document.getElementById('pv_' + s.key);
       if (box) box.checked = !!src[s.key];
     });
+    const ret = (this._state && this._state.meeting_mode
+      && this._state.meeting_mode.default_retention) || 'transcript_only';
+    const t = document.getElementById('pv_ret_transcript');
+    const r = document.getElementById('pv_ret_receipts');
+    if (t) t.checked = ret !== 'keep_receipts';
+    if (r) r.checked = ret === 'keep_receipts';
     el.classList.add('open');
   },
   closePrivacy() {
@@ -1877,6 +1955,15 @@ window.VinceoCapture = {
     });
     try {
       this._state = await this.saveConsent(sources);
+      const retEl = document.querySelector('input[name="pv_retention"]:checked');
+      if (retEl && retEl.value) {
+        await fetch('/meeting/retention', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({retention: retEl.value, default: true}),
+        });
+      }
+      this._state = await this.status();
       this.render();
       this.closePrivacy();
     } catch (e) {}
@@ -1920,6 +2007,16 @@ window.VinceoCapture = {
       + rows
       + '<div class="pv-warn">System audio and screen can capture other people '
       + 'in meetings or nearby — only enable when everyone expects it.</div>'
+      + '<div class="pv-ret" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line)">'
+      + '<b style="font-size:13px;color:var(--navy)">After meetings</b>'
+      + '<p style="font-size:12px;color:var(--mut);margin:6px 0 8px;line-height:1.45">'
+      + 'Transcript-only = Granola-parity (WAVs deleted, note stays). '
+      + 'Keep receipts = playback and dispute-proof memory.</p>'
+      + '<label class="pv-src"><input type="radio" name="pv_retention" id="pv_ret_transcript" value="transcript_only">'
+      + '<div><b>Transcript-only</b><span>Delete session audio; keep the note.</span></div></label>'
+      + '<label class="pv-src"><input type="radio" name="pv_retention" id="pv_ret_receipts" value="keep_receipts">'
+      + '<div><b>Keep receipts</b><span>Retain WAVs for “Play the moment”.</span></div></label>'
+      + '</div>'
       + '<div class="pv-actions">'
       + '<button type="button" class="pv-btn quiet" id="pvRevoke">Turn all off</button>'
       + '<button type="button" class="pv-btn quiet" id="pvCancel">Not now</button>'
@@ -1950,9 +2047,18 @@ window.VinceoCapture = {
     const consent = this._state.consent || {};
     const sources = consent.sources || {};
     const running = this._state.running || {};
+    const mm = this._state.meeting_mode || {};
     const liveKeys = ['mic', 'webcam', 'screen', 'system_audio'];
     const consented = !!consent.consented;
     let html = '';
+    if (mm.active) {
+      html += '<div class="rec-row meeting">'
+        + '<span class="rec-chip meeting-on" title="Meeting mode — hotter capture">'
+        + '<span class="dot" aria-hidden="true"></span>'
+        + '<span>Meeting · capturing'
+        + (mm.title ? (' · ' + String(mm.title).slice(0, 40)) : '')
+        + '</span></span></div>';
+    }
     if (!consented) {
       html += '<button type="button" class="rec-consent-btn" id="recOpenPrivacy">'
         + 'Enable capture…</button>';

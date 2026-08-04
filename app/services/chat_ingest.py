@@ -98,7 +98,14 @@ def run_job(payload: dict) -> None:
 
     store = get_store()
     now = time.time()
-    facts = extractor._extract_text(text)
+    # Typed chat is the enrolled user speaking — label so owner='me' maps to self.
+    speaker = None
+    try:
+        from app.services.identity import user_identity
+        speaker = (user_identity(store).get("name") or "").strip() or None
+    except Exception:
+        pass
+    facts = extractor._extract_text(text, speaker=speaker)
     n = _persist_facts(store, facts, anchor, text, now)
     try:
         if anchor is not None:

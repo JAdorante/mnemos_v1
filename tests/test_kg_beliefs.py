@@ -161,5 +161,121 @@ class KgExplainEndpointTests(unittest.TestCase):
         self.assertIn("works_at", r.json().get("explanation", ""))
 
 
+class StructuredClaimBeliefTests(unittest.TestCase):
+    """Plan 2.5 — parseable claims → kg_beliefs; money conflict_flag."""
+
+    def test_david_said_49_queryable_by_speaker(self):
+        from app.services import kg_beliefs
+        from app.services.consolidation import Turn
+        from app.services.extractor import Extractor
+        with tempfile.TemporaryDirectory() as td:
+            store = _mk(td)
+            try:
+                ex = Extractor(store=store)
+                turn = Turn(
+                    start=NOW, end=NOW, speaker="Hugh",
+                    text="David said the pilot plan is $49 a month",
+                    event_ids=[], n_utterances=1)
+                facts = {
+                    "tasks": [], "commitments": [],
+                    "claims": [{
+                        "text": "David said the pilot plan is $49 a month",
+                        "confidence": 0.9,
+                        "source_span": "the pilot plan is $49 a month",
+                        "assertion": "stated_by_other",
+                        "subject": "pilot plan",
+                        "predicate": "costs",
+                        "object": "$49",
+                        "speaker_is_source": False,
+                    }],
+                    "entities": [], "relations": [],
+                }
+                n = ex._persist(turn, facts, NOW)
+                self.assertGreaterEqual(n, 1)
+                hits = kg_beliefs.beliefs_by_speaker(store, "David")
+                self.assertTrue(hits, "expected belief evidence attributed to David")
+                pred = hits[0]["predicate"]
+                self.assertEqual(pred.get("predicate"), "costs")
+                # Object entity is the literal $49
+                obj = store.get_entity(int(pred["obj_id"])) if hasattr(
+                    store, "get_entity") else None
+                if obj:
+                    self.assertIn("49", obj.get("name") or "")
+            finally:
+                store.close()
+
+    def test_simultaneous_price_conflict_flag_no_overwrite(self):
+        from app.services import kg_beliefs
+        with tempfile.TemporaryDirectory() as td:
+            store = _mk(td)
+            try:
+                subj = store.resolve_entity("pilot plan", "other", ts=NOW)
+                o49 = store.resolve_entity("$49", "other", ts=NOW)
+                o55 = store.resolve_entity("$55", "other", ts=NOW)
+                r1 = kg_beliefs.record_from_claim(
+                    store, subj_type="entity", subj_id=subj,
+                    predicate="costs", obj_type="entity", obj_id=o49,
+                    fact_id=1, confidence=0.9, ts=NOW,
+                    quote="pilot plan is $49", source_class="private_conversation",
+                    speaker="David", speaker_is_source=False)
+                self.assertTrue(r1.get("ok"))
+                r2 = kg_beliefs.record_from_claim(
+                    store, subj_type="entity", subj_id=subj,
+                    predicate="costs", obj_type="entity", obj_id=o55,
+                    fact_id=2, confidence=0.9, ts=NOW + 60,
+                    quote="pilot plan is $55", source_class="private_conversation",
+                    speaker="David", speaker_is_source=False)
+                self.assertTrue(r2.get("ok"))
+                # Both stay active — never silent overwrite
+                p49 = store.find_kg_predicate(
+                    subj_type="entity", subj_id=subj, predicate="costs",
+                    obj_type="entity", obj_id=o49)
+                p55 = store.find_kg_predicate(
+                    subj_type="entity", subj_id=subj, predicate="costs",
+                    obj_type="entity", obj_id=o55)
+                self.assertIsNotNone(p49)
+                self.assertIsNotNone(p55)
+                self.assertTrue(p49.get("conflict"))
+                self.assertTrue(p55.get("conflict"))
+                flags = store.list_adjudications(kind="conflict_flag", limit=20)
+                self.assertTrue(flags)
+                self.assertEqual(flags[0].get("decision"), "defer")
+            finally:
+                store.close()
+
+    def test_unparseable_claim_stays_flat(self):
+        from app.services.consolidation import Turn
+        from app.services.extractor import Extractor
+        with tempfile.TemporaryDirectory() as td:
+            store = _mk(td)
+            try:
+                ex = Extractor(store=store)
+                turn = Turn(
+                    start=NOW, end=NOW, speaker="Hugh",
+                    text="The vibe in the room was weird",
+                    event_ids=[], n_utterances=1)
+                facts = {
+                    "tasks": [], "commitments": [],
+                    "claims": [{
+                        "text": "The vibe in the room was weird",
+                        "confidence": 0.7,
+                        "source_span": "The vibe in the room was weird",
+                        "assertion": "stated_by_user",
+                        "subject": "",
+                        "predicate": "",
+                        "object": "",
+                    }],
+                    "entities": [], "relations": [],
+                }
+                ex._persist(turn, facts, NOW)
+                # Flat claim exists; no costs/priced_at/due_on beliefs.
+                claims = store.list_facts(kind="claim", limit=20)
+                self.assertTrue(claims)
+                preds = store.list_kg_predicates(predicate="costs", limit=20)
+                self.assertEqual(preds, [])
+            finally:
+                store.close()
+
+
 if __name__ == "__main__":
     unittest.main()

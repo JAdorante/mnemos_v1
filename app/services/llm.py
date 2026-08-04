@@ -80,4 +80,18 @@ def answer(question: str) -> dict:
                 out["answer"] = reply
     except Exception as exc:
         print(f"[llm] generation skipped ({exc}); returning retrieval-only answer.")
+    # Deterministic answer-check (plan 3.2) — fabricated name/date/price tokens
+    # against the retrieval block downgrade to an evidence dump.
+    try:
+        from app.services.answer_check import check_answer
+        checked = check_answer(
+            out.get("answer") or "",
+            context or "",
+            question=question,
+            sources=sources,
+        )
+        out["answer"] = checked.text
+        out["answer_check"] = checked.to_dict()
+    except Exception as exc:
+        print(f"[llm] answer_check skipped ({exc}).")
     return out

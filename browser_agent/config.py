@@ -127,6 +127,21 @@ if DRY_RUN not in DRY_RUN_LEVELS:
 
 # --- Approval gate (P2) ----------------------------------------------------
 REQUIRE_APPROVAL = True                # gate irreversible actions on human OK
+# Approval binding (plan 0.4 → default-on for 5.2): at the irreversible commit
+# click, re-hash the about-to-execute args and require hash == packet.payload_hash
+# and now < expires_at.
+#   off      — disabled
+#   shadow   — log drift/expiry, allow the click
+#   enforce  — hard-stop + re-ask with diff on mismatch (code default)
+_APPROVAL_BIND_RAW = os.environ.get("QUILL_APPROVAL_BIND", "enforce").strip().lower()
+if _APPROVAL_BIND_RAW in ("0", "off", "false", "no"):
+    APPROVAL_BIND = "off"
+elif _APPROVAL_BIND_RAW in ("shadow", "log"):
+    APPROVAL_BIND = "shadow"
+elif _APPROVAL_BIND_RAW in ("enforce", "on", "1", "true", "yes"):
+    APPROVAL_BIND = "enforce"
+else:
+    APPROVAL_BIND = "enforce"
 # Accessible-name patterns that look like they COMMIT something irreversible.
 # A click on a matching control is stopped for approval even if the model did
 # not ask — a non-LLM safety net, so a mis-classifying model can't send/buy/

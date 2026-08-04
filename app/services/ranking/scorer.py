@@ -39,7 +39,7 @@ def _parse_id(nid: str) -> tuple[str, int] | None:
 def _component_labels(n: dict, *, pinned: bool, pros: float, rel: float,
                       cent: float, temp: float, conf: float, act: float = 0.0,
                       mode_mult: float = 1.0, mode_label: str | None = None,
-                      aging: float = 0.0
+                      aging: float = 0.0, note_adj: float = 0.0
                       ) -> dict[str, str]:
     kind = n.get("kind") or ""
     is_open = kind in ("commitment", "task")
@@ -110,6 +110,12 @@ def _component_labels(n: dict, *, pinned: bool, pros: float, rel: float,
         labels["aging"] = "Starting to age without follow-through"
     else:
         labels["aging"] = "Not aging"
+    if note_adj >= 1.0:
+        labels["note_adjacent"] = "Co-timed with your live meeting note"
+    elif note_adj > 0:
+        labels["note_adjacent"] = "Near a live meeting note"
+    else:
+        labels["note_adjacent"] = "No notepad anchor"
     if mode_mult != 1.0 and mode_label:
         labels["context"] = f"Ranking for: {mode_label}"
     elif mode_mult != 1.0:
@@ -139,6 +145,9 @@ def _evidence_for(key: str, n: dict) -> tuple[list[str], str | None]:
         act_refs = list(meta.get("activation_evidence") or [])
         return act_refs, (None if act_refs else "none")
     if key == "aging":
+        fid = n.get("id") if (n.get("kind") in ("task", "commitment")) else None
+        return ([fid] if fid else []), (None if fid else "none")
+    if key == "note_adjacent":
         fid = n.get("id") if (n.get("kind") in ("task", "commitment")) else None
         return ([fid] if fid else []), (None if fid else "none")
     return [], "none"
@@ -233,6 +242,7 @@ def _features_from_candidate(n: dict) -> dict[str, float]:
         "b": float(n.get("_feat_b") or 0.0),
         "v": float(n.get("_feat_v") or 0.0),
         "aging": float(n.get("_feat_aging") or 0.0),
+        "note_adjacent": float(n.get("_feat_note_adjacent") or 0.0),
     }
 
 
@@ -275,6 +285,7 @@ class GravityScorer(Scorer):
                 from app.services.field_history import aging_signal
                 aging = aging_signal(age, kind=n.get("kind") or "")
                 n["_feat_aging"] = aging
+            note_adj = float(feat.get("note_adjacent") or 0.0)
 
             scored = score_gravity(
                 kind=n.get("kind") or "idea",
@@ -298,14 +309,16 @@ class GravityScorer(Scorer):
             sem_eff = sem if sem else (
                 0.55 if n.get("kind") == "person" else 0.35)
             aging_w = float(w.get("aging", 0.95))
-            # Recompute gravity with aging term in raw.
+            note_w = float(w.get("note_adjacent", 1.20))
+            # Recompute gravity with aging + note-adjacent terms in raw.
             # Open commitments resist decay as they age — follow-through
             # must not fade the longer a promise sits open.
             decay = float(scored["decay"])
             trust = float(scored["trust"])
             if aging > 0 and (n.get("kind") in ("task", "commitment")):
                 decay = decay + (1.0 - decay) * min(1.0, aging * 1.15)
-            raw_with_aging = float(scored["raw"]) + aging_w * aging
+            raw_with_aging = (float(scored["raw"]) + aging_w * aging
+                              + note_w * note_adj)
             from app.services.graph import _sigmoid, GRAVITY as _G
             g1 = (_sigmoid(raw_with_aging - _G["sigmoid_offset"])
                   * decay * trust)
@@ -321,6 +334,8 @@ class GravityScorer(Scorer):
             ]
             if aging > 1e-9:
                 contributions.append(("aging", aging_w * aging))
+            if note_adj > 1e-9:
+                contributions.append(("note_adjacent", note_w * note_adj))
             # Drop near-zero for quieter breakdowns but keep pin if pinned.
             contributions = [
                 (k, v) for k, v in contributions
@@ -333,7 +348,7 @@ class GravityScorer(Scorer):
             labels = _component_labels(
                 n, pinned=pinned, pros=pros, rel=rel, cent=cent,
                 temp=temp, conf=conf, mode_mult=mode_mult,
-                mode_label=mode_label, aging=aging)
+                mode_label=mode_label, aging=aging, note_adj=note_adj)
             if abs(mode_mult - 1.0) > 1e-9:
                 comps = _scale_components_to_total(
                     contributions, g1, labels, n)
@@ -538,14 +553,16 @@ class FieldV2Scorer(Scorer):
                 from app.services.field_history import aging_signal
                 aging = aging_signal(age, kind=n.get("kind") or "")
                 n["_feat_aging"] = aging
+            note_adj = float(feat.get("note_adjacent") or 0.0)
             aging_w = float(w.get("aging", 0.95))
+            note_w = float(w.get("note_adjacent", 1.20))
             # Open commitments resist decay + gain an aging boost (same as Gravity).
             decay = float(scored["decay"])
             trust = float(scored["trust"])
             if aging > 0 and (n.get("kind") in ("task", "commitment")):
                 decay = decay + (1.0 - decay) * min(1.0, aging * 1.15)
             from app.services.graph import _sigmoid, GRAVITY as _G
-            # Rebuild v2 with aging in the raw channel.
+            # Rebuild v2 with aging + note-adjacent in the raw channel.
             ww = learned_w or w
             raw_v2 = (
                 ww.get("pin", 1.35) * is_pin
@@ -559,6 +576,7 @@ class FieldV2Scorer(Scorer):
                 + ww.get("temp", 0.70) * b_val
                 + ww.get("act", 0.90) * act_val
                 + aging_w * aging
+                + note_w * note_adj
                 - ww.get("unc", 0.80) * unc
             )
             v2_live = _sigmoid(raw_v2 - _G["sigmoid_offset"]) * decay * trust
@@ -575,6 +593,8 @@ class FieldV2Scorer(Scorer):
             ]
             if aging > 1e-9:
                 contributions.append(("aging", aging_w * aging))
+            if note_adj > 1e-9:
+                contributions.append(("note_adjacent", note_w * note_adj))
             contributions = [
                 (k, v) for k, v in contributions
                 if abs(v) > 1e-9 or (k == "pin" and pinned)
@@ -587,7 +607,8 @@ class FieldV2Scorer(Scorer):
             labels = _component_labels(
                 n, pinned=pinned, pros=pros, rel=rel, cent=cent,
                 temp=b_val, conf=conf, act=act_val,
-                mode_mult=mode_mult, mode_label=mode_label, aging=aging)
+                mode_mult=mode_mult, mode_label=mode_label, aging=aging,
+                note_adj=note_adj)
 
             if abs(mode_mult - 1.0) > 1e-9:
                 comps = _scale_components_to_total(

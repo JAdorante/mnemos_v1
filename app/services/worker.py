@@ -4,7 +4,8 @@ The processing pipeline (consolidate now; extract next) is too slow to run on
 the capture callback or an HTTP request, and must survive a crash. So instead of
 doing that work inline, producers `enqueue()` a row in the SQLite `jobs` table
 and this worker drains it on its own thread: claim -> dispatch -> finish, with
-bounded retries and a wake signal so it reacts promptly instead of only polling.
+bounded retries (default 5), exponential backoff, dead-letter on exhaustion,
+and a wake signal so it reacts promptly instead of only polling.
 
 This is the "one queue, one worker" from the PRD — minus Celery/Redis, which buy
 nothing for a single-process laptop prototype. Handlers are a `{kind: fn}`
@@ -130,8 +131,11 @@ class JobWorker:
         except Exception as exc:
             self.last_error = f"{job['kind']}: {exc}"
             status = self._s().fail_job(job["id"], str(exc), self._max)
+            label = ("dead-letter"
+                     if status == "dead"
+                     else f"retry (backoff, {status})")
             print(f"[worker] job {job['id']} ({job['kind']}) failed "
-                  f"[attempt {job['attempts']}] -> {status}: {exc}")
+                  f"[attempt {job['attempts']}/{self._max}] -> {label}: {exc}")
 
 
 # Process-wide worker. Handlers are registered at startup (see app/main.py).

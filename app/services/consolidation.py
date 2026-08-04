@@ -35,6 +35,29 @@ def enrolled_name(ev: Event) -> str:
     return ""
 
 
+def speaker_label(turn: "Turn | dict | None") -> str:
+    """Display name for extractor labeling (plan 2.1). Empty → 'unknown speaker'."""
+    if turn is None:
+        return "unknown speaker"
+    if isinstance(turn, dict):
+        spk = (turn.get("speaker") or "").strip()
+    else:
+        spk = (getattr(turn, "speaker", None) or "").strip()
+    return spk if spk else "unknown speaker"
+
+
+def format_turn_transcript(turn: "Turn | dict | None", text: str | None = None) -> str:
+    """`[<speaker or 'unknown speaker'>]: <text>` for speaker-aware extraction."""
+    if text is None:
+        if turn is None:
+            text = ""
+        elif isinstance(turn, dict):
+            text = turn.get("text") or ""
+        else:
+            text = getattr(turn, "text", None) or ""
+    return f"[{speaker_label(turn)}]: {(text or '').strip()}"
+
+
 def _display_label(ev: Event) -> str:
     """A label to show (anonymous cluster label or person), best-effort."""
     spk = ev.meta.get("speaker") if isinstance(ev.meta, dict) else None

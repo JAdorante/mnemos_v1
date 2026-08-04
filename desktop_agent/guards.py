@@ -78,15 +78,38 @@ def _first_verb(argv: list[str]) -> str:
     return v
 
 
+def _risk_table_blocks_verb(verb: str) -> str | None:
+    """Consult RISK_TABLE (via agent_planner) — one policy source (plan 0.7).
+
+    Returns a refusal reason when the shell verb maps to a blocked action kind
+    (delete/remove). Falls back to None when app.* is unavailable so the
+    desktop package stays importable standalone; local BLOCKED_VERBS still apply.
+    """
+    try:
+        from app.services.agent_planner import (
+            kind_for_shell_verb, policy_block_reason,
+        )
+    except Exception:
+        return None
+    kind = kind_for_shell_verb(verb)
+    if not kind:
+        return None
+    return policy_block_reason(kind=kind, label=verb)
+
+
 def scan_danger(argv: list[str]) -> str | None:
     """Return a reason string if the command is categorically unsafe, else None.
 
     This runs BEFORE allowlist classification: a hit here is a hard block that no
-    approval can override.
+    approval can override — including autonomous mode (plan 0.7).
     """
     if not argv:
         return "empty command"
     verb = _first_verb(argv)
+    # RISK_TABLE first — single semantic policy for delete/remove.
+    policy = _risk_table_blocks_verb(verb)
+    if policy:
+        return policy
     if verb in cfg.BLOCKED_VERBS:
         return f"blocked verb: {verb!r} (destructive / elevation / nested shell)"
     for arg in argv:
@@ -98,6 +121,34 @@ def scan_danger(argv: list[str]) -> str | None:
         if ".." in Path(str(arg)).parts:
             return f"path traversal in argument: {arg!r}"
     return None
+
+
+def policy_blocks(*, verb: str | None = None, summary: str = "",
+                  label: str = "", fields: dict | None = None) -> str | None:
+    """Desktop-facing RISK_TABLE check for mutating actions (plan 0.7).
+
+    Used by the driver before the approval ask so autonomous auto-approve
+    cannot unlock delete/remove. Returns a refusal reason or None.
+    """
+    fields = fields or {}
+    action = (fields.get("action") or verb or "").strip()
+    try:
+        from app.services.agent_planner import (
+            kind_for_shell_verb, policy_block_reason,
+        )
+    except Exception:
+        # Standalone fallback: block obvious delete/remove labels only.
+        import re
+        text = f"{action} {summary} {label}"
+        if re.search(r"\b(delete|remove|erase|uninstall)\b", text, re.I):
+            return f"blocked by policy (delete) — autonomous mode cannot override"
+        return None
+    kind = ""
+    if verb:
+        kind = kind_for_shell_verb(verb) or ""
+    return policy_block_reason(
+        kind=kind or action, goal=summary or "",
+        label=label or action, summary=summary or "")
 
 
 def classify_command(argv: list[str]) -> tuple[Tier, str]:

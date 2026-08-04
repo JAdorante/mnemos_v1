@@ -331,10 +331,17 @@ class CaptureSourceBody(BaseModel):
 def capture_status() -> dict:
     """Recording indicator payload: consent + live sources."""
     from app.services import capture_consent
+    meeting = {}
+    try:
+        from app.services import meeting_mode as _mm
+        meeting = _mm.status()
+    except Exception:
+        meeting = {}
     return {
         "consent": capture_consent.status(),
         "running": _running_map(),
         "save_audio": bool(settings.storage.save_audio),
+        "meeting_mode": meeting,
     }
 
 
@@ -784,10 +791,23 @@ def artifact(path: str = Query(..., description="absolute path to a stored clip/
 @router.get("/console/models")
 def console_models() -> dict:
     """Model-call telemetry: per (task, provider, model) calls, latency, and
-    estimated cost — the measure of what local-first vision saves vs Claude."""
+    estimated cost — the measure of what local-first vision saves vs Claude.
+    Includes privacy egress summary (plan 6.2)."""
     from app.services.model_log import model_log
 
     return model_log.stats()
+
+
+@router.get("/console/egress")
+def console_egress(recent: int = 40) -> dict:
+    """Plan 6.2 — auditable 'what left the machine' inventory.
+
+    Recent external model calls with privacy_max (highest class sent or
+    refused), plus class histogram. Complements /console/models spend view.
+    """
+    from app.services.model_log import model_log
+
+    return model_log.egress_inventory(recent=max(0, min(int(recent), 200)))
 
 
 @router.get("/console/escalate")
@@ -1011,12 +1031,18 @@ def console_activity_events(ids: str = "") -> dict:
 
 @router.get("/console/jobs")
 def console_jobs(limit: int = 20) -> dict:
-    """Background worker status: job counts by state + the most recent jobs."""
+    """Background worker status: job counts by state, recent jobs, and the
+    dead-letter queue (poisoned jobs parked after max attempts — plan 0.10)."""
     store = memory._ensure_store()
     from app.services.worker import worker
 
-    return {"stats": store.job_stats(), "recent": store.recent_jobs(limit),
-            "last_error": worker.last_error}
+    return {
+        "stats": store.job_stats(),
+        "recent": store.recent_jobs(limit),
+        "dead": store.dead_jobs(limit),
+        "last_error": worker.last_error,
+        "max_attempts": settings.worker.max_attempts,
+    }
 
 
 @router.get("/console/camera-health")
@@ -1060,6 +1086,26 @@ def console_agent_run(run_id: int) -> dict:
     if run is None:
         raise HTTPException(status_code=404, detail="no such agent run")
     return run
+
+
+@router.get("/console/trace/{correlation_id}")
+def console_trace(correlation_id: str, request: Request,
+                  format: str | None = None) -> Response:
+    """The full audit chain for one correlation_id (plan 1.5/1.6): the source
+    events, the raw fact_candidates rows, materialized facts, and any tagged
+    agent_runs — so a fact (or an agent action) traces back to the exact
+    utterance that produced it. JSON by default; HTML with `?format=html` or
+    an Accept: text/html request (`?format=json` always forces JSON)."""
+    from fastapi.responses import JSONResponse
+
+    chain = memory._ensure_store().trace_chain(correlation_id)
+    fmt = (format or "").strip().lower()
+    wants_html = fmt == "html" or (
+        fmt != "json" and "text/html" in (request.headers.get("accept") or ""))
+    if wants_html:
+        from app.api.trace_page import render_trace_page
+        return HTMLResponse(render_trace_page(correlation_id, chain))
+    return JSONResponse(chain)
 
 
 # --- knowledge graph (v1): traversal over people/facts/events ---------------
@@ -1193,12 +1239,18 @@ def kg_backfill_enqueue() -> dict:
 
 @router.get("/kg/parity")
 def kg_parity_status(run: bool = False) -> dict:
-    """Change 8: latest dual-write parity reports + M3 cutover gate."""
+    """Change 8: latest dual-write parity reports + M3 cutover gate.
+
+    Plan 2.6: `read_v2` is true when constellation/grounding primary-read
+    kg_beliefs (7 clean reports, or QUILL_KG_READ_V2 override).
+    """
     from app.services import kg_parity
     store = memory._ensure_store()
     if run:
         kg_parity.run(store)
-    return {"gate": kg_parity.cutover_ready(store),
+    gate = kg_parity.cutover_ready(store)
+    return {"gate": gate,
+            "read_v2": kg_parity.read_v2_enabled(store),
             "reports": kg_parity.latest_reports(store)}
 
 
@@ -1520,6 +1572,14 @@ def console_economy_lance_optimize() -> dict:
     """Force Lance compact + version prune (recovery from version backlog)."""
     from app.vectorstore import get_vectorstore
     return get_vectorstore().force_optimize()
+
+
+@router.post("/console/economy/vector-gc")
+def console_economy_vector_gc() -> dict:
+    """Plan 6.6: drop Lance rows for dismissed/superseded/evidence_removed
+    facts past the grace window, then optimize."""
+    from app.services import memory as memory_svc
+    return memory_svc.vector_gc(memory._ensure_store())
 
 
 @router.get("/console/predictors")
@@ -2039,6 +2099,217 @@ def shell_restore(body: ShellRestoreIn) -> dict:
     return _today_restore(body)
 
 
+class SessionNoteIn(BaseModel):
+    text: str
+    session_id: int | None = None
+
+
+def _session_note(body: SessionNoteIn) -> dict:
+    """Meeting Layer P2 — notepad jot → meeting.note TEXT event."""
+    from app.services import meeting_notes
+    eid = meeting_notes.ingest(
+        body.text,
+        store=memory._ensure_store(),
+        session_id=body.session_id,
+    )
+    if eid is None:
+        raise HTTPException(status_code=400,
+                            detail="note too short or notes disabled")
+    return {"ok": True, "event_id": int(eid), "text": (body.text or "").strip()}
+
+
+@router.post("/session/note")
+def session_note(body: SessionNoteIn) -> dict:
+    return _session_note(body)
+
+
+@router.post("/today/note")
+def today_note(body: SessionNoteIn) -> dict:
+    """Alias for /session/note (Today notepad)."""
+    return _session_note(body)
+
+
+# --- Meeting Layer P3: enhanced meeting notes with receipts ----------------
+def _meeting_title(summary: str) -> str:
+    title = (summary or "").split("\n", 1)[0].strip() or "Meeting note"
+    if " · " in title:
+        title = title.split(" · ", 1)[0].strip()
+    return title
+
+
+@router.get("/meetings", response_class=HTMLResponse)
+def meetings_page() -> HTMLResponse:
+    from app.api.meeting_page import MEETINGS_LIST_PAGE
+    return _html_with_approval(MEETINGS_LIST_PAGE, next_url="/meetings")
+
+
+@router.get("/meetings/list")
+def meetings_list(limit: int = 40) -> dict:
+    from app.services import meeting_enhance
+    store = memory._ensure_store()
+    rows = store.list_reflections(scope="meeting", limit=limit)
+    out = []
+    for r in rows:
+        items = store.reflection_items(r["id"])
+        when = ""
+        if r.get("period_start"):
+            import time as _t
+            when = _t.strftime("%a %b %d %H:%M", _t.localtime(r["period_start"]))
+        out.append({
+            "id": r["id"],
+            "title": _meeting_title(r.get("summary") or ""),
+            "when": when,
+            "n_items": len(items),
+            "created_at": r.get("created_at"),
+        })
+    return {"meetings": out}
+
+
+@router.get("/meeting/note/latest")
+def meeting_note_latest(format: str = "html"):
+    """Latest meeting note — `?format=json` for the hydrated payload."""
+    from app.services import meeting_enhance
+    store = memory._ensure_store()
+    header = store.latest_reflection("meeting")
+    if (format or "").lower() == "json":
+        if not header:
+            return {"note": None}
+        return {"note": meeting_enhance.hydrate_meeting_note(store, header)}
+    from app.api.meeting_page import MEETING_PAGE
+    page = MEETING_PAGE.replace("@@NOTE_ID@@", "null")
+    return _html_with_approval(page, next_url="/meeting/note/latest")
+
+
+@router.get("/meeting/note/{reflection_id}")
+def meeting_note(reflection_id: int, format: str = "html"):
+    from app.services import meeting_enhance
+    store = memory._ensure_store()
+    header = store.get_reflection(reflection_id)
+    if header is None or header.get("scope") != "meeting":
+        raise HTTPException(status_code=404, detail="meeting note not found")
+    if (format or "").lower() == "json":
+        return {"note": meeting_enhance.hydrate_meeting_note(store, header)}
+    from app.api.meeting_page import MEETING_PAGE
+    page = MEETING_PAGE.replace("@@NOTE_ID@@", str(int(reflection_id)))
+    return _html_with_approval(
+        page, next_url=f"/meeting/note/{reflection_id}")
+
+
+@router.post("/meeting/enhance")
+def meeting_enhance_run(force: bool = False) -> dict:
+    """Manual trigger — enhance eligible settled sessions now."""
+    from app.services import meeting_enhance
+    return meeting_enhance.run_once(
+        memory._ensure_store(), verbose=True, force=force)
+
+
+# --- Meeting Layer P4: ask this meeting + draft follow-up ------------------
+class MeetingAskIn(BaseModel):
+    question: str
+    session_id: int | None = None
+
+
+class MeetingDraftIn(BaseModel):
+    to: str | None = None
+    dry_run: str | None = "draft"
+
+
+@router.post("/meeting/note/{reflection_id}/ask")
+def meeting_note_ask(reflection_id: int, body: MeetingAskIn) -> dict:
+    """Answer a question scoped to one meeting note (no browser agent)."""
+    from app.services import meeting_chat
+    out = meeting_chat.ask(
+        body.question,
+        meeting_reflection_id=int(reflection_id),
+        session_id=body.session_id,
+        store=memory._ensure_store(),
+    )
+    if not out.get("ok"):
+        raise HTTPException(status_code=404, detail=out.get("error") or "ask failed")
+    return out
+
+
+@router.post("/meeting/note/{reflection_id}/draft")
+def meeting_note_draft(reflection_id: int, body: MeetingDraftIn | None = None) -> dict:
+    """Enqueue a grounded follow-up draft citing the note's fact ids."""
+    from app.services import meeting_chat
+    body = body or MeetingDraftIn()
+    dry = (body.dry_run or "draft").strip().lower()
+    if dry not in ("draft", "plan", "navigate", "approval", "full", "autonomous"):
+        dry = "draft"
+    out = meeting_chat.draft_followup(
+        int(reflection_id),
+        store=memory._ensure_store(),
+        dry_run=dry,
+        to=body.to,
+    )
+    if not out.get("ok"):
+        code = 503 if "agent" in (out.get("error") or "") else 404
+        raise HTTPException(status_code=code, detail=out.get("error") or "draft failed")
+    return out
+
+
+# --- Meeting Layer P5: meeting mode + retention ----------------------------
+class MeetingModeIn(BaseModel):
+    until: float | None = None
+    title: str | None = None
+    calendar_event_id: str | None = None
+    session_id: int | None = None
+
+
+class MeetingRetentionIn(BaseModel):
+    retention: str  # transcript_only | keep_receipts
+    session_id: int | None = None
+    calendar_event_id: str | None = None
+    default: bool = False  # when True, set the user default preference
+
+
+@router.get("/meeting/mode")
+def meeting_mode_get() -> dict:
+    from app.services import meeting_mode as _mm
+    return _mm.status()
+
+
+@router.post("/meeting/mode")
+def meeting_mode_enter(body: MeetingModeIn) -> dict:
+    from app.services import meeting_mode as _mm
+    return _mm.enter(
+        until=body.until,
+        title=body.title or "",
+        calendar_event_id=body.calendar_event_id,
+        session_id=body.session_id,
+        source="manual",
+    )
+
+
+@router.post("/meeting/mode/exit")
+def meeting_mode_exit() -> dict:
+    from app.services import meeting_mode as _mm
+    return _mm.exit_mode(reason="manual")
+
+
+@router.post("/meeting/retention")
+def meeting_retention_set(body: MeetingRetentionIn) -> dict:
+    """Set default retention preference and/or apply to one session."""
+    from app.services import meeting_mode as _mm
+    if body.default:
+        try:
+            prefs = _mm.set_default_retention(body.retention)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, "default_retention": prefs.get("default_retention")}
+    out = _mm.set_session_retention(
+        body.retention,
+        session_id=body.session_id,
+        calendar_event_id=body.calendar_event_id,
+        store=memory._ensure_store(),
+        apply=True,
+    )
+    if not out.get("ok"):
+        raise HTTPException(status_code=400, detail=out.get("error") or "bad retention")
+    return out
+
+
 @router.get("/approvals/state")
 def approvals_state() -> dict:
     """Current pending approval/offer for the global banner."""
@@ -2056,6 +2327,7 @@ async def approvals_resolve(
     """Yes/No for the global banner — works without JS (303 redirect).
 
     With `as_json=1` or Accept: application/json returns JSON instead of redirecting.
+    When a bound packet is pending, resolve() routes through hash-checked decide.
     """
     from app.api.approval_partial import resolve as _resolve
 
@@ -2067,8 +2339,63 @@ async def approvals_resolve(
     )
     if want_json:
         from fastapi.responses import JSONResponse
-        return JSONResponse(result if isinstance(result, dict) else {"ok": True, "result": result})
+        status = 200 if (isinstance(result, dict) and result.get("ok", True)) else 409
+        return JSONResponse(
+            result if isinstance(result, dict) else {"ok": True, "result": result},
+            status_code=status)
     dest = next if str(next).startswith("/") else "/today"
+    return RedirectResponse(url=dest, status_code=303)
+
+
+@router.post("/approval/{packet_id}/decide")
+async def approval_decide(packet_id: int, request: Request) -> Response:
+    """Bound Approve/Cancel/Edit (plan 0.6).
+
+    Accepts JSON `{payload_hash, decision, user_edit?, fields?, approved_via?}`
+    or the same fields as a form POST (banner / no-JS). Stale or drifted
+    `payload_hash` is refused — free text alone cannot authorize the packet.
+    """
+    from app.api.approval_partial import decide as _decide
+    from fastapi.responses import JSONResponse
+
+    ctype = (request.headers.get("content-type") or "").lower()
+    fields = None
+    next_url = "/chat"
+    as_json = ""
+    if "application/json" in ctype:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        payload_hash = body.get("payload_hash") or ""
+        decision = body.get("decision") or "approve"
+        user_edit = body.get("user_edit")
+        approved_via = body.get("approved_via") or "button"
+        fields = body.get("fields")
+        next_url = body.get("next") or "/chat"
+        want_json = True
+    else:
+        form = await request.form()
+        payload_hash = form.get("payload_hash") or ""
+        decision = form.get("decision") or "approve"
+        user_edit = form.get("user_edit")
+        approved_via = form.get("approved_via") or "button"
+        next_url = form.get("next") or "/chat"
+        as_json = form.get("as_json") or ""
+        want_json = (
+            str(as_json).strip() in ("1", "true")
+            or "application/json" in (request.headers.get("accept") or "")
+        )
+
+    result = _decide(
+        _agent_worker(), int(packet_id), str(payload_hash or ""),
+        str(decision or "approve"),
+        user_edit=user_edit, fields=fields,
+        approved_via=str(approved_via or "button"))
+    if want_json:
+        status = 200 if result.get("ok") else 409
+        return JSONResponse(result, status_code=status)
+    dest = next_url if str(next_url).startswith("/") else "/chat"
     return RedirectResponse(url=dest, status_code=303)
 
 
@@ -2181,6 +2508,16 @@ def _fact_view(d: dict) -> dict:
         "source_span": d.get("source_span") or "",
         "source": _provenance(d), "source_event_id": d.get("source_event_id"),
         "source_audio": None,  # filled in by the route from the source event
+        "enhanced_audio": None,
+        "play_path": None,
+        "source_transcript": "",
+        "span_highlight": None,
+        "playable": False,
+        # Plan 4.1 — commitment lifecycle (null for tasks/claims).
+        "commitment_state": d.get("commitment_state"),
+        "completion_evidence_json": d.get("completion_evidence_json"),
+        "last_surfaced": d.get("last_surfaced"),
+        "counterparty_expects": d.get("counterparty_expects"),
     }
 
 
@@ -2192,14 +2529,29 @@ def facts_list(kind: str | None = None, status: str | None = None,
     store = memory._ensure_store()
     rows = store.list_facts(kind=kind, status=status, review=review, limit=limit)
     views = [_fact_view(r) for r in rows]
-    # Attach the source clip so a fact can be heard, not just read (provenance).
+    # Attach the source clip so a fact can be heard, not just read (plan 3.4).
     ids = [v["source_event_id"] for v in views if v.get("source_event_id")]
     if ids:
+        from app.services.evidence_playback import clip_from_event, find_span
         emap = store.by_ids_map(ids)
         for v in views:
             ev = emap.get(v.get("source_event_id"))
-            if ev is not None:
-                v["source_audio"] = (ev.meta or {}).get("audio_path")
+            if ev is None:
+                continue
+            clip = clip_from_event(ev)
+            v["source_audio"] = clip.get("audio_path")
+            v["enhanced_audio"] = clip.get("enhanced_audio")
+            v["play_path"] = clip.get("play_path")
+            v["source_transcript"] = clip.get("transcript") or ""
+            v["playable"] = bool(clip.get("play_path"))
+            span = v.get("source_span") or ""
+            hit = find_span(v["source_transcript"], span) if span else None
+            if hit:
+                v["span_highlight"] = {
+                    "before": hit["before"],
+                    "match": hit["match"],
+                    "after": hit["after"],
+                }
     return {"count": len(views), "facts": views}
 
 
@@ -3031,9 +3383,11 @@ def fact_due(fact_id: int, body: FactDue) -> dict:
 @router.post("/facts/{fact_id}/reopen")
 def fact_reopen(fact_id: int) -> dict:
     """Bring a done/cancelled item back to the open board."""
-    _get_or_404(fact_id)
+    fact = _get_or_404(fact_id)
     memory._ensure_store().set_fact_status(fact_id, "open")
-    return {"ok": True, "fact_id": fact_id, "status": "open"}
+    refreshed = memory._ensure_store().get_fact(fact_id) or fact
+    return {"ok": True, "fact_id": fact_id, "status": "open",
+            "commitment_state": refreshed.get("commitment_state")}
 
 
 @router.post("/facts/{fact_id}/approve")
@@ -3041,7 +3395,9 @@ def fact_approve(fact_id: int) -> dict:
     fact = _get_or_404(fact_id)
     memory._ensure_store().review_fact(fact_id, "approved")
     _label_distill_outcome(fact, "accepted")
-    return {"ok": True, "fact_id": fact_id, "review": "approved"}
+    refreshed = memory._ensure_store().get_fact(fact_id) or fact
+    return {"ok": True, "fact_id": fact_id, "review": "approved",
+            "commitment_state": refreshed.get("commitment_state")}
 
 
 @router.post("/facts/{fact_id}/dismiss")
@@ -3051,14 +3407,53 @@ def fact_dismiss(fact_id: int) -> dict:
     fact = _get_or_404(fact_id)
     memory._ensure_store().review_fact(fact_id, "dismissed")
     _label_distill_outcome(fact, "rejected")
-    return {"ok": True, "fact_id": fact_id, "review": "dismissed"}
+    refreshed = memory._ensure_store().get_fact(fact_id) or fact
+    return {"ok": True, "fact_id": fact_id, "review": "dismissed",
+            "commitment_state": refreshed.get("commitment_state")}
 
 
 @router.post("/facts/{fact_id}/done")
 def fact_done(fact_id: int) -> dict:
-    _get_or_404(fact_id)
+    fact = _get_or_404(fact_id)
     memory._ensure_store().set_fact_status(fact_id, "done")
-    return {"ok": True, "fact_id": fact_id, "status": "done"}
+    refreshed = memory._ensure_store().get_fact(fact_id) or fact
+    return {"ok": True, "fact_id": fact_id, "status": "done",
+            "commitment_state": refreshed.get("commitment_state")}
+
+
+class CommitmentTransitionBody(BaseModel):
+    to_state: str
+    reason: str | None = None
+    evidence: dict | None = None
+    actor: str = "user"
+
+
+@router.post("/facts/{fact_id}/transition")
+def fact_transition(fact_id: int, body: CommitmentTransitionBody) -> dict:
+    """Plan 4.1 — legal commitment state transition with optional evidence."""
+    fact = _get_or_404(fact_id)
+    if fact.get("kind") != "commitment":
+        raise HTTPException(status_code=400,
+                            detail="transition is only for commitments")
+    try:
+        out = memory._ensure_store().transition_commitment(
+            fact_id, body.to_state,
+            reason=body.reason, evidence=body.evidence,
+            actor=body.actor or "user")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return out
+
+
+@router.get("/facts/{fact_id}/transitions")
+def fact_transitions(fact_id: int, limit: int = 50) -> dict:
+    """Commitment transition history (plan 4.1)."""
+    fact = _get_or_404(fact_id)
+    if fact.get("kind") != "commitment":
+        return {"fact_id": fact_id, "transitions": []}
+    rows = memory._ensure_store().list_commitment_transitions(
+        fact_id, limit=limit)
+    return {"fact_id": fact_id, "count": len(rows), "transitions": rows}
 
 
 @router.post("/facts/{fact_id}/edit")
@@ -3912,9 +4307,12 @@ def auth_page() -> HTMLResponse:
 
 
 @router.get("/auth/status")
-def auth_status(request: Request) -> dict:
+def auth_status(request: Request, response: Response) -> dict:
     from app.services import api_auth
 
+    csrf = (request.cookies.get(api_auth.CSRF_COOKIE) or "").strip()
+    if not csrf:
+        csrf = api_auth.apply_csrf_cookie(response)
     return {
         "bind_loopback": api_auth.bind_is_loopback(),
         "lan_gate": not api_auth.bind_is_loopback(),
@@ -3925,31 +4323,30 @@ def auth_status(request: Request) -> dict:
             or api_auth.bind_is_loopback()
             or api_auth.request_authorized(request)
         ),
+        "csrf_token": csrf,
+        "csrf_header": api_auth.CSRF_HEADER,
     }
 
 
 @router.post("/auth/unlock")
 def auth_unlock(body: AuthUnlockIn, response: Response) -> dict:
+    """Unlock LAN browser UI. Cookie gets an HMAC session token (plan 6.3),
+    never the raw QUILL_API_TOKEN — cookie theft ≠ Bearer credential.
+    Also mints the CSRF double-submit cookie (plan 6.4)."""
     from app.services import api_auth
 
     if not api_auth.token_matches(body.token):
         raise HTTPException(status_code=401, detail="invalid token")
-    response.set_cookie(
-        key=api_auth.COOKIE_NAME,
-        value=body.token.strip(),
-        httponly=True,
-        samesite="strict",
-        max_age=60 * 60 * 24 * 30,
-        path="/",
-    )
-    return {"ok": True}
+    api_auth.apply_session_cookie(response, body.token.strip())
+    csrf = api_auth.apply_csrf_cookie(response)
+    return {"ok": True, "csrf_token": csrf}
 
 
 @router.post("/auth/logout")
 def auth_logout(response: Response) -> dict:
     from app.services import api_auth
 
-    response.delete_cookie(api_auth.COOKIE_NAME, path="/")
+    api_auth.clear_session_cookie(response)
     return {"ok": True}
 
 
@@ -5117,25 +5514,59 @@ function bindFolioSeal(root){
   const approve=root.querySelector('.seal-approve');
   const cancel=root.querySelector('.seal-cancel');
   if(!approve) return;
+  const row=root.querySelector('.seal-row')||root;
+  const packetId=row.getAttribute('data-packet-id')||'';
+  const payloadHash=row.getAttribute('data-payload-hash')||'';
+  async function decide(decision, extra){
+    if(!packetId||!payloadHash){
+      // Legacy folio without bind metadata — fall back to typed reply.
+      reply(decision==='cancel'?'cancel':(extra&&extra.user_edit)||'approve');
+      return;
+    }
+    const body=Object.assign({
+      payload_hash:payloadHash,
+      decision:decision,
+      approved_via:'button',
+    }, extra||{});
+    try{
+      const r=await fetch('/approval/'+encodeURIComponent(packetId)+'/decide',{
+        method:'POST',
+        headers:{'Content-Type':'application/json','Accept':'application/json'},
+        body:JSON.stringify(body),
+      });
+      const j=await r.json().catch(()=>({}));
+      if(!r.ok||j.ok===false){
+        add('system', (j&&j.error)||('Approval refused ('+r.status+')'));
+        return;
+      }
+      try{ window.dispatchEvent(new CustomEvent('vinceo:approval-resolved',{detail:j})); }catch(e){}
+    }catch(e){
+      add('system','Approval request failed: '+String(e.message||e));
+    }
+  }
   VinceoSeal.bind(approve,{
     onApprove:()=>{
       const subjEl=root.querySelector('[data-field=subject]');
       const bodyEl=root.querySelector('[data-field=body]');
-      const changed=(subjEl&&subjEl.defaultValue!==subjEl.value)
-        ||(bodyEl&&bodyEl.defaultValue!==bodyEl.value);
+      const fields={};
+      let changed=false;
+      if(subjEl&&subjEl.defaultValue!==subjEl.value){
+        fields.subject=subjEl.value; changed=true;
+      }
+      if(bodyEl&&bodyEl.defaultValue!==bodyEl.value){
+        fields.body=bodyEl.value; changed=true;
+      }
       if(changed){
         let msg='Please revise: ';
-        if(subjEl&&subjEl.defaultValue!==subjEl.value)
-          msg+='subject → '+subjEl.value+'. ';
-        if(bodyEl&&bodyEl.defaultValue!==bodyEl.value)
-          msg+='body → '+bodyEl.value;
-        reply(msg.trim());
+        if(fields.subject!=null) msg+='subject → '+fields.subject+'. ';
+        if(fields.body!=null) msg+='body → '+fields.body;
+        decide('edit',{user_edit:msg.trim(), fields:fields});
       } else {
-        reply('approve');
+        decide('approve');
       }
     }
   });
-  if(cancel) cancel.onclick=()=>reply('cancel');
+  if(cancel) cancel.onclick=()=>decide('cancel');
 }
 function add(kind,text,distillId,sources,packet,compiled){
   const d=document.createElement('div');d.className='msg '+kind;
@@ -5623,6 +6054,14 @@ body{
 .const-edit-actions{display:flex;gap:6px;margin:8px 0}
 .const-ev-row{padding:6px 0;border-top:1px solid var(--line);line-height:1.35}
 .const-ev-ch{font:10px var(--mono);color:var(--mut);text-transform:uppercase;letter-spacing:.04em}
+.const-ev-body{margin-top:4px}
+.const-ev-transcript{line-height:1.45;color:var(--ink)}
+.const-ev-quote{margin-top:4px;font-style:italic;color:var(--mut)}
+.const-ev-audio{display:block;width:100%;height:28px;margin-top:6px}
+.const-play-moment{margin-top:6px}
+mark.span-hl{
+  background:rgba(184,115,51,.22);color:inherit;padding:0 .12em;border-radius:2px;
+}
 .const-kind-select{
   width:100%;margin-top:4px;padding:7px 10px;border-radius:8px;border:1px solid var(--line);
   background:var(--panel);color:var(--navy);font:13px var(--font);
@@ -5756,7 +6195,17 @@ img.thumb.big{max-height:none;max-width:100%}
   margin-top:8px;padding:8px 12px;border-left:2px solid var(--acc);
   color:var(--mut);font-size:13px;font-style:italic;background:rgba(184,115,51,.05);border-radius:0 10px 10px 0;
 }
-.prov audio{height:28px;margin-top:6px;font-style:normal}
+.prov audio{height:28px;margin-top:6px;font-style:normal;display:block;width:100%}
+.prov .span-transcript{font-style:normal;color:var(--ink);line-height:1.45}
+.prov mark.span-hl{
+  background:rgba(184,115,51,.22);color:inherit;padding:0 .12em;border-radius:2px;font-style:normal;
+}
+.prov .play-moment{
+  display:inline-block;margin-top:6px;border:1px solid var(--line);background:var(--panel);
+  border-radius:8px;padding:4px 10px;font:12px var(--font);cursor:pointer;color:var(--navy);
+  font-style:normal;
+}
+.prov .play-moment:hover{border-color:rgba(184,115,51,.45);color:var(--acc)}
 .acts{margin-top:10px;display:flex;gap:8px;flex-wrap:wrap}
 .mini{
   border:1px solid var(--line);background:var(--bg-elev);color:var(--text);
@@ -5802,6 +6251,14 @@ img.thumb.big{max-height:none;max-width:100%}
 .hval{font-family:var(--display);font-size:1.65rem;font-weight:400;margin:8px 0 4px;letter-spacing:-.02em;color:var(--navy)}
 .hsub{color:var(--mut);font-size:12px;display:flex;gap:6px;flex-wrap:wrap;align-items:center}
 .pill{background:var(--panel-2);border:1px solid var(--line);border-radius:999px;padding:2px 9px;font-size:12px}
+.dead-jobs{font-size:12px;color:var(--warn,#b45309);max-width:280px}
+.dead-jobs summary{cursor:pointer;list-style:none;white-space:nowrap}
+.dead-jobs-list{margin-top:6px;padding:8px 10px;background:var(--panel);border:1px solid var(--line);
+  border-radius:8px;max-height:180px;overflow:auto;font-size:11px;color:var(--ink,#1a1a1a);
+  box-shadow:var(--shadow);position:absolute;z-index:40;min-width:260px}
+.dead-jobs-list .dj{padding:4px 0;border-bottom:1px solid var(--line)}
+.dead-jobs-list .dj:last-child{border-bottom:0}
+.dead-jobs-list .dj .err{color:var(--mut);display:block;word-break:break-word}
 @media(max-width:720px){
   #q{width:100%;order:5}
   .meta-bar{width:100%}
@@ -5823,6 +6280,10 @@ img.thumb.big{max-height:none;max-width:100%}
     <span class="spacer"></span>
     <div class="meta-bar">
       <span id="jobs" title="background worker"></span>
+      <details id="deadJobsBox" class="dead-jobs" style="display:none">
+        <summary id="deadJobsSummary">Dead-letter</summary>
+        <div id="deadJobsList" class="dead-jobs-list"></div>
+      </details>
       <span id="stat"></span>
     </div>
     <button class="btn" id="rebuild" onclick="rebuild()" style="display:none">Rebuild turns</button>
@@ -5846,6 +6307,7 @@ img.thumb.big{max-height:none;max-width:100%}
       <span class="chip" id="factchip" onclick="pickFacts()">Tasks</span>
       <span class="chip" id="reflectchip" onclick="pickReflect()">Reflection</span>
       <span class="chip" id="attnchip" onclick="pickAttention()">Attention</span>
+      <span class="chip" id="egresschip" onclick="pickEgress()">Egress</span>
       <span class="chip" id="healthchip" onclick="pickHealth()">Audio Health</span>
       <span class="chip" id="lowchip" onclick="toggleLow()">Low-confidence</span>
     </div>
@@ -6051,6 +6513,8 @@ function setViewUI(){
  document.getElementById('sesschip').classList.toggle('on',view==="sessions");
  document.getElementById('factchip').classList.toggle('on',view==="facts");
  document.getElementById('reflectchip').classList.toggle('on',view==="reflect");
+ document.getElementById('attnchip').classList.toggle('on',view==="attention");
+ document.getElementById('egresschip').classList.toggle('on',view==="egress");
  document.getElementById('healthchip').classList.toggle('on',view==="health");
  const rb=document.getElementById('rebuild');
  rb.style.display=(view==="turns"||view==="activity"||view==="sessions")?'inline-block':'none';
@@ -6073,6 +6537,9 @@ function pickReflect(){view="reflect";
 function pickAttention(){view="attention";
  document.querySelectorAll('#archiveTabs .chip').forEach(c=>c.classList.remove('on'));
  document.getElementById('attnchip').classList.add('on');setViewUI();load();}
+function pickEgress(){view="egress";
+ document.querySelectorAll('#archiveTabs .chip').forEach(c=>c.classList.remove('on'));
+ document.getElementById('egresschip').classList.add('on');setViewUI();load();}
 function pickHealth(){view="health";
  document.querySelectorAll('#archiveTabs .chip').forEach(c=>c.classList.remove('on'));
  document.getElementById('healthchip').classList.add('on');setViewUI();load();}
@@ -6232,9 +6699,22 @@ function factRow(f){
  if(f.confidence!=null) bits.push('conf '+Number(f.confidence).toFixed(2));
  if(f.source) bits.push(esc(f.source));
  if(f.review) bits.push('<span class="rev">'+esc(f.review)+'</span>');
- const clip = f.source_audio ? '<audio controls preload="none" src="'+art(f.source_audio)+'"></audio>' : '';
- const prov = (f.source_span||clip) ? '<div class="prov">'
-   +(f.source_span?('“'+esc(f.source_span)+'”'):'')+clip+'</div>' : '';
+ const play = f.play_path || f.enhanced_audio || f.source_audio;
+ const aid = 'fact-audio-'+f.fact_id;
+ let transcriptHtml = '';
+ if(f.span_highlight && f.span_highlight.match!=null){
+  const hl=f.span_highlight;
+  transcriptHtml = '<div class="span-transcript">'
+   +esc(hl.before||'')+'<mark class="span-hl">'+esc(hl.match||'')+'</mark>'
+   +esc(hl.after||'')+'</div>';
+ } else if(f.source_span){
+  transcriptHtml = '“'+esc(f.source_span)+'”';
+ }
+ const clip = play
+  ? ('<button type="button" class="play-moment" onclick="playFactMoment(\''+aid+'\')">Play the moment</button>'
+     +'<audio id="'+aid+'" controls preload="none" src="'+art(play)+'"></audio>')
+  : '';
+ const prov = (transcriptHtml||clip) ? '<div class="prov">'+transcriptHtml+clip+'</div>' : '';
  const badge = kind==='commitment' ? 'b-vision' : 'b-audio';
  const t=(f.text||'').replace(/'/g,"\\'");
  return '<div class="row"><span class="badge '+badge+'">'+esc(kind)+'</span>'
@@ -6246,6 +6726,12 @@ function factRow(f){
   +'<button class="mini" onclick="factEdit('+f.fact_id+',\''+t+'\')">✎ Edit</button>'
   +'<button class="mini drop" onclick="factAction('+f.fact_id+',\'dismiss\')">✕ Dismiss</button>'
   +'</div></div></div>';
+}
+function playFactMoment(aid){
+ const audio=document.getElementById(aid);
+ if(!audio) return;
+ try{ audio.play(); }catch(e){}
+ audio.scrollIntoView({block:'nearest'});
 }
 async function loadFacts(){
  try{
@@ -6346,6 +6832,54 @@ async function toggleKillSwitch(env,on){
       body:JSON.stringify({env:env,on:!!on})});
   }catch(e){}
   loadAttention();
+}
+async function loadEgress(){
+  try{
+  const eg=await (await fetch('/console/egress?recent=40')).json();
+  let models={};
+  try{ models=await (await fetch('/console/models')).json(); }catch(e){}
+  const by=eg.by_class||{};
+  const sess=(eg.session||{});
+  const sessBy=sess.by_class||{};
+  const order=['public','internal','personal','sensitive','never-send'];
+  const pill=(cls,n)=>'<span class="pill">'+esc(cls)+' '+n+'</span>';
+  const classPills=order.filter(c=>by[c]).map(c=>pill(c,by[c])).join('')
+    || '<span class="mut">no cloud calls with privacy_max yet</span>';
+  const sessPills=order.filter(c=>sessBy[c]).map(c=>pill(c,sessBy[c])).join('')
+    || '<span class="mut">—</span>';
+  const rows=(eg.recent||[]).map(r=>{
+    const when=r.time?new Date(r.time*1000).toLocaleString():'—';
+    const act=r.privacy_action||(r.ok===false&&r.privacy_max==='never-send'?'refuse':'');
+    const badge=act==='refuse'
+      ? '<span class="pill" style="color:var(--danger,#a33)">refused</span>'
+      : (act==='redact'?'<span class="pill">redacted</span>':'');
+    return '<div class="row bleed" style="padding:10px 0;border-top:1px solid var(--line)">'
+      +'<div class="t"><b style="color:var(--navy)">'+esc(r.privacy_max||'—')+'</b>'
+      +' · '+esc(r.task||'')+' · '+esc(r.provider||'')+'/'+esc(r.model||'')
+      +'<div class="meta">'+esc(when)
+      +(r.input_tokens!=null?(' · '+r.input_tokens+' in'):'')
+      +(r.cost_usd!=null?(' · $'+Number(r.cost_usd).toFixed(4)):'')
+      +' '+badge+'</div></div></div>';
+  }).join('') || '<div class="empty">No external calls recorded yet.</div>';
+  document.getElementById('stat').textContent=
+    (eg.max_seen?('max '+eg.max_seen+' · '):'')
+    +(eg.refused||0)+' refused · '+(Object.values(by).reduce((a,b)=>a+b,0))+' cloud w/ class';
+  const priv=(models.privacy||{});
+  list.innerHTML='<div class="refl" style="margin-bottom:12px">'
+    +'<div class="sechead">What left the machine</div>'
+    +'<div class="sum">Highest privacy_class on each external model call '
+    +'(plan 6.2). never-send is refused before bytes leave; sensitive/personal '
+    +'are redacted.</div></div>'
+    +'<div class="hgrid">'
+    +hcard('Trail max', eg.max_seen||'—', classPills)
+    +hcard('Refused', String(eg.refused||0), 'never-send blocked at gate')
+    +hcard('Session max', sess.max_seen||priv.max_seen||'—', sessPills)
+    +hcard('Session cloud', String(sess.cloud_calls||priv.cloud_calls||0),
+           (sess.refused||priv.refused||0)+' refused this process')
+    +'</div>'
+    +'<div class="sechead" style="margin-top:18px">Recent egress</div>'
+    +rows;
+  }catch(e){ list.innerHTML='<div class="empty">error loading egress: '+e+'</div>'; }
 }
 async function loadHealth(){
   try{
@@ -6658,6 +7192,7 @@ async function load(){
  if(view==="facts"){ return loadFacts(); }
  if(view==="reflect"){ return loadReflect(); }
  if(view==="attention"){ return loadAttention(); }
+ if(view==="egress"){ return loadEgress(); }
  if(view==="health"){ return loadHealth(); }
  if(view==="turns"){ return loadTurns(); }
  if(view==="activity"){ return loadActivity(); }
@@ -6695,8 +7230,29 @@ async function jobs(){
  try{
   const j=await (await fetch('/console/jobs')).json(); const s=j.stats||{};
   const parts=[]; if(s.pending)parts.push(s.pending+' pending'); if(s.running)parts.push('running');
-  if(s.error)parts.push('⚠ '+s.error+' err');
+  if(s.dead)parts.push(s.dead+' dead');
+  else if(s.error)parts.push(s.error+' err');
   document.getElementById('jobs').textContent=parts.length?('worker: '+parts.join(', ')):'worker idle';
+  const box=document.getElementById('deadJobsBox');
+  const list=document.getElementById('deadJobsList');
+  const sum=document.getElementById('deadJobsSummary');
+  const dead=j.dead||[];
+  if(box && list && sum){
+    if(dead.length){
+      box.style.display='';
+      sum.textContent='Dead-letter ('+dead.length+')';
+      list.innerHTML=dead.map(d=>{
+        const err=esc(d.error||'');
+        const when=d.updated_at?new Date(d.updated_at*1000).toLocaleString():'';
+        return '<div class="dj"><b>#'+d.id+'</b> '+esc(d.kind||'')
+          +' · '+d.attempts+'/'+(j.max_attempts||5)+' · '+esc(when)
+          +'<span class="err">'+err+'</span></div>';
+      }).join('');
+    } else {
+      box.style.display='none';
+      list.innerHTML='';
+    }
+  }
  }catch(e){}
 }
 q.addEventListener('input',()=>{clearTimeout(timer);timer=setTimeout(()=>{persistConsole();load();},250);});

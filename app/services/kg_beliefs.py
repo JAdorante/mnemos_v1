@@ -49,7 +49,10 @@ SEQ_GAP_DAYS = 14        # evidence gap that reads as "life moved on"
 SPLIT_MIN_CONF = 0.6     # new belief must stand on its own before splitting
 LAMBDA_CONFLICT = 0.8    # logit penalty, applied ONLY to simultaneous conflicts
 # Functional predicates: at most one open object per subject at a time.
-_FUNCTIONAL_PREDS = {"works_at"}
+# Plan 2.5: money/date claim predicates join works_at so simultaneous
+# $49 vs $55 (or two due dates) raise conflict_flag, never silent overwrite.
+_FUNCTIONAL_PREDS = {"works_at", "costs", "priced_at", "due_on"}
+_CLAIM_PREDICATES = frozenset({"costs", "priced_at", "due_on"})
 
 
 def source_weights(store=None) -> tuple[int, dict[str, float]]:
@@ -95,6 +98,8 @@ def record_from_relation(
     quote: str | None = None,
     source_class: str | None = None,
     modality: str | None = None,
+    fact_id: int | None = None,
+    meta: dict | None = None,
 ) -> dict[str, Any]:
     """Dual-write one asserted/user edge into the belief store."""
     now = float(ts if ts is not None else time.time())
@@ -105,13 +110,13 @@ def record_from_relation(
             ev = store.get_event(int(source_event_id))
             if ev:
                 src = (ev.get("source") or "") if isinstance(ev, dict) else ""
-                meta = ev.get("meta") if isinstance(ev, dict) else {}
-                if not isinstance(meta, dict):
-                    meta = {}
+                meta_ev = ev.get("meta") if isinstance(ev, dict) else {}
+                if not isinstance(meta_ev, dict):
+                    meta_ev = {}
                 from app.services import source_policy as sp
                 pol = sp.policy_for_event(
                     event_source=src,
-                    window=str(meta.get("window") or ""),
+                    window=str(meta_ev.get("window") or ""),
                     text=(ev.get("raw") or ev.get("summary") or "")[:800]
                     if isinstance(ev, dict) else "")
                 source_class = pol.source_class
@@ -133,10 +138,11 @@ def record_from_relation(
         confidence=confidence if confidence is not None else min(0.95, 0.4 + 0.1 * w),
         ts=now)
     ev_id = store.add_kg_evidence(
-        pred_id, event_id=source_event_id, modality=modality,
-        source_class=source_class, quote=quote, weight=w,
+        pred_id, event_id=source_event_id, fact_id=fact_id,
+        modality=modality, source_class=source_class, quote=quote, weight=w,
         extractor_conf=confidence, observed_at=now,
-        created_by=("user" if origin == "user" else "system"))
+        created_by=("user" if origin == "user" else "system"),
+        meta=meta)
     # Change 5: NO posterior math on the intake path — the evidence insert
     # flipped posterior_stale; reads and the recal sweep do the math.
     conflict = resolve_conflicts(store, pred_id, now=now)
@@ -144,6 +150,93 @@ def record_from_relation(
     return {"ok": True, "predicate_id": pred_id, "evidence_id": ev_id,
             "confidence": float(cur.get("confidence") or 0),
             "conflict": conflict}
+
+
+def record_from_claim(
+    store,
+    *,
+    subj_type: str,
+    subj_id: int,
+    predicate: str,
+    obj_type: str,
+    obj_id: int,
+    fact_id: int | None = None,
+    source_event_id: int | None = None,
+    confidence: float | None = None,
+    ts: float | None = None,
+    quote: str | None = None,
+    source_class: str | None = None,
+    speaker: str | None = None,
+    speaker_is_source: bool | None = None,
+    modality: str | None = None,
+) -> dict[str, Any]:
+    """Plan 2.5 — dual-write a parseable claim into kg_beliefs.
+
+    Evidence meta carries speaker attribution so "David said $49" is
+    queryable via beliefs_by_speaker / evidence meta. Unparseable claims
+    never call this (they stay flat facts only).
+    """
+    pred = (predicate or "").strip()
+    if pred not in _CLAIM_PREDICATES:
+        return {"ok": False, "reason": f"unsupported_claim_predicate:{pred}"}
+    meta = {
+        "speaker": (speaker or "").strip() or None,
+        "speaker_is_source": bool(speaker_is_source)
+        if speaker_is_source is not None else None,
+        "from_claim": True,
+    }
+    return record_from_relation(
+        store, subj_type=subj_type, subj_id=subj_id, predicate=pred,
+        obj_type=obj_type, obj_id=obj_id, origin="asserted",
+        source_event_id=source_event_id, confidence=confidence, ts=ts,
+        quote=quote, source_class=source_class, modality=modality,
+        fact_id=fact_id, meta=meta)
+
+
+def beliefs_by_speaker(store, speaker: str, *, limit: int = 50) -> list[dict]:
+    """Beliefs whose evidence bag attributes `speaker` (plan 2.5 AC)."""
+    want = (speaker or "").strip().lower()
+    if not want:
+        return []
+    out: list[dict] = []
+    try:
+        preds = store.list_kg_predicates(limit=500)
+    except Exception:
+        return []
+    for pred in preds:
+        try:
+            evs = store.list_kg_evidence(int(pred["id"]), limit=50)
+        except Exception:
+            continue
+        matched = []
+        for e in evs:
+            meta = e.get("meta") if isinstance(e.get("meta"), dict) else None
+            if meta is None:
+                raw = e.get("meta_json")
+                if isinstance(raw, str) and raw.strip():
+                    try:
+                        import json
+                        meta = json.loads(raw)
+                    except Exception:
+                        meta = {}
+                elif isinstance(raw, dict):
+                    meta = raw
+                else:
+                    meta = {}
+            if not isinstance(meta, dict):
+                continue
+            spk = (meta.get("speaker") or "").strip().lower()
+            if spk == want:
+                matched.append(e)
+        if matched:
+            out.append({
+                "predicate": pred,
+                "evidence": matched,
+                "conflict": bool(pred.get("conflict")),
+            })
+            if len(out) >= limit:
+                break
+    return out
 
 
 def _evidence_features(rows: list[dict], *, now: float) -> list[dict]:

@@ -51,6 +51,13 @@ _NEWS_CONTENT = re.compile(
     r"share\s+this\s+(?:article|story)|comments?\s+section)\b",
     re.I,
 )
+# Plan 2.4: "the article mentioned…" must mint-deny (knowledge-only).
+_ARTICLE_MENTIONED = re.compile(
+    r"\b(?:the\s+)?article\s+mentioned\b|"
+    r"\bas\s+(?:mentioned|reported)\s+in\s+(?:the\s+)?(?:article|story|press)\b|"
+    r"\b(?:according\s+to|per)\s+(?:the\s+)?(?:article|story|report)\b",
+    re.I,
+)
 _EMAIL_WINDOW = re.compile(r"\b(?:outlook|gmail|mail|inbox|thunderbird)\b", re.I)
 _CODE_WINDOW = re.compile(
     r"\b(?:visual studio code|vscode|\bcursor\b|intellij|pycharm|sublime|"
@@ -127,7 +134,8 @@ def classify_source(
     if _EMAIL_WINDOW.search(win):
         return "email"
     if (_NEWS_WINDOW.search(win) or _NEWS_WINDOW.search(blob)
-            or _NEWS_CONTENT.search(blob)):
+            or _NEWS_CONTENT.search(blob)
+            or _ARTICLE_MENTIONED.search(blob)):
         return "news_page"
     if _CODE_WINDOW.search(win) and (content_type or "").lower() == "code":
         return "code_editor"

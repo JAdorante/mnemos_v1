@@ -642,5 +642,102 @@ class M1BackfillTests(unittest.TestCase):
                 store.close()
 
 
+class Plan26ReadCutoverTests(unittest.TestCase):
+    """Plan 2.6 — constellation + grounding read kg_beliefs after gate."""
+
+    def test_read_v2_env_override(self):
+        import os
+        from unittest.mock import patch
+        from app.services import kg_parity
+        with tempfile.TemporaryDirectory() as td:
+            store = _mk(td)
+            try:
+                with patch.dict(os.environ, {"QUILL_KG_READ_V2": "1"}):
+                    self.assertTrue(kg_parity.read_v2_enabled(store))
+                with patch.dict(os.environ, {"QUILL_KG_READ_V2": "0"}):
+                    self.assertFalse(kg_parity.read_v2_enabled(store))
+                # Unset → follows cutover_ready (false on empty store)
+                env = {k: v for k, v in os.environ.items()
+                       if k != "QUILL_KG_READ_V2"}
+                with patch.dict(os.environ, env, clear=True):
+                    self.assertFalse(kg_parity.read_v2_enabled(store))
+                    for i in range(7):
+                        kg_parity.run(store, now=NOW + i * DAY)
+                    self.assertTrue(kg_parity.cutover_ready(store)["ready"])
+                    self.assertTrue(kg_parity.read_v2_enabled(store))
+            finally:
+                store.close()
+
+    def test_context_for_person_reads_kg_when_cutover(self):
+        import os
+        from unittest.mock import patch
+        from app.services import graph
+        with tempfile.TemporaryDirectory() as td:
+            store = _mk(td)
+            try:
+                pid = store.resolve_person("Ada", ts=NOW)
+                eid = store.resolve_entity("Acme", "org", ts=NOW)
+                # Belief only — no v1 relations row
+                _works_at(store, pid, eid, ts=NOW, quote="Ada at Acme")
+                with store._lock:
+                    store._conn.execute("DELETE FROM relations")
+                    store._conn.commit()
+                with patch.dict(os.environ, {"QUILL_KG_READ_V2": "1"}):
+                    ctx = graph.context_for_person("Ada", store)
+                self.assertTrue(ctx["found"])
+                by_name = {a["name"]: a for a in ctx["affiliations"]}
+                self.assertIn("Acme", by_name)
+                self.assertEqual(by_name["Acme"].get("source"), "kg_beliefs")
+                self.assertFalse(by_name["Acme"].get("former"))
+            finally:
+                store.close()
+
+    def test_grounding_surfaces_former_from_beliefs(self):
+        import os
+        from unittest.mock import patch
+        from app.services import grounding
+        with tempfile.TemporaryDirectory() as td:
+            store = _mk(td)
+            try:
+                pid = store.resolve_person("Sarah Kim", ts=NOW - 400 * DAY)
+                figma = store.resolve_entity("Figma", "org", ts=NOW - 400 * DAY)
+                linear = store.resolve_entity("Linear", "org", ts=NOW)
+                _works_at(store, pid, figma, ts=NOW - 400 * DAY,
+                          quote="at Figma", n=3)
+                _works_at(store, pid, linear, ts=NOW,
+                          quote="Sarah · Linear — sig", source_class="email")
+                with patch.dict(os.environ, {"QUILL_KG_READ_V2": "1"}):
+                    lines, _, _ = grounding._person_section("Sarah Kim", store)
+                blob = "\n".join(lines)
+                self.assertIn("Linear", blob)
+                self.assertIn("Figma (former)", blob)
+            finally:
+                store.close()
+
+    def test_constellation_paints_affiliation_from_kg(self):
+        import os
+        from unittest.mock import patch
+        from app.services import graph
+        with tempfile.TemporaryDirectory() as td:
+            store = _mk(td)
+            try:
+                pid = store.resolve_person("Ada", ts=NOW)
+                eid = store.resolve_entity("Acme", "org", ts=NOW)
+                _works_at(store, pid, eid, ts=NOW, quote="Ada at Acme", n=2)
+                with store._lock:
+                    store._conn.execute("DELETE FROM relations")
+                    store._conn.commit()
+                with patch.dict(os.environ, {"QUILL_KG_READ_V2": "1"}):
+                    out = graph.constellation(store, limit=20)
+                edges = out.get("edges") or []
+                hit = [e for e in edges
+                       if e.get("source") == f"person:{pid}"
+                       and e.get("target") == f"entity:{eid}"
+                       and e.get("rel") == "works_at"]
+                self.assertTrue(hit, f"expected works_at edge, got {edges[:10]}")
+            finally:
+                store.close()
+
+
 if __name__ == "__main__":
     unittest.main()

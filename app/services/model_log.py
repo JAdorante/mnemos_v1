@@ -1,11 +1,11 @@
 """Model-call telemetry — the measurement layer under the ModelRouter.
 
 Every model call (local or paid) funnels through `log_call`, which records task
-type, provider/model, token or byte sizes, latency, estimated cost, and success.
-Records append to a JSONL trail (data/model_calls.jsonl) and a rolling in-memory
-aggregate the console reads via /console/models. This is what makes the local-vs-
-Claude routing measurable — and the substrate the Gemini/local benchmarks (roadmap
-steps 4-5) score against.
+type, provider/model, token or byte sizes, latency, estimated cost, success,
+and (plan 6.2) `privacy_max` — the highest privacy_class in the payload that
+left (or was refused) for an external call. Records append to a JSONL trail
+(data/model_calls.jsonl); `/console/models` + the Egress console tab read the
+aggregates / inventory.
 
 Cost is *estimated* from a per-model price table (USD per 1M tokens). Local models
 (Ollama) are $0. Prices are point-in-time; update PRICES when they change.
@@ -20,6 +20,11 @@ from pathlib import Path
 from typing import Any
 
 from app.config import settings
+
+# Providers whose calls leave the machine (egress inventory).
+_CLOUD_PROVIDERS = frozenset({
+    "claude", "anthropic", "gemini", "openai", "google", "azure",
+})
 
 # USD per 1M tokens, (input, output). Source: Claude pricing, 2026-07.
 # Local/Ollama models are free — anything not listed is treated as $0.
@@ -63,6 +68,29 @@ def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
     return (input_tokens * inp + output_tokens * out) / 1_000_000
 
 
+def _normalize_privacy(cls: str | None) -> str | None:
+    if not cls:
+        return None
+    try:
+        from app.services.privacy_class import normalize
+        return normalize(cls)
+    except Exception:
+        c = str(cls).strip().lower().replace("_", "-")
+        return c or None
+
+
+def _privacy_rank(cls: str | None) -> int:
+    order = ("public", "internal", "personal", "sensitive", "never-send")
+    try:
+        return order.index(_normalize_privacy(cls) or "internal")
+    except ValueError:
+        return 1
+
+
+def _is_cloud(provider: str) -> bool:
+    return (provider or "").strip().lower() in _CLOUD_PROVIDERS
+
+
 class ModelLog:
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -71,13 +99,24 @@ class ModelLog:
         self._agg: dict[tuple, dict[str, float]] = defaultdict(
             lambda: {"calls": 0, "errors": 0, "latency_s": 0.0, "cost_usd": 0.0,
                      "input_tokens": 0, "output_tokens": 0})
+        # Plan 6.2: session rollup of highest class that left (or was refused).
+        self._privacy_by_class: dict[str, int] = defaultdict(int)
+        self._privacy_max_seen: str | None = None
+        self._privacy_cloud_calls: int = 0
+        self._privacy_refused: int = 0
 
     def log_call(self, *, task: str, provider: str, model: str,
                  latency_s: float, ok: bool = True,
                  input_tokens: int = 0, output_tokens: int = 0,
                  input_bytes: int = 0, cost_usd: float | None = None,
+                 privacy_max: str | None = None,
                  meta: dict | None = None) -> dict:
-        """Record one model call. Returns the row (also appended to the trail)."""
+        """Record one model call. Returns the row (also appended to the trail).
+
+        `privacy_max` (plan 6.2): highest privacy_class in the outbound payload
+        for this call. Also accepted via meta.privacy_class / meta.privacy_max
+        for back-compat with the 6.1 router wiring.
+        """
         if cost_usd is None:
             cost_usd = estimate_cost(model, input_tokens, output_tokens)
         # Spend metering (SECURITY #2): cloud spend on ambient tasks feeds the
@@ -92,6 +131,14 @@ class ModelLog:
                     spend_cap.record(cost_usd, task)
             except Exception:
                 pass
+        # Resolve privacy_max (explicit kwarg wins, then meta).
+        pmax = _normalize_privacy(privacy_max)
+        if pmax is None and meta:
+            pmax = _normalize_privacy(
+                meta.get("privacy_max") or meta.get("privacy_class"))
+        action = None
+        if meta:
+            action = meta.get("privacy_action")
         row = {
             # Wall-clock stamp — without it the trail can't answer "what
             # happened after X?" (rows predating 2026-07-17 lack it).
@@ -101,6 +148,10 @@ class ModelLog:
             "input_tokens": input_tokens, "output_tokens": output_tokens,
             "input_bytes": input_bytes, "cost_usd": round(cost_usd, 6),
         }
+        if pmax:
+            row["privacy_max"] = pmax
+        if action:
+            row["privacy_action"] = action
         if meta:
             row["meta"] = meta
         key = (task, provider, model)
@@ -112,6 +163,16 @@ class ModelLog:
             a["cost_usd"] += cost_usd
             a["input_tokens"] += input_tokens
             a["output_tokens"] += output_tokens
+            # Egress privacy rollup — cloud only (local never "left").
+            if _is_cloud(provider) and pmax:
+                self._privacy_cloud_calls += 1
+                self._privacy_by_class[pmax] += 1
+                if (self._privacy_max_seen is None
+                        or _privacy_rank(pmax)
+                        > _privacy_rank(self._privacy_max_seen)):
+                    self._privacy_max_seen = pmax
+                if action == "refuse" or (pmax == "never-send" and not ok):
+                    self._privacy_refused += 1
             try:
                 self._path.parent.mkdir(parents=True, exist_ok=True)
                 with self._path.open("a", encoding="utf-8") as f:
@@ -121,7 +182,8 @@ class ModelLog:
         return row
 
     def stats(self) -> dict[str, Any]:
-        """Aggregated view for the console: per (task, provider, model) rollups."""
+        """Aggregated view for the console: per (task, provider, model) rollups
+        plus privacy egress summary (plan 6.2)."""
         with self._lock:
             rows = []
             totals = {"calls": 0, "cost_usd": 0.0, "errors": 0}
@@ -139,7 +201,82 @@ class ModelLog:
                 totals["errors"] += a["errors"]
                 totals["cost_usd"] += a["cost_usd"]
             totals["cost_usd"] = round(totals["cost_usd"], 4)
-        return {"rows": rows, "totals": totals}
+            privacy = {
+                "cloud_calls": self._privacy_cloud_calls,
+                "refused": self._privacy_refused,
+                "max_seen": self._privacy_max_seen,
+                "by_class": dict(self._privacy_by_class),
+            }
+        return {"rows": rows, "totals": totals, "privacy": privacy}
+
+    def egress_inventory(self, *, recent: int = 40) -> dict[str, Any]:
+        """Auditable 'what left the machine' view (plan 6.2).
+
+        Reads the JSONL trail for external providers and returns recent rows
+        with privacy_max, plus class histogram (session + trail).
+        """
+        recent = max(0, min(int(recent), 200))
+        trail: list[dict] = []
+        by_class: dict[str, int] = defaultdict(int)
+        max_seen: str | None = None
+        refused = 0
+        try:
+            if self._path.is_file():
+                lines = self._path.read_text(encoding="utf-8").splitlines()
+                for line in lines[-800:]:
+                    try:
+                        d = json.loads(line)
+                    except Exception:
+                        continue
+                    if not _is_cloud(d.get("provider") or ""):
+                        continue
+                    pmax = _normalize_privacy(
+                        d.get("privacy_max")
+                        or (d.get("meta") or {}).get("privacy_class")
+                        or (d.get("meta") or {}).get("privacy_max"))
+                    if not pmax:
+                        continue
+                    action = (d.get("privacy_action")
+                              or (d.get("meta") or {}).get("privacy_action"))
+                    by_class[pmax] += 1
+                    if (max_seen is None
+                            or _privacy_rank(pmax) > _privacy_rank(max_seen)):
+                        max_seen = pmax
+                    if action == "refuse" or (
+                            pmax == "never-send" and not d.get("ok", True)):
+                        refused += 1
+                    trail.append({
+                        "time": d.get("time"),
+                        "task": d.get("task"),
+                        "provider": d.get("provider"),
+                        "model": d.get("model"),
+                        "ok": d.get("ok"),
+                        "privacy_max": pmax,
+                        "privacy_action": action,
+                        "cost_usd": d.get("cost_usd"),
+                        "input_tokens": d.get("input_tokens"),
+                    })
+        except Exception as exc:
+            return {"ok": False, "error": str(exc), "recent": [],
+                    "by_class": {}, "max_seen": None}
+        trail = trail[-recent:]
+        trail.reverse()  # newest first
+        with self._lock:
+            session = {
+                "cloud_calls": self._privacy_cloud_calls,
+                "refused": self._privacy_refused,
+                "max_seen": self._privacy_max_seen,
+                "by_class": dict(self._privacy_by_class),
+            }
+        return {
+            "ok": True,
+            "title": "What left the machine",
+            "recent": trail,
+            "by_class": dict(by_class),
+            "max_seen": max_seen,
+            "refused": refused,
+            "session": session,
+        }
 
 
 model_log = ModelLog()

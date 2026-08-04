@@ -56,6 +56,12 @@ _VERDICT_TASKS = frozenset({"chat"})
 MODELS: dict[str, str] = {
     "extract": os.environ.get("QUILL_EXTRACT_MODEL", "claude-opus-4-8"),
     "chat": os.environ.get("QUILL_CHAT_MODEL", "claude-opus-4-8"),
+    # Plan 3.3 — local-eligible route classifier (not high-stakes / not ambient).
+    "query_route": os.environ.get("QUILL_QUERY_ROUTE_MODEL",
+                                  os.environ.get("QUILL_CHAT_MODEL",
+                                                 "claude-opus-4-8")),
+    # Meeting Layer P3 — session enhance (quality over cost; Sonnet-class).
+    "enhance": os.environ.get("QUILL_ENHANCE_MODEL", "claude-sonnet-4-6"),
 }
 
 # Distill rows are a training signal. `prompt_head` and browse fields stay
@@ -231,12 +237,56 @@ class ModelRouter:
         is spent. The local-first path converts that into "keep the local
         answer"; Claude-only ambient callers already treat an extract failure
         as retry-later, which is the required degrade/re-queue behavior.
-        User-initiated tasks (chat, plan) are never capped here."""
+        User-initiated tasks (chat, plan) are never capped here.
+
+        Plan 6.1: privacy_class gate — never-send refuses; sensitive/personal
+        are redacted before Anthropic. Local Ollama path is unaffected."""
         try:
             from app.perception.spend_cap import spend_cap
             spend_cap.check(task)
         except ImportError:
             pass
+        # Egress gate (plan 6.1) — must run before any bytes leave the machine.
+        privacy_cls = "internal"
+        privacy_action = "allow"
+        try:
+            from app.services.privacy_class import PrivacyRefuse, gate_cloud
+        except Exception:
+            PrivacyRefuse = None  # type: ignore
+            gate_cloud = None  # type: ignore
+        if gate_cloud is not None:
+            try:
+                system, messages, privacy_cls, privacy_action = gate_cloud(
+                    system, messages)
+            except Exception as exc:
+                if PrivacyRefuse is not None and isinstance(exc, PrivacyRefuse):
+                    try:
+                        model_log.log_call(
+                            task=task, provider="claude",
+                            model=model or self.model_for(task),
+                            latency_s=0.0, ok=False,
+                            privacy_max=exc.privacy_class,
+                            meta={"privacy_class": exc.privacy_class,
+                                  "privacy_action": "refuse",
+                                  "privacy_kinds": exc.kinds})
+                    except Exception:
+                        pass
+                    raise
+                try:
+                    from app.services.redact import redact_text, redact_payload
+                    system = redact_text(system or "")
+                    messages = redact_payload(messages or [])
+                    privacy_action = "redact_fallback"
+                except Exception:
+                    pass
+        else:
+            try:
+                from app.services.redact import redact_text, redact_payload
+                system = redact_text(system or "")
+                messages = redact_payload(messages or [])
+                privacy_action = "redact_fallback"
+            except Exception:
+                pass
         model = model or self.model_for(task)
         kwargs: dict[str, Any] = {"model": model, "max_tokens": max_tokens,
                                   "system": system, "messages": messages}
@@ -248,7 +298,10 @@ class ModelRouter:
             resp = self._ensure().messages.create(**kwargs)
         except Exception:
             model_log.log_call(task=task, provider="claude", model=model,
-                               latency_s=time.time() - t0, ok=False)
+                               latency_s=time.time() - t0, ok=False,
+                               privacy_max=privacy_cls,
+                               meta={"privacy_class": privacy_cls,
+                                     "privacy_action": privacy_action})
             raise
         u = getattr(resp, "usage", None)
         model_log.log_call(
@@ -256,6 +309,9 @@ class ModelRouter:
             latency_s=time.time() - t0, ok=True,
             input_tokens=getattr(u, "input_tokens", 0) or 0,
             output_tokens=getattr(u, "output_tokens", 0) or 0,
+            privacy_max=privacy_cls,
+            meta={"privacy_class": privacy_cls,
+                  "privacy_action": privacy_action},
         )
         return next((b.text for b in resp.content if b.type == "text"), "")
 

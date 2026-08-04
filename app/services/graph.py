@@ -35,6 +35,49 @@ AFFILIATION_PREDS = frozenset(
     {"works_at", "part_of", "member_of", "affiliated_with", "founded"})
 
 
+def _affiliations_from_kg(store: Store, person_id: int,
+                          emap: dict | None = None) -> dict[int, dict]:
+    """Plan 2.6 — affiliations primary-read from kg_predicates (+ past)."""
+    if emap is None:
+        emap = {e["id"]: e for e in store.all_entities()}
+    try:
+        kg_rows = store.list_kg_predicates(
+            subj_type="person", subj_id=int(person_id),
+            statuses=("active", "superseded"))
+    except Exception:
+        return {}
+    affil: dict[int, dict] = {}
+    for r in kg_rows:
+        if r.get("obj_type") != "entity" or r["predicate"] not in AFFILIATION_PREDS:
+            continue
+        eid = int(r["obj_id"])
+        ent = emap.get(eid)
+        if not ent:
+            continue
+        cur = affil.get(eid)
+        if cur is not None and cur.get("belief_status") == "active" \
+                and r["status"] != "active":
+            continue
+        try:
+            from app.services import kg_beliefs
+            conf = float(kg_beliefs.posterior(store, int(r["id"])))
+        except Exception:
+            conf = float(r.get("confidence") or 0.5)
+        affil[eid] = {
+            "id": eid, "name": ent["name"], "kind": ent["kind"],
+            "predicate": r["predicate"], "asserted": True,
+            "weight": conf, "confidence": conf,
+            "belief_status": r["status"],
+            "former": r["status"] == "superseded",
+            "valid_from": r.get("valid_from"),
+            "valid_to": r.get("valid_to"),
+            "superseded_by": r.get("superseded_by"),
+            "predicate_id": int(r["id"]),
+            "source": "kg_beliefs",
+        }
+    return affil
+
+
 def _name_pattern(name: str):
     return re.compile(r"\b" + re.escape(name) + r"\b", re.I)
 
@@ -291,61 +334,69 @@ def context_for_person(name: str, store: Store | None = None) -> dict:
                  for pid, w in sorted(neigh.items(), key=lambda kv: -kv[1])]
 
     # entity affiliations: asserted (works_at/part_of/…) first, then associated_with.
+    # Plan 2.6: when read_v2 is on, affiliations primary-read kg_beliefs.
     emap = {e["id"]: e for e in store.all_entities()}
-    affil: dict[int, dict] = {}
-    for e in edges["out"]:
-        if e["obj_type"] != "entity":
-            continue
-        ent = emap.get(e["obj_id"])
-        if not ent:
-            continue
-        cur = affil.get(e["obj_id"])
-        asserted = e["origin"] == "asserted"
-        # keep the strongest edge per entity (an asserted predicate beats a derived one)
-        if cur is None or (asserted and cur["predicate"] == "associated_with"):
-            affil[e["obj_id"]] = {"id": e["obj_id"], "name": ent["name"],
-                                  "kind": ent["kind"],
-                                  "predicate": e["predicate"], "asserted": asserted,
-                                  "weight": e["weight"]}
-    # Change 6: people queries implicitly include the past — annotate each
-    # affiliation with its KG belief status/interval so a former employer
-    # renders as "at X 2022–2024" instead of silently vanishing. Current
-    # affiliations rank above former.
     try:
-        kg_rows = store.list_kg_predicates(
-            subj_type="person", subj_id=person["id"],
-            statuses=("active", "superseded"))
+        from app.services import kg_parity
+        read_v2 = kg_parity.read_v2_enabled(store)
     except Exception:
-        kg_rows = []
-    kg_by_obj = {}
-    for r in kg_rows:
-        if r.get("obj_type") == "entity" and r["predicate"] in AFFILIATION_PREDS:
-            cur = kg_by_obj.get(int(r["obj_id"]))
-            if cur is None or (cur["status"] != "active"
-                               and r["status"] == "active"):
-                kg_by_obj[int(r["obj_id"])] = r
-        # superseded rows whose entity fell out of `relations` still surface
-        if r.get("obj_type") == "entity" and r["predicate"] in AFFILIATION_PREDS \
-                and int(r["obj_id"]) not in affil:
-            ent = emap.get(int(r["obj_id"]))
-            if ent:
-                affil[int(r["obj_id"])] = {
-                    "id": int(r["obj_id"]), "name": ent["name"],
-                    "kind": ent["kind"], "predicate": r["predicate"],
-                    "asserted": True, "weight": 0.0}
-    for a in affil.values():
-        kg = kg_by_obj.get(a["id"])
-        if kg:
-            a["belief_status"] = kg["status"]
-            a["former"] = kg["status"] == "superseded"
-            a["valid_from"] = kg.get("valid_from")
-            a["valid_to"] = kg.get("valid_to")
-            a["superseded_by"] = kg.get("superseded_by")
-        else:
-            a["former"] = False
+        read_v2 = False
+
+    if read_v2:
+        affil = _affiliations_from_kg(store, int(person["id"]), emap)
+    else:
+        affil = {}
+        for e in edges["out"]:
+            if e["obj_type"] != "entity":
+                continue
+            ent = emap.get(e["obj_id"])
+            if not ent:
+                continue
+            cur = affil.get(e["obj_id"])
+            asserted = e["origin"] == "asserted"
+            # keep the strongest edge per entity (asserted beats derived)
+            if cur is None or (asserted and cur["predicate"] == "associated_with"):
+                affil[e["obj_id"]] = {"id": e["obj_id"], "name": ent["name"],
+                                      "kind": ent["kind"],
+                                      "predicate": e["predicate"],
+                                      "asserted": asserted,
+                                      "weight": e["weight"]}
+        # Change 6: annotate with KG belief status/interval (hybrid path).
+        try:
+            kg_rows = store.list_kg_predicates(
+                subj_type="person", subj_id=person["id"],
+                statuses=("active", "superseded"))
+        except Exception:
+            kg_rows = []
+        kg_by_obj = {}
+        for r in kg_rows:
+            if r.get("obj_type") == "entity" and r["predicate"] in AFFILIATION_PREDS:
+                cur = kg_by_obj.get(int(r["obj_id"]))
+                if cur is None or (cur["status"] != "active"
+                                   and r["status"] == "active"):
+                    kg_by_obj[int(r["obj_id"])] = r
+            if r.get("obj_type") == "entity" and r["predicate"] in AFFILIATION_PREDS \
+                    and int(r["obj_id"]) not in affil:
+                ent = emap.get(int(r["obj_id"]))
+                if ent:
+                    affil[int(r["obj_id"])] = {
+                        "id": int(r["obj_id"]), "name": ent["name"],
+                        "kind": ent["kind"], "predicate": r["predicate"],
+                        "asserted": True, "weight": 0.0}
+        for a in affil.values():
+            kg = kg_by_obj.get(a["id"])
+            if kg:
+                a["belief_status"] = kg["status"]
+                a["former"] = kg["status"] == "superseded"
+                a["valid_from"] = kg.get("valid_from")
+                a["valid_to"] = kg.get("valid_to")
+                a["superseded_by"] = kg.get("superseded_by")
+            else:
+                a["former"] = False
     affiliations = sorted(affil.values(),
                           key=lambda a: (a.get("former", False),
-                                         not a["asserted"], -a["weight"]))
+                                         not a.get("asserted", True),
+                                         -(a.get("weight") or 0)))
 
     return {
         "found": True, "person": person,
@@ -528,6 +579,8 @@ GRAVITY = {
         "act": 0.90,    # context activation (field v2 only; v1 ignores it)
         # Neglected open commitments gain gravity (WS3) — resists decay bias.
         "aging": 0.95,
+        # Meeting Layer P2 — pin-like boost when a notepad jot co-times the turn.
+        "note_adjacent": 1.20,
     },
     "recency_horizon_days": 45.0,
     "decay_half_life_days": {
@@ -810,12 +863,15 @@ def constellation_evidence(store: Store | None, node_id: str) -> dict:
                 "owner": fact.get("owner"),
                 "from_person": fact.get("from_person"),
                 "to_person": fact.get("to_person"),
+                "source_span": fact.get("source_span") or "",
+                "source_event_id": fact.get("source_event_id"),
             }
             sources.append({
                 "channel": fact.get("source_modality") or "event",
                 "event_id": fact.get("source_event_id"),
                 "time": fact.get("source_time"),
                 "text": fact.get("text") or fact.get("source_span"),
+                "source_span": fact.get("source_span") or "",
                 "confidence": fact.get("confidence"),
                 "kind": fact.get("kind"),
             })
@@ -834,18 +890,26 @@ def constellation_evidence(store: Store | None, node_id: str) -> dict:
                     "confidence": e.get("confidence"),
                 })
 
-    # Hydrate event snippets when available.
+    # Hydrate event snippets + playback clip (plan 3.4).
+    from app.services.evidence_playback import hydrate_source
     eids = [int(s["event_id"]) for s in sources if s.get("event_id")]
     emap = store.by_ids_map(eids) if eids else {}
+    # Person-linked items may carry their own source_span via fact text.
+    fact_span = ""
+    if kind == "fact" and detail.get("fact"):
+        fact_span = detail["fact"].get("source_span") or ""
     for s in sources:
         ev = emap.get(int(s["event_id"])) if s.get("event_id") else None
         if not ev:
+            s["playable"] = False
             continue
         raw = (getattr(ev, "raw", None) or "")[:220]
         s.setdefault("text", raw)
-        s["time"] = getattr(ev, "time", None) or s.get("time")
-        mod = getattr(ev, "modality", None)
-        s["modality"] = (mod.value if hasattr(mod, "value") else mod) or s.get("channel")
+        span = s.get("source_span") or fact_span or ""
+        # For person graph items, try matching the item text as the span.
+        if not span and kind == "person":
+            span = (s.get("text") or "")[:160]
+        hydrate_source(s, ev, source_span=span or None)
 
     # Surface current editable kind for the drawer.
     current_kind = (node or {}).get("kind")
@@ -972,8 +1036,18 @@ def constellation(store: Store | None = None, limit: int = 28,
         candidates[fid] = _base(
             fid, f.get("text") or f.get("source_span") or "item", fkind,
             ts=ts, confidence=float(f.get("confidence") or 0.5), due=f.get("due"),
-            meta={"fact_kind": f.get("kind"), "status": f.get("status")},
+            meta={"fact_kind": f.get("kind"), "status": f.get("status"),
+                  "source_time": f.get("source_time"),
+                  "source_event_id": f.get("source_event_id")},
         )
+
+    # Meeting Layer P2: precompute jot timestamps once for note_adjacent.
+    note_times: list[float] = []
+    try:
+        from app.services import meeting_notes as _mnotes
+        note_times = _mnotes.jot_times(store, since=now - 14 * 86400, limit=800)
+    except Exception:
+        note_times = []
 
     # Memory traces + activation + learned β — fed to FieldV2Scorer via
     # PipelineContext. Always computed so the ledger keeps g1/shadow/v2
@@ -1100,6 +1174,19 @@ def constellation(store: Store | None = None, limit: int = 28,
         n["_feat_aging"] = aging
         n["aging"] = round(aging, 3)
         n["age_days"] = round(age, 2)
+        # Note adjacency: open work whose source turn co-timed a jot.
+        note_adj = 0.0
+        if is_open_work and note_times:
+            try:
+                from app.services import meeting_notes as _mnotes
+                src_ts = (n.get("meta") or {}).get("source_time") or n.get("ts")
+                note_adj = _mnotes.note_adjacent_score(src_ts, note_times)
+            except Exception:
+                note_adj = 0.0
+        n["_feat_note_adjacent"] = note_adj
+        if note_adj >= 1.0:
+            why = list(n.get("why") or [])
+            n["why"] = (["Highlighted in your live notes"] + why)[:3]
 
     from app.services.ranking.pipeline import run as _rank_run
     from app.services.ranking.types import PipelineContext as _PCtx
@@ -1200,28 +1287,58 @@ def constellation(store: Store | None = None, limit: int = 28,
                 _add_edge(f"person:{person['id']}", fid, weight=1.4,
                           rel=pred, confidence=conf)
 
+    try:
+        from app.services import kg_parity
+        read_v2 = kg_parity.read_v2_enabled(store)
+    except Exception:
+        read_v2 = False
+
     for p in people:
         src = f"person:{p['id']}"
         if src not in keep:
             continue
         rel = store.relations_of("person", p["id"])
         for e in rel.get("out") or []:
+            # Derived co_occurs always stay on relations (never in belief store).
             if e["predicate"] == "co_occurs" and e["obj_type"] == "person":
                 _add_edge(src, f"person:{e['obj_id']}",
                           weight=float(e.get("weight") or 1),
                           rel="mentioned_together",
                           confidence=float(e.get("confidence") or 0.55))
-            elif e["obj_type"] == "entity":
-                pred = e["predicate"] if e["predicate"] != "associated_with" else "affiliated"
-                _add_edge(src, f"entity:{e['obj_id']}",
-                          weight=float(e.get("weight") or 1),
-                          rel=pred,
-                          confidence=float(e.get("confidence") or 0.6))
             elif e["obj_type"] == "fact":
                 _add_edge(src, f"fact:{e['obj_id']}",
                           weight=float(e.get("weight") or 1),
                           rel=e["predicate"] or "related",
                           confidence=float(e.get("confidence") or 0.55))
+            elif e["obj_type"] == "entity" and not read_v2:
+                pred = (e["predicate"] if e["predicate"] != "associated_with"
+                        else "affiliated")
+                _add_edge(src, f"entity:{e['obj_id']}",
+                          weight=float(e.get("weight") or 1),
+                          rel=pred,
+                          confidence=float(e.get("confidence") or 0.6))
+        # Plan 2.6: person↔entity affiliation edges from kg_beliefs when cutover.
+        if read_v2:
+            try:
+                from app.services import kg_beliefs
+                kg_rows = store.list_kg_predicates(
+                    subj_type="person", subj_id=int(p["id"]),
+                    statuses=("active",))
+            except Exception:
+                kg_rows = []
+            for r in kg_rows:
+                if (r.get("obj_type") != "entity"
+                        or r["predicate"] not in AFFILIATION_PREDS):
+                    continue
+                try:
+                    conf = float(kg_beliefs.posterior(store, int(r["id"])))
+                except Exception:
+                    conf = float(r.get("confidence") or 0.6)
+                pred = (r["predicate"] if r["predicate"] != "associated_with"
+                        else "affiliated")
+                _add_edge(src, f"entity:{int(r['obj_id'])}",
+                          weight=max(0.5, conf),
+                          rel=pred, confidence=conf)
 
     for ta, ia, tb, ib, w in store.user_linked_pairs():
         _add_edge(f"{ta}:{ia}", f"{tb}:{ib}", weight=max(1.5, w),

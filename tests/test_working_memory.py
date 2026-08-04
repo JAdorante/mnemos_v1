@@ -178,6 +178,74 @@ class WorkingSetGroundingTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_current_exposes_active_person_and_project(self):
+        from app.services import working_memory as wm
+        from app.storage import Store
+
+        with tempfile.TemporaryDirectory() as td:
+            store = Store(Path(td) / "t.db")
+            try:
+                pid = store.resolve_person("Marc Chen")
+                eid = store.resolve_entity("Fundraise", "project")
+                wm.persist_slots(store, [{
+                    "slot": 0, "node_type": "person", "node_id": pid,
+                    "node_key": f"person:{pid}",
+                    "entered_at": time.time(), "score": 0.9,
+                    "cluster_head": 1, "cluster_n": 1,
+                    "reason": {"label": "Marc Chen", "kind": "person",
+                               "why": ["Active"]},
+                }, {
+                    "slot": 1, "node_type": "entity", "node_id": eid,
+                    "node_key": f"entity:{eid}",
+                    "entered_at": time.time(), "score": 0.8,
+                    "cluster_head": 1, "cluster_n": 1,
+                    "reason": {"label": "Fundraise", "kind": "project",
+                               "why": ["Active project"]},
+                }])
+                ctx = wm.current(store)
+                self.assertEqual(ctx["person_ids"], [pid])
+                self.assertEqual(ctx["person_labels"], ["Marc Chen"])
+                self.assertEqual(ctx["project_ids"], [eid])
+                self.assertEqual(ctx["project_labels"], ["Fundraise"])
+            finally:
+                store.close()
+
+    def test_active_project_boosted_on_task_question(self):
+        from app.services import grounding as gr
+        from app.services import working_memory as wm
+        from app.storage import Store
+
+        with tempfile.TemporaryDirectory() as td:
+            store = Store(Path(td) / "t.db")
+            try:
+                eid = store.resolve_entity("Fundraise", "project")
+                tid = store.add_task("Close Fundraise term sheet",
+                                     confidence=0.9, extracted_at=time.time())
+                wm.persist_slots(store, [{
+                    "slot": 0, "node_type": "entity", "node_id": eid,
+                    "node_key": f"entity:{eid}",
+                    "entered_at": time.time(), "score": 0.9,
+                    "cluster_head": 1, "cluster_n": 1,
+                    "reason": {"label": "Fundraise", "kind": "project",
+                               "why": ["Active project"]},
+                }])
+                ctx = wm.current(store)
+                with mock.patch("app.services.grounding._semantic_section",
+                                return_value=([], [])), \
+                     mock.patch("app.services.grounding._activity_section",
+                                return_value=[]):
+                    out = gr.compose("What deadlines do I have?",
+                                     store=store, ctx=ctx,
+                                     record_attention=False)
+                labels = [s["label"] for s in out["sources"]]
+                self.assertTrue(
+                    any(l.startswith("active project: Fundraise") for l in labels),
+                    f"expected project boost, got {labels}")
+                self.assertIn("Fundraise", out["block"])
+                self.assertIn("Close Fundraise term sheet", out["block"])
+            finally:
+                store.close()
+
 
 class PlannerWmTests(unittest.TestCase):
     def test_select_context_reads_wm(self):

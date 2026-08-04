@@ -210,6 +210,81 @@ class GroundingTests(unittest.TestCase):
             out = gr.compose("anything", store=_FakeStore(), semantic_limit=10)
         self.assertLessEqual(len(out["block"]), gr._MAX_BLOCK_CHARS + 1)
 
+    def test_tell_me_route_uses_speaker_beliefs(self) -> None:
+        store = _FakeStore(people=[{"name": "David"}])
+        beliefs = [{
+            "predicate": {
+                "subj_type": "entity", "subj_id": 1,
+                "predicate": "costs", "obj_type": "entity", "obj_id": 2,
+            },
+            "evidence": [{"quote": "pilot plan is $49 a month"}],
+            "conflict": False,
+        }]
+        with mock.patch("app.services.kg_beliefs.beliefs_by_speaker",
+                        return_value=beliefs) as bbs, \
+             mock.patch("app.services.grounding._node_label",
+                        side_effect=lambda s, t, i: (
+                            "pilot plan" if i == 1 else "$49")):
+            out = gr.compose(
+                "What did David tell me about the price?",
+                store=store, allow_llm_route=False)
+        bbs.assert_called()
+        self.assertEqual(out["route"]["route"], "speaker_beliefs")
+        self.assertIn("BELIEFS ATTRIBUTED TO", out["block"])
+        self.assertIn("$49", out["block"])
+        labels = [s["label"] for s in out["sources"]]
+        self.assertTrue(any(l.startswith("beliefs from") for l in labels))
+
+    def test_changed_route_uses_field_diff(self) -> None:
+        store = _FakeStore()
+        diff = {
+            "entered_focus": ["person:2"],
+            "left_focus": ["fact:1"],
+            "rising": [{"id": "person:1", "delta": 0.1}],
+            "aging": [],
+            "has_prior": True,
+        }
+        with mock.patch("app.services.field_history.diff",
+                        return_value=diff) as fd, \
+             mock.patch.object(store, "list_reflections",
+                               return_value=[{
+                                   "summary": "Pricing talk moved up",
+                                   "period_end": 1e12,
+                                   "created_at": 1e12,
+                               }], create=True):
+            out = gr.compose(
+                "What changed since last week?",
+                store=store, allow_llm_route=False)
+        fd.assert_called()
+        self.assertEqual(out["route"]["route"], "field_delta")
+        self.assertIn("WHAT CHANGED SINCE", out["block"])
+        self.assertIn("entered focus", out["block"])
+        self.assertIn("Pricing talk moved up", out["block"])
+        labels = [s["label"] for s in out["sources"]]
+        self.assertTrue(any(l.startswith("changes since") for l in labels))
+
+    def test_regex_route_skips_llm(self) -> None:
+        with mock.patch("app.services.model_router.router.complete_json") as cj:
+            hit = gr.classify_query_route(
+                "What did David tell me?", allow_llm=True)
+        self.assertEqual(hit["via"], "regex")
+        cj.assert_not_called()
+
+    def test_llm_route_only_on_soft_miss(self) -> None:
+        with mock.patch.dict("os.environ", {"QUILL_QUERY_ROUTE_LLM": "1"}), \
+             mock.patch("app.services.model_router.router.complete_json",
+                        return_value={
+                            "route": "speaker_beliefs",
+                            "speaker": "David",
+                            "since": None,
+                        }) as cj:
+            # Soft signal but not an exact regex shape.
+            hit = gr.classify_query_route(
+                "Remind me what David mentioned earlier", allow_llm=True)
+        cj.assert_called_once()
+        self.assertEqual(hit["route"], "speaker_beliefs")
+        self.assertEqual(hit["via"], "llm")
+
 
 if __name__ == "__main__":
     unittest.main()

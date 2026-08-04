@@ -146,6 +146,34 @@ class EscalateLogTests(_TempTrailMixin, unittest.TestCase):
 
 
 class RouterDistillTests(_TempTrailMixin, unittest.TestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        # Hermetic routing config: these tests assert code-DEFAULT routing
+        # (cloud fallback allowed on local outage). A machine .env that opts
+        # out of paying for local outages (QUILL_VISION_CLOUD_WHEN_LOCAL_DOWN=0,
+        # the historic "4 failing tests" in test_full_suite_out.txt) must not
+        # change what the suite proves.
+        from dataclasses import replace as _dc_replace
+        from types import SimpleNamespace
+        from app.services import vlm as vlm_mod
+        self._vision_cfg = _dc_replace(
+            vlm_mod.settings.vision, cloud_when_local_down=True)
+        p = mock.patch.object(vlm_mod, "settings",
+                              SimpleNamespace(vision=self._vision_cfg))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _patch_vision(self, **over) -> None:
+        """Override vision config fields for one test (frozen dataclass)."""
+        from dataclasses import replace as _dc_replace
+        from types import SimpleNamespace
+        from app.services import vlm as vlm_mod
+        p = mock.patch.object(
+            vlm_mod, "settings",
+            SimpleNamespace(vision=_dc_replace(self._vision_cfg, **over)))
+        p.start()
+        self.addCleanup(p.stop)
+
     def _router(self, local: _FakeProvider, claude: _FakeProvider,
                 local_ok: bool = True,
                 lite: _FakeProvider | None = None) -> VLMRouter:
@@ -225,9 +253,13 @@ class RouterDistillTests(_TempTrailMixin, unittest.TestCase):
         self.assertEqual(row["source"], "vision.webcam")
 
     def test_local_disabled_logs_parent_only_row(self) -> None:
+        # "Disabled" = the user opted out of local vision (local_vlm=False),
+        # which always escalates — distinct from local_unreachable (probe
+        # failed), which honors cloud_when_local_down.
+        self._patch_vision(local_vlm=False)
         local = _FakeProvider()
         claude = _FakeProvider(_res("notes", 0.9))
-        out = self._router(local, claude, local_ok=False).describe(b"jpg")
+        out = self._router(local, claude).describe(b"jpg")
         self.assertEqual(out["_provider"], "claude")
         row = _rows(self.trail)[0]
         self.assertEqual(row["reason"], "local_disabled")

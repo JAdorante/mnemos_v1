@@ -250,6 +250,75 @@ def snapshot(store=None) -> list[dict]:
     return load_slots(store)
 
 
+# Constellation kinds that count as an "active project" for grounding boost.
+_PROJECT_KINDS = frozenset({"project", "product"})
+
+
+def current(store=None) -> dict[str, Any]:
+    """Plan 3.1 — structured working context for `compose(question, ctx=…)`.
+
+    Refreshes WM when Now-Context moved, then returns typed active
+    person/project/fact ids + labels derived from the live slot list.
+    """
+    empty = {
+        "slots": [],
+        "person_ids": [],
+        "person_labels": [],
+        "project_ids": [],
+        "project_labels": [],
+        "fact_ids": [],
+    }
+    if store is None:
+        try:
+            from app.storage import get_store
+            store = get_store()
+        except Exception:
+            return empty
+    try:
+        ensure_fresh(store)
+    except Exception:
+        pass
+    slots = snapshot(store)
+    person_ids: list[int] = []
+    person_labels: list[str] = []
+    project_ids: list[int] = []
+    project_labels: list[str] = []
+    fact_ids: list[int] = []
+    for s in slots:
+        nt = s.get("node_type")
+        nid = s.get("node_id")
+        if nid is None:
+            continue
+        label = (s.get("label")
+                 or (s.get("reason") or {}).get("label")
+                 or "").strip()
+        kind = (s.get("kind")
+                or (s.get("reason") or {}).get("kind")
+                or "").strip().lower()
+        if nt == "person":
+            person_ids.append(int(nid))
+            if not label:
+                try:
+                    p = store.get_person(int(nid))
+                    label = (p or {}).get("name") or ""
+                except Exception:
+                    label = ""
+            person_labels.append(label or f"person:{nid}")
+        elif nt == "entity" and kind in _PROJECT_KINDS:
+            project_ids.append(int(nid))
+            project_labels.append(label or f"entity:{nid}")
+        elif nt == "fact":
+            fact_ids.append(int(nid))
+    return {
+        "slots": slots,
+        "person_ids": person_ids,
+        "person_labels": person_labels,
+        "project_ids": project_ids,
+        "project_labels": project_labels,
+        "fact_ids": fact_ids,
+    }
+
+
 def ensure_fresh(store=None, *, limit: int = 28,
                  force: bool = False) -> dict[str, Any]:
     """Rebuild WM from live ranking when Now-Context moved or slots are empty.

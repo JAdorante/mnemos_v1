@@ -24,6 +24,20 @@ JAIL_ROOT = Path(_get("QUILL_DESKTOP_JAIL", str(Path.home() / "quill_desktop")))
 # Master switch for the human approval gate on mutating actions.
 REQUIRE_APPROVAL = _get("QUILL_DESKTOP_APPROVAL", "1") not in ("0", "false", "False")
 
+# Approval binding (plan 0.4/0.5 → default-on for 5.2): same flag as the browser
+# commit gate. After the human approves a mutating desktop action, re-hash the
+# about-to-execute args and require hash == payload_hash and now < expires_at.
+#   off | shadow | enforce (code default)
+_APPROVAL_BIND_RAW = _get("QUILL_APPROVAL_BIND", "enforce").strip().lower()
+if _APPROVAL_BIND_RAW in ("0", "off", "false", "no"):
+    APPROVAL_BIND = "off"
+elif _APPROVAL_BIND_RAW in ("shadow", "log"):
+    APPROVAL_BIND = "shadow"
+elif _APPROVAL_BIND_RAW in ("enforce", "on", "1", "true", "yes"):
+    APPROVAL_BIND = "enforce"
+else:
+    APPROVAL_BIND = "enforce"
+
 # Bounds on a single task.
 COMMAND_TIMEOUT_S = float(_get("QUILL_DESKTOP_TIMEOUT_S", "60"))
 MAX_ACTIONS_PER_TASK = int(_get("QUILL_DESKTOP_MAX_ACTIONS", "25"))

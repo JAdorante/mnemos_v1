@@ -62,6 +62,20 @@ class Event:
         """Combined 0..1 readiness-to-act, or None if the contract wasn't set."""
         return (self.meta or {}).get("action_readiness")
 
+    # --- privacy_class (plan 6.1) ------------------------------------------
+    # Taxonomy: public | internal | personal | sensitive | never-send.
+    # Stamped deterministically at persist; enforced in model_router before
+    # any cloud call. Lives in meta so no schema migration is required.
+    @property
+    def privacy_class(self) -> str:
+        """Egress class for this event (default 'internal' if never stamped)."""
+        return (self.meta or {}).get("privacy_class") or "internal"
+
+    def stamp_privacy_class(self) -> "Event":
+        """Compute and attach privacy_class (idempotent; keeps higher class)."""
+        from app.services.privacy_class import stamp_event
+        return stamp_event(self)
+
 
 Subscriber = Callable[[Event], Awaitable[None] | None]
 

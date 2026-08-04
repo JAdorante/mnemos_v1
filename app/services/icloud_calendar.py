@@ -190,9 +190,31 @@ def _parse_dt(prop: str, value: str) -> tuple[dt.datetime | dt.date | None, bool
         return None, False
 
 
+def _parse_cal_address(head: str, val: str) -> dict:
+    """ATTENDEE/ORGANIZER line → {name, email}."""
+    cn = ""
+    m = re.search(r"CN=([^;:]+)", head or "", re.I)
+    if m:
+        cn = m.group(1).strip().strip('"')
+        # RFC 5545 escaped commas in CN
+        cn = cn.replace("\\,", ",").replace("\\;", ";")
+    email = (val or "").strip()
+    if email.lower().startswith("mailto:"):
+        email = email[7:]
+    # Drop angle brackets some servers emit
+    email = email.strip("<>").strip()
+    return {"name": cn, "email": email}
+
+
 def parse_vevent(block: str) -> dict | None:
-    """One unfolded VEVENT -> {uid, summary, start, end, all_day, location}."""
+    """One unfolded VEVENT -> {uid, summary, start, end, all_day, location,
+    organizer, attendees}.
+
+    Attendees/organizer feed Meeting Layer P1 session join + people priors.
+    """
     props: dict[str, tuple[str, str]] = {}
+    attendees: list[dict] = []
+    organizer: dict | None = None
     for line in block.splitlines():
         if ":" not in line:
             continue
@@ -201,6 +223,12 @@ def parse_vevent(block: str) -> dict | None:
         if name in ("UID", "SUMMARY", "LOCATION", "DTSTART", "DTEND",
                     "RECURRENCE-ID", "STATUS"):
             props[name] = (head, val)
+        elif name == "ATTENDEE":
+            a = _parse_cal_address(head, val)
+            if a.get("email") or a.get("name"):
+                attendees.append(a)
+        elif name == "ORGANIZER":
+            organizer = _parse_cal_address(head, val)
     if props.get("STATUS", ("", ""))[1].strip().upper() == "CANCELLED":
         return None
     start, all_day = _parse_dt(*props.get("DTSTART", ("", "")))
@@ -214,6 +242,8 @@ def parse_vevent(block: str) -> dict | None:
         "summary": props.get("SUMMARY", ("", ""))[1].strip() or "(untitled)",
         "location": props.get("LOCATION", ("", ""))[1].strip(),
         "start": start, "end": end, "all_day": all_day,
+        "organizer": organizer,
+        "attendees": attendees,
     }
 
 
@@ -232,8 +262,11 @@ def _when_text(ev: dict) -> str:
 def _fingerprint(ev: dict) -> tuple[str, str]:
     """(stable key, content hash) — hash change means the event was edited."""
     key = f"{ev['calendar']}|{ev['uid']}"
-    blob = json.dumps([ev["summary"], str(ev["start"]), str(ev.get("end")),
-                       ev["location"], ev["all_day"]], sort_keys=True)
+    blob = json.dumps([
+        ev["summary"], str(ev["start"]), str(ev.get("end")),
+        ev["location"], ev["all_day"],
+        ev.get("organizer"), ev.get("attendees") or [],
+    ], sort_keys=True)
     return key, hashlib.sha1(blob.encode("utf-8")).hexdigest()
 
 
@@ -256,9 +289,24 @@ def sync(publish=None) -> dict:
         fresh = 0
         state = _load_state()
         known = state.get("hashes") or {}
+        # Meeting Layer P1: keep calendar_events index warm even when the
+        # memory-event fingerprint is unchanged (attendee priors need it).
+        try:
+            from app.storage import get_store
+            from app.services import meeting_join as _mj
+            _cal_store = get_store()
+        except Exception:
+            _cal_store = None
+            _mj = None  # type: ignore
+
         for cal in cals:
             for ev in query_events(base, cal, auth, start, end):
                 seen += 1
+                if _cal_store is not None and _mj is not None:
+                    try:
+                        _mj.upsert_from_sync_event(_cal_store, ev)
+                    except Exception:
+                        pass
                 key, digest = _fingerprint(ev)
                 if known.get(key) == digest:
                     continue
@@ -272,7 +320,11 @@ def sync(publish=None) -> dict:
                             meta={"origin": "icloud", "calendar": ev["calendar"],
                                   "uid": ev["uid"], "start": str(ev["start"]),
                                   "end": str(ev.get("end") or ""),
-                                  "all_day": ev["all_day"]})
+                                  "all_day": ev["all_day"],
+                                  "summary": ev["summary"],
+                                  "location": ev.get("location") or "",
+                                  "organizer": ev.get("organizer"),
+                                  "attendees": ev.get("attendees") or []})
                 _conf.attach(out, _conf.OBSERVED)
                 publish(out)
         if fresh:
@@ -350,10 +402,49 @@ def build_ics(uid: str, summary: str, start: str, end: str | None,
     return "\r\n".join(lines) + "\r\n"
 
 
+def get_event(href_or_uid: str, calendar: str = "Home") -> dict:
+    """CalDAV GET read-back by href or bare UID (plan 5.1)."""
+    href_or_uid = (href_or_uid or "").strip()
+    if not href_or_uid:
+        return {"ok": False, "error": "href/uid required"}
+    user, pwd = icloud_account._read_saved()
+    if not (user and pwd):
+        return {"ok": False, "error": "iCloud not connected"}
+    auth = (user, pwd)
+    try:
+        base, cals = discover(auth)
+        if href_or_uid.endswith(".ics") and "/" in href_or_uid:
+            url = base + href_or_uid if not href_or_uid.startswith("http") \
+                else href_or_uid
+            href = href_or_uid
+        else:
+            cal = _find_calendar(cals, calendar) or (cals[0] if cals else None)
+            if cal is None:
+                return {"ok": False, "error": "calendar not found"}
+            href = cal["href"] + href_or_uid + ".ics"
+            url = base + href
+        r = requests.get(url, auth=auth, timeout=30,
+                         headers={"Accept": "text/calendar"})
+        if r.status_code != 200:
+            return {"ok": False, "status": r.status_code, "href": href,
+                    "error": f"GET HTTP {r.status_code}"}
+        body = r.text or ""
+        uid_m = re.search(r"(?im)^UID:(.+)$", body)
+        uid = (uid_m.group(1).strip() if uid_m else href_or_uid)
+        return {"ok": True, "uid": uid, "href": href, "status": 200,
+                "ics": body[:4000]}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 def create_event(summary: str, start: str, *, end: str | None = None,
                  duration_min: int = 60, calendar: str = "Home",
                  location: str = "", all_day: bool = False) -> dict:
-    """Create one personal event (no attendees) via CalDAV PUT. Human-initiated."""
+    """Create one personal event (no attendees) via CalDAV PUT. Human-initiated.
+
+    Plan 5.1: after PUT, GET the event by href — `verified` only when read-back
+    succeeds; otherwise `outcome_uncertain` with the PUT still ok.
+    """
     if not settings.icloud.sync_enabled:
         return {"ok": False, "error": "iCloud sync disabled"}
     user, pwd = icloud_account._read_saved()
@@ -375,7 +466,8 @@ def create_event(summary: str, start: str, *, end: str | None = None,
         stamp = dt.datetime.now(dt.timezone.utc)
         ics = build_ics(uid, summary, start, end, duration_min, location,
                         all_day, stamp)
-        url = base + cal["href"] + uid + ".ics"
+        href = cal["href"] + uid + ".ics"
+        url = base + href
         r = requests.put(url, auth=auth, data=ics.encode("utf-8"),
                          headers={"Content-Type": "text/calendar; charset=utf-8",
                                   "If-None-Match": "*"},
@@ -385,8 +477,19 @@ def create_event(summary: str, start: str, *, end: str | None = None,
                     "error": f"calendar rejected the write (HTTP {r.status_code})"}
         when = (start if all_day else str(_to_utc(start).astimezone()))
         print(f"[icloud_calendar] created event {summary!r} in {cal['name']}")
-        return {"ok": True, "uid": uid, "calendar": cal["name"],
-                "summary": summary, "when": when, "href": cal["href"] + uid + ".ics"}
+        out = {"ok": True, "uid": uid, "calendar": cal["name"],
+               "summary": summary, "when": when, "href": href}
+        # Evidence-anchored read-back (plan 5.1)
+        try:
+            from app.services import outcome_verify as ov
+            ev = ov.verify_calendar_event(href, uid=uid, calendar=cal["name"])
+            out["verify"] = ev.as_dict()
+            out["step_status"] = ev.status
+        except Exception as exc:
+            out["verify"] = {"ok": False, "source": "calendar_get",
+                             "note": str(exc), "status": "outcome_uncertain"}
+            out["step_status"] = "outcome_uncertain"
+        return out
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 

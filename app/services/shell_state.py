@@ -20,6 +20,7 @@ def build(store, *, agent_worker=None, field_limit: int = 28) -> dict[str, Any]:
         "world": {"nodes": [], "wm": [], "selection": None, "mode": None},
         "attention": {
             "horizon": [],
+            "open_loops": [],
             "at_risk": [],
             "wm": [],
         },
@@ -65,6 +66,30 @@ def build(store, *, agent_worker=None, field_limit: int = 28) -> dict[str, Any]:
         out["attention"]["horizon_enabled"] = hz.get("enabled", True)
     except Exception as exc:
         out["attention"]["horizon_error"] = str(exc)
+
+    # Plan 4.3: expose open loops explicitly for Today (also embedded in horizon).
+    try:
+        from app.services import open_loops
+        loops = open_loops.detect(store, worker=agent_worker, now=now, limit=6)
+        out["attention"]["open_loops"] = [
+            {
+                "id": lp.get("id"),
+                "kind": lp.get("kind"),
+                "label": lp.get("label"),
+                "when_label": lp.get("when_label"),
+                "reason": lp.get("reason") or [],
+                "evidence": lp.get("evidence") or {},
+                "fact_id": lp.get("fact_id"),
+                "p_need": lp.get("p_need"),
+            }
+            for lp in loops
+        ]
+        try:
+            out["attention"]["open_loop_dismiss_rate"] = open_loops.dismiss_rate()
+        except Exception:
+            pass
+    except Exception as exc:
+        out["attention"]["open_loops_error"] = str(exc)
 
     try:
         from app.services import meta_memory
@@ -118,6 +143,51 @@ def build(store, *, agent_worker=None, field_limit: int = 28) -> dict[str, Any]:
         ]
     except Exception:
         out["forgotten"] = []
+
+    # Meeting Layer P2 — live notepad (jots for the active / recent session).
+    try:
+        from app.services import meeting_notes as _mnotes
+        active = _mnotes.active_session(store, now)
+        sid = int(active["id"]) if active and active.get("id") is not None else None
+        cal = (active or {}).get("calendar_event_id")
+        retention = None
+        meeting_mode = None
+        try:
+            from app.services import meeting_mode as _mm
+            meeting_mode = _mm.status()
+            if sid is not None or cal:
+                retention = _mm.retention_for(sid, cal)
+        except Exception:
+            pass
+        out["notepad"] = {
+            "enabled": _mnotes.enabled(),
+            "session_id": sid,
+            "title": ((active or {}).get("meeting_meta") or {}).get("title")
+                     if active else "",
+            "calendar_linked": bool(active and active.get("calendar_event_id")),
+            "jots": _mnotes.recent_jots(store, limit=24, session_id=None)[:16],
+            "retention": retention,
+            "meeting_mode": meeting_mode,
+        }
+    except Exception as exc:
+        out["notepad"] = {"enabled": True, "jots": [], "error": str(exc)}
+
+    # Meeting Layer P3 — pointer to latest enhanced note.
+    try:
+        latest = store.latest_reflection("meeting")
+        if latest:
+            title = (latest.get("summary") or "").split("\n", 1)[0].strip()
+            if " · " in title:
+                title = title.split(" · ", 1)[0].strip()
+            out["latest_meeting_note"] = {
+                "id": latest["id"],
+                "title": title or "Meeting note",
+                "href": f"/meeting/note/{latest['id']}",
+            }
+        else:
+            out["latest_meeting_note"] = None
+    except Exception:
+        out["latest_meeting_note"] = None
 
     return out
 

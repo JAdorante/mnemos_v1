@@ -49,6 +49,7 @@ COMPONENT_KEYS = frozenset({
     "activation",  # Field v2 only
     "context",     # mode reweight (WS4 surface; emitted when mode ≠ 1)
     "aging",       # neglected open commitments (WS3)
+    "note_adjacent",  # Meeting Layer P2 — turn co-timed with a notepad jot
 })
 
 # Admission provenance.

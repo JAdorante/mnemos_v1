@@ -8,9 +8,14 @@ data/.api_token) for non-loopback clients.
 Phone device endpoints keep their own Bearer device tokens. Pairing claim and
 the phone setup HTML stay open so a phone can finish pairing. Browser UIs unlock
 via POST /auth/unlock, which sets an HttpOnly session cookie.
+
+Plan 6.3: the cookie stores an HMAC-derived session token
+(HMAC-SHA256(salt, api_token)), never the raw LAN token — so cookie theft
+cannot be replayed as `Authorization: Bearer <token>`.
 """
 from __future__ import annotations
 
+import hashlib
 import hmac
 import os
 import secrets
@@ -23,6 +28,17 @@ from starlette.responses import JSONResponse, Response
 from app.config import settings
 
 COOKIE_NAME = "quill_api_session"
+COOKIE_MAX_AGE_S = 60 * 60 * 24 * 30
+
+# Plan 6.4 — double-submit CSRF (readable by JS) + Origin/Referer check.
+CSRF_COOKIE = "quill_csrf"
+CSRF_HEADER = "x-csrf-token"
+_UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+_CSRF_EXACT_EXEMPT = frozenset({
+    "/auth/unlock",          # establishes session; no prior CSRF cookie
+    "/phone/pair/claim",     # single-use pairing code is the auth
+    "/peer/pair/claim",
+})
 
 # Paths that must stay reachable without the LAN API token.
 _EXACT_EXEMPT = frozenset({
@@ -127,10 +143,192 @@ def ensure_api_token() -> str:
 
 
 def token_matches(candidate: str | None) -> bool:
+    """True when `candidate` is the raw LAN API token (Bearer path)."""
     expected = get_api_token()
     if not expected or not candidate:
         return False
     return hmac.compare_digest(candidate.strip(), expected)
+
+
+def session_salt_path() -> Path:
+    return Path(settings.storage.data_dir) / ".session_salt"
+
+
+def get_session_salt() -> str:
+    """Stable salt for session HMAC. Env wins; else durable file under data/."""
+    env = (os.environ.get("QUILL_SESSION_SALT") or "").strip()
+    if env:
+        return env
+    path = session_salt_path()
+    try:
+        if path.is_file():
+            salt = path.read_text(encoding="utf-8").strip()
+            if salt:
+                return salt
+    except OSError:
+        pass
+    # Mint once so cookie values stay stable across restarts.
+    path.parent.mkdir(parents=True, exist_ok=True)
+    salt = secrets.token_urlsafe(32)
+    try:
+        path.write_text(salt + "\n", encoding="utf-8")
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+    except OSError:
+        pass
+    return salt
+
+
+def session_token(api_token: str | None = None, *, salt: str | None = None) -> str:
+    """HMAC-SHA256(salt, api_token) hex — what the browser cookie holds (6.3)."""
+    token = (api_token if api_token is not None else get_api_token()) or ""
+    s = (salt if salt is not None else get_session_salt()) or ""
+    if not token or not s:
+        return ""
+    return hmac.new(
+        s.encode("utf-8"),
+        token.strip().encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def session_matches(candidate: str | None) -> bool:
+    """True when `candidate` is the derived session token (cookie path)."""
+    expected = session_token()
+    if not expected or not candidate:
+        return False
+    return hmac.compare_digest(candidate.strip(), expected)
+
+
+def apply_session_cookie(response: Response, api_token: str | None = None) -> str:
+    """Set HttpOnly/SameSite cookie to the derived session token. Returns it."""
+    value = session_token(api_token)
+    response.set_cookie(
+        key=COOKIE_NAME,
+        value=value,
+        httponly=True,
+        samesite="strict",
+        max_age=COOKIE_MAX_AGE_S,
+        path="/",
+    )
+    return value
+
+
+def clear_session_cookie(response: Response) -> None:
+    response.delete_cookie(COOKIE_NAME, path="/")
+
+
+def mint_csrf_token() -> str:
+    return secrets.token_urlsafe(24)
+
+
+def apply_csrf_cookie(response: Response, token: str | None = None) -> str:
+    """Set non-HttpOnly CSRF cookie (double-submit; JS reads + sends header)."""
+    value = (token or mint_csrf_token()).strip()
+    response.set_cookie(
+        key=CSRF_COOKIE,
+        value=value,
+        httponly=False,
+        samesite="strict",
+        max_age=COOKIE_MAX_AGE_S,
+        path="/",
+    )
+    return value
+
+
+def csrf_enabled() -> bool:
+    return os.environ.get("QUILL_CSRF", "1") not in ("0", "false", "False")
+
+
+def _host_only(host: str | None) -> str:
+    """Normalize Host / netloc: lowercase, strip default ports."""
+    h = (host or "").strip().lower()
+    if not h:
+        return ""
+    # Drop userinfo if somehow present
+    if "@" in h:
+        h = h.rsplit("@", 1)[-1]
+    if h.endswith(":80") and h.count(":") == 1:
+        h = h[:-3]
+    if h.endswith(":443") and h.count(":") == 1:
+        h = h[:-4]
+    return h
+
+
+def _netloc_from_url(url: str | None) -> str:
+    if not (url or "").strip():
+        return ""
+    try:
+        from urllib.parse import urlparse
+        p = urlparse(url.strip())
+        if not p.scheme or not p.netloc:
+            return ""
+        return _host_only(p.netloc)
+    except Exception:
+        return ""
+
+
+def origin_ok(request: Request) -> bool:
+    """True when Origin (or Referer) matches this request's Host."""
+    host = _host_only(request.headers.get("host"))
+    if not host:
+        return False
+    origin = (request.headers.get("origin") or "").strip()
+    if origin:
+        # "null" is opaque origin (sandboxed) — never trust.
+        if origin.lower() == "null":
+            return False
+        return _netloc_from_url(origin) == host
+    referer = (request.headers.get("referer") or "").strip()
+    if referer:
+        return _netloc_from_url(referer) == host
+    return False
+
+
+def csrf_header_ok(request: Request) -> bool:
+    """Double-submit: X-CSRF-Token header must equal quill_csrf cookie."""
+    cookie = (request.cookies.get(CSRF_COOKIE) or "").strip()
+    header = (
+        request.headers.get(CSRF_HEADER)
+        or request.headers.get("x-vinceo-csrf")
+        or ""
+    ).strip()
+    if not cookie or not header:
+        return False
+    return hmac.compare_digest(cookie, header)
+
+
+def csrf_path_exempt(path: str) -> bool:
+    if path in _CSRF_EXACT_EXEMPT:
+        return True
+    # Device/peer Bearer routes enforce their own auth — not browser cookie CSRF.
+    for prefix in _PREFIX_EXEMPT:
+        if path == prefix or path.startswith(prefix + "/"):
+            return True
+    return False
+
+
+def csrf_applies(request: Request) -> bool:
+    """Whether this request must pass Origin or CSRF-token check."""
+    if not csrf_enabled():
+        return False
+    method = (request.method or "").upper()
+    if method not in _UNSAFE_METHODS:
+        return False
+    path = request.url.path
+    if csrf_path_exempt(path):
+        return False
+    # Raw LAN Bearer (API clients / scripts) is not a cookie CSRF vector.
+    if token_matches(_bearer_token(request.headers.get("authorization"))):
+        return False
+    return True
+
+
+def csrf_ok(request: Request) -> bool:
+    """Origin match OR double-submit CSRF header (plan 6.4)."""
+    return origin_ok(request) or csrf_header_ok(request)
 
 
 def _bearer_token(authorization: str | None) -> str | None:
@@ -143,9 +341,11 @@ def _bearer_token(authorization: str | None) -> str | None:
 
 
 def request_authorized(request: Request) -> bool:
+    # Bearer: raw LAN token (API clients / scripts).
     if token_matches(_bearer_token(request.headers.get("authorization"))):
         return True
-    return token_matches(request.cookies.get(COOKIE_NAME))
+    # Cookie: derived session token only (plan 6.3) — never the raw token.
+    return session_matches(request.cookies.get(COOKIE_NAME))
 
 
 def path_is_exempt(path: str, method: str) -> bool:
@@ -180,6 +380,30 @@ def path_is_exempt(path: str, method: str) -> bool:
             pass
     # #endregion
     return False
+
+
+class CsrfProtectMiddleware(BaseHTTPMiddleware):
+    """Plan 6.4 — reject cross-origin state-changing requests.
+
+    Applies to POST/PUT/PATCH/DELETE unless the path is CSRF-exempt or the
+    caller presents the raw LAN Bearer token. Passes when Origin/Referer
+    matches Host, or when the double-submit CSRF header matches the cookie.
+    """
+
+    async def dispatch(self, request: Request, call_next) -> Response:
+        if csrf_applies(request) and not csrf_ok(request):
+            return JSONResponse(
+                {"detail": "CSRF rejected: cross-origin or missing token"},
+                status_code=403,
+            )
+        response = await call_next(request)
+        # Ensure browsers always have a CSRF cookie for subsequent POSTs.
+        try:
+            if CSRF_COOKIE not in (request.cookies or {}):
+                apply_csrf_cookie(response)
+        except Exception:
+            pass
+        return response
 
 
 class LanApiAuthMiddleware(BaseHTTPMiddleware):

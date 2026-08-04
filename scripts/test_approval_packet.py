@@ -67,6 +67,36 @@ def test_decision_roundtrip():
         _log = staticmethod(lambda s: None)
         _recorder = _NullRecorder()
         last_route = None
+        _source_fact_id = None
+        _grounded_source_ids = None
+        _bound_packet = None
+        _about_to_execute_fields = None
+
+        def _grounded_fields(self, fields):
+            return dict(fields or {})
+
+        def _bind_approved_packet(self, packet_id, fields):
+            self._bound_packet = {
+                "packet_id": packet_id,
+                "fields": dict(fields or {}),
+                "payload_hash": None,
+                "expires_at": None,
+            }
+
+        def _clear_bound_packet(self):
+            self._bound_packet = None
+            self._about_to_execute_fields = None
+
+        def _set_pending_approval_packet(self, packet_id, fields):
+            self._pending_approval_packet = {
+                "packet_id": packet_id,
+                "fields": dict(fields or {}),
+                "payload_hash": "x",
+                "expires_at": None,
+            }
+
+        def _mint_edit_packet(self, fields, user_edit, summary):
+            return None, dict(fields or {}), "x"
     replies = iter(["change the subject to Q3 pricing"])
     fake = Fake()
     fake._ask_fn = lambda prompt: next(replies)

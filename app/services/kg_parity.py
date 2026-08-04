@@ -145,3 +145,22 @@ def cutover_ready(store) -> dict[str, Any]:
     ok = len(reports) >= 7 and all(int(r["critical"]) == 0 for r in reports)
     return {"ready": ok, "reports": len(reports),
             "critical_in_window": sum(int(r["critical"]) for r in reports)}
+
+
+def read_v2_enabled(store=None) -> bool:
+    """Plan 2.6 — whether constellation/grounding primary-read kg_beliefs.
+
+    Env override (dev / rollback / tests):
+      QUILL_KG_READ_V2=1 → force ON
+      QUILL_KG_READ_V2=0 → force OFF
+    Unset → follow cutover_ready (7 consecutive zero-critical parity reports).
+    """
+    raw = os.environ.get("QUILL_KG_READ_V2")
+    if raw is not None and str(raw).strip() != "":
+        return str(raw) not in ("0", "false", "False")
+    if store is None:
+        return False
+    try:
+        return bool(cutover_ready(store).get("ready"))
+    except Exception:
+        return False

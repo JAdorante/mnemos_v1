@@ -9,6 +9,7 @@ AdmittedBy = Literal["score", "quota", "pin"]
 ComponentKey = Literal[
     "pin", "due", "relationship", "centrality", "recency",
     "kind", "confidence_gate", "activation", "context", "aging",
+    "note_adjacent",  # Meeting Layer P2 — co-timed notepad jot
 ]
 
 
