@@ -1,6 +1,10 @@
-# vinceo.ai
+# Mnemos
 
 **A personal memory + agent system that hears, sees, remembers, reflects — and, with your approval, acts.**
+
+> The product is **Mnemos** (formerly QUILL); the in-app assistant brands
+> itself **vinceo.ai**, and env vars / the database keep the `QUILL_` prefix —
+> see the [naming note](#configuration-reference).
 
 ![status](https://img.shields.io/badge/status-experimental%20prototype-orange)
 ![python](https://img.shields.io/badge/python-3.10%2B-blue)
@@ -26,17 +30,20 @@ stops for your **Approve / Edit / Cancel** before anything sends.
 > The laptop is the hardware prototype: prove the software experience first,
 > shrink it into a pen later.
 
-> **Status:** experimental research prototype under active development. Capture,
-> memory, facts, reflection, the knowledge graph, local-first model routing, and
-> the browser/desktop/phone agents all work today; some pieces are stubs or
-> feature-flagged off — see [Known gaps & roadmap](#known-gaps--roadmap). Not
-> production software.
+> **Status (August 2026):** experimental research prototype under active
+> development. Capture, memory, facts, reflection, the knowledge graph,
+> local-first model routing, the meeting layer, and the browser/desktop/phone
+> agents all work today, behind a hardened trust layer (hash-bound approvals,
+> source policies, evidence-verified outcomes). ~1,600 tests pass. Some pieces
+> remain feature-flagged — see [Known gaps & roadmap](#known-gaps--roadmap).
+> Not production software.
 
 ---
 
 ## Table of contents
 
 - [How it works — the short version](#how-it-works--the-short-version)
+- [Recent additions (July-August 2026)](#recent-additions-july-august-2026)
 - [One moment, end to end](#one-moment-end-to-end)
 - [The Event: one schema for everything](#the-event-one-schema-for-everything)
 - [Layer 1 — Perceive](#layer-1--perceive)
@@ -99,6 +106,53 @@ Three principles run through every layer:
   pushed as a notification). Retrieved memory can *inform* an action but can
   never *approve* one — only a live human reply authorizes anything
   irreversible.
+
+---
+
+## Recent additions (July-August 2026)
+
+The July–August push was about **trust**: proving what the system heard,
+bounding what it may mint and do, and verifying what it actually did.
+
+- **Meeting layer** ([meeting_join](app/services/meeting_join.py) ·
+  [meeting_notes](app/services/meeting_notes.py) ·
+  [meeting_enhance](app/services/meeting_enhance.py) ·
+  [meeting_chat](app/services/meeting_chat.py) ·
+  [meeting_mode](app/services/meeting_mode.py)) — sessions matched to calendar
+  events, live jots that boost co-timed memories in ranking, template-driven
+  meeting briefs persisted as reflections, session-scoped meeting chat, and a
+  per-session transcript-only retention switch. Browse at `/meetings`.
+- **Approval hash binding** (`QUILL_APPROVAL_BIND=enforce`, the code default) —
+  the packet you approve is canonicalized and hashed; at the irreversible click
+  the about-to-execute fields must hash-match the approved row in the database
+  (so it survives agent restarts) or the agent stops, shows a diff, and re-asks
+  on a fresh packet. Approvals expire after 15 minutes; a duplicate-send
+  lookback stops double-fires.
+- **Source policy table** ([data/source_policies.json](data/source_policies.json),
+  checked in) — per source-class rules for what a terminal window, news page,
+  social feed, email, or document may contribute: mint people, commitments,
+  claims, contacts, identity/relationship evidence. A missing table degrades to
+  **deny minting, never allow** — with a loud log, a `/health` flag, and a
+  Memory Console banner.
+- **Commitment lifecycle + open loops** — a real state machine with completion
+  only from *verified* sends, plus detectors for waiting-on-me /
+  waiting-on-them / unanswered questions ([open_loops](app/services/open_loops.py)).
+- **Evidence-anchored outcome verification** — an action "worked" only if
+  evidence says so (Sent-folder check, CalDAV read-back, file stat). An
+  LLM-only success claim records `outcome_uncertain`, never verified.
+- **Privacy-gated cloud egress + spend cap** — never-send classes are refused,
+  sensitive/personal content is redacted before any Anthropic call, the max
+  privacy class of every call is logged, and a hard spend cap bounds cost.
+- **Speaker-labeled extraction + assertion classes** — every extracted fact
+  carries who said it and how (stated by user / by other / inferred / quoted /
+  hypothetical), so overheard speech can't create wrong-owner commitments.
+- **Team + phone channels** — paired Mnemos↔Mnemos asks with per-peer
+  disclosure policies (`/peer`), and a direct QR-paired phone channel (no
+  Phone Link required).
+- **Standing triggers** (`/triggers`) — chat-authored data-row triggers with a
+  7-day backtest before arming; offer-only by design.
+- **Eval harness** — checked-in goldens with hard thresholds (`make eval`),
+  CI-able exit codes, plus golden-snapshot ranking tests.
 
 ---
 
@@ -395,9 +449,11 @@ answers are ingested. A JSON backup lands at `data/onboarding_profile.json`.
 [app/services/readiness.py](app/services/readiness.py) ·
 [app/services/multitask.py](app/services/multitask.py)
 
-The brain above the hands. Behind `QUILL_PLANNER=1`, the **Personal Agent
-Layer** compiles a user goal into a grounded, risk-classified **Plan** of
-`ActionPacket`s before anything touches a browser:
+The brain above the hands. **On by default** (`QUILL_PLANNER=1` is the code
+default since approval binding graduated to enforce; `QUILL_PLANNER=0`
+restores core-workflow-only gating), the **Personal Agent Layer** compiles a
+user goal into a grounded, risk-classified **Plan** of `ActionPacket`s before
+anything touches a browser:
 
 ```
 Facts / Graph / Reflections / Commitments
@@ -603,8 +659,8 @@ weights, never in code (`tests/test_no_user_tailoring.py` enforces it).
 
 ## The Memory Console — the trust layer
 
-**Where:** <http://127.0.0.1:8000/console> (all endpoints + the embedded UI live
-in [app/api/routes.py](app/api/routes.py))
+**Where:** <http://127.0.0.1:8000/memory> (`/console` 301-redirects there; all
+endpoints + the embedded UI live in [app/api/routes.py](app/api/routes.py))
 
 vinceo.ai asks you to trust what it heard, saw, and inferred — the Console is
 where you check. One page, tabbed:
@@ -623,8 +679,10 @@ where you check. One page, tabbed:
 Vision rows carry a **provider pill** (which VLM produced the description, with
 the routing reason on hover) — local-first routing, validated per row. Rebuild
 buttons re-derive turns / sessions / activities on demand. Related pages:
-`/ui` (live chat + offers), `/desktop-access` (desktop capture control +
-metrics), `/onboarding` (profile setup), `/docs` (Swagger).
+`/today` (day view), `/chat` and `/ui` (live chat + offers), `/profile` (the
+living user profile), `/meetings`, `/triggers` (standing triggers), `/peer`
+(team pairing + disclosure policy), `/desktop-access` (desktop capture control
++ metrics), `/onboarding` (profile setup), `/docs` (Swagger).
 
 ---
 
@@ -724,7 +782,7 @@ python run_all.py
 One command starts the Memory Engine, live audio + vision + notification
 capture, the FastAPI server, and the browser-agent UI. Then open:
 
-- **Memory Console** — <http://127.0.0.1:8000/console>
+- **Memory Console** — <http://127.0.0.1:8000/memory>
 - **Live chat UI** — <http://127.0.0.1:8000/ui>
 - **Onboarding (first run)** — <http://127.0.0.1:8000/onboarding>
 - **API docs (Swagger)** — <http://127.0.0.1:8000/docs>
@@ -797,7 +855,7 @@ curl -s "http://127.0.0.1:8000/memory/search?q=whiteboard%20series%20A"
 
 | Surface | What it is |
 |---|---|
-| **`/console`** | The Memory Console (see [above](#the-memory-console--the-trust-layer)). |
+| **`/memory`** | The Memory Console (see [above](#the-memory-console--the-trust-layer)); `/console` redirects here. |
 | **`/ui`** | Live chat — watch capture happen, see offers, reply, approve. |
 | **`/desktop-access`** | Desktop-capture control + metrics page. |
 | **`/onboarding`** | One-time guided profile setup. |
@@ -816,7 +874,7 @@ POST /vision/start · /vision/stop
 POST /notifications/start · /notifications/stop
 POST /desktop-capture/start · /desktop-capture/stop
 GET  /memory · /memory/search?q=
-GET  /console · /console/events (modality/source/q filters) · /console/turns
+GET  /console (301 → /memory) · /console/events (modality/source/q filters) · /console/turns
 GET  /console/sessions · /console/activity · /console/activity/events?ids=
 POST /console/consolidate · /console/sessions/rebuild · /console/activity/rebuild
 GET  /console/jobs · /console/models · /console/escalate · /console/readiness
@@ -871,9 +929,11 @@ All settings are read from the environment / `.env` with sane defaults (see
 [browser_agent/config.py](browser_agent/config.py)). A `.credentials.env` is
 loaded after `.env` with override, for secrets.
 
-> **Naming note:** the product is **vinceo.ai**, but env vars and the SQLite file
-> keep the `QUILL_` / `quill.db` prefix from the project's original name —
-> deliberately, so existing configs and data keep working.
+> **Naming note:** the product is **Mnemos**. The in-app UI still brands as
+> **vinceo.ai** ([app/api/vinceo_theme.py](app/api/vinceo_theme.py)), and env
+> vars and the SQLite file keep the `QUILL_` / `quill.db` prefix from the
+> project's original name — deliberately, so existing configs and data keep
+> working.
 
 ### Core / server
 
@@ -1009,6 +1069,9 @@ Off by default; enable with `QUILL_DESKTOP_CAPTURE=1` or
 | `QUILL_WORKER` | `1` | durable background job runner |
 | `QUILL_WORKER_POLL_S` / `_MAX_ATTEMPTS` | `2.0` / `3` | worker poll / retry cap |
 | `QUILL_EXTRACT` | `1` | run fact/task extraction (calls the LLM) |
+| `QUILL_PEOPLE_V2` | `1` | People Intelligence v2 (source policies, candidates, contacts) |
+| `QUILL_OPEN_LOOPS` | `1` | waiting-on-me / waiting-on-them / unanswered-question detectors |
+| `QUILL_MEETING_MODE` | `1` | meeting layer (calendar join, jots, briefs, session chat) |
 | `QUILL_REFLECT` | `1` | run daily reflection (calls the LLM) |
 | `QUILL_REFLECT_MODEL` | `claude-opus-4-8` | reflection model |
 | `QUILL_REFLECT_MAX_RECENT` / `_MAX_OPEN` | `120` / `40` | packet size bounds |
@@ -1017,7 +1080,8 @@ Off by default; enable with `QUILL_DESKTOP_CAPTURE=1` or
 
 | Var | Default | Notes |
 |---|---|---|
-| `QUILL_PLANNER` | `0` | `1` enables the Personal Agent Layer |
+| `QUILL_PLANNER` | `1` | Personal Agent Layer on by default; `0` = core-workflow-only gating |
+| `QUILL_APPROVAL_BIND` | `enforce` | `off` / `shadow` / `enforce` — hash-bind approvals to what executes |
 | `QUILL_AGENT_CHANNEL` | — | e.g. `chrome` — browser channel for the in-app agent |
 | `QUILL_AGENT_PROFILE` | — | persistent browser profile (logged-in session reuse) |
 | `AGENT_DRY_RUN` | `approval` | `plan` / `navigate` / `draft` / `approval` / `full` |
@@ -1056,13 +1120,15 @@ planner/escalation = Opus, verifier = Haiku.
 | Model-call log | `data/model_calls.jsonl` |
 | Escalation distill trail | `data/escalate_distill.jsonl` |
 | Onboarding profile | `data/onboarding_profile.json` |
+| Source policy table (checked in — ships with the repo) | `data/source_policies.json` |
 | Browser-agent sessions & profiles | `./sessions/` |
 | Model weights | `~/.cache/huggingface` |
 
 The timeline reloads from `data/quill.db` on startup, so everything survives
 restarts. Raw artifacts are served back through `/artifact`, which is
 **path-confined to the data directory** so it can't read arbitrary files. The
-entire `data/` and `sessions/` trees are git-ignored.
+`data/` and `sessions/` trees are git-ignored, except the checked-in config
+tables (`model_prices.json`, `source_policies.json`).
 
 ---
 
@@ -1137,8 +1203,8 @@ desktop_agent/           guarded OS control (the allowlist IS the sandbox)
   driver.py              DesktopDriver (launch apps, make dirs, allowlisted cmds)
   config.py              jail, allowlists, budgets
 
-tests/                   unit tests (unittest; run with
-                         `python -m unittest discover -s tests`)
+tests/                   unit suite (~1,600 tests; run with
+                         `python -m pytest tests -q`)
 scripts/                 download_models · enroll_speaker · run_extract ·
                          eval_agent · eval_vision_task · test_track_a ·
                          test_reflection · test_planner · bench_vision ·
@@ -1157,7 +1223,8 @@ scripts/                 download_models · enroll_speaker · run_extract ·
 ## Development & testing
 
 ```powershell
-python -m unittest discover -s tests    # the unit suite
+python -m pytest tests -q               # the unit suite (~1,600 tests)
+make eval                               # golden evals with hard thresholds
 python scripts/test_track_a.py          # facts layer, assertion-based
 python scripts/test_reflection.py       # daily reflection + grounding check
 python scripts/test_planner.py          # context selection, risk table, compilers
@@ -1166,7 +1233,8 @@ python scripts/eval_agent.py            # browser-agent eval (routing + live tie
 
 | Area | Coverage |
 |---|---|
-| **Unit suite** (`tests/`) | 420+ tests: escalate log, text/vision local routing, few-shot recall, grounding, self-quiz, bench + curation logic, the LoRA gate, chat verdicts, and friends — fast, mostly no network. |
+| **Unit suite** (`tests/`) | ~1,600 tests: approval binding, source policies, commitment lifecycle, meeting layer, ranking golden snapshots, escalate log, text/vision local routing, few-shot recall, grounding, self-quiz, the LoRA gate, chat verdicts, and friends — fast, hermetic (no network). Windows-only desktop suites skip cleanly on other platforms. |
+| **Golden evals** (`make eval`) | Checked-in goldens for commitment ownership, entity resolution, and contact attribution with hard pass thresholds and exit codes — CI-able today. `make eval-live` runs against your live corpus. |
 | **Facts layer** | `scripts/test_track_a.py`, `scripts/facts_schema_check.py`, `scripts/run_extract.py --demo`. |
 | **Reflection** | `scripts/test_reflection.py` — runs a daily reflection, checks grounding. |
 | **Personal Agent Layer** | `scripts/test_planner.py`, `scripts/test_agent_log.py`. |
@@ -1205,6 +1273,19 @@ vinceo.ai acts on your behalf, so its trust boundaries are explicit and layered:
 6. **Desktop capture is opt-in**, captures no keystrokes, and click crops never
    leave the machine unless screen VLM escalation is warranted.
 7. **Provenance serving** (`/artifact`) is path-confined to the data directory.
+8. **What you approved is what executes.** Approval packets are canonicalized
+   and hash-bound (`QUILL_APPROVAL_BIND=enforce`, the default): if the fields
+   about to execute drift from the approved hash — even across an agent
+   restart — the click is stopped, a diff is shown, and a fresh approval is
+   required. Approvals expire; duplicate sends are caught by lookback.
+9. **Perception minting is policy-bound.** `data/source_policies.json` decides
+   per source class what a terminal / news page / social feed / document may
+   mint (people, commitments, claims, contacts). A missing table degrades to
+   deny, never allow.
+10. **Cloud egress is privacy-gated** — never-send classes are refused,
+    sensitive/personal content is redacted before any Anthropic call, and each
+    call's max privacy class is logged. And **success claims need evidence**:
+    an LLM-only "it worked" records `outcome_uncertain`, never verified.
 
 > **Handle your keys carefully.** `.env` and `.credentials.env` are git-ignored
 > but hold live API keys in plaintext — don't share them, don't paste them into
@@ -1231,23 +1312,28 @@ vinceo.ai acts on your behalf, so its trust boundaries are explicit and layered:
 
 ## Known gaps & roadmap
 
-- **Voice / TTS** ([app/services/voice.py](app/services/voice.py)) — still a
-  stub; spoken Q&A isn't wired.
-- **Personal Agent Layer is a v1 slice** — behind `QUILL_PLANNER=1`; task
-  decomposition and several cognitive agents are stubbed (`# LLM:` markers).
+- **KG v2 read cutover** — the belief-store read path runs in shadow until
+  `cutover_ready()` sees 7 clean nightly parity reports (manual override:
+  `QUILL_KG_READ_V2`). Deliberately gated, not forced.
+- **Live evals** — `make eval` (offline goldens) is the gate that matters, but
+  `make eval-live` should run once against a real corpus before trusting the
+  People-v2 thresholds in production.
+- **Peer channel over LAN needs TLS** before pairing beyond localhost.
+- ~~**Voice / TTS stub**~~ — **closed**: [voice.py](app/services/voice.py) is
+  a real local TTS (SAPI5 on Windows, queue-threaded, auto-speaks replies).
+- ~~**Personal Agent Layer behind a flag**~~ — **closed 2026-08**: planner on
+  by default; risk table, readiness bands, and multi-task fan-out live.
 - ~~**Unit-test `desktop_agent/guards.py`**~~ — **closed 2026-07-17**:
-  `tests/test_desktop_guards.py` (31 tests) pins the jail, hard blocks,
-  default-deny classification, and the autonomy ladder.
+  the jail, hard blocks, default-deny classification, and the autonomy ladder
+  are pinned by tests (and the jail is now platform-independent).
 - ~~**Output-side feedback loop**~~ — **closed 2026-07-17**: verdicts flow
   back as few-shot corrections, calibration evidence, bench data, and LoRA
   training pairs (see [the learning loop](#the-learning-loop--from-verdicts-to-weights)).
-  Remaining: data volume to the first training run (~100 curated pairs).
-- **Enrich the extractor to populate `entities`** (orgs/projects) — lights up
-  the graph's affiliation traversal.
-- **Scheduling** — reflection is time-triggered on startup; self-quiz and
-  LoRA training are manual/cron-able scripts; no real idle scheduler yet.
-- **M6 connectors** — native email / calendar / CRM (the browser agent drives
-  those UIs directly for now).
+- ~~**Idle scheduling**~~ — **closed 2026-07-28**: the LoRA trainer runs on a
+  condition-driven idle scheduler (new-pairs + idle + AC + disk, with
+  backoff); reflection remains time-triggered.
+- **M6 connectors** — native email / CRM (the browser agent drives those UIs
+  directly for now; iCloud calendar sync exists).
 - **Postgres / object storage** — deferred, gated on a second device.
 
 ---
@@ -1270,6 +1356,10 @@ notes are inline as module docstrings; dated build logs are in
 [july_07_2026_status_2.md](july_07_2026_status_2.md), and
 [july_17_2026_status.md](july_17_2026_status.md) (the day the learning loop
 closed); architecture deep-dives in
-[phase3_lora_architecture.md](phase3_lora_architecture.md) and
-[voice_pipeline_architecture.md](voice_pipeline_architecture.md); the previous
+[phase3_lora_architecture.md](phase3_lora_architecture.md),
+[voice_pipeline_architecture.md](voice_pipeline_architecture.md),
+[people_intelligence_architecture.md](people_intelligence_architecture.md), and
+[mnemos_knowledge_graph_v2_architecture.md](mnemos_knowledge_graph_v2_architecture.md);
+the August 2026 hardening plan is
+[implementation_plan_2026-08.md](implementation_plan_2026-08.md); the previous
 README is preserved as [readme_archive_2026-07-16.md](readme_archive_2026-07-16.md).
