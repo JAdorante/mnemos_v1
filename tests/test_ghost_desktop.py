@@ -6,10 +6,15 @@ paths without launching real windows.
 """
 from __future__ import annotations
 
+import sys
 import unittest
 from unittest import mock
 
-from desktop_agent import config as dcfg, ghost_win
+if sys.platform != "win32":
+    raise unittest.SkipTest(
+        "Windows-only: ghost desktop parks/captures Win32 windows")
+
+from desktop_agent import config as dcfg, ghost_win  # noqa: E402
 
 
 class GhostableTests(unittest.TestCase):

@@ -300,8 +300,13 @@ def _apply_consent_runtime(sources: dict) -> dict:
 @router.get("/health")
 def health() -> dict:
     from app.services import capture_consent
+    from app.services import source_policy
     return {
         "status": "ok",
+        "source_policies": {
+            "loaded": source_policy.policies_loaded(),
+            "version": source_policy.policy_version(),
+        },
         "audio_running": _audio_running,
         "system_audio_running": _system_audio_running,
         "vision_running": _vision_running,
@@ -2465,10 +2470,26 @@ def hold_tip_set(body: HoldTipIn | None = None) -> dict:
     return {"ok": True, "seen": seen}
 
 
+def _policy_preflight_banner() -> str:
+    """Warn on the console when the source-policy table failed to load and the
+    restrictive fallback (no minting, no contacts) is in effect."""
+    from app.services import source_policy
+    if source_policy.policies_loaded():
+        return ""
+    return (
+        '<div style="background:#7f1d1d;color:#fff;padding:8px 14px;'
+        'font-size:13px">⚠ data/source_policies.json missing or unreadable — '
+        'running on the restrictive fallback policy (no people/commitment/'
+        'claim minting, no contact extraction). Restore the file and restart.'
+        '</div>')
+
+
 @router.get("/memory", response_class=HTMLResponse)
 def memory_console_page() -> HTMLResponse:
     """The Memory Console — timeline, search, provenance, confidence."""
-    return _html_with_approval(_CONSOLE_PAGE, next_url="/memory")
+    page = _CONSOLE_PAGE.replace(
+        '<div class="layout">', _policy_preflight_banner() + '<div class="layout">', 1)
+    return _html_with_approval(page, next_url="/memory")
 
 
 @router.get("/console", response_class=RedirectResponse)

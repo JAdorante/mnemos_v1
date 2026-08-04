@@ -47,6 +47,32 @@ class SourcePolicyTests(unittest.TestCase):
             text="Breaking news: subscribe to continue reading this article")
         self.assertEqual(p2.source_class, "news_page")
 
+    def test_missing_policy_file_degrades_restrictive(self):
+        """Aug 2026 audit: a missing safety table must never mean 'allow'.
+
+        With data/source_policies.json unreadable, every class falls back to
+        the deny posture — no people/commitment/claim minting, no contacts —
+        and the failure is detectable (policies_loaded False, version
+        'fallback') so the console preflight can warn.
+        """
+        sp._raw_policies.cache_clear()
+        try:
+            with patch.object(sp, "_POLICY_PATH",
+                              Path(tempfile.mkdtemp()) / "missing.json"):
+                self.assertFalse(sp.policies_loaded())
+                self.assertEqual(sp.policy_version(), "fallback")
+                for cls in ("private_conversation", "terminal", "unknown"):
+                    p = sp.policy_for(cls)
+                    self.assertFalse(p.create_person_candidates, cls)
+                    self.assertFalse(p.create_commitments, cls)
+                    self.assertFalse(p.create_claims, cls)
+                    self.assertFalse(p.extract_contacts, cls)
+                    self.assertFalse(p.update_people, cls)
+                    self.assertFalse(p.identity_evidence, cls)
+        finally:
+            sp._raw_policies.cache_clear()   # don't leak the fallback
+        self.assertTrue(sp.policies_loaded())
+
 
 class PeoplePipelineTests(unittest.TestCase):
     def setUp(self):

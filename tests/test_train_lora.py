@@ -12,6 +12,10 @@ import sys
 import unittest
 from pathlib import Path
 
+if sys.platform != "win32":
+    raise unittest.SkipTest(
+        "Windows-only: covers Windows→WSL drive mapping for the LoRA trainer")
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import lora_train_wsl as ltw  # noqa: E402
 import train_lora as tl  # noqa: E402

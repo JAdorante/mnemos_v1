@@ -10,6 +10,7 @@ __pycache__/
 # desktop_agent/data/ are NOT matched and stay tracked/distributable.
 /data/*
 !/data/model_prices.json
+!/data/source_policies.json
 sessions/
 
 .DS_Store

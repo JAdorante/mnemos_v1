@@ -7,6 +7,8 @@ exhaustively in isolation.
 """
 from __future__ import annotations
 
+import os
+import re
 from enum import Enum
 from pathlib import Path
 
@@ -20,9 +22,19 @@ class Tier(str, Enum):
 
 
 # --- path jail -------------------------------------------------------------
+# POSIX treats "\" and drive letters as ordinary filename characters, so a
+# Windows-style escape ("..\\..\\x", "C:\\Users\\x", "\\\\server\\share")
+# would resolve as ONE relative component *inside* the jail. The jail
+# invariant must not be platform-conditional: on non-Windows hosts, deny
+# drive/UNC prefixes outright and treat backslashes as separators.
+_WIN_DRIVE_OR_UNC = re.compile(r"^[A-Za-z]:|^[\\/]{2}")
+
+
 def within_jail(path: Path | str, root: Path | None = None) -> bool:
     """True iff `path` resolves to something inside the jail root."""
     root = (root or cfg.JAIL_ROOT).resolve()
+    if os.name != "nt" and _WIN_DRIVE_OR_UNC.match(str(path)):
+        return False
     try:
         resolved = Path(path).resolve()
     except Exception:
@@ -59,7 +71,17 @@ def safe_child(root: Path | None, name: str) -> Path | None:
     """
     root = (root or cfg.JAIL_ROOT).resolve()
     try:
-        if not name or ".." in Path(name).parts:
+        if not name:
+            return None
+        if os.name != "nt":
+            # Apply Windows path syntax on every platform (see
+            # _WIN_DRIVE_OR_UNC): drive/UNC prefixes are absolute → refuse;
+            # backslashes are separators → normalize so ".." hidden behind
+            # them is caught below instead of passing as one filename.
+            if _WIN_DRIVE_OR_UNC.match(name):
+                return None
+            name = name.replace("\\", "/")
+        if ".." in Path(name).parts:
             return None
         candidate = (root / name).resolve()
     except (ValueError, OSError):

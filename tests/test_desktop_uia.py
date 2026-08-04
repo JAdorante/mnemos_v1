@@ -5,11 +5,16 @@ covered by the scratchpad verification; these tests pin the safety contract.
 """
 from __future__ import annotations
 
+import sys
 import unittest
 from unittest import mock
 
-from desktop_agent import uia
-from desktop_agent.driver import DesktopDriver
+if sys.platform != "win32":
+    raise unittest.SkipTest(
+        "Windows-only: UIA driver wraps comtypes UIAutomation")
+
+from desktop_agent import uia  # noqa: E402
+from desktop_agent.driver import DesktopDriver  # noqa: E402
 
 
 def _driver(approve: bool = True):

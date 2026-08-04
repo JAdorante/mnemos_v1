@@ -8,10 +8,16 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+
+if sys.platform != "win32":
+    raise unittest.SkipTest(
+        "Windows-only: access read-model expects the Windows app registry "
+        "(explorer et al.)")
 
 os.environ.setdefault("QUILL_DESKTOP_JAIL", tempfile.mkdtemp(prefix="quill_jail_"))
 

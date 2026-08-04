@@ -140,7 +140,8 @@ class MultiStepCompileTests(unittest.TestCase):
                 recorded: list[int] = []
 
                 def fake_run_goal(goal, dry_run=None, surface=None, packet=None,
-                                  source_fact_id=None, study_mode=None):
+                                  source_fact_id=None, source_fact_ids=None,
+                                  study_mode=None):
                     if packet is not None:
                         rec.start_run(goal, surface=surface or "browser")
                         pid = rec.record_from_packet(packet)

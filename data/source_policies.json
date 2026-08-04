@@ -1,0 +1,225 @@
+{
+  "version": "1.2",
+  "classes": {
+    "private_conversation": {
+      "extract_mentions": true,
+      "create_person_candidates": true,
+      "relationship_evidence": true,
+      "extract_contacts": true,
+      "create_commitments": true,
+      "create_claims": true,
+      "update_people": true,
+      "identity_evidence": true,
+      "knowledge_entities": true
+    },
+    "meeting_transcript": {
+      "extract_mentions": true,
+      "create_person_candidates": true,
+      "relationship_evidence": true,
+      "extract_contacts": true,
+      "create_commitments": true,
+      "create_claims": true,
+      "update_people": true,
+      "identity_evidence": true,
+      "knowledge_entities": true
+    },
+    "direct_message": {
+      "extract_mentions": true,
+      "create_person_candidates": true,
+      "relationship_evidence": true,
+      "extract_contacts": true,
+      "create_commitments": true,
+      "create_claims": true,
+      "update_people": true,
+      "identity_evidence": true,
+      "knowledge_entities": true
+    },
+    "email": {
+      "extract_mentions": true,
+      "create_person_candidates": true,
+      "relationship_evidence": true,
+      "extract_contacts": true,
+      "create_commitments": true,
+      "create_claims": true,
+      "update_people": true,
+      "identity_evidence": true,
+      "knowledge_entities": true
+    },
+    "calendar": {
+      "extract_mentions": true,
+      "create_person_candidates": true,
+      "relationship_evidence": true,
+      "extract_contacts": false,
+      "create_commitments": true,
+      "create_claims": true,
+      "update_people": false,
+      "identity_evidence": true,
+      "knowledge_entities": true
+    },
+    "user_authored_document": {
+      "extract_mentions": true,
+      "create_person_candidates": true,
+      "relationship_evidence": true,
+      "extract_contacts": true,
+      "create_commitments": true,
+      "create_claims": true,
+      "update_people": true,
+      "identity_evidence": true,
+      "knowledge_entities": true
+    },
+    "shared_document": {
+      "extract_mentions": true,
+      "create_person_candidates": true,
+      "relationship_evidence": false,
+      "extract_contacts": false,
+      "create_commitments": true,
+      "create_claims": true,
+      "update_people": false,
+      "identity_evidence": false,
+      "knowledge_entities": true
+    },
+    "presentation": {
+      "extract_mentions": true,
+      "create_person_candidates": false,
+      "relationship_evidence": false,
+      "extract_contacts": false,
+      "create_commitments": true,
+      "create_claims": true,
+      "update_people": false,
+      "identity_evidence": false,
+      "knowledge_entities": true
+    },
+    "browser_article": {
+      "extract_mentions": true,
+      "create_person_candidates": false,
+      "relationship_evidence": false,
+      "extract_contacts": false,
+      "create_commitments": false,
+      "create_claims": true,
+      "update_people": false,
+      "identity_evidence": false,
+      "knowledge_entities": true
+    },
+    "news_page": {
+      "extract_mentions": true,
+      "create_person_candidates": false,
+      "relationship_evidence": false,
+      "extract_contacts": false,
+      "create_commitments": false,
+      "create_claims": true,
+      "update_people": false,
+      "identity_evidence": false,
+      "knowledge_entities": true
+    },
+    "social_feed": {
+      "extract_mentions": false,
+      "create_person_candidates": false,
+      "relationship_evidence": false,
+      "extract_contacts": false,
+      "create_commitments": false,
+      "create_claims": false,
+      "update_people": false,
+      "identity_evidence": false,
+      "knowledge_entities": false
+    },
+    "social_composer": {
+      "extract_mentions": true,
+      "create_person_candidates": true,
+      "relationship_evidence": true,
+      "extract_contacts": true,
+      "create_commitments": true,
+      "create_claims": true,
+      "update_people": true,
+      "identity_evidence": true,
+      "knowledge_entities": true
+    },
+    "advertisement": {
+      "extract_mentions": false,
+      "create_person_candidates": false,
+      "relationship_evidence": false,
+      "extract_contacts": false,
+      "create_commitments": false,
+      "create_claims": false,
+      "update_people": false,
+      "identity_evidence": false,
+      "knowledge_entities": false
+    },
+    "terminal": {
+      "extract_mentions": false,
+      "create_person_candidates": false,
+      "relationship_evidence": false,
+      "extract_contacts": false,
+      "create_commitments": false,
+      "create_claims": false,
+      "update_people": false,
+      "identity_evidence": false,
+      "knowledge_entities": false
+    },
+    "code_editor": {
+      "extract_mentions": false,
+      "create_person_candidates": false,
+      "relationship_evidence": false,
+      "extract_contacts": false,
+      "create_commitments": false,
+      "create_claims": true,
+      "update_people": false,
+      "identity_evidence": false,
+      "knowledge_entities": true
+    },
+    "system_ui": {
+      "extract_mentions": false,
+      "create_person_candidates": false,
+      "relationship_evidence": false,
+      "extract_contacts": false,
+      "create_commitments": false,
+      "create_claims": false,
+      "update_people": false,
+      "identity_evidence": false,
+      "knowledge_entities": false
+    },
+    "filesystem": {
+      "extract_mentions": false,
+      "create_person_candidates": false,
+      "relationship_evidence": false,
+      "extract_contacts": false,
+      "create_commitments": false,
+      "create_claims": false,
+      "update_people": false,
+      "identity_evidence": false,
+      "knowledge_entities": false
+    },
+    "peer_answer": {
+      "extract_mentions": true,
+      "create_person_candidates": true,
+      "relationship_evidence": true,
+      "extract_contacts": false,
+      "create_commitments": true,
+      "create_claims": true,
+      "update_people": false,
+      "identity_evidence": false,
+      "knowledge_entities": true
+    },
+    "notification": {
+      "extract_mentions": true,
+      "create_person_candidates": true,
+      "relationship_evidence": false,
+      "extract_contacts": false,
+      "create_commitments": true,
+      "create_claims": true,
+      "update_people": false,
+      "identity_evidence": false,
+      "knowledge_entities": true
+    },
+    "unknown": {
+      "extract_mentions": true,
+      "create_person_candidates": true,
+      "relationship_evidence": false,
+      "extract_contacts": false,
+      "create_commitments": true,
+      "create_claims": true,
+      "update_people": false,
+      "identity_evidence": false,
+      "knowledge_entities": true
+    }
+  }
+}

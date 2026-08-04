@@ -2,6 +2,14 @@
 
 Changing weights requires updating golden JSON in the same PR so ranking
 diffs are reviewable instead of silent drift.
+
+Cross-platform note (Aug 2026 audit): a Linux container run reported ~0.002
+total drift on the small-corpus goldens. It does not reproduce on Windows
+(where these goldens were generated), including with a scrubbed environment,
+and scoring has no weight-table normalization that adding note_adjacent
+could shift. If a Linux CI run fails ONLY on golden totals (focus_ids and
+admitted_by still equal), suspect platform float/sqlite differences before
+suspecting a ranking change.
 """
 from __future__ import annotations
 

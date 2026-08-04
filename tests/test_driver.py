@@ -12,9 +12,15 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+if sys.platform != "win32":
+    raise unittest.SkipTest(
+        "Windows-only: driver expectations assume the Windows file-type "
+        "registry and desktop app registry")
 
 os.environ.setdefault("QUILL_DESKTOP_JAIL", tempfile.mkdtemp(prefix="quill_jail_"))
 

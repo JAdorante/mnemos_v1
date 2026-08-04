@@ -8,6 +8,7 @@ scattered if-social / if-terminal checks in extractors.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass
 from functools import lru_cache
@@ -15,15 +16,23 @@ from pathlib import Path
 
 from app.services import surface_filters as sf
 
+log = logging.getLogger(__name__)
+
 _POLICY_PATH = Path(__file__).resolve().parents[2] / "data" / "source_policies.json"
 
+# Fallback when data/source_policies.json is missing or unreadable. A safety
+# table's absence must never mean "allow": deny all minting (people,
+# commitments, claims), contacts, and identity/relationship evidence, keeping
+# only passive observation (mentions, knowledge entities). The shipped JSON is
+# the real posture; if this fallback is live, policies_loaded() is False and
+# the console preflight warns.
 _DEFAULT_POLICY = {
     "extract_mentions": True,
-    "create_person_candidates": True,
+    "create_person_candidates": False,
     "relationship_evidence": False,
     "extract_contacts": False,
-    "create_commitments": True,
-    "create_claims": True,
+    "create_commitments": False,
+    "create_claims": False,
     "update_people": False,
     "identity_evidence": False,
     "knowledge_entities": True,
@@ -75,11 +84,11 @@ _DOC_WINDOW = re.compile(
 class SourcePolicy:
     source_class: str
     extract_mentions: bool = True
-    create_person_candidates: bool = True
+    create_person_candidates: bool = False
     relationship_evidence: bool = False
     extract_contacts: bool = False
-    create_commitments: bool = True
-    create_claims: bool = True
+    create_commitments: bool = False
+    create_claims: bool = False
     update_people: bool = False
     identity_evidence: bool = False
     knowledge_entities: bool = True
@@ -89,9 +98,25 @@ class SourcePolicy:
 def _raw_policies() -> dict:
     try:
         data = json.loads(_POLICY_PATH.read_text(encoding="utf-8"))
-        return data.get("classes") or {}
-    except Exception:
+        classes = data.get("classes") or {}
+        if not classes:
+            log.error(
+                "source_policies.json at %s has no 'classes' — running on the "
+                "restrictive fallback policy (no minting, no contacts).",
+                _POLICY_PATH)
+        return classes
+    except Exception as exc:
+        log.error(
+            "Could not load source policy table %s (%s) — running on the "
+            "restrictive fallback policy (no minting, no contacts). Ship "
+            "data/source_policies.json to restore per-class policies.",
+            _POLICY_PATH, exc)
         return {}
+
+
+def policies_loaded() -> bool:
+    """True when the shipped policy table is in effect (not the fallback)."""
+    return bool(_raw_policies())
 
 
 def policy_version() -> str:
@@ -99,7 +124,7 @@ def policy_version() -> str:
         data = json.loads(_POLICY_PATH.read_text(encoding="utf-8"))
         return str(data.get("version") or "1")
     except Exception:
-        return "1"
+        return "fallback"
 
 
 def classify_source(

@@ -7,9 +7,14 @@ anything. Environment flags (pixel UI, approval, budget) are patched per test.
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+if sys.platform != "win32":
+    raise unittest.SkipTest(
+        "Windows-only: preflight probes Windows desktop app availability")
 
 os.environ.setdefault("QUILL_DESKTOP_JAIL", tempfile.mkdtemp(prefix="quill_jail_"))
 

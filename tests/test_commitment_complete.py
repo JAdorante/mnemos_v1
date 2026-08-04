@@ -197,7 +197,13 @@ class CommitmentCompleteUnitTests(unittest.TestCase):
                     fid, "active", reason="approve",
                     evidence={"source": "test"})
                 layer = PersonalAgentLayer(store=store)
-                with mock.patch("app.services.memory.memory.search",
+                # _llm -> None keeps the test hermetic (no Anthropic call):
+                # route_intent + multitask fall back to heuristics and the
+                # writing draft degrades to the passthrough compiler, which
+                # still cites source_fact_ids.
+                with mock.patch("app.services.agent_planner._llm",
+                                return_value=None), \
+                     mock.patch("app.services.memory.memory.search",
                                 return_value=[]), \
                      mock.patch("app.services.working_memory.ensure_fresh"), \
                      mock.patch("app.services.working_memory.snapshot",
