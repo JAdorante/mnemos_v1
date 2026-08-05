@@ -109,21 +109,6 @@ class JobWorker:
                     job["id"], f"corrupt payload: {exc}", self._max)
                 print(f"[worker] job {job['id']} ({job['kind']}) corrupt payload "
                       f"[attempt {job['attempts']}] -> {status}: {exc}")
-                # #region agent log
-                try:
-                    import time as _time
-                    from pathlib import Path as _P
-                    with _P("debug-2e9950.log").open("a", encoding="utf-8") as _f:
-                        _f.write(json.dumps({
-                            "sessionId": "2e9950", "runId": "post-fix",
-                            "hypothesisId": "M2", "location": "worker._dispatch",
-                            "message": "corrupt payload failed job",
-                            "data": {"job_id": job["id"], "status": status},
-                            "timestamp": int(_time.time() * 1000),
-                        }) + "\n")
-                except Exception:
-                    pass
-                # #endregion
                 return
         try:
             fn(payload)

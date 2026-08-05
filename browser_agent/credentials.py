@@ -147,20 +147,6 @@ def save(site_or_url: str, username: str, password: str) -> dict[str, str]:
         os.environ[pk] = pw
     lines.append("")
     path.write_text("\n".join(lines), encoding="utf-8")
-    # #region agent log
-    try:
-        import json as _json, time as _time
-        from pathlib import Path as _P
-        with _P("debug-2e9950.log").open("a", encoding="utf-8") as _f:
-            _f.write(_json.dumps({
-                "sessionId": "2e9950", "runId": "post-fix", "hypothesisId": "H1",
-                "location": "credentials.save", "message": "credential save ok",
-                "data": {"site": host, "user_len": len(user), "pass_len": len(pw)},
-                "timestamp": int(_time.time() * 1000),
-            }) + "\n")
-    except Exception:
-        pass
-    # #endregion
     return {"site": host, "user_key": _user_key(host), "aliases": targets[1:]}
 
 

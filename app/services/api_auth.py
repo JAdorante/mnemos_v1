@@ -365,21 +365,6 @@ def path_is_exempt(path: str, method: str) -> bool:
     # Phone status is polled by the setup page on the phone itself.
     if path == "/phone/status" and method_u == "GET":
         return True
-    # #region agent log
-    if path.startswith("/phone/outbox"):
-        try:
-            import json as _json, time as _time
-            from pathlib import Path as _P
-            with _P("debug-2e9950.log").open("a", encoding="utf-8") as _f:
-                _f.write(_json.dumps({
-                    "sessionId": "2e9950", "runId": "post-fix", "hypothesisId": "C1",
-                    "location": "api_auth.path_is_exempt", "message": "outbox exempt check",
-                    "data": {"path": path, "method": method_u, "exempt": False},
-                    "timestamp": int(_time.time() * 1000),
-                }) + "\n")
-        except Exception:
-            pass
-    # #endregion
     return False
 
 
