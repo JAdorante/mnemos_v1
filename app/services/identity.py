@@ -12,7 +12,7 @@ user. This resolves both deterministically:
     machine it describes THAT person (the general-code invariant).
 
 Surfaced as a compact section (`identity_lines`) injected FIRST into every chat's
-grounding block, so local, Claude, agent, and self-quiz answers all know it.
+grounding block, so local, Claude, and agent answers all know it.
 Best-effort: any lookup failure degrades to "user not known yet", never raises.
 """
 from __future__ import annotations

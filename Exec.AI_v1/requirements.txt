@@ -1,7 +1,0 @@
-# A recent anthropic SDK is needed for output_config / effort. If your version
-# is older, the agent still runs (it falls back to plain-JSON prompting), but
-# upgrading is recommended: pip install -U anthropic
-anthropic>=0.49.0
-playwright>=1.40.0
-python-dotenv>=1.0.0
-flask>=3.0.0          # web UI (webapp.py)

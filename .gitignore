@@ -15,3 +15,5 @@ sessions/
 
 .DS_Store
 .vscode/*.log
+debug-*.log
+test_full_suite_out.txt

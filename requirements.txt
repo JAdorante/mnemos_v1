@@ -43,10 +43,6 @@ pynput>=1.7.6; sys_platform == "win32"   # passive mouse-click observer
 pyarrow>=14.0                   # perception Parquet export (Phase D)
 psutil>=5.9                     # criterion-9 CPU/RSS harness (bench_perception_overhead)
 
-# --- fl_jam: MIDI generation + live play into FL Studio (see fl_jam.py) ------
-mido>=1.3                   # compose/read Standard MIDI Files (pure python)
-python-rtmidi>=1.5          # live MIDI ports (needs a loopMIDI virtual cable)
-
 # --- M4: text-to-speech, Mnemos speaks back (see services/voice.py) ---------
 edge-tts>=6.1               # free neural (online) voices — the "human" default
 pyttsx3>=2.90               # offline TTS (non-Windows fallback)

@@ -26,7 +26,7 @@ _ROOT = Path(__file__).resolve().parent.parent.parent
 
 # Data-bearing locations relative to the repo root. Non-existent ones skip.
 _WATCH_ROOTS = ("data", "data_boot", "data_bridge", "data_test", "data_ui",
-                "sessions", "Exec.AI_v1/sessions", "desktop_agent/sessions")
+                "sessions", "desktop_agent/sessions")
 
 
 def _cfg_gb(key: str, default: str) -> float:

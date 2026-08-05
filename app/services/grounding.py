@@ -26,7 +26,7 @@ misses but the question still looks route-shaped.
 
 Every layer is best-effort: any store/graph failure just drops that section,
 so grounding can never break an answer. Used by BOTH chat paths (the agent's
-memory provider and llm.answer), so local, Claude, and self-quiz answers all
+memory provider and llm.answer), so local and Claude answers all
 see the same upgraded context. Generic code: every name, task, and memory
 comes from this install's own store at call time.
 """
@@ -983,8 +983,8 @@ def compose(question: str, *, semantic_limit: int = 5, min_score: float = 0.15,
     # Attention ledger (Phase 0): record what grounding pulled in, and flag
     # asked-about people the field had NOT surfaced recently as misses — the
     # negative labels learned ranking needs. Best-effort, never breaks answers.
-    # `record_attention=False` keeps machine callers (self-quiz) out of the
-    # ledger: a generated quiz question is not the user needing something.
+    # `record_attention=False` keeps machine callers out of the ledger:
+    # a machine-generated question is not the user needing something.
     if (record_attention and store is not None
             and (grounded_person_ids or grounded_fact_ids)):
         try:

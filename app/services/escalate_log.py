@@ -43,7 +43,7 @@ def _clean_payload(res: dict | None) -> dict | None:
     # Redact secrets AND PII (email/phone) at the write boundary: this trail
     # feeds later LoRA training and console views, so neither a credential
     # nor a contact detail the models saw may persist here — whichever caller
-    # (vision, text, self-quiz) recorded it. TIER_LOG = the durable-log tier
+    # (vision or text) recorded it. TIER_LOG = the durable-log tier
     # of app/perception/redaction.py.
     cleaned, _hits = _redaction.redact(
         {k: v for k, v in res.items() if k not in _INTERNAL},

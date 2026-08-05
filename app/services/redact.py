@@ -13,7 +13,7 @@ model or a training log. Three layers use this module:
      the cloud escalation is skipped entirely (no image bytes leave the
      machine for that frame) and the local result is returned redacted.
   3. escalate_log.record — every distill row is redacted before it is
-     written, whatever the caller (vision, text, self-quiz), so the trail
+     written, whatever the caller (vision or text), so the trail
      that later feeds LoRA training can never carry a raw credential.
 
 Detection is regex-only and intentionally biased toward false positives:

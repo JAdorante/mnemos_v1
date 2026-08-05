@@ -605,11 +605,9 @@ every escalation logged as future training data**:
 
 **Files:** [app/services/few_shot.py](app/services/few_shot.py) ·
 [app/services/grounding.py](app/services/grounding.py) ·
-[app/services/self_quiz.py](app/services/self_quiz.py) ·
 [scripts/bench_text.py](scripts/bench_text.py) ·
 [scripts/distill_curate.py](scripts/distill_curate.py) ·
-[scripts/train_lora.py](scripts/train_lora.py) · design doc:
-[phase3_lora_architecture.md](phase3_lora_architecture.md)
+[scripts/train_lora.py](scripts/train_lora.py)
 
 The distill trail isn't just a log — it's a complete, closed learning loop.
 The local model gets measurably better from nothing but normal use:
@@ -623,9 +621,6 @@ every chat answer → 👍/👎/✏️ verdict → distill row (data/escalate_di
       │    self-confidence, but only when its answer AGREES with the verified
       │    answer it matched; refusal-despite-context and echo answers force
       │    escalation at any confidence
-      ├─ self-quiz (idle): the model quizzes itself on human-approved facts;
-      │    failures become auto-labeled lessons whose gold already exists —
-      │    zero human labeling, zero paid calls
       ├─ bench (on demand): replay labeled rows, score vs the human gold by
       │    embedding similarity — "is it getting better?" is a number
       └─ LoRA (periodic, ~100+ pairs): one command curates → trains a QLoRA
@@ -1182,7 +1177,6 @@ app/
     escalate_log.py      local→parent distillation trail (+ human verdicts)
     few_shot.py          retrieval few-shot correction from verified verdicts
     grounding.py         structured chat grounding (graph/tasks/screen first) + sources
-    self_quiz.py         idle self-quiz on approved facts → auto-labeled lessons
     model_log.py         per-call model usage log
     llm.py               chat entry (memory retriever; local-first when enabled)
     voice.py             TTS (stub)
@@ -1211,7 +1205,6 @@ scripts/                 download_models · enroll_speaker · run_extract ·
   bench_text.py          learning-loop bench: replay labeled rows vs human gold
   distill_label.py       CLI verdicts on distill rows (list / show / label)
   distill_curate.py      training-set curation + readiness report
-  self_quiz.py           run the idle self-quiz
   train_lora.py          Phase 3: curate → train (WSL2) → package → gate
   lora_train_wsl.py      the Linux half — Unsloth QLoRA + merged-GGUF export
   phone_link/            PowerShell UI-automation scripts
@@ -1232,7 +1225,7 @@ python scripts/eval_agent.py            # browser-agent eval (routing + live tie
 
 | Area | Coverage |
 |---|---|
-| **Unit suite** (`tests/`) | ~1,600 tests: approval binding, source policies, commitment lifecycle, meeting layer, ranking golden snapshots, escalate log, text/vision local routing, few-shot recall, grounding, self-quiz, the LoRA gate, chat verdicts, and friends — fast, hermetic (no network). Windows-only desktop suites skip cleanly on other platforms. |
+| **Unit suite** (`tests/`) | ~1,600 tests: approval binding, source policies, commitment lifecycle, meeting layer, ranking golden snapshots, escalate log, text/vision local routing, few-shot recall, grounding, the LoRA gate, chat verdicts, and friends — fast, hermetic (no network). Windows-only desktop suites skip cleanly on other platforms. |
 | **Golden evals** (`make eval`) | Checked-in goldens for commitment ownership, entity resolution, and contact attribution with hard pass thresholds and exit codes — CI-able today. `make eval-live` runs against your live corpus. |
 | **Facts layer** | `scripts/test_track_a.py`, `scripts/facts_schema_check.py`, `scripts/run_extract.py --demo`. |
 | **Reflection** | `scripts/test_reflection.py` — runs a daily reflection, checks grounding. |
@@ -1342,23 +1335,11 @@ Mnemos acts on your behalf, so its trust boundaries are explicit and layered:
 **Status:** experimental research prototype under active development — not
 production software; APIs and schemas may change without notice.
 
-**License:** no license file is present, so all rights are reserved by default.
-If you intend to share or open-source this, add a `LICENSE` file (e.g. MIT).
-The Phone Link PowerShell scripts under
-[scripts/phone_link/](scripts/phone_link/) are adapted from the MIT-licensed
-`phonelink-mcp-server` project and retain that attribution.
+**License:** MIT — see [LICENSE](LICENSE). The Phone Link PowerShell scripts
+under [scripts/phone_link/](scripts/phone_link/) are adapted from the
+MIT-licensed `phonelink-mcp-server` project and retain that attribution.
 
 **Deeper docs:** the interactive API reference lives at
 <http://127.0.0.1:8000/docs> when the server is running; per-subsystem design
-notes are inline as module docstrings; dated build logs are in
-[july_07_2026_status.md](july_07_2026_status.md),
-[july_07_2026_status_2.md](july_07_2026_status_2.md), and
-[july_17_2026_status.md](july_17_2026_status.md) (the day the learning loop
-closed); architecture deep-dives in
-[phase3_lora_architecture.md](phase3_lora_architecture.md),
-[voice_pipeline_architecture.md](voice_pipeline_architecture.md),
-[people_intelligence_architecture.md](people_intelligence_architecture.md), and
-[mnemos_knowledge_graph_v2_architecture.md](mnemos_knowledge_graph_v2_architecture.md);
-the August 2026 hardening plan is
-[implementation_plan_2026-08.md](implementation_plan_2026-08.md); the previous
-README is preserved as [readme_archive_2026-07-16.md](readme_archive_2026-07-16.md).
+notes are inline as module docstrings. Dated build logs and architecture
+deep-dives are maintained in a separate internal docs repo.

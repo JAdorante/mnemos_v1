@@ -39,7 +39,6 @@ AUDIT_ROOTS: dict[str, str] = {
     "data_test": "dev/test db clone",
     "data_ui": "dev/test db clone",
     "sessions": "browser-agent sessions + Chrome profiles",
-    "Exec.AI_v1/sessions": "legacy browser-agent sessions + profiles",
     "desktop_agent/sessions": "desktop-agent audit trail",
 }
 
