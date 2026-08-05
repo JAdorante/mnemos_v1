@@ -17,10 +17,10 @@ class LastAssistantAndResolveTests(unittest.TestCase):
         from browser_agent.orchestrator import Agent
         agent = self._agent()
         agent.transcript = [
-            {"goal": "summarize yourself", "result": "I am vinceo.ai; I help with…"},
+            {"goal": "summarize yourself", "result": "I am Mnemos; I help with…"},
             {"goal": "text Hugh that", "result": "SMS send cancelled."},
         ]
-        self.assertIn("vinceo.ai", Agent._last_assistant_text(agent))
+        self.assertIn("Mnemos", Agent._last_assistant_text(agent))
 
     def test_resolve_fills_anaphoric_empty_message(self) -> None:
         from browser_agent.orchestrator import Agent
@@ -42,7 +42,7 @@ class LastAssistantAndResolveTests(unittest.TestCase):
         from browser_agent.orchestrator import Agent
         agent = self._agent()
         agent.transcript = [
-            {"goal": "who are you", "result": "I'm vinceo.ai."},
+            {"goal": "who are you", "result": "I'm Mnemos."},
         ]
         parsed = {
             "action": "send_sms",
@@ -51,7 +51,7 @@ class LastAssistantAndResolveTests(unittest.TestCase):
         }
         Agent._resolve_session_message(
             agent, parsed, "Text Hugh the message you just told me")
-        self.assertEqual(parsed["message"], "I'm vinceo.ai.")
+        self.assertEqual(parsed["message"], "I'm Mnemos.")
 
     def test_resolve_leaves_concrete_body_alone(self) -> None:
         from browser_agent.orchestrator import Agent
@@ -85,9 +85,9 @@ class CrossLaneReplyTests(unittest.TestCase):
 
     def test_empty_transcript_falls_back_to_shared_pool(self) -> None:
         from browser_agent.orchestrator import Agent
-        shared = ["Open tasks: send the number.", "I'm vinceo.ai; I help with…"]
+        shared = ["Open tasks: send the number.", "I'm Mnemos; I help with…"]
         agent = self._agent(transcript=[], shared=shared)
-        self.assertIn("vinceo.ai", Agent._last_assistant_text(agent))
+        self.assertIn("Mnemos", Agent._last_assistant_text(agent))
 
     def test_own_clarifying_question_is_never_the_reply(self) -> None:
         # Fast lane's transcript holds only its own ask + a cancel; the real
@@ -99,7 +99,7 @@ class CrossLaneReplyTests(unittest.TestCase):
                  "result": "What would you like me to text Hugh Salva?"},
                 {"goal": "text Hugh …", "result": "SMS send cancelled."},
             ],
-            shared=["I'm vinceo.ai, a memory-aware assistant…",
+            shared=["I'm Mnemos, a memory-aware assistant…",
                     "What would you like me to text Hugh Salva?",
                     "SMS send cancelled."])
         self.assertIn("memory-aware", Agent._last_assistant_text(agent))
@@ -126,7 +126,7 @@ class TranscriptContextTests(unittest.TestCase):
         ]
         agent._memory_provider = lambda _g: "RELEVANT MEMORIES:\n- Venture Pulse CRM"
         agent._memory_context = lambda g: (
-            "RELEVANT MEMORIES FROM vinceo.ai:\n- Venture Pulse CRM\n\n")
+            "RELEVANT MEMORIES FROM Mnemos:\n- Venture Pulse CRM\n\n")
         ctx = Agent._build_ctx(
             agent, "Can you recall the description of how you work?")
         self.assertLess(ctx.find("SESSION CONVERSATION"),
@@ -222,7 +222,7 @@ class WorkingContextComposeTests(unittest.TestCase):
         ]
         agent._memory_provider = lambda _g: "RELEVANT MEMORIES:\n- Venture Pulse CRM"
         agent._memory_context = lambda g: (
-            "RELEVANT MEMORIES FROM vinceo.ai:\n- Venture Pulse CRM\n\n")
+            "RELEVANT MEMORIES FROM Mnemos:\n- Venture Pulse CRM\n\n")
         ctx = Agent._build_ctx(
             agent, "Can you recall the description of how you work?")
         self.assertLess(ctx.find("SESSION CONVERSATION"),

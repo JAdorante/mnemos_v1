@@ -11,7 +11,7 @@ from typing import Any
 
 
 APPROVAL_CSS = """\
-#vinceoApproval{
+#mnemosApproval{
   display:none;align-items:center;gap:12px;flex-wrap:wrap;
   min-height:44px;padding:8px 22px;
   background:linear-gradient(180deg,#FFF8F0 0%,rgba(248,246,241,.97) 100%);
@@ -20,33 +20,33 @@ APPROVAL_CSS = """\
   font:14px/1.35 var(--font);color:var(--navy);
   animation:approvalSlide .28s var(--ease) both;
 }
-#vinceoApproval.on{display:flex}
-#vinceoApproval .ap-dot{
+#mnemosApproval.on{display:flex}
+#mnemosApproval .ap-dot{
   width:8px;height:8px;border-radius:50%;background:var(--acc);flex:0 0 auto;
 }
-#vinceoApproval .ap-sum{flex:1;min-width:12rem}
-#vinceoApproval .ap-age{
+#mnemosApproval .ap-sum{flex:1;min-width:12rem}
+#mnemosApproval .ap-age{
   font:11px var(--mono);color:var(--mut);white-space:nowrap;
 }
-#vinceoApproval .ap-more{
+#mnemosApproval .ap-more{
   font:11px var(--mono);color:var(--acc);border:1px solid rgba(184,115,51,.35);
   border-radius:999px;padding:2px 8px;text-decoration:none;white-space:nowrap;
 }
-#vinceoApproval .ap-actions{display:flex;gap:8px;flex-wrap:wrap;margin-left:auto}
-#vinceoApproval .ap-actions button,#vinceoApproval .ap-actions a{
+#mnemosApproval .ap-actions{display:flex;gap:8px;flex-wrap:wrap;margin-left:auto}
+#mnemosApproval .ap-actions button,#mnemosApproval .ap-actions a{
   border-radius:10px;padding:7px 12px;font:500 13px var(--font);cursor:pointer;
   border:1px solid var(--line);background:var(--panel);color:var(--navy);
   text-decoration:none;display:inline-flex;align-items:center;
 }
-#vinceoApproval .ap-actions .go{background:var(--navy);color:#F8F6F1;border:none}
-#vinceoApproval .ap-actions .quiet{background:transparent;color:var(--mut)}
-#vinceoApproval .ap-actions .review{color:var(--mut)}
+#mnemosApproval .ap-actions .go{background:var(--navy);color:#F8F6F1;border:none}
+#mnemosApproval .ap-actions .quiet{background:transparent;color:var(--mut)}
+#mnemosApproval .ap-actions .review{color:var(--mut)}
 @keyframes approvalSlide{
   from{opacity:0;transform:translateY(-6px)}
   to{opacity:1;transform:none}
 }
 @media (prefers-reduced-motion:reduce){
-  #vinceoApproval{animation:none}
+  #mnemosApproval{animation:none}
 }
 .action-detail{margin:10px 0 4px}
 .action-detail > summary{
@@ -74,26 +74,27 @@ APPROVAL_CSS = """\
 
 APPROVAL_JS = r"""
 <script>
-window.VinceoApprovals = {
+window.MnemosApprovals = {
   _es: null,
   _lastSig: '',
   refresh() {
     fetch('/approvals/state').then(r => r.json()).then(s => {
       this.render(s);
-      try { window.dispatchEvent(new CustomEvent('vinceo:approval', {detail: s})); } catch (e) {}
+      try { window.dispatchEvent(new CustomEvent('mnemos:approval', {detail: s})); } catch (e) {}
     }).catch(() => {});
   },
   render(s) {
-    const bar = document.getElementById('vinceoApproval');
+    const bar = document.getElementById('mnemosApproval');
     if (!bar) return;
     const pending = !!(s && s.pending);
     bar.classList.toggle('on', pending);
     bar.setAttribute('aria-hidden', pending ? 'false' : 'true');
+    try { document.body.classList.toggle('has-approval', pending); } catch (e) {}
     if (!pending) return;
     const sum = bar.querySelector('.ap-sum');
     const age = bar.querySelector('.ap-age');
     const more = bar.querySelector('.ap-more');
-    if (sum) sum.textContent = s.summary || 'Vinceo needs your decision.';
+    if (sum) sum.textContent = s.summary || 'Mnemos needs your decision.';
     if (age) age.textContent = s.age_label || '';
     if (more) {
       const n = s.queued || 0;
@@ -123,7 +124,7 @@ window.VinceoApprovals = {
           if (sig === this._lastSig) return;
           this._lastSig = sig;
           this.render(s);
-          try { window.dispatchEvent(new CustomEvent('vinceo:approval', {detail: s})); } catch (e) {}
+          try { window.dispatchEvent(new CustomEvent('mnemos:approval', {detail: s})); } catch (e) {}
         } catch (e) {}
       });
       this._es.onerror = () => { /* browser will retry */ };
@@ -153,20 +154,20 @@ window.VinceoApprovals = {
           try { j = await r.json(); } catch (e) {}
           if (!r.ok || j.ok === false) {
             const msg = (j && j.error) || ('approval refused (' + r.status + ')');
-            try { window.dispatchEvent(new CustomEvent('vinceo:approval-refused', {detail: j})); } catch (e) {}
+            try { window.dispatchEvent(new CustomEvent('mnemos:approval-refused', {detail: j})); } catch (e) {}
             console.warn('[approval]', msg);
           }
           this.refresh();
-          try { window.dispatchEvent(new CustomEvent('vinceo:approval-resolved')); } catch (e) {}
+          try { window.dispatchEvent(new CustomEvent('mnemos:approval-resolved')); } catch (e) {}
         }).catch(() => { form.submit(); });
       });
     });
   }
 };
 document.addEventListener('DOMContentLoaded', () => {
-  if (window.VinceoApprovals) {
-    VinceoApprovals.enhanceForms();
-    VinceoApprovals.connect();
+  if (window.MnemosApprovals) {
+    MnemosApprovals.enhanceForms();
+    MnemosApprovals.connect();
   }
 });
 </script>
@@ -243,9 +244,9 @@ def collect_state(agent_worker=None) -> dict[str, Any]:
 
     if packet and packet.get("kind") == "approval":
         kind = "approval"
-        summary = intent or (packet.get("summary") or "Vinceo needs approval to act.")
-        if not summary.lower().startswith("vinceo"):
-            summary = f"Vinceo wants to {summary[0].lower() + summary[1:]}" if summary else summary
+        summary = intent or (packet.get("summary") or "Mnemos needs approval to act.")
+        if not summary.lower().startswith("mnemos"):
+            summary = f"Mnemos wants to {summary[0].lower() + summary[1:]}" if summary else summary
         if fields.get("to"):
             steps.append(f"Compose to {fields['to']}")
         if fields.get("subject"):
@@ -260,7 +261,7 @@ def collect_state(agent_worker=None) -> dict[str, Any]:
         msg = (offer.get("message") or "").strip()
         title = (offer.get("title") or "").strip()
         items = list(offer.get("items") or [])
-        summary = msg or title or (items[0] if items else "Vinceo has an offer waiting.")
+        summary = msg or title or (items[0] if items else "Mnemos has an offer waiting.")
         if len(summary) > 140:
             summary = summary[:137] + "…"
         created = offer.get("created_at")
@@ -269,7 +270,7 @@ def collect_state(agent_worker=None) -> dict[str, Any]:
         intent = summary
         queued = max(queued, int(offer.get("queued_behind") or 0))
     else:
-        summary = (state.get("waiting_on") or question or "Vinceo needs your decision.")[:160]
+        summary = (state.get("waiting_on") or question or "Mnemos needs your decision.")[:160]
         intent = summary
 
     outbound = bool(
@@ -319,7 +320,7 @@ def render_banner_html(state: dict[str, Any] | None = None, *, next_url: str = "
     s = state or {"pending": False}
     on = " on" if s.get("pending") else ""
     aria = "false" if s.get("pending") else "true"
-    summary = _esc(s.get("summary") or "Vinceo needs your decision.")
+    summary = _esc(s.get("summary") or "Mnemos needs your decision.")
     age = _esc(s.get("age_label") or "")
     queued = int(s.get("queued") or 0)
     more_hidden = "" if queued > 0 else " hidden"
@@ -352,7 +353,7 @@ def render_banner_html(state: dict[str, Any] | None = None, *, next_url: str = "
             f'<input type="hidden" name="next" value="{next_u}">'
         )
     return f"""\
-<aside id="vinceoApproval" class="{on.strip()}" aria-hidden="{aria}" role="status"
+<aside id="mnemosApproval" class="{on.strip()}" aria-hidden="{aria}" role="status"
        data-packet-id="{_esc(pid) if pid is not None else ''}"
        data-payload-hash="{phash}">
   <span class="ap-dot" aria-hidden="true"></span>

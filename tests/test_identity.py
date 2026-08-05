@@ -16,11 +16,11 @@ from app.services import identity
 
 
 class AssistantIdentityTests(unittest.TestCase):
-    def test_assistant_is_vinceo(self):
+    def test_assistant_is_mnemos(self):
         a = identity.assistant_identity()
-        self.assertEqual(a["name"], "vinceo.ai")
+        self.assertEqual(a["name"], "Mnemos")
         self.assertIn("memory assistant", a["role"])
-        self.assertIn("vinceo.ai", a["summary"])
+        self.assertIn("Mnemos", a["summary"])
 
 
 class UserFromProfileTests(unittest.TestCase):
@@ -95,7 +95,7 @@ class IdentityLinesTests(unittest.TestCase):
         with mock.patch.object(identity, "user_identity", return_value={}):
             lines = identity.identity_lines()
         joined = " ".join(lines)
-        self.assertIn("vinceo.ai", joined)
+        self.assertIn("Mnemos", joined)
         self.assertTrue(any("who am i" in l.lower() for l in lines))
 
     def test_names_the_user_when_known(self):

@@ -1,4 +1,4 @@
-# People Intelligence Architecture — Vinceo.ai / nexus_v1
+# People Intelligence Architecture — Mnemos.ai / nexus_v1
 
 **Status:** Implementation-ready design · July 20, 2026  
 **Audience:** Principal / senior engineers executing the People pipeline redesign  

@@ -1,7 +1,7 @@
 """#8 — Voice pipeline eval harness: golden clips + metrics + A/B.
 
 The goal (per the roadmap) is not academic perfection — it's *knowing whether a
-code change made vinceo.ai better or worse*. SNR is a lying proxy (it went up while
+code change made Mnemos better or worse*. SNR is a lying proxy (it went up while
 ASR got worse in #2); this measures the things that matter, on a fixed golden set,
 reproducibly.
 

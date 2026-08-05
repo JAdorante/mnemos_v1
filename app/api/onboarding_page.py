@@ -1,8 +1,8 @@
 """Guided onboarding wizard HTML — replaces hand-editing the JSON profile sheet."""
 
-from app.api.vinceo_theme import apply as _vinceo
+from app.api.mnemos_theme import apply as _mnemos
 
-ONBOARDING_PAGE = _vinceo(r"""<!doctype html>
+ONBOARDING_PAGE = _mnemos(r"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">

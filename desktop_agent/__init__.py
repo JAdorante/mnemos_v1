@@ -1,4 +1,4 @@
-"""Guarded desktop/OS control for vinceo.ai — allowlist-first, default-deny.
+"""Guarded desktop/OS control for Mnemos — allowlist-first, default-deny.
 
 This is the OS-side counterpart to `browser_agent/`. Where the browser agent is
 sandboxed by the browser, a desktop agent has no sandbox — so *the allowlist is

@@ -5,7 +5,7 @@ retrieval: "what are you?" and "who am I?". Before this, both fell through to
 fuzzy timeline search, so "who am I?" could miss the very fact that defines the
 user. This resolves both deterministically:
 
-  * the ASSISTANT's identity is a product constant (vinceo.ai) — general, the
+  * the ASSISTANT's identity is a product constant (Mnemos) — general, the
     same on every install;
   * the USER's identity is read from THIS install's own onboarding profile /
     accepted memory at call time, never hardcoded — so on another person's
@@ -38,14 +38,14 @@ _IDENTITY_FIELDS = (
 
 
 def brand() -> str:
-    """Product name — single source of truth is vinceo_theme.BRAND. Lazy import
+    """Product name — single source of truth is mnemos_theme.BRAND. Lazy import
     (and a literal fallback) so a services-layer caller never hard-depends on the
     UI layer or breaks if it's unavailable."""
     try:
-        from app.api.vinceo_theme import BRAND
+        from app.api.mnemos_theme import BRAND
         return BRAND
     except Exception:
-        return "vinceo.ai"
+        return "Mnemos"
 
 
 def assistant_identity() -> dict:

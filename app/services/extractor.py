@@ -284,7 +284,7 @@ _SCHEMA = {
 }
 
 _SYSTEM = (
-    "You are vinceo.ai's fact extractor. You receive a short passage of transcribed "
+    "You are Mnemos's fact extractor. You receive a short passage of transcribed "
     "speech (one conversational turn) labeled with who spoke, and pull out the "
     "structured facts it contains: tasks, commitments, notable claims, and open "
     "questions.\n\n"

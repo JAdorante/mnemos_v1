@@ -6,7 +6,7 @@ Whisper-like / embedding CPU burn so numbers reflect the real contention
 
 Usage (with the app already capturing, or standalone synthetic OCR):
 
-    # Against a running Vinceo/uvicorn PID (preferred — audio + L1 live):
+    # Against a running Mnemos/uvicorn PID (preferred — audio + L1 live):
     python scripts/bench_perception_overhead.py --pid <PID> --seconds 120
 
     # Standalone: synthetic OCR loop + optional audio-contention burn:

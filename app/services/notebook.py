@@ -27,7 +27,7 @@ from __future__ import annotations
 from app.services.agent_planner import _llm, _draft_model, classify_risk
 
 _ACTION_SYSTEM = (
-    "You are vinceo.ai reading a page from the user's own notebook. Transcribe the "
+    "You are Mnemos reading a page from the user's own notebook. Transcribe the "
     "intent faithfully, decide what each line IS, and for anything actionable "
     "produce a clean structured action. Rules: never invent a recipient, body, "
     "or fact not on the page; keep quoted message bodies VERBATIM (fix only "

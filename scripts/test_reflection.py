@@ -54,8 +54,8 @@ def test_core():
             {"kind": "open_loop", "text": "Pricing deck for Chris is unsent",
              "detail": "Draft a follow-up", "subject": "Chris", "confidence": 0.8,
              "source_fact_ids": [c1, 99999]},
-            {"kind": "recommendation", "text": "Prepare a vinceo.ai status memo",
-             "detail": "", "subject": "vinceo.ai", "confidence": 0.6, "source_fact_ids": [t1]},
+            {"kind": "recommendation", "text": "Prepare a Mnemos status memo",
+             "detail": "", "subject": "Mnemos", "confidence": 0.6, "source_fact_ids": [t1]},
             {"kind": "bogus_kind", "text": "coerced to change", "detail": "",
              "subject": "", "confidence": 0.5, "source_fact_ids": []},
         ],
@@ -73,11 +73,11 @@ def test_core():
     check("unknown kind coerced to 'change'",
           items.get("coerced to change", {}).get("kind") == "change")
 
-    rec = items["Prepare a vinceo.ai status memo"]
-    store.edit_reflection_item_text(rec["id"], "Prepare a vinceo.ai board memo")
+    rec = items["Prepare a Mnemos status memo"]
+    store.edit_reflection_item_text(rec["id"], "Prepare a Mnemos board memo")
     edited = store.get_reflection_item(rec["id"])
     check("edit updates text + marks 'edited'",
-          edited["text"] == "Prepare a vinceo.ai board memo" and edited["review"] == "edited")
+          edited["text"] == "Prepare a Mnemos board memo" and edited["review"] == "edited")
 
     before = len(store.open_tasks())
     fid = store.add_task(edited["text"], source_span=edited["text"],

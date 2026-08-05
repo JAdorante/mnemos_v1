@@ -1,6 +1,7 @@
 """Track D reasoners — commitment / relationship / scheduling."""
 from __future__ import annotations
 
+import os
 import tempfile
 import time
 import unittest
@@ -31,6 +32,50 @@ class CommitmentReasonerTests(unittest.TestCase):
                                     if p.fact_id == fid))
             finally:
                 store.close()
+
+    def test_ancient_overdue_skipped_for_chat(self):
+        """1125d-overdue junk must not reopen Chat on every launch."""
+        from app.services.reasoners import commitment
+        from app.storage import Store
+
+        with tempfile.TemporaryDirectory() as td:
+            store = Store(Path(td) / "t.db")
+            try:
+                now = time.time()
+                due = time.strftime("%Y-%m-%dT%H:%M:%S",
+                                    time.localtime(now - 1125 * 86400))
+                fid = store.add_commitment(
+                    "Join reference calls with the speaker commitment",
+                    confidence=0.9, extracted_at=now - 1200 * 86400,
+                    due=due)
+                props = commitment.propose(store, now=now)
+                self.assertFalse(any(p.fact_id == fid for p in props))
+            finally:
+                store.close()
+
+    def test_dismiss_survives_reload(self):
+        from app.services.reasoners import base as rb
+        from app.services.reasoners.base import Proposal, clear_cooldown_for_tests
+
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "cd.json"
+            with mock.patch.dict(os.environ, {
+                    "QUILL_REASONER_COOLDOWN_PATH": str(path)}):
+                clear_cooldown_for_tests()
+                # Force reload from the patched path next time.
+                rb._loaded = False
+                prop = Proposal(
+                    reasoner="commitment",
+                    goal="Follow through on this open commitment with Justin: x",
+                    summary="Follow through: x",
+                    fact_id=99,
+                    person="Justin Adorante",
+                )
+                rb.mark_dismissed(prop)
+                self.assertTrue(path.is_file())
+                rb._recent.clear()
+                rb._loaded = False
+                self.assertTrue(rb.on_cooldown(prop))
 
 
 class RelationshipReasonerTests(unittest.TestCase):

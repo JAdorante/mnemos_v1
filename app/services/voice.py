@@ -1,4 +1,4 @@
-"""M4 — speaking. Local, offline text-to-speech so vinceo.ai can talk back.
+"""M4 — speaking. Local, offline text-to-speech so Mnemos can talk back.
 
 Memory/agent -> text -> TTS -> laptop speaker. Local-first, in keeping with the
 rest of the stack: no API key, no network, runs on the CPU. On Windows it drives
@@ -176,7 +176,7 @@ def _mci_play(path: str) -> None:
     def cmd(s: str) -> int:
         return ctypes.windll.winmm.mciSendStringW(s, buf, 254, 0)
 
-    alias = "vinceo_tts"
+    alias = "mnemos_tts"
     cmd(f"close {alias}")                       # clear any stale handle
     if cmd(f'open "{path}" type mpegvideo alias {alias}') != 0:
         if cmd(f'open "{path}" alias {alias}') != 0:
@@ -330,7 +330,7 @@ class Speaker:
 
         voice_id = self._resolve_edge_voice()
         rate, vol = self._edge_rate(), self._edge_volume()
-        probe = os.path.join(tempfile.gettempdir(), "vinceo_tts_probe.mp3")
+        probe = os.path.join(tempfile.gettempdir(), "mnemos_tts_probe.mp3")
         try:
             self._edge_render("Ready.", voice_id, rate, vol, probe)
         except Exception as exc:
@@ -343,7 +343,7 @@ class Speaker:
             import tempfile
             import uuid
             path = os.path.join(tempfile.gettempdir(),
-                                f"vinceo_tts_{uuid.uuid4().hex}.mp3")
+                                f"mnemos_tts_{uuid.uuid4().hex}.mp3")
             try:
                 self._edge_render(text, voice_id, rate, vol, path)
                 _mci_play(path)

@@ -2,9 +2,9 @@
 
 **A personal memory + agent system that hears, sees, remembers, reflects — and, with your approval, acts.**
 
-> The product is **Mnemos** (formerly QUILL); the in-app assistant brands
-> itself **vinceo.ai**, and env vars / the database keep the `QUILL_` prefix —
-> see the [naming note](#configuration-reference).
+> The product and in-app assistant are **Mnemos** (Mnemos Labs). Env vars and
+> the database keep the `QUILL_` prefix — see the
+> [naming note](#configuration-reference).
 
 ![status](https://img.shields.io/badge/status-experimental%20prototype-orange)
 ![python](https://img.shields.io/badge/python-3.10%2B-blue)
@@ -12,7 +12,7 @@
 ![local-first](https://img.shields.io/badge/inference-local--first-brightgreen)
 ![license](https://img.shields.io/badge/license-unspecified-lightgrey)
 
-vinceo.ai is a laptop prototype of a wearable (a "pen") that continuously **hears**
+Mnemos is a laptop prototype of a wearable (a "pen") that continuously **hears**
 (microphone), **sees** (webcam, and optionally your screen), and — on Windows —
 mirrors your **phone notifications**. It distills that raw stream into a
 searchable, provenance-linked memory; extracts the **tasks, commitments, and
@@ -21,7 +21,7 @@ doing?" **activity blocks**; reflects daily into durable **insights**; and then
 **acts** — driving a real web browser, your desktop, or Phone Link — pausing at
 a human approval gate before anything irreversible.
 
-The one-sentence pitch is the **hear → act loop**: vinceo.ai overhears
+The one-sentence pitch is the **hear → act loop**: Mnemos overhears
 *"I'll send Justin the pricing follow-up — Marc said forty-nine a month,"* files
 the commitment with a verbatim source quote and the audio clip to prove it, and
 later hands that task to an autonomous browser agent that drafts the email and
@@ -72,7 +72,7 @@ stops for your **Approve / Edit / Cancel** before anything sends.
 
 ## How it works — the short version
 
-vinceo.ai is a stack of five layers. Each layer only depends on the one below it,
+Mnemos is a stack of five layers. Each layer only depends on the one below it,
 and everything between them travels as a single `Event` on an in-process bus:
 
 ```
@@ -190,7 +190,7 @@ You say, near the laptop:
 6. **Graph & reflection.** A deterministic rebuild wires the fact into the
    knowledge graph (Justin ↔ commitment ↔ evidence); the daily reflection later
    notices if it's still open and surfaces it as an `open_loop` insight.
-7. **Act** — you ask in chat (or vinceo.ai proactively offers): *"email Justin the
+7. **Act** — you ask in chat (or Mnemos proactively offers): *"email Justin the
    pricing follow-up."* The router picks the browser surface, the agent pulls
    "$49/mo" straight from memory (no re-explaining), drafts the email, and stops
    at a source-grounded approval packet — Action / To / Subject / Body /
@@ -291,7 +291,7 @@ Webcam → OpenCV frame selection → VLM structured extraction → `Event`.
   Claude is the paid fallback — see
   [the escalation ladder](#local-first-models--the-escalation-ladder).
 - **Windows camera quirks handled.** The default MSMF backend often fails;
-  vinceo.ai uses **DirectShow** (`dshow`) and forces **MJPG** to avoid mis-strided
+  Mnemos uses **DirectShow** (`dshow`) and forces **MJPG** to avoid mis-strided
   green frames. All overridable.
 
 ### Desktop capture (screen + clicks, opt-in)
@@ -319,7 +319,7 @@ keystrokes are captured.
 (capture) · [app/services/phone_link.py](app/services/phone_link.py) (control) ·
 [app/services/phone_watcher.py](app/services/phone_watcher.py) (proactive)
 
-Microsoft ships no public Phone Link API, so vinceo.ai reads iPhone notifications
+Microsoft ships no public Phone Link API, so Mnemos reads iPhone notifications
 the way they actually surface: as ordinary **Windows toast notifications** from
 the Phone Link app, via `UserNotificationListener` (`winsdk`). Each becomes an
 `Event` with `Modality.NOTIFICATION` in the same pipeline as speech and vision.
@@ -436,7 +436,7 @@ text search can't do. API: `GET /graph/context?name=…` · `POST /graph/rebuild
 
 A one-time guided profile (identity → people → work → rhythm) at
 [/onboarding](http://127.0.0.1:8000/onboarding) seeds people, entities,
-asserted graph edges, and accepted claims, so a new user's vinceo.ai knows their
+asserted graph edges, and accepted claims, so a new user's Mnemos knows their
 world on day one. Idempotent and delta-aware: edit and re-save later, only new
 answers are ingested. A JSON backup lands at `data/onboarding_profile.json`.
 
@@ -528,7 +528,7 @@ verify** loop over deterministic Playwright actions.
   `intent@site`; a named persistent browser profile (`QUILL_AGENT_PROFILE`)
   reuses your hand-authenticated Gmail/CRM session; `QUILL_AGENT_CHANNEL=chrome`
   uses real installed Chrome.
-- **Memory-grounded.** The agent semantic-searches vinceo.ai's own timeline, so
+- **Memory-grounded.** The agent semantic-searches Mnemos's own timeline, so
   *"follow up on what Marc said about pricing"* pulls the "$49/mo" it overheard.
 
 ### Desktop agent
@@ -662,7 +662,7 @@ weights, never in code (`tests/test_no_user_tailoring.py` enforces it).
 **Where:** <http://127.0.0.1:8000/memory> (`/console` 301-redirects there; all
 endpoints + the embedded UI live in [app/api/routes.py](app/api/routes.py))
 
-vinceo.ai asks you to trust what it heard, saw, and inferred — the Console is
+Mnemos asks you to trust what it heard, saw, and inferred — the Console is
 where you check. One page, tabbed:
 
 | Tab | What you see |
@@ -693,7 +693,7 @@ retriever and silence every offer). Offers are exactly that — a yes/no in chat
 nothing runs without your reply.
 
 - **To-do watcher** ([todo_watcher.py](app/services/todo_watcher.py)) — vision
-  classifies a page as `todo_list` → vinceo.ai offers in chat to run the items
+  classifies a page as `todo_list` → Mnemos offers in chat to run the items
   through the browser agent (debounced by items-hash + cooldown). The fully
   autonomous **see → offer → act** trigger.
 - **Task offer** ([task_offer.py](app/services/task_offer.py)) — spoken tasks
@@ -929,11 +929,10 @@ All settings are read from the environment / `.env` with sane defaults (see
 [browser_agent/config.py](browser_agent/config.py)). A `.credentials.env` is
 loaded after `.env` with override, for secrets.
 
-> **Naming note:** the product is **Mnemos**. The in-app UI still brands as
-> **vinceo.ai** ([app/api/vinceo_theme.py](app/api/vinceo_theme.py)), and env
-> vars and the SQLite file keep the `QUILL_` / `quill.db` prefix from the
-> project's original name — deliberately, so existing configs and data keep
-> working.
+> **Naming note:** the product and UI brand are **Mnemos**
+> ([app/api/mnemos_theme.py](app/api/mnemos_theme.py)). Env vars and the SQLite
+> file keep the `QUILL_` / `quill.db` prefix from an earlier name — deliberately,
+> so existing configs and data keep working.
 
 ### Core / server
 
@@ -1139,7 +1138,7 @@ run_all.py               launch everything (capture in-process + agent as child)
 run_audio.py             M1 standalone — live transcription
 run_vision.py            M2 standalone — live webcam understanding
 run_desktop.py           desktop-agent standalone driver
-exec_webapp.py           browser agent standalone (with vinceo.ai memory bridge)
+exec_webapp.py           browser agent standalone (with Mnemos memory bridge)
 
 app/
   config.py              central settings (frozen dataclasses, env-driven)
@@ -1252,7 +1251,7 @@ publish `Event`s to the bus — no downstream changes.
 
 ## Security model
 
-vinceo.ai acts on your behalf, so its trust boundaries are explicit and layered:
+Mnemos acts on your behalf, so its trust boundaries are explicit and layered:
 
 1. **Memory is context, never command authority.** Perception is
    attacker-influenceable (anything said in the room, shown to the camera, or

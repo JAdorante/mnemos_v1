@@ -422,7 +422,7 @@ def revoke(device_id: str) -> bool:
 
 # --- outbox (Mnemos -> phone, pull-based) -----------------------------------
 # The mirror image of ingest, built for a phone with NO extra apps: Mnemos
-# queues outbound items here; a native Shortcuts recipe ("Check vinceo") drains
+# queues outbound items here; a native Shortcuts recipe ("Check Mnemos") drains
 # them with the same device token — via Siri, a tap, or an iOS automation — and
 # executes each with built-in actions (Show Notification, Add Reminder, ...).
 # Trust mirror: only Mnemos-side code/UI can ENQUEUE (the desktop is the
@@ -527,7 +527,7 @@ def drain_outbox(device: dict, *, peek: bool = False) -> dict:
 
 
 def sync_exchange(device: dict, payload: dict | None) -> dict:
-    """One round-trip for the unified "vinceo" shortcut: optionally INGEST the
+    """One round-trip for the unified "mnemos" shortcut: optionally INGEST the
     payload (if it carries text), then always DRAIN this device's outbox.
 
     Lets a single Shortcuts action do both directions — run it empty (from an

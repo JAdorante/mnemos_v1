@@ -1,13 +1,14 @@
-"""vinceo.ai brand tokens — shared across Home, Chat, Console, Desktop, Onboarding.
+"""Mnemos brand tokens — shared across Home, Chat, Console, Desktop, Onboarding.
 
 Palette: warm ivory paper, midnight navy, charcoal, burnished copper.
 Motion: ink-like, 200–400ms. Not AI-startup neon.
 Copper means human attention — brand mark, Seal, decisions — not navigation.
 """
 
-BRAND = "vinceo.ai"
+BRAND = "Mnemos"
 
 FONT_LINKS = """\
+<link rel="icon" href="/static/mnemos-logo.png" type="image/png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -15,10 +16,12 @@ FONT_LINKS = """\
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin></script>"""
 
-# Continuous single-stroke mark (pen never lifts).
+# Mnemos mark — rounded frame with right tab, arched "m", copper seal at the gap.
 BRAND_MARK = """\
-<svg class="mark" width="26" height="26" viewBox="0 0 28 28" fill="none" aria-hidden="true">
-  <path d="M5 21C7.5 9 11 7 14 14c2.5 6 6.5 6 9-7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+<svg class="mark" width="26" height="26" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+  <path class="mark-frame" d="M9 5.2h11.2c2.4 0 4.3 1.9 4.3 4.3v2.4h2.1v6.2h-2.1v2.6c0 2.4-1.9 4.3-4.3 4.3h-3.4M12.1 25H9c-2.4 0-4.3-1.9-4.3-4.3V9.5C4.7 7.1 6.6 5.2 9 5.2" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="mark-m" d="M10.2 20.6V12.4c0-1 .7-1.7 1.6-1.7.5 0 1 .2 1.3.7l2.1 3.1 2.1-3.1c.3-.5.8-.7 1.3-.7.9 0 1.6.7 1.6 1.7v8.2" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle class="mark-dot" cx="16" cy="26.2" r="1.85" fill="var(--acc,#B87333)"/>
 </svg>"""
 
 ROOT_TOKENS = """\
@@ -322,8 +325,9 @@ a{color:inherit;text-decoration:none}
   transition:color .28s var(--ease),opacity .28s var(--ease);
 }
 .brand:hover{color:var(--navy);opacity:.85}
-.brand .mark{color:var(--acc);flex:0 0 auto;transition:transform .32s var(--ease)}
-.brand:hover .mark{transform:rotate(-8deg) scale(1.06)}
+.brand .mark{color:var(--navy);flex:0 0 auto;transition:transform .32s var(--ease)}
+.brand:hover .mark{transform:rotate(-6deg) scale(1.05)}
+.brand .mark .mark-dot{fill:var(--acc)}
 .page-sub{color:var(--mut);font-size:13px;font-weight:500}
 .nav{display:flex;gap:2px;align-items:center}
 .nav a{
@@ -363,8 +367,10 @@ button:active:not(:disabled),.btn:active:not(:disabled),
 }
 button:disabled,.btn:disabled{cursor:default}
 .brand .mark path{
-  stroke-dasharray:48;animation:inkDraw .45s var(--ease) both;
+  stroke-dasharray:64;animation:inkDraw .5s var(--ease) both;
 }
+.brand .mark .mark-m{animation-delay:.08s}
+.brand .mark .mark-dot{animation:sealPress .4s var(--ease) .18s both}
 /* The Seal + shared hold primitive */
 .seal-btn{
   position:relative;isolation:isolate;overflow:hidden;
@@ -404,79 +410,79 @@ button:disabled,.btn:disabled{cursor:default}
 }
 .hold-more:hover,.hold-more:focus{opacity:1;background:var(--panel-2);color:var(--navy)}
 /* Recording indicator — persistent, one-click pause per source */
-#vinceoRecBar{
+#mnemosRecBar{
   position:fixed;z-index:70;right:16px;bottom:16px;
   display:flex;flex-direction:column;gap:8px;align-items:flex-end;
   pointer-events:none;font-family:var(--font);
 }
-#vinceoRecBar .rec-chip,#vinceoRecBar .rec-consent-btn,#vinceoPrivacy .pv-btn{
+#mnemosRecBar .rec-chip,#mnemosRecBar .rec-consent-btn,#mnemosPrivacy .pv-btn{
   pointer-events:auto;
 }
-#vinceoRecBar .rec-row{
+#mnemosRecBar .rec-row{
   display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;
   max-width:min(420px,92vw);
 }
-#vinceoRecBar .rec-chip{
+#mnemosRecBar .rec-chip{
   display:inline-flex;align-items:center;gap:7px;
   background:rgba(248,246,241,.96);border:1px solid var(--line);
   border-radius:999px;padding:7px 12px 7px 10px;cursor:pointer;
   box-shadow:0 6px 18px rgba(11,19,32,.1);font-size:12px;font-weight:600;
   color:var(--navy);backdrop-filter:blur(10px);
 }
-#vinceoRecBar .rec-chip .dot{
+#mnemosRecBar .rec-chip .dot{
   width:8px;height:8px;border-radius:50%;background:var(--danger);
   box-shadow:0 0 0 0 rgba(166,71,71,.45);
   animation:recPulse 1.6s var(--ease) infinite;
 }
-#vinceoRecBar .rec-chip.paused .dot{
+#mnemosRecBar .rec-chip.paused .dot{
   background:var(--mut);animation:none;box-shadow:none;
 }
-#vinceoRecBar .rec-chip.paused{color:var(--mut);font-weight:500}
-#vinceoRecBar .rec-chip .act{font:10px/1 var(--mono);color:var(--mut);letter-spacing:.04em;text-transform:uppercase}
-#vinceoRecBar .rec-chip.meeting-on{
+#mnemosRecBar .rec-chip.paused{color:var(--mut);font-weight:500}
+#mnemosRecBar .rec-chip .act{font:10px/1 var(--mono);color:var(--mut);letter-spacing:.04em;text-transform:uppercase}
+#mnemosRecBar .rec-chip.meeting-on{
   background:rgba(11,19,32,.92);color:#F8F6F1;border-color:rgba(11,19,32,.5);
   cursor:default;
 }
-#vinceoRecBar .rec-chip.meeting-on .dot{background:#E8A07A}
-#vinceoRecBar .rec-consent-btn{
+#mnemosRecBar .rec-chip.meeting-on .dot{background:#E8A07A}
+#mnemosRecBar .rec-consent-btn{
   border:1px solid rgba(184,115,51,.4);background:rgba(184,115,51,.1);
   color:var(--navy);border-radius:12px;padding:9px 14px;font:600 12px var(--font);
   cursor:pointer;box-shadow:0 6px 18px rgba(11,19,32,.08);
 }
-#vinceoPrivacy{
+#mnemosPrivacy{
   display:none;position:fixed;inset:0;z-index:80;background:var(--overlay);
   align-items:center;justify-content:center;padding:24px 16px;
 }
-#vinceoPrivacy.open{display:flex}
-#vinceoPrivacy .pv-sheet{
+#mnemosPrivacy.open{display:flex}
+#mnemosPrivacy .pv-sheet{
   width:min(480px,100%);background:var(--folio);border:1px solid var(--line);
   border-radius:var(--radius);box-shadow:var(--shadow-float);padding:22px 22px 18px;
   animation:fadeUp .28s var(--ease) both;
 }
-#vinceoPrivacy h2{
+#mnemosPrivacy h2{
   font-family:var(--display);font-weight:400;font-size:1.55rem;margin:0 0 8px;
   color:var(--navy);letter-spacing:-.02em;
 }
-#vinceoPrivacy .pv-lead{color:var(--mut);font-size:14px;margin:0 0 16px;max-width:40ch}
-#vinceoPrivacy label.pv-src{
+#mnemosPrivacy .pv-lead{color:var(--mut);font-size:14px;margin:0 0 16px;max-width:40ch}
+#mnemosPrivacy label.pv-src{
   display:flex;gap:10px;align-items:flex-start;padding:10px 0;
   border-top:1px solid var(--line);cursor:pointer;font-size:14px;
 }
-#vinceoPrivacy label.pv-src:first-of-type{border-top:0}
-#vinceoPrivacy label.pv-src input{margin-top:3px;flex:0 0 auto}
-#vinceoPrivacy .pv-src b{display:block;color:var(--navy);font-weight:600}
-#vinceoPrivacy .pv-src span{display:block;color:var(--mut);font-size:12px;margin-top:2px}
-#vinceoPrivacy .pv-warn{
+#mnemosPrivacy label.pv-src:first-of-type{border-top:0}
+#mnemosPrivacy label.pv-src input{margin-top:3px;flex:0 0 auto}
+#mnemosPrivacy .pv-src b{display:block;color:var(--navy);font-weight:600}
+#mnemosPrivacy .pv-src span{display:block;color:var(--mut);font-size:12px;margin-top:2px}
+#mnemosPrivacy .pv-warn{
   margin:12px 0 0;padding:10px 12px;border-radius:10px;font-size:12px;
   background:rgba(166,71,71,.06);border:1px solid rgba(166,71,71,.22);color:var(--danger);
 }
-#vinceoPrivacy .pv-actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px;justify-content:flex-end}
-#vinceoPrivacy .pv-btn{
+#mnemosPrivacy .pv-actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px;justify-content:flex-end}
+#mnemosPrivacy .pv-btn{
   border-radius:10px;padding:9px 16px;font:500 13px var(--font);cursor:pointer;
   border:1px solid var(--line);background:var(--panel);color:var(--navy);
 }
-#vinceoPrivacy .pv-btn.go{background:var(--navy);color:#F8F6F1;border:none}
-#vinceoPrivacy .pv-btn.quiet{background:transparent;color:var(--mut)}
+#mnemosPrivacy .pv-btn.go{background:var(--navy);color:#F8F6F1;border:none}
+#mnemosPrivacy .pv-btn.quiet{background:transparent;color:var(--mut)}
 @keyframes recPulse{
   0%{box-shadow:0 0 0 0 rgba(166,71,71,.4)}
   70%{box-shadow:0 0 0 8px rgba(166,71,71,0)}
@@ -488,15 +494,15 @@ button:disabled,.btn:disabled{cursor:default}
   .mini:hover:not(:disabled),.ctl:hover:not(:disabled),
   button:active:not(:disabled),.btn:active:not(:disabled),
   .mini:active:not(:disabled),.ctl:active:not(:disabled){transform:none;box-shadow:none}
-  .brand .mark path,.ink-rule,.ink-divider,.seal-btn.holding .seal-ring circle,
+  .brand .mark path,.brand .mark .mark-dot,.ink-rule,.ink-divider,.seal-btn.holding .seal-ring circle,
   .holdable.holding .hold-ring circle,
-  #vinceoRecBar .rec-chip .dot,#vinceoPrivacy .pv-sheet{animation:none}
+  #mnemosRecBar .rec-chip .dot,#mnemosPrivacy .pv-sheet{animation:none}
   .seal-btn.holding .seal-ring circle,.holdable.holding .hold-ring circle{stroke-dashoffset:0}
   .holdable.hold-spine::after{transition:none}
 }
 @media (forced-colors: active){
   :root{--acc:CanvasText;--acc-dim:Highlight;--navy:CanvasText;--mut:GrayText;--line:CanvasText}
-  #vinceoApproval,.band.proposal,.holdable.hold-spine::after,.row::before{
+  #mnemosApproval,.band.proposal,.holdable.hold-spine::after,.row::before{
     border:2px solid Highlight !important;
   }
   .nav a.on,.seal-btn,.holdable.holding{
@@ -512,7 +518,7 @@ def apply(page: str) -> str:
     Leaves @@APPROVAL@@ for per-request SSR via approval_partial.inject_page.
     """
     from app.api.approval_partial import APPROVAL_CSS, APPROVAL_JS
-    from app.api.vinceo_ui import UI_JS
+    from app.api.mnemos_ui import UI_JS
 
     return (
         page.replace("@@FONTS@@", FONT_LINKS)

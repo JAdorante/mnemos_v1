@@ -1,13 +1,13 @@
-"""Shared Vinceo UI behaviors — Seal, Bleed, Constellation, Ambient, persistence.
+"""Shared Mnemos UI behaviors — Seal, Bleed, Constellation, Ambient, persistence.
 
-Injected into pages via @@UI_JS@@ (see vinceo_theme.apply).
+Injected into pages via @@UI_JS@@ (see mnemos_theme.apply).
 """
 
 UI_JS = r"""
 <script>
-/* Vinceo shared UI — instrument, not chatbot chrome */
-window.VinceoMemory = {
-  ns: 'vinceo.ui.',
+/* Mnemos shared UI — instrument, not chatbot chrome */
+window.MnemosMemory = {
+  ns: 'mnemos.ui.',
   get(key, fallback) {
     try {
       const raw = localStorage.getItem(this.ns + key);
@@ -50,12 +50,12 @@ window.VinceoMemory = {
   };
 })();
 
-window.VinceoReduceMotion = () =>
+window.MnemosReduceMotion = () =>
   window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 /* Shared hold primitive — Seal + Bleed. Copper progress only; no pulse.
    HOLD_MS 700; early release (≥150ms) teaches once via server-persisted tip. */
-window.VinceoHold = {
+window.MnemosHold = {
   HOLD_MS: 700,
   TEACH_MS: 150,
   _tipSeen: null,
@@ -81,7 +81,7 @@ window.VinceoHold = {
       this._live = document.createElement('div');
       this._live.setAttribute('aria-live', 'polite');
       this._live.setAttribute('aria-atomic', 'true');
-      this._live.className = 'vinceo-hold-live';
+      this._live.className = 'mnemos-hold-live';
       this._live.style.cssText = 'position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)';
       document.body.appendChild(this._live);
     }
@@ -89,11 +89,11 @@ window.VinceoHold = {
   },
   showTeach(el, text) {
     if (!el) return;
-    let tip = document.getElementById('vinceoHoldTip');
+    let tip = document.getElementById('mnemosHoldTip');
     if (!tip) {
       tip = document.createElement('div');
-      tip.id = 'vinceoHoldTip';
-      tip.className = 'vinceo-hold-tip';
+      tip.id = 'mnemosHoldTip';
+      tip.className = 'mnemos-hold-tip';
       tip.style.cssText = 'position:fixed;z-index:80;max-width:240px;padding:8px 10px;'
         + 'font:11px/1.35 "IBM Plex Mono",ui-monospace,monospace;color:var(--navy,#0B1320);'
         + 'background:rgba(255,254,251,.97);border:1px solid rgba(184,115,51,.35);'
@@ -120,7 +120,7 @@ window.VinceoHold = {
     opts = opts || {};
     const ms = opts.ms || this.HOLD_MS;
     const fill = opts.fill || 'ring';
-    const reduce = window.VinceoReduceMotion();
+    const reduce = window.MnemosReduceMotion();
     el.classList.add('holdable');
     el.setAttribute('tabindex', el.getAttribute('tabindex') || '0');
     if (!el.getAttribute('role')) el.setAttribute('role', 'button');
@@ -228,19 +228,19 @@ window.VinceoHold = {
   }
 };
 
-window.VinceoSeal = {
+window.MnemosSeal = {
   HOLD_MS: 700,
   bind(btn, { onApprove, onCancel } = {}) {
     if (!btn || btn._sealBound) return;
     btn._sealBound = true;
     btn.classList.add('seal-btn');
-    window.VinceoHold.bind(btn, {
+    window.MnemosHold.bind(btn, {
       ms: this.HOLD_MS,
       fill: 'ring',
       teach: 'Hold to seal this approval',
       onComplete: () => {
-        if (window.VinceoMemory.get('sound', false)) {
-          try { window.VinceoInkSound && window.VinceoInkSound(); } catch (e) {}
+        if (window.MnemosMemory.get('sound', false)) {
+          try { window.MnemosInkSound && window.MnemosInkSound(); } catch (e) {}
         }
         onApprove && onApprove();
       },
@@ -249,7 +249,7 @@ window.VinceoSeal = {
   }
 };
 
-window.VinceoInkSound = function () {
+window.MnemosInkSound = function () {
   try {
     const Ctx = window.AudioContext || window.webkitAudioContext;
     if (!Ctx) return;
@@ -267,7 +267,7 @@ window.VinceoInkSound = function () {
   } catch (e) {}
 };
 
-window.VinceoBleed = {
+window.MnemosBleed = {
   HOLD_MS: 700,
   bind(el, onReveal) {
     if (!el || el._bleedBound) return;
@@ -283,7 +283,7 @@ window.VinceoBleed = {
       more.textContent = '⋯';
       el.appendChild(more);
     }
-    window.VinceoHold.bind(el, {
+    window.MnemosHold.bind(el, {
       ms: this.HOLD_MS,
       fill: 'spine',
       teach: 'Hold to see where this came from',
@@ -309,9 +309,9 @@ function esc(s) {
   return String(s == null ? '' : s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
-window.VinceoEsc = esc;
+window.MnemosEsc = esc;
 
-window.VinceoAmbient = {
+window.MnemosAmbient = {
   render(el, notes, opts) {
     if (!el) return;
     opts = opts || {};
@@ -384,7 +384,7 @@ window.VinceoAmbient = {
   }
 };
 
-window.VinceoConstellation = {
+window.MnemosConstellation = {
   mount(canvas, data, opts) {
     if (!canvas) return null;
     const ctx = canvas.getContext('2d');
@@ -547,7 +547,7 @@ window.VinceoConstellation = {
       insightEl.hidden = false;
       insightEl.innerHTML = notes.map(n =>
         '<button type="button" class="const-insight-btn" data-nid="'
-        + VinceoEsc(n.node_id || '') + '">' + VinceoEsc(n.text || '') + '</button>'
+        + MnemosEsc(n.node_id || '') + '">' + MnemosEsc(n.text || '') + '</button>'
       ).join('');
     }
 
@@ -555,9 +555,9 @@ window.VinceoConstellation = {
       if (!tip || !n) { if (tip) tip.hidden = true; return; }
       const why = (n.why && n.why.length) ? n.why.join(' · ') : '';
       tip.hidden = false;
-      tip.innerHTML = '<strong>' + VinceoEsc(n.label || n.id) + '</strong>'
-        + '<span class="const-tip-kind">' + VinceoEsc(n.kind || '') + '</span>'
-        + (why ? '<div class="const-tip-why">' + VinceoEsc(why) + '</div>' : '');
+      tip.innerHTML = '<strong>' + MnemosEsc(n.label || n.id) + '</strong>'
+        + '<span class="const-tip-kind">' + MnemosEsc(n.kind || '') + '</span>'
+        + (why ? '<div class="const-tip-why">' + MnemosEsc(why) + '</div>' : '');
       if (wrap) {
         const r = wrap.getBoundingClientRect();
         tip.style.left = Math.min(r.width - 180, Math.max(8, clientX - r.left + 12)) + 'px';
@@ -651,19 +651,19 @@ window.VinceoConstellation = {
         const v = Number(c.value) || 0;
         const val = (v >= 0 ? '+' : '') + (Math.round(v * 1000) / 1000);
         html += '<button type="button" class="const-rank-row" data-rk="' + i + '">'
-          + '<span class="const-rank-label">' + VinceoEsc(c.label || c.key || '')
-          + '</span><span class="const-rank-val">' + VinceoEsc(String(val))
+          + '<span class="const-rank-label">' + MnemosEsc(c.label || c.key || '')
+          + '</span><span class="const-rank-val">' + MnemosEsc(String(val))
           + '</span></button>';
         html += '<div class="const-rank-ev" hidden data-rk-ev="' + i + '">';
         const refs = c.evidence_refs || [];
         if (refs.length) {
           refs.forEach(r => {
             html += '<div class="const-ev-row"><span class="const-ev-ch">ref</span>'
-              + '<div>' + VinceoEsc(String(r)) + '</div></div>';
+              + '<div>' + MnemosEsc(String(r)) + '</div></div>';
           });
         } else {
           html += '<div class="const-edit-hint">'
-            + VinceoEsc(
+            + MnemosEsc(
               (c.evidence === 'none')
                 ? 'Structural signal — no single event'
                 : 'No evidence refs')
@@ -686,10 +686,10 @@ window.VinceoConstellation = {
         const data = await (await fetch('/graph/constellation/evidence?id='
           + encodeURIComponent(id))).json();
         const n = data.node || state.byId[id] || {};
-        let html = '<div class="const-edit-head"><strong>' + VinceoEsc(n.label || id)
+        let html = '<div class="const-edit-head"><strong>' + MnemosEsc(n.label || id)
           + '</strong><button type="button" data-act="close-ev" class="linkish">Close</button></div>';
-        html += '<div class="const-tip-kind">' + VinceoEsc(n.kind || '')
-          + (n.layer ? ' · ' + VinceoEsc(n.layer) : '') + '</div>';
+        html += '<div class="const-tip-kind">' + MnemosEsc(n.kind || '')
+          + (n.layer ? ' · ' + MnemosEsc(n.layer) : '') + '</div>';
         // Rank breakdown first — same panel vocabulary as provenance below.
         html += renderRankBreakdown(data.breakdown
           || (state.breakdowns && state.breakdowns[id]));
@@ -700,7 +700,7 @@ window.VinceoConstellation = {
         }
         if (data.why && data.why.length) {
           html += '<div class="const-why">' + data.why.map(w =>
-            '<div>' + VinceoEsc(w) + '</div>').join('') + '</div>';
+            '<div>' + MnemosEsc(w) + '</div>').join('') + '</div>';
         }
         const allowed = data.allowed_kinds || [];
         if (allowed.length) {
@@ -708,9 +708,9 @@ window.VinceoConstellation = {
           html += '<label class="const-edit-hint" style="display:block;margin-top:8px">Category</label>';
           html += '<select class="const-kind-select" data-act="kind-select">';
           allowed.forEach(k => {
-            html += '<option value="' + VinceoEsc(k) + '"'
+            html += '<option value="' + MnemosEsc(k) + '"'
               + (k === cur ? ' selected' : '') + '>'
-              + VinceoEsc(k) + '</option>';
+              + MnemosEsc(k) + '</option>';
           });
           html += '</select>';
           html += '<button type="button" class="const-link-btn" data-act="do-reclassify" '
@@ -725,18 +725,18 @@ window.VinceoConstellation = {
           html += '<div class="const-edit-list"><div class="const-edit-hint">Evidence</div>';
           sources.slice(0, 8).forEach((s, idx) => {
             html += '<div class="const-ev-row"><span class="const-ev-ch">'
-              + VinceoEsc(s.modality || s.channel || 'source') + '</span>';
+              + MnemosEsc(s.modality || s.channel || 'source') + '</span>';
             html += '<div class="const-ev-body">';
             const hl = s.span_highlight;
             if (hl && (hl.match || hl.before || hl.after)) {
               html += '<div class="const-ev-transcript">'
-                + VinceoEsc(hl.before || '')
-                + '<mark class="span-hl">' + VinceoEsc(hl.match || '') + '</mark>'
-                + VinceoEsc(hl.after || '') + '</div>';
+                + MnemosEsc(hl.before || '')
+                + '<mark class="span-hl">' + MnemosEsc(hl.match || '') + '</mark>'
+                + MnemosEsc(hl.after || '') + '</div>';
             } else {
-              html += '<div>' + VinceoEsc((s.text || s.transcript || '').slice(0, 200) || '—') + '</div>';
+              html += '<div>' + MnemosEsc((s.text || s.transcript || '').slice(0, 200) || '—') + '</div>';
               if (s.source_span) {
-                html += '<div class="const-ev-quote">“' + VinceoEsc(s.source_span) + '”</div>';
+                html += '<div class="const-ev-quote">“' + MnemosEsc(s.source_span) + '”</div>';
               }
             }
             const play = s.play_path || s.enhanced_audio || s.audio_path;
@@ -760,9 +760,9 @@ window.VinceoConstellation = {
           if (neigh.length) {
             html += '<div class="const-edit-list">';
             neigh.forEach(x => {
-              html += '<div class="const-edit-row"><span>' + VinceoEsc(x.node.label || x.id)
+              html += '<div class="const-edit-row"><span>' + MnemosEsc(x.node.label || x.id)
                 + (x.manual ? ' <em>manual</em>' : '')
-                + '</span><button type="button" data-unlink="' + VinceoEsc(x.id)
+                + '</span><button type="button" data-unlink="' + MnemosEsc(x.id)
                 + '">Remove</button></div>';
             });
             html += '</div>';
@@ -771,7 +771,7 @@ window.VinceoConstellation = {
         panel.innerHTML = html;
       } catch (err) {
         panel.innerHTML = '<div class="const-edit-hint" style="color:var(--danger)">'
-          + VinceoEsc(err.message || err) + '</div>';
+          + MnemosEsc(err.message || err) + '</div>';
       }
     }
 
@@ -853,7 +853,7 @@ window.VinceoConstellation = {
     };
     const saveCam = () => {
       clampCam();
-      if (state.persistKey) window.VinceoMemory.set(state.persistKey, state.cam);
+      if (state.persistKey) window.MnemosMemory.set(state.persistKey, state.cam);
     };
     const fit = () => {
       state.cam = { x: 0, y: 0, z: 1 };
@@ -871,7 +871,7 @@ window.VinceoConstellation = {
       clampCam();
     };
     const saved = state.persistKey
-      ? window.VinceoMemory.get(state.persistKey, null) : null;
+      ? window.MnemosMemory.get(state.persistKey, null) : null;
     if (saved && typeof saved.z === 'number') {
       state.cam = Object.assign(state.cam, saved);
       clampCam();
@@ -1135,7 +1135,7 @@ window.VinceoConstellation = {
       ctx.translate(w / 2 + st.cam.x, h / 2 + st.cam.y);
       ctx.scale(st.cam.z, st.cam.z);
       ctx.translate(-w / 2, -h / 2);
-      const breath = window.VinceoReduceMotion() ? 0
+      const breath = window.MnemosReduceMotion() ? 0
         : Math.sin((now - st.t0) / 2800) * 0.006;
       const dimFocus = !!st.focusId;
 
@@ -1354,7 +1354,7 @@ window.VinceoConstellation = {
           try { await togglePin(state.selected); }
           catch (err) { panel.insertAdjacentHTML('beforeend',
             '<div class="const-edit-hint" style="color:var(--danger)">'
-            + VinceoEsc(err.message || err) + '</div>'); }
+            + MnemosEsc(err.message || err) + '</div>'); }
           return;
         }
         if (act === 'do-reclassify' && state.selected) {
@@ -1364,7 +1364,7 @@ window.VinceoConstellation = {
           try { await reclassify(state.selected, kind); }
           catch (err) { panel.insertAdjacentHTML('beforeend',
             '<div class="const-edit-hint" style="color:var(--danger)">'
-            + VinceoEsc(err.message || err) + '</div>'); }
+            + MnemosEsc(err.message || err) + '</div>'); }
           return;
         }
         if (act === 'start-link' && state.selected) {
@@ -1378,7 +1378,7 @@ window.VinceoConstellation = {
           try { await unlinkPair(state.selected, other); }
           catch (err) { panel.insertAdjacentHTML('beforeend',
             '<div class="const-edit-hint" style="color:var(--danger)">'
-            + VinceoEsc(err.message || err) + '</div>'); }
+            + MnemosEsc(err.message || err) + '</div>'); }
           return;
         }
         // Rank component → reveal its evidence refs (same hold-to-reveal vocabulary).
@@ -1443,7 +1443,7 @@ window.VinceoConstellation = {
             } catch (err) {
               if (panel) panel.insertAdjacentHTML('beforeend',
                 '<div class="const-edit-hint" style="color:var(--danger)">'
-                + VinceoEsc(err.message || err) + '</div>');
+                + MnemosEsc(err.message || err) + '</div>');
             }
           } else {
             state.selected = state.hover;
@@ -1573,7 +1573,7 @@ window.VinceoConstellation = {
   }
 };
 
-window.VinceoParsePacket = function (text) {
+window.MnemosParsePacket = function (text) {
   if (!text || text.indexOf('APPROVAL NEEDED') < 0) return null;
   const lines = text.split(/\r?\n/);
   const first = lines[0] || '';
@@ -1602,7 +1602,7 @@ window.VinceoParsePacket = function (text) {
   return { kind: 'approval', summary, fields };
 };
 
-window.VinceoRenderFolio = function (packet, opts) {
+window.MnemosRenderFolio = function (packet, opts) {
   opts = opts || {};
   const f = (packet && packet.fields) || {};
   const editable = !!opts.editable;
@@ -1652,7 +1652,7 @@ window.VinceoRenderFolio = function (packet, opts) {
 };
 
 /* Response document renderer — semantic sections → editorial UI */
-window.VinceoResponse = {
+window.MnemosResponse = {
   CARD: {
     key_idea: {label: 'Key idea', icon: '◆'},
     concept: {label: 'Concept', icon: '◆'},
@@ -1823,7 +1823,7 @@ window.VinceoResponse = {
 };
 
 /* Field SSE — push channel for /field/stream (A3). Polling remains fallback. */
-window.VinceoFieldStream = {
+window.MnemosFieldStream = {
   _es: null,
   _cb: null,
   _debounce: null,
@@ -1862,7 +1862,7 @@ window.VinceoFieldStream = {
 };
 
 /* Today — thin helpers for the dashboard (offers stay on agent_bridge). */
-window.VinceoShell = {
+window.MnemosShell = {
   async state(limit) {
     const r = await fetch('/today/state?limit=' + (limit || 28));
     return r.json();
@@ -1878,7 +1878,7 @@ window.VinceoShell = {
 };
 
 /* Capture privacy — consent gate + persistent recording indicator. */
-window.VinceoCapture = {
+window.MnemosCapture = {
   _timer: null,
   _state: null,
   _SOURCES: [
@@ -1927,7 +1927,7 @@ window.VinceoCapture = {
     return r.json();
   },
   openPrivacy() {
-    const el = document.getElementById('vinceoPrivacy');
+    const el = document.getElementById('mnemosPrivacy');
     if (!el) return;
     const src = ((this._state && this._state.consent && this._state.consent.sources)
       || {});
@@ -1944,7 +1944,7 @@ window.VinceoCapture = {
     el.classList.add('open');
   },
   closePrivacy() {
-    const el = document.getElementById('vinceoPrivacy');
+    const el = document.getElementById('mnemosPrivacy');
     if (el) el.classList.remove('open');
   },
   async applyPrivacy() {
@@ -1982,15 +1982,15 @@ window.VinceoCapture = {
     }
   },
   mount() {
-    if (document.getElementById('vinceoRecBar')) return;
+    if (document.getElementById('mnemosRecBar')) return;
     // Skip on bare launch page until Continue — still mount so consent can show.
     const bar = document.createElement('div');
-    bar.id = 'vinceoRecBar';
+    bar.id = 'mnemosRecBar';
     bar.setAttribute('aria-live', 'polite');
     document.body.appendChild(bar);
 
     const modal = document.createElement('div');
-    modal.id = 'vinceoPrivacy';
+    modal.id = 'mnemosPrivacy';
     modal.setAttribute('role', 'dialog');
     modal.setAttribute('aria-modal', 'true');
     modal.setAttribute('aria-label', 'Capture privacy');
@@ -2025,12 +2025,12 @@ window.VinceoCapture = {
     document.body.appendChild(modal);
     modal.addEventListener('click', (e) => {
       if (e.target === modal) {
-        VinceoMemory.set('capturePromptDismissed', true);
+        MnemosMemory.set('capturePromptDismissed', true);
         this.closePrivacy();
       }
     });
     document.getElementById('pvCancel').onclick = () => {
-      VinceoMemory.set('capturePromptDismissed', true);
+      MnemosMemory.set('capturePromptDismissed', true);
       this.closePrivacy();
     };    document.getElementById('pvSave').onclick = () => this.applyPrivacy();
     document.getElementById('pvRevoke').onclick = async () => {
@@ -2042,7 +2042,7 @@ window.VinceoCapture = {
     };
   },
   render() {
-    const bar = document.getElementById('vinceoRecBar');
+    const bar = document.getElementById('mnemosRecBar');
     if (!bar || !this._state) return;
     const consent = this._state.consent || {};
     const sources = consent.sources || {};
@@ -2094,7 +2094,7 @@ window.VinceoCapture = {
       // First visit: force the consent sheet when nothing is allowed yet.
       if (this._state && this._state.consent
           && !this._state.consent.consented
-          && !VinceoMemory.get('capturePromptDismissed', false)) {
+          && !MnemosMemory.get('capturePromptDismissed', false)) {
         this.openPrivacy();
       }
     } catch (e) {}
@@ -2108,7 +2108,7 @@ window.VinceoCapture = {
 };
 
 document.addEventListener('DOMContentLoaded', () => {
-  try { window.VinceoCapture && window.VinceoCapture.start(); } catch (e) {}
+  try { window.MnemosCapture && window.MnemosCapture.start(); } catch (e) {}
 });
 </script>
 """

@@ -330,7 +330,7 @@ class IngestConfig:
 class AudioQualityConfig:
     """Pre-ASR audio quality scoring (see services/audio_quality.py).
 
-    Scores the raw utterance waveform *before* Whisper so the rest of vinceo.ai can
+    Scores the raw utterance waveform *before* Whisper so the rest of Mnemos can
     tell "the audio was bad" apart from "Whisper failed", and so denoising (#2)
     and the Audio Health console (#9) have a signal to route on. Pure numpy.
     """
@@ -594,7 +594,7 @@ class DesktopCaptureConfig:
 
 @dataclass(frozen=True)
 class VoiceConfig:
-    """Text-to-speech so vinceo.ai can talk back (see services/voice.py).
+    """Text-to-speech so Mnemos can talk back (see services/voice.py).
 
     `auto` uses the most human voice available: a neural (online) Edge voice when
     reachable, else the offline OS voice (SAPI5 on Windows, pyttsx3 elsewhere).

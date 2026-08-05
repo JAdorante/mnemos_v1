@@ -2,7 +2,7 @@
 
 *The day the learning loop closed.*
 
-Yesterday vinceo.ai could hear, see, remember, and act. Today it **learns** —
+Yesterday Mnemos could hear, see, remember, and act. Today it **learns** —
 end to end, measurably, from nothing but normal use. Every stage of the
 lessons-into-weights pipeline shipped and was live-verified in one session:
 

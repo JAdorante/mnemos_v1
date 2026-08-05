@@ -44,7 +44,7 @@ class AttentionCorpusTests(unittest.TestCase):
         # Corpus is additive — GravityGoldenTests must still import cleanly.
         import importlib.util
         from pathlib import Path
-        path = Path(__file__).resolve().parent / "test_vinceo_interface.py"
+        path = Path(__file__).resolve().parent / "test_mnemos_interface.py"
         spec = importlib.util.spec_from_file_location("tvi", path)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)

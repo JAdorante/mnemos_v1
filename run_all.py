@@ -1,8 +1,8 @@
-"""Launch the whole vinceo.ai system with one command.
+"""Launch the whole Mnemos system with one command.
 
     python run_all.py
 
-Starts the whole vinceo.ai system:
+Starts the whole Mnemos system:
   * the Memory Engine (SQLite + semantic index),
   * the FastAPI server + API/docs at http://127.0.0.1:8000/docs,
   * the Exec.AI browser agent web UI at http://127.0.0.1:5000
@@ -79,7 +79,7 @@ def _start_browser_agent(port: int, headless: bool) -> subprocess.Popen | None:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Launch all of vinceo.ai at once")
+    ap = argparse.ArgumentParser(description="Launch all of Mnemos at once")
     ap.add_argument("--no-audio", action="store_true",
                     help="force-disable mic (overrides prior consent for this run)")
     ap.add_argument("--no-vision", action="store_true",
@@ -121,7 +121,7 @@ def main() -> None:
         atexit.register(_kill_tree, browser_proc)
 
     print("=" * 62)
-    print("  vinceo.ai — launching everything")
+    print("  Mnemos — launching everything")
     print(f"  API + docs:      http://{args.host}:{args.port}/docs")
     if browser_proc:
         print(f"  Browser agent:   http://127.0.0.1:{args.browser_port}")

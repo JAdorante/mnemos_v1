@@ -1,8 +1,8 @@
 """Meeting note page — enhanced session note with evidence playback (P3)."""
 
-from app.api.vinceo_theme import apply as _vinceo
+from app.api.mnemos_theme import apply as _mnemos
 
-MEETING_PAGE = _vinceo(r"""<!doctype html>
+MEETING_PAGE = _mnemos(r"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -164,10 +164,10 @@ function playPath(path) {
 }
 
 function spanHtml(hl, fallback) {
-  if (!hl) return VinceoEsc(fallback || '');
-  return VinceoEsc(hl.before || '')
-    + '<mark>' + VinceoEsc(hl.match || '') + '</mark>'
-    + VinceoEsc(hl.after || '');
+  if (!hl) return MnemosEsc(fallback || '');
+  return MnemosEsc(hl.before || '')
+    + '<mark>' + MnemosEsc(hl.match || '') + '</mark>'
+    + MnemosEsc(hl.after || '');
 }
 
 function fmtWhen(ts) {
@@ -207,7 +207,7 @@ async function load() {
     note.period_end ? ('– ' + fmtWhen(note.period_end)) : '',
     note.model ? ('· ' + note.model) : '',
   ].filter(Boolean).join(' ');
-  document.title = (note.title || 'Meeting') + ' · Vinceo';
+  document.title = (note.title || 'Meeting') + ' · Mnemos';
   const rid = note.id;
   document.getElementById('askPanel').hidden = !rid;
   document.getElementById('draftPanel').hidden = !rid;
@@ -218,23 +218,23 @@ async function load() {
   stack.innerHTML = (note.items || []).map(it => {
     const dismissed = it.review === 'dismissed' ? ' dismissed' : '';
     const pill = it.review
-      ? ('<span class="pill">' + VinceoEsc(it.review) + '</span>') : '';
+      ? ('<span class="pill">' + MnemosEsc(it.review) + '</span>') : '';
     const receipts = (it.evidence || []).map(ev => {
       const quote = spanHtml(ev.span_highlight, ev.source_span || ev.text || '');
       const play = ev.playable && ev.play_path
         ? ('<button type="button" class="play" data-path="'
-           + VinceoEsc(ev.play_path) + '">Play the moment</button>')
+           + MnemosEsc(ev.play_path) + '">Play the moment</button>')
         : '<span class="pill">no audio</span>';
       return '<div class="receipt"><div class="quote">' + quote + '</div>'
         + '<div class="actions">' + play
-        + '<span class="pill">fact ' + VinceoEsc(String(ev.fact_id || '')) + '</span>'
+        + '<span class="pill">fact ' + MnemosEsc(String(ev.fact_id || '')) + '</span>'
         + '</div></div>';
     }).join('');
     return '<article class="item' + dismissed + '" data-id="' + it.id + '">'
-      + '<div class="kind">' + VinceoEsc(it.kind || '') + ' ' + pill + '</div>'
-      + '<div class="text">' + VinceoEsc(it.text || '') + '</div>'
-      + (it.detail ? ('<div class="detail">' + VinceoEsc(it.detail) + '</div>') : '')
-      + (it.subject ? ('<div class="subject">' + VinceoEsc(it.subject) + '</div>') : '')
+      + '<div class="kind">' + MnemosEsc(it.kind || '') + ' ' + pill + '</div>'
+      + '<div class="text">' + MnemosEsc(it.text || '') + '</div>'
+      + (it.detail ? ('<div class="detail">' + MnemosEsc(it.detail) + '</div>') : '')
+      + (it.subject ? ('<div class="subject">' + MnemosEsc(it.subject) + '</div>') : '')
       + (receipts ? ('<div class="receipts">' + receipts + '</div>') : '')
       + '<div class="row-actions">'
       + '<button type="button" data-verb="approve">Approve</button>'
@@ -271,7 +271,7 @@ function renderPrivacy(priv) {
     + (priv.tradeoff || '');
   const pills = document.getElementById('privacyPills');
   const src = (cons.sources_on || []).map(s =>
-    '<span class="pill">' + VinceoEsc(s) + '</span>').join('');
+    '<span class="pill">' + MnemosEsc(s) + '</span>').join('');
   pills.innerHTML = src || '<span class="pill">no sources on</span>';
   document.querySelectorAll('#retentionBtns button').forEach(btn => {
     const v = btn.getAttribute('data-ret');
@@ -310,12 +310,12 @@ async function askMeeting() {
     });
     const data = await r.json();
     if (!r.ok) {
-      out.innerHTML = '<span class="err">' + VinceoEsc(data.detail || 'ask failed') + '</span>';
+      out.innerHTML = '<span class="err">' + MnemosEsc(data.detail || 'ask failed') + '</span>';
       return;
     }
     out.textContent = data.answer || '(no answer)';
   } catch (e) {
-    out.innerHTML = '<span class="err">' + VinceoEsc(String(e)) + '</span>';
+    out.innerHTML = '<span class="err">' + MnemosEsc(String(e)) + '</span>';
   }
 }
 
@@ -332,7 +332,7 @@ async function draftFollowup() {
     });
     const data = await r.json();
     if (!r.ok) {
-      out.innerHTML = '<span class="err">' + VinceoEsc(data.detail || 'draft failed') + '</span>';
+      out.innerHTML = '<span class="err">' + MnemosEsc(data.detail || 'draft failed') + '</span>';
       return;
     }
     const n = (data.source_fact_ids || []).length;
@@ -340,7 +340,7 @@ async function draftFollowup() {
       + (n ? (' · citing ' + n + ' fact' + (n === 1 ? '' : 's')) : '')
       + '. Open Chat to approve the draft.';
   } catch (e) {
-    out.innerHTML = '<span class="err">' + VinceoEsc(String(e)) + '</span>';
+    out.innerHTML = '<span class="err">' + MnemosEsc(String(e)) + '</span>';
   }
 }
 
@@ -356,7 +356,7 @@ load();
 """)
 
 
-MEETINGS_LIST_PAGE = _vinceo(r"""<!doctype html>
+MEETINGS_LIST_PAGE = _mnemos(r"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -404,9 +404,9 @@ async function load() {
   }
   el.innerHTML = rows.map(m =>
     '<a class="row" href="/meeting/note/' + m.id + '">'
-    + '<div class="t">' + VinceoEsc(m.title || 'Meeting') + '</div>'
-    + '<div class="m">' + VinceoEsc(m.when || '') + ' · '
-    + VinceoEsc(String(m.n_items || 0)) + ' items</div></a>'
+    + '<div class="t">' + MnemosEsc(m.title || 'Meeting') + '</div>'
+    + '<div class="m">' + MnemosEsc(m.when || '') + ' · '
+    + MnemosEsc(String(m.n_items || 0)) + ' items</div></a>'
   ).join('');
 }
 load();

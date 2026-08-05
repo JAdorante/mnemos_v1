@@ -5,9 +5,9 @@ Local-first: there are no cloud accounts. "New" runs onboarding on this machine;
 LAN API token when the browser is not on loopback).
 """
 
-from app.api.vinceo_theme import apply as _vinceo
+from app.api.mnemos_theme import apply as _mnemos
 
-WELCOME_PAGE = _vinceo(r"""<!doctype html>
+WELCOME_PAGE = _mnemos(r"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -40,9 +40,13 @@ a:hover{opacity:.8}
 .brand-row{
   display:flex;align-items:center;gap:14px;margin:0 0 20px;
 }
-.brand-row .mark{color:var(--acc);width:40px;height:40px}
+.brand-logo{
+  display:block;width:min(340px,86vw);height:auto;
+  animation:fadeUp .5s var(--ease) both;
+}
+.brand-row .mark{color:var(--navy);width:40px;height:40px}
 .brand-row .mark path{
-  stroke-dasharray:48;animation:inkDraw .55s var(--ease) both;
+  stroke-dasharray:64;animation:inkDraw .55s var(--ease) both;
 }
 .brand{
   font-family:var(--display);font-weight:400;
@@ -129,15 +133,15 @@ h1{
   .unlock .row{flex-direction:column}
 }
 @media(prefers-reduced-motion:reduce){
-  .stage,.brand-row .mark path,.rule,.unlock{animation:none}
+  .stage,.brand-logo,.brand-row .mark path,.rule,.unlock{animation:none}
 }
 </style>
 </head>
 <body>
   <main class="stage" id="stage">
     <div class="brand-row">
-      @@MARK@@
-      <div class="brand">@@BRAND@@</div>
+      <img class="brand-logo" src="/static/mnemos-logo.png" width="340" height="88"
+           alt="@@BRAND@@ Labs" decoding="async">
     </div>
     <div class="rule" aria-hidden="true"></div>
     <h1 id="headline">Your memory starts here</h1>
@@ -177,7 +181,7 @@ h1{
              user_name:'', needs_unlock:false};
 
   function goHome(){
-    try{ VinceoMemory.set('lastRoute', state.home_url||'/today'); }catch(e){}
+    try{ MnemosMemory.set('lastRoute', state.home_url||'/today'); }catch(e){}
     location.href=state.home_url||'/today';
   }
   function goOnboarding(){

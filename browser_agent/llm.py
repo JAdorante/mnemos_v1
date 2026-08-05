@@ -150,7 +150,7 @@ class LLM:
     def direct_answer(self, user_request, context="", mode_guidance=""):
         """Answer a no-browser request (a memory/conversational question).
 
-        This is plain chat, not agentic work — so when vinceo.ai's ModelRouter is
+        This is plain chat, not agentic work — so when Mnemos's ModelRouter is
         importable and its local-first text tier is ON, the answer routes
         through it (task="chat"): free local model first, few-shot corrected
         from past verdicts, escalations distilled for the learning loop.
@@ -169,7 +169,7 @@ class LLM:
         """
         self.last_distill_id = None
         system = (
-            "You are vinceo.ai's assistant. Answer the user's request directly and "
+            "You are Mnemos's assistant. Answer the user's request directly and "
             "concisely from the conversation context. If the context does not "
             "contain the answer, say so plainly in one line — do not invent it. "
             "General knowledge (world facts, definitions, conversions) may be "

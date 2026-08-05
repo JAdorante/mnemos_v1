@@ -1,6 +1,6 @@
 # Implementation Prompt: Desktop Perception Capture & Ingest Pipeline (v1)
 
-> Hand this to a coding agent working **inside the existing Vinceo/Mnemos Windows prototype** (`nexus_v1`). This is a **brownfield** task: a desktop-capture path already exists and has known security holes this milestone must close, not step around. Python 3.11+, SQLite (WAL) + LanceDB + an existing memory/KG layer are present. Read the "BROWNFIELD CONTEXT" and "SECURITY PRECONDITIONS" sections before writing any code — they override the greenfield-sounding architecture below wherever they conflict.
+> Hand this to a coding agent working **inside the existing Mnemos Windows prototype** (`nexus_v1`). This is a **brownfield** task: a desktop-capture path already exists and has known security holes this milestone must close, not step around. Python 3.11+, SQLite (WAL) + LanceDB + an existing memory/KG layer are present. Read the "BROWNFIELD CONTEXT" and "SECURITY PRECONDITIONS" sections before writing any code — they override the greenfield-sounding architecture below wherever they conflict.
 
 ---
 

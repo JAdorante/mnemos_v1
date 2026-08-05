@@ -5,9 +5,24 @@ follow-through action. Execution goes through readiness + the chat offer gate.
 """
 from __future__ import annotations
 
+import os
+import re
 from typing import Any
 
 from app.services.reasoners.base import Proposal
+
+# Multi-year "overdue" rows are Memory Console cleanup, not chat interruptions.
+_MAX_CHAT_OVERDUE_D = float(
+    os.environ.get("QUILL_REASONER_MAX_OVERDUE_D", "60") or "60")
+_OVERDUE_RE = re.compile(r"overdue by (\d+)d", re.I)
+
+
+def _overdue_days(why: list) -> float | None:
+    for w in why or []:
+        m = _OVERDUE_RE.search(str(w))
+        if m:
+            return float(m.group(1))
+    return None
 
 
 def propose(store, *, now: float | None = None) -> list[Proposal]:
@@ -24,8 +39,11 @@ def propose(store, *, now: float | None = None) -> list[Proposal]:
         text = (r.get("text") or "").strip()
         if not text:
             continue
-        fid = r.get("fact_id")
         why = list(r.get("why") or [])
+        overdue = _overdue_days(why)
+        if overdue is not None and overdue > _MAX_CHAT_OVERDUE_D:
+            continue  # stale — don't spam Chat; leave for Memory / reflection
+        fid = r.get("fact_id")
         why.append("commitment_follow_through")
         subject = (r.get("subject") or "").strip() or None
         goal = (
@@ -54,6 +72,12 @@ def propose(store, *, now: float | None = None) -> list[Proposal]:
         if any(p.fact_id == fid for p in out if fid is not None):
             continue
         quiet = d.get("quiet_days")
+        try:
+            quiet_f = float(quiet) if quiet is not None else 0.0
+        except (TypeError, ValueError):
+            quiet_f = 0.0
+        if quiet_f > _MAX_CHAT_OVERDUE_D:
+            continue  # years-quiet threads belong in Memory, not Chat
         why = [f"dropped_thread quiet {quiet}d"]
         goal = f"Reopen or close this dropped thread: {text}"
         out.append(Proposal(

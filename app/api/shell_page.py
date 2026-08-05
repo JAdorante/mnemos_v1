@@ -9,9 +9,9 @@ Stages (cumulative):
      goes through /today/offer → worker.resolve_todo (no new channel)
 """
 
-from app.api.vinceo_theme import apply as _vinceo
+from app.api.mnemos_theme import apply as _mnemos
 
-SHELL_PAGE = _vinceo(r"""<!doctype html>
+SHELL_PAGE = _mnemos(r"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -275,7 +275,7 @@ body{
           <canvas id="constCanvas"></canvas>
         </a>
         <div id="constEmpty">
-          <span>Memories will gather here as you capture, chat, and work. Each node is something Vinceo can show its evidence for.</span>
+          <span>Memories will gather here as you capture, chat, and work. Each node is something Mnemos can show its evidence for.</span>
           <button type="button" class="empty-act" id="constStartCapture">Start capturing</button>
         </div>
       </div>
@@ -314,7 +314,7 @@ body{
 
 @@UI_JS@@
 <script>
-VinceoMemory.set('lastRoute', '/today');
+MnemosMemory.set('lastRoute', '/today');
 let constCtl = null;
 let pollTimer = null;
 
@@ -360,8 +360,8 @@ function renderNotepad(np, latestNote) {
   }
   list.innerHTML = jots.map(j => {
     const when = j.time ? new Date(j.time * 1000).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '';
-    return '<div class="jot-item">' + VinceoEsc(j.text || '')
-      + (when ? '<div class="when">' + VinceoEsc(when) + '</div>' : '')
+    return '<div class="jot-item">' + MnemosEsc(j.text || '')
+      + (when ? '<div class="when">' + MnemosEsc(when) + '</div>' : '')
       + '</div>';
   }).join('');
 }
@@ -434,7 +434,7 @@ function fillActionDetail(p, packet) {
   const fields = (packet && packet.fields) || {};
   const intentText = (fields.action || (packet && packet.summary)
     || (p && (p.message || (p.items && p.items[0]))) || '').trim();
-  intent.textContent = intentText || 'Vinceo is waiting for your decision.';
+  intent.textContent = intentText || 'Mnemos is waiting for your decision.';
   const stepItems = [];
   if (fields.to) stepItems.push('Compose to ' + fields.to);
   if (fields.subject) stepItems.push('Subject: ' + fields.subject);
@@ -444,7 +444,7 @@ function fillActionDetail(p, packet) {
     stepItems.push(fields.action);
   }
   if (!stepItems.length && intentText) stepItems.push(intentText);
-  steps.innerHTML = stepItems.map(s => '<li>' + VinceoEsc(String(s)) + '</li>').join('');
+  steps.innerHTML = stepItems.map(s => '<li>' + MnemosEsc(String(s)) + '</li>').join('');
   const body = (fields.body || fields.details || '').trim();
   const outbound = !!(fields.body || fields.to || /email|message|send|post|sms|text/i.test(intentText));
   if (body) {
@@ -475,7 +475,7 @@ function renderProposal(p, queued, waitingOn, packet) {
     let meta = '';
     if (p.confidence != null) meta += '<span class="pill attn">' + Math.round(p.confidence * 100) + '%</span>';
     (p.why || []).slice(0, 3).forEach(w => {
-      meta += '<span class="pill">' + VinceoEsc(String(w)) + '</span>';
+      meta += '<span class="pill">' + MnemosEsc(String(w)) + '</span>';
     });
     document.getElementById('propMeta').innerHTML = meta;
   } else {
@@ -495,9 +495,9 @@ function renderWm(slots) {
     return;
   }
   el.innerHTML = slots.map(s =>
-    '<div class="slot"><div class="k">' + VinceoEsc(s.node_type || 'node')
+    '<div class="slot"><div class="k">' + MnemosEsc(s.node_type || 'node')
     + (s.cluster_n > 1 ? (' · ×' + s.cluster_n) : '') + '</div>'
-    + VinceoEsc(s.label || s.node_key || '') + '</div>'
+    + MnemosEsc(s.label || s.node_key || '') + '</div>'
   ).join('');
 }
 
@@ -513,9 +513,9 @@ function renderHorizon(items) {
     const kind = i.loop_kind || i.source || '';
     const meta = [i.when_label || '', kind === 'open_loop' ? '' : kind,
       why].filter(Boolean).join(' · ');
-    return '<div class="chip"><span class="when">' + VinceoEsc(i.when_label || '')
-      + '</span>' + VinceoEsc(i.label || '')
-      + (meta ? ('<div class="meta">' + VinceoEsc(meta) + '</div>') : '')
+    return '<div class="chip"><span class="when">' + MnemosEsc(i.when_label || '')
+      + '</span>' + MnemosEsc(i.label || '')
+      + (meta ? ('<div class="meta">' + MnemosEsc(meta) + '</div>') : '')
       + '</div>';
   }).join('');
 }
@@ -527,9 +527,9 @@ function renderRisk(items) {
     return;
   }
   el.innerHTML = items.map(r =>
-    '<div class="row"><div class="t">' + VinceoEsc(r.text || '')
-    + '<div class="meta">' + VinceoEsc((r.why || []).join(' · ') || 'at risk')
-    + (r.subject ? (' · ' + VinceoEsc(r.subject)) : '') + '</div></div>'
+    '<div class="row"><div class="t">' + MnemosEsc(r.text || '')
+    + '<div class="meta">' + MnemosEsc((r.why || []).join(' · ') || 'at risk')
+    + (r.subject ? (' · ' + MnemosEsc(r.subject)) : '') + '</div></div>'
     + '<span class="pill urgent">' + (r.risk != null ? Math.round(r.risk * 100) + '%' : 'risk')
     + '</span></div>'
   ).join('');
@@ -560,7 +560,7 @@ function renderWorld(world) {
   };
   if (constCtl) constCtl.update(payload);
   else {
-    constCtl = VinceoConstellation.mount(
+    constCtl = MnemosConstellation.mount(
       document.getElementById('constCanvas'), payload, {
         mode: 'thumbnail',
         href: '/memory?mode=constellation',
@@ -574,9 +574,9 @@ function renderForgot(items) {
   if (!items.length) { sec.hidden = true; return; }
   sec.hidden = false;
   el.innerHTML = items.map(f =>
-    '<div class="row"><div class="t">' + VinceoEsc(f.summary || ('event ' + f.event_id))
-    + '<div class="meta">event ' + VinceoEsc(String(f.event_id || '')) + '</div></div>'
-    + '<button type="button" class="quiet" data-eid="' + VinceoEsc(String(f.event_id || ''))
+    '<div class="row"><div class="t">' + MnemosEsc(f.summary || ('event ' + f.event_id))
+    + '<div class="meta">event ' + MnemosEsc(String(f.event_id || '')) + '</div></div>'
+    + '<button type="button" class="quiet" data-eid="' + MnemosEsc(String(f.event_id || ''))
     + '">Restore</button></div>'
   ).join('');
   el.querySelectorAll('button[data-eid]').forEach(btn => {
@@ -606,7 +606,7 @@ async function answerOffer(accept) {
     });
   } catch (e) {}
   loadShell();
-  if (window.VinceoApprovals) window.VinceoApprovals.refresh();
+  if (window.MnemosApprovals) window.MnemosApprovals.refresh();
 }
 document.querySelectorAll('#secProposal form.approval-form').forEach(form => {
   form.addEventListener('submit', (ev) => {
@@ -622,7 +622,7 @@ if (startCap) {
   startCap.onclick = (e) => {
     e.preventDefault();
     e.stopPropagation();
-    if (window.VinceoCapture && VinceoCapture.openPrivacy) VinceoCapture.openPrivacy();
+    if (window.MnemosCapture && MnemosCapture.openPrivacy) MnemosCapture.openPrivacy();
     else location.href = '/chat';
   };
 }
@@ -683,8 +683,8 @@ document.addEventListener('keydown', e => {
 
 loadShell();
 pollTimer = setInterval(loadShell, 12000);
-if (window.VinceoFieldStream) {
-  const live = VinceoFieldStream.connect(() => loadShell());
+if (window.MnemosFieldStream) {
+  const live = MnemosFieldStream.connect(() => loadShell());
   if (live) clearInterval(pollTimer), pollTimer = setInterval(loadShell, 45000);
 }
 </script>

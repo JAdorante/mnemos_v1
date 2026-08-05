@@ -3,7 +3,7 @@
 The fact extractor runs over noisy speech, vision captions, and document text, so
 it hands the resolver strings that aren't names at all: pronouns ("us"), role
 words ("curator"), sentence fragments ("set it to 0"), env-var/system tokens
-("QUILL_AGENT", "vinceo.ai"), and file paths ("app/services/memory.py"). Ungated,
+("QUILL_AGENT", "Mnemos"), and file paths ("app/services/memory.py"). Ungated,
 each becomes a bogus person/entity node that clutters the constellation and
 pollutes retrieval.
 
@@ -35,7 +35,7 @@ _GENERIC = frozenset({
 # Includes the app's OWN UI surface names (page titles): screen capture reading
 # our own dashboard minted "Memory Console" as an entity (live, July 28 2026).
 _SELF_TOKENS = frozenset({
-    "vinceo.ai", "vinceo", "mnemos", "quill", "quill_agent", "exec.ai",
+    "Mnemos", "mnemos", "quill", "quill_agent", "exec.ai",
     "memory console", "desktop access", "weekly check-in", "memory changes",
     "constellation field",
 })

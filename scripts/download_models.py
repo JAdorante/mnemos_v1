@@ -1,4 +1,4 @@
-"""Pre-download vinceo.ai's models so the first live run starts instantly.
+"""Pre-download Mnemos's models so the first live run starts instantly.
 
     python scripts/download_models.py            # downloads the configured model
     python scripts/download_models.py base small # downloads specific sizes

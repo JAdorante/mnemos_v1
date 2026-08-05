@@ -1,11 +1,14 @@
-"""vinceo.ai FastAPI entrypoint.  Run:  uvicorn app.main:app --reload"""
+"""Mnemos FastAPI entrypoint.  Run:  uvicorn app.main:app --reload"""
 from __future__ import annotations
 
 import asyncio
 import os
 import threading
 
+from pathlib import Path
+
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from app.api.routes import router, start_all, stop_all
 from app.config import settings
@@ -17,11 +20,14 @@ from app.services.api_auth import (
 )
 from app.services.memory import memory
 
-app = FastAPI(title="vinceo.ai", version="0.1.0")
+app = FastAPI(title="Mnemos", version="0.1.0")
 app.add_middleware(LanApiAuthMiddleware)
 # Outer: CSRF runs first (plan 6.4) — cross-origin POSTs rejected.
 app.add_middleware(CsrfProtectMiddleware)
 app.include_router(router)
+_STATIC_DIR = Path(__file__).resolve().parent / "static"
+if _STATIC_DIR.is_dir():
+    app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
 
 # --- tail-latency nudge -----------------------------------------------------
@@ -448,7 +454,7 @@ async def _shutdown() -> None:
 def api_stub() -> dict:
     """Machine-readable service stub (formerly served at `/`)."""
     return {
-        "name": "vinceo.ai",
+        "name": "Mnemos",
         "milestone": "Personal Intelligence Platform",
         "endpoints": [
             "GET /", "GET /welcome", "GET /welcome/status",

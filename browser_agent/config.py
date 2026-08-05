@@ -11,7 +11,7 @@ from pathlib import Path
 # Every tier's model + effort is overridable via env so the same code runs against
 # any account's model line-up (no hardcoded IDs). Defaults match the tiered
 # routing strategy; AGENT_* wins where set.
-ROUTER_MODEL = os.environ.get("AGENT_ROUTER_MODEL", "claude-sonnet-4-6")     # vinceo.ai intent/action router (once per request)
+ROUTER_MODEL = os.environ.get("AGENT_ROUTER_MODEL", "claude-sonnet-4-6")     # Mnemos intent/action router (once per request)
 PLANNER_MODEL = os.environ.get("AGENT_PLANNER_MODEL", "claude-opus-4-8")     # infrequent, high-leverage planning
 EXECUTOR_MODEL = os.environ.get("AGENT_EXECUTOR_MODEL", "claude-sonnet-4-6") # per-step action selection (the hot path)
 ESCALATION_MODEL = os.environ.get("AGENT_ESCALATION_MODEL", "claude-opus-4-8")  # FR-MODEL-3: executor stuck -> escalate

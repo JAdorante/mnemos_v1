@@ -57,7 +57,7 @@ CLI_LINE = re.compile(
 _BAD_TITLE = re.compile(
     r"user-scoped|activity ownership|my contacts|people_?\d*|"
     r"serving flask|exec_webapp|debug mode|memory tag|fact:task|"
-    r"content_type|screen_type|checklist for vinceo",
+    r"content_type|screen_type|checklist for mnemos",
     re.I,
 )
 
@@ -116,9 +116,9 @@ def _self_title_re() -> re.Pattern:
     truth), so a rebrand keeps this correct without touching filter code."""
     global _SELF_TITLE_RE
     if _SELF_TITLE_RE is None:
-        brand_words = {"vinceo", "mnemos", "quill"}
+        brand_words = {"mnemos", "quill"}
         try:
-            from app.api.vinceo_theme import BRAND
+            from app.api.mnemos_theme import BRAND
             brand_words.add((BRAND or "").split(".")[0].strip().lower())
         except Exception:
             pass

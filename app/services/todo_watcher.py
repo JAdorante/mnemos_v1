@@ -6,7 +6,7 @@ REAL user to-do list, this:
   1. Upserts clean items into open tasks (deduped).
   2. Offers (in chat) to run the *actionable* ones — debounced.
 
-Ignores vinceo.ai's own UI, VLM schema leakage, anticipation text, and other
+Ignores Mnemos's own UI, VLM schema leakage, anticipation text, and other
 garbage that the model sometimes stuffs into `items`. Disable with
 QUILL_TODO_WATCH=0 (or QUILL_AGENT=0).
 """
@@ -60,9 +60,9 @@ _ACTION_CUE = re.compile(
     r"https?://|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
     re.I,
 )
-# Don't treat vinceo.ai's own chrome / memory UI as a user to-do page.
+# Don't treat Mnemos's own chrome / memory UI as a user to-do page.
 _SELF_WINDOW = re.compile(
-    r"vinceo(?:\.ai)?|mnemos|memory console|exec\.ai|/onboarding|nexus_v1\s*-\s*cursor",
+    r"mnemos(?:\.ai)?|mnemos|memory console|exec\.ai|/onboarding|nexus_v1\s*-\s*cursor",
     re.I,
 )
 # Real list surfaces we trust on desktop capture.
@@ -96,7 +96,7 @@ _META_PROSE = re.compile(
 _BAD_TITLE = re.compile(
     r"user-scoped|activity ownership|my contacts|people_?\d*|"
     r"serving flask|exec_webapp|debug mode|memory tag|fact:task|"
-    r"content_type|screen_type|checklist for vinceo",
+    r"content_type|screen_type|checklist for mnemos",
     re.I,
 )
 
@@ -111,19 +111,19 @@ def _hash(items: list[str]) -> str:
 
 
 def _is_self_ui(ev) -> bool:
-    """True when the frame is vinceo.ai/Cursor-on-vinceo.ai — never a user notepad list."""
+    """True when the frame is Mnemos/Cursor-on-Mnemos — never a user notepad list."""
     meta = ev.meta or {}
     win = str(meta.get("window") or "")
     if _SELF_WINDOW.search(win):
         return True
-    # Webcam frames describing the vinceo.ai UI via OCR/summary.
+    # Webcam frames describing the Mnemos UI via OCR/summary.
     vision = meta.get("vision") if isinstance(meta.get("vision"), dict) else {}
     blob = " ".join([
         str(vision.get("title") or ""),
         str(vision.get("ocr_text") or "")[:400],
         str(ev.summary or "")[:400],
     ]).lower()
-    if "vinceo" in blob and ("checklist for vinceo" in blob
+    if "mnemos" in blob and ("checklist for mnemos" in blob
                              or "memory console" in blob
                              or "reply 'yes'" in blob):
         return True
@@ -249,7 +249,7 @@ def _items_from_ocr(ocr: str) -> list[str]:
 def _looks_like_todo(title: str, ocr: str, summary: str) -> bool:
     blob = f"{title}\n{ocr}\n{summary}".lower()
     # Self-referential / UI copy is not a user list.
-    if "checklist for vinceo" in blob or "reply 'yes'" in blob:
+    if "checklist for mnemos" in blob or "reply 'yes'" in blob:
         return False
     if any(m in blob for m in _TODO_MARKERS):
         return True
@@ -296,8 +296,8 @@ def _todo_payload(ev) -> dict | None:
     inferred = (not explicit) and _looks_like_todo(title, ocr, summary)
     notes_doc = _is_notes_document(title, ocr)
     # Explicit todo_list from the model still needs to look sane; if the title
-    # is clearly vinceo.ai meta, drop it.
-    if "vinceo" in title.lower() and "checklist" in title.lower():
+    # is clearly Mnemos meta, drop it.
+    if "mnemos" in title.lower() and "checklist" in title.lower():
         return None
     if _BAD_TITLE.search(title):
         return None

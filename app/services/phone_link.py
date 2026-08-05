@@ -1,4 +1,4 @@
-"""Phone Link integration — control the Windows Phone Link app from vinceo.ai.
+"""Phone Link integration — control the Windows Phone Link app from Mnemos.
 
 Microsoft does not ship a public Phone Link API. This module drives the
 installed Phone Link UI via PowerShell + UI Automation (scripts adapted from

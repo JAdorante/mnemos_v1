@@ -3,9 +3,9 @@ policy, and decide the approval queue. The page only renders state and calls
 the /peer/* endpoints — every rule (single-use codes, personal-never-auto,
 offer-by-default) lives in services/peer_channel.py, not here."""
 
-from app.api.vinceo_theme import apply as _vinceo
+from app.api.mnemos_theme import apply as _mnemos
 
-PEER_PAGE = _vinceo(r"""<!doctype html>
+PEER_PAGE = _mnemos(r"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">

@@ -10,9 +10,9 @@ Live: polls /graph/version and re-renders when memory changes, so saying
 "I'm switching the deck to Figma" in chat updates this page within seconds.
 """
 
-from app.api.vinceo_theme import apply as _vinceo
+from app.api.mnemos_theme import apply as _mnemos
 
-PROFILE_PAGE = _vinceo(r"""<!doctype html>
+PROFILE_PAGE = _mnemos(r"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -207,7 +207,7 @@ body{margin:0;min-height:100vh;font:15px/1.55 var(--font);color:var(--text);
 
 @@UI_JS@@
 <script>
-VinceoMemory.set('lastRoute', '/profile');
+MnemosMemory.set('lastRoute', '/profile');
 
 function fmtWhen(ts){
   if(!ts) return '';
@@ -221,8 +221,8 @@ function card(f, isWork){
     :(f.review==='edited'?'edited by you':'');
   const meta=[f.kind,fmtWhen(f.updated_at),conf,rev].filter(Boolean).join(' · ');
   return '<div class="card" data-id="'+f.fact_id+'">'
-    +'<div class="t">'+VinceoEsc(f.text||'')+'<div class="meta">'+meta+'</div></div>'
-    +'<span class="pill">'+VinceoEsc(f.kind||'')+'</span>'
+    +'<div class="t">'+MnemosEsc(f.text||'')+'<div class="meta">'+meta+'</div></div>'
+    +'<span class="pill">'+MnemosEsc(f.kind||'')+'</span>'
     +'<span class="acts">'
     +(f.review!=='approved'?'<button data-act="approve" title="Yes, this is right">Confirm</button>':'')
     +'<button data-act="edit" title="Correct the wording">Edit</button>'
@@ -262,14 +262,14 @@ async function load(){
   if(d.identity && d.identity.name){
     const c=[];
     if(d.identity.primary_email) c.push('<div><span>Primary email</span>'
-      +VinceoEsc(d.identity.primary_email)+'</div>');
+      +MnemosEsc(d.identity.primary_email)+'</div>');
     if(d.identity.secondary_email) c.push('<div><span>Secondary email</span>'
-      +VinceoEsc(d.identity.secondary_email)+'</div>');
+      +MnemosEsc(d.identity.secondary_email)+'</div>');
     if(d.identity.phone) c.push('<div><span>Phone</span>'
-      +VinceoEsc(d.identity.phone)+'</div>');
-    id.innerHTML='<div class="nm">'+VinceoEsc(d.identity.name)+'</div>'
-      +(d.identity.role?'<div class="rl">'+VinceoEsc(d.identity.role)+'</div>':'')
-      +(d.identity.description?'<div class="ds">'+VinceoEsc(d.identity.description)+'</div>':'')
+      +MnemosEsc(d.identity.phone)+'</div>');
+    id.innerHTML='<div class="nm">'+MnemosEsc(d.identity.name)+'</div>'
+      +(d.identity.role?'<div class="rl">'+MnemosEsc(d.identity.role)+'</div>':'')
+      +(d.identity.description?'<div class="ds">'+MnemosEsc(d.identity.description)+'</div>':'')
       +(c.length?'<div class="contact">'+c.join('')+'</div>':'')
       +'<div class="meta" style="margin-top:10px"><a href="/onboarding">Edit identity in Setup →</a></div>';
   }else{
@@ -296,7 +296,7 @@ function setTab(name){
     document.getElementById(tabs[k]).hidden = name!==k;
     document.getElementById(btns[k]).classList.toggle('on', name===k);
   });
-  VinceoMemory.set('profile.tab', name);
+  MnemosMemory.set('profile.tab', name);
   if(name==='people') loadPeople();
   if(name==='entities') loadEntities();
   if(name==='work') loadWork();
@@ -340,7 +340,7 @@ function renderPeopleList(){
   if(!rows.length){el.innerHTML='<div class="empty">No one yet — mention people in chat or speech and they\'ll appear.</div>';return;}
   el.innerHTML=rows.map(p=>{
     const row='<div class="prow" data-pid="'+p.id+'">'
-      +'<div style="flex:1"><span class="nm">'+VinceoEsc(p.name)+'</span>'
+      +'<div style="flex:1"><span class="nm">'+MnemosEsc(p.name)+'</span>'
       +(p.is_self?' <span class="chip">you</span>':'')
       +'<div class="meta">connection '+p.weight.toFixed(1)+' · '+fmtSeen(p.last_seen)+'</div></div>'
       +'<span class="meta">'+(openPersonId===p.id?'▾':'▸')+'</span></div>';
@@ -367,20 +367,20 @@ function detailSrcChip(d){
   if(d.source==='you')
     return '<span class="chip" style="align-self:center" title="You set this">you</span>';
   if(d.source==='graph')
-    return '<span class="chip" style="align-self:center" title="'+VinceoEsc(d.quote||'graph')+'">connected</span>';
+    return '<span class="chip" style="align-self:center" title="'+MnemosEsc(d.quote||'graph')+'">connected</span>';
   if(d.source==='attributed')
-    return '<span class="chip" style="align-self:center" title="'+VinceoEsc(d.quote||'attributed')+'">attributed</span>';
+    return '<span class="chip" style="align-self:center" title="'+MnemosEsc(d.quote||'attributed')+'">attributed</span>';
   if(d.value)
-    return '<span class="chip" style="align-self:center" title="'+VinceoEsc(d.quote||'mined from memory')+'">from memory</span>';
+    return '<span class="chip" style="align-self:center" title="'+MnemosEsc(d.quote||'mined from memory')+'">from memory</span>';
   return '';
 }
 
 async function loadPersonDetail(pid){
   const host=document.getElementById('pDetail'); if(!host) return;
   const p=await (await fetch('/people/'+pid)).json();
-  let h='<h3>'+VinceoEsc(p.name)+'</h3>';
+  let h='<h3>'+MnemosEsc(p.name)+'</h3>';
   if(p.aliases&&p.aliases.length)
-    h+='<div>'+p.aliases.map(a=>'<span class="chip">'+VinceoEsc(a)+'</span>').join('')+'</div>';
+    h+='<div>'+p.aliases.map(a=>'<span class="chip">'+MnemosEsc(a)+'</span>').join('')+'</div>';
   h+='<div class="plabel">Details — add phones, orgs, and teams; × removes one value</div>';
   const lists=p.detail_lists||{};
   DETAIL_FIELDS.forEach(([k,label])=>{
@@ -391,10 +391,10 @@ async function loadPersonDetail(pid){
       rows.forEach(d=>{
         const canRemove=d.ref && !String(d.ref).startsWith('merged:');
         h+='<div class="pfield">'
-          +'<input readonly value="'+VinceoEsc(d.value||'')+'">'
+          +'<input readonly value="'+MnemosEsc(d.value||'')+'">'
           +detailSrcChip(d)
           +(canRemove
-            ?'<button data-pact="detail-remove" data-key="'+k+'" data-ref="'+VinceoEsc(d.ref)+'" data-value="'+VinceoEsc(d.value||'')+'" title="Remove">×</button>'
+            ?'<button data-pact="detail-remove" data-key="'+k+'" data-ref="'+MnemosEsc(d.ref)+'" data-value="'+MnemosEsc(d.value||'')+'" title="Remove">×</button>'
             :'')
           +'</div>';
       });
@@ -403,19 +403,19 @@ async function loadPersonDetail(pid){
     }else{
       const d=(p.details||{})[k]||{};
       h+='<div class="pfield"><span style="min-width:96px;align-self:center;font:11px var(--mono);letter-spacing:.05em;text-transform:uppercase;color:var(--mut)">'+label+'</span>'
-        +'<input id="pd_'+k+'" value="'+VinceoEsc(d.value||'')+'" placeholder="unknown — type to set">'
+        +'<input id="pd_'+k+'" value="'+MnemosEsc(d.value||'')+'" placeholder="unknown — type to set">'
         +detailSrcChip(d)
         +'<button data-pact="detail" data-key="'+k+'">Save</button></div>';
     }
   });
   if(p.affiliations&&p.affiliations.length)
     h+='<div class="plabel">Connected to</div><div>'
-      +p.affiliations.map(a=>'<span class="chip">'+VinceoEsc(a.name)+' · '+VinceoEsc(a.predicate)+'</span>').join('')+'</div>';
+      +p.affiliations.map(a=>'<span class="chip">'+MnemosEsc(a.name)+' · '+MnemosEsc(a.predicate)+'</span>').join('')+'</div>';
   if(p.discussed_with&&p.discussed_with.length)
     h+='<div class="plabel">Comes up with</div><div>'
-      +p.discussed_with.map(x=>'<span class="chip">'+VinceoEsc(x.name)+'</span>').join('')+'</div>';
+      +p.discussed_with.map(x=>'<span class="chip">'+MnemosEsc(x.name)+'</span>').join('')+'</div>';
   h+='<div class="plabel">Correct the name</div>'
-    +'<div class="pfield"><input id="pRename" value="'+VinceoEsc(p.name)+'">'
+    +'<div class="pfield"><input id="pRename" value="'+MnemosEsc(p.name)+'">'
     +'<button data-pact="rename">Rename</button></div>'
     +'<div class="plabel">Add an alias (other spellings the ears hear)</div>'
     +'<div class="pfield"><input id="pAlias" placeholder="a nickname or other spelling">'
@@ -511,8 +511,8 @@ function renderEntityList(){
   if(!rows.length){el.innerHTML='<div class="empty">Nothing yet — mention orgs, projects, and tools in chat or speech.</div>';return;}
   el.innerHTML=rows.map(x=>{
     const row='<div class="prow" data-eid="'+x.id+'">'
-      +'<div style="flex:1"><span class="nm">'+VinceoEsc(x.name)+'</span>'
-      +' <span class="chip">'+VinceoEsc(x.kind)+'</span>'
+      +'<div style="flex:1"><span class="nm">'+MnemosEsc(x.name)+'</span>'
+      +' <span class="chip">'+MnemosEsc(x.kind)+'</span>'
       +'<div class="meta">connection '+x.weight.toFixed(1)+' · '+fmtSeen(x.last_seen)+'</div></div>'
       +'<span class="meta">'+(openEntityId===x.id?'▾':'▸')+'</span></div>';
     return row+(openEntityId===x.id?'<div class="pdetail" id="eDetail"><div class="lead">Loading…</div></div>':'');
@@ -533,9 +533,9 @@ document.addEventListener('click', e=>{
 async function loadEntityDetail(eid){
   const host=document.getElementById('eDetail'); if(!host) return;
   const x=await (await fetch('/entities/'+eid)).json();
-  let h='<h3>'+VinceoEsc(x.name)+'</h3>';
+  let h='<h3>'+MnemosEsc(x.name)+'</h3>';
   if(x.aliases&&x.aliases.length)
-    h+='<div>'+x.aliases.map(a=>'<span class="chip">'+VinceoEsc(a)+'</span>').join('')+'</div>';
+    h+='<div>'+x.aliases.map(a=>'<span class="chip">'+MnemosEsc(a)+'</span>').join('')+'</div>';
   h+='<div class="plabel">Category</div><div>'
     +ENTITY_KINDS.map(k=>'<button class="chip" style="cursor:pointer'
       +(x.kind===k?';color:var(--navy);border-color:var(--navy)':'')
@@ -545,19 +545,19 @@ async function loadEntityDetail(eid){
     const d=(x.details||{})[k]||{};
     let src=d.source==='you'
       ? '<span class="chip" style="align-self:center" title="You set this — it wins over memory">you</span>'
-      : (d.value?'<span class="chip" style="align-self:center" title="'+VinceoEsc(d.quote||'mined from memory')+'">from memory</span>':'');
+      : (d.value?'<span class="chip" style="align-self:center" title="'+MnemosEsc(d.quote||'mined from memory')+'">from memory</span>':'');
     if(d.stale) src+='<span class="chip" style="align-self:center" title="Nothing has confirmed this in '
       +Math.round(d.age_days)+' days (its freshness window is '+Math.round(d.freshness_days)+')">stale</span>';
     h+='<div class="pfield"><span style="min-width:96px;align-self:center;font:11px var(--mono);letter-spacing:.05em;text-transform:uppercase;color:var(--mut)">'+label+'</span>'
-      +'<input id="ed_'+k+'" value="'+VinceoEsc(d.value||'')+'" placeholder="unknown — type to set">'
+      +'<input id="ed_'+k+'" value="'+MnemosEsc(d.value||'')+'" placeholder="unknown — type to set">'
       +src
       +'<button data-eact="detail" data-key="'+k+'">Save</button></div>';
   });
   if(x.people&&x.people.length)
     h+='<div class="plabel">People involved</div><div>'
-      +x.people.map(p=>'<span class="chip">'+VinceoEsc(p.name)+'</span>').join('')+'</div>';
+      +x.people.map(p=>'<span class="chip">'+MnemosEsc(p.name)+'</span>').join('')+'</div>';
   h+='<div class="plabel">Correct the name</div>'
-    +'<div class="pfield"><input id="eRename" value="'+VinceoEsc(x.name)+'">'
+    +'<div class="pfield"><input id="eRename" value="'+MnemosEsc(x.name)+'">'
     +'<button data-eact="rename">Rename</button></div>'
     +'<div class="plabel">Add an alias</div>'
     +'<div class="pfield"><input id="eAlias" placeholder="a shorthand or other spelling">'
@@ -631,8 +631,8 @@ function workCard(f, open){
     .filter(Boolean).join(' · ');
   return '<div class="card" data-wid="'+f.fact_id+'">'
     +'<input type="checkbox" class="wcheck" data-wsel value="'+f.fact_id+'" title="Select">'
-    +'<div class="t">'+VinceoEsc(f.text||'')+'<div class="meta">'+meta+'</div></div>'
-    +'<span class="pill">'+VinceoEsc(f.kind||'')+'</span>'
+    +'<div class="t">'+MnemosEsc(f.text||'')+'<div class="meta">'+meta+'</div></div>'
+    +'<span class="pill">'+MnemosEsc(f.kind||'')+'</span>'
     +'<span class="acts">'
     +(open
       ? '<button data-wcard="done" title="Mark done">Done</button>'
@@ -797,7 +797,7 @@ async function memCheck(){
   }catch(e){}
 }
 load();
-setTab(VinceoMemory.get('profile.tab','profile')||'profile');
+setTab(MnemosMemory.get('profile.tab','profile')||'profile');
 setInterval(memCheck,4000);
 </script>
 </body>

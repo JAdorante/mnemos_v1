@@ -1,6 +1,6 @@
 """The common event shape that every modality feeds into the Memory Engine.
 
-Everything vinceo.ai perceives — a spoken utterance, a captured frame, an OCR
+Everything Mnemos perceives — a spoken utterance, a captured frame, an OCR
 result — is normalized into an `Event` and pushed onto the in-process
 `EventBus`. Later milestones (memory, knowledge graph, agents) subscribe to
 this bus instead of talking to each modality directly.
@@ -20,7 +20,7 @@ class Modality(str, Enum):
     INPUT = "input"          # keyboard / mouse activity
     SYSTEM = "system"
     DOCUMENT = "document"    # file text read off disk (PDF / Word / notes)
-    TEXT = "text"            # typed chat — statements the user tells vinceo directly
+    TEXT = "text"            # typed chat — statements the user tells mnemos directly
 
 
 @dataclass

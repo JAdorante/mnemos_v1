@@ -680,7 +680,7 @@ Stop mutating `relations` for new beliefs; retain as compatibility view.
 | Policy | `knowledge_entities` enforced (fix the current gap) |
 | Migration | Round-trip v1 → v2 → explain parity |
 | Scale soak | Synthetic 1e5 nodes / 1e6 edges — constellation latency budget |
-| Behavioral | Extend vinceo interface contracts: pins, trust gate, no derived pollution in focus |
+| Behavioral | Extend mnemos interface contracts: pins, trust gate, no derived pollution in focus |
 
 ---
 

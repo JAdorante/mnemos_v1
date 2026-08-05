@@ -32,7 +32,7 @@ _HW_MARKERS = re.compile(
     re.I,
 )
 _SELF_WINDOW = re.compile(
-    r"vinceo(?:\.ai)?|mnemos|memory console|exec\.ai|/onboarding|nexus_v1\s*-\s*cursor|"
+    r"mnemos(?:\.ai)?|memory console|exec\.ai|/onboarding|nexus_v1\s*-\s*cursor|"
     r"/ui\b|localhost:\d+",
     re.I,
 )
@@ -71,7 +71,7 @@ def _is_self_ui(ev) -> bool:
         str(vision.get("ocr_text") or "")[:300],
         str(ev.summary or "")[:300],
     ]).lower()
-    if "vinceo" in blob and ("homework help" in blob or "study mode" in blob):
+    if "mnemos" in blob and ("homework help" in blob or "study mode" in blob):
         return True
     return False
 

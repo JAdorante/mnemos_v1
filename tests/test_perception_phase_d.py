@@ -68,7 +68,7 @@ class ExtractIdempotencyTests(PerceptionStoreMixin, unittest.TestCase):
         cid = "cap_idem_1"
         self._seed_capture(
             cid,
-            "TODO: ship the Phase D extract path for Vinceo tomorrow.")
+            "TODO: ship the Phase D extract path for Mnemos tomorrow.")
         facts = {
             "tasks": [{
                 "text": "ship the Phase D extract path",

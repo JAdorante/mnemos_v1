@@ -194,7 +194,7 @@ class ActionStep:
         path is run_goal(packet=...) — see PLUG-IN below."""
         parts: list[str] = []
         if self.packet.context:
-            parts.append("RELEVANT CONTEXT (from vinceo.ai memory):\n"
+            parts.append("RELEVANT CONTEXT (from Mnemos memory):\n"
                          + "\n".join(f"- {c}" for c in self.packet.context))
         f = self.packet.fields or {}
         if f.get("body") or f.get("subject"):
@@ -287,19 +287,19 @@ class WritingCompiler(IntentCompiler):
             execution_surface=self.surface,
             success_criteria=["A draft exists", "Mentions the open commitment",
                               "Is NOT sent without approval"],
-            fallback="Save the draft text into vinceo.ai if the destination app is unavailable.",
+            fallback="Save the draft text into Mnemos if the destination app is unavailable.",
         )
 
     def _draft(self, goal: str, ctx: SelectedContext) -> dict:
         """Draft {to, subject, body, why, summary} grounded ONLY in ctx. Uses the
-        executor's Anthropic-wired LLM (vinceo.ai's own app.services.llm is still a
+        executor's Anthropic-wired LLM (Mnemos's own app.services.llm is still a
         stub). Raises NotImplementedError if no LLM is available so the Planner
         degrades to the passthrough compiler rather than crashing."""
         llm = _llm()
         if llm is None:
             raise NotImplementedError("no LLM available for drafting")
         system = (
-            "You are vinceo.ai's Writing Agent. Draft a concise, ready-to-send "
+            "You are Mnemos's Writing Agent. Draft a concise, ready-to-send "
             "message grounded ONLY in the provided context (the user's own "
             "memory). Match the user's tone where evident. Never invent facts, "
             "prices, dates, names, or commitments that are not in the context. "
@@ -536,7 +536,7 @@ register(SchedulingCompiler())
 # ---------------------------------------------------------------------------
 class PersonalAgentLayer:
     """Compiles a user goal into a grounded, risk-classified Plan. Stateless per
-    call; reads vinceo.ai's canonical store. Injectable store for tests."""
+    call; reads Mnemos's canonical store. Injectable store for tests."""
 
     def __init__(self, store=None):
         self._store = store
@@ -742,7 +742,7 @@ class PersonalAgentLayer:
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
-# Shared handle on the executor's Anthropic-wired LLM. vinceo.ai's own
+# Shared handle on the executor's Anthropic-wired LLM. Mnemos's own
 # app.services.llm is still a stub, so the Writing Agent and the shared router
 # both reuse browser_agent's LLM. Lazy + sentinel-cached so a missing key /
 # import failure disables the LLM path once, not on every call.
@@ -801,7 +801,7 @@ def _draft_prompt(goal: str, ctx: SelectedContext) -> str:
 
 # --- Meeting agent -----------------------------------------------------------
 _MEETING_SYSTEM = (
-    "You are vinceo.ai's Meeting Agent. From the user's own memory, produce a "
+    "You are Mnemos's Meeting Agent. From the user's own memory, produce a "
     "concise pre-meeting briefing: who this is, what was discussed before, the "
     "open commitments (what the user owes / is owed), and what to raise or not "
     "forget. Ground every point in the provided context; never invent people, "
@@ -874,14 +874,14 @@ def _plain_schedule(ctx: SelectedContext, goal: str) -> str:
 
 
 _COMMITMENT_SYSTEM = (
-    "You are vinceo.ai's Commitment Agent. From the user's own memory, produce a "
+    "You are Mnemos's Commitment Agent. From the user's own memory, produce a "
     "skimmable follow-through brief: what is owed, to whom, why it matters, and "
     "the smallest next step. Never invent facts or mark anything done. Never "
     "send a message."
 )
 
 _SCHEDULE_SYSTEM = (
-    "You are vinceo.ai's Scheduling Agent. Propose 1–2 concrete time windows to "
+    "You are Mnemos's Scheduling Agent. Propose 1–2 concrete time windows to "
     "finish the named work. Do NOT book or claim a calendar event was created. "
     "Ground only in the provided memory."
 )

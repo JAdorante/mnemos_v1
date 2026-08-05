@@ -1,4 +1,4 @@
-"""vinceo.ai — laptop-based multimodal memory prototype.
+"""Mnemos — laptop-based multimodal memory prototype.
 
 Architecture:  Multimodal Capture -> Memory Engine -> Agent Layer
 

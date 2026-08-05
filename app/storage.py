@@ -1,4 +1,4 @@
-"""Persistent storage for vinceo.ai's memory timeline.
+"""Persistent storage for Mnemos's memory timeline.
 
 * Events -> SQLite (`data/quill.db`), stdlib only.
 * Raw audio utterances -> WAV files (`data/audio/<ts>.wav`), linked from the

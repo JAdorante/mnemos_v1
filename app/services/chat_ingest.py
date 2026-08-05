@@ -1,4 +1,4 @@
-"""Typed chat → memory. Tell vinceo something in the chat box and it lands in
+"""Typed chat → memory. Tell mnemos something in the chat box and it lands in
 the same memory the ears feed.
 
 Until now only *spoken* words (and ingested documents) became facts — a typed

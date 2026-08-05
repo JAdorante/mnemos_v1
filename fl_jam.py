@@ -2,7 +2,7 @@
 
 Two outputs from one engine:
   * GENERATE   compose beats / chords / basslines / melodies and write a .mid
-               file you drag (or have vinceo.ai open) into FL Studio.
+               file you drag (or have Mnemos open) into FL Studio.
   * LIVE       stream those same notes in real time to a MIDI port FL Studio
                listens on (via a loopMIDI virtual cable), so the agent "plays"
                FL Studio live.

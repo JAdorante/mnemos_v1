@@ -11,9 +11,9 @@ day (attention bands + approvals); the margin is a memory-side reading aid.
 Kept on disk for archaeology until a later cleanup deletes the module.
 """
 
-from app.api.vinceo_theme import apply as _vinceo
+from app.api.mnemos_theme import apply as _mnemos
 
-HOME_PAGE = _vinceo(r"""<!doctype html>
+HOME_PAGE = _mnemos(r"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">

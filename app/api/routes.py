@@ -27,7 +27,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, RedirectResponse,
                                Response)
 from pydantic import BaseModel
 
-from app.api.vinceo_theme import apply as _vinceo
+from app.api.mnemos_theme import apply as _mnemos
 from app.config import settings
 from app.services import agent_bridge as agent
 from app.services import llm, voice
@@ -682,7 +682,7 @@ def memory_search(q: str = "", limit: int = 20, modality: str | None = None) -> 
 # A read-only window onto the timeline: recent captures, search, speaker labels,
 # confidence, and — critically — a link from every memory back to its source
 # audio clip or frame (provenance). This is the trust/training layer: you can
-# see what vinceo.ai heard and saw, and judge what's good, low-confidence, or junk.
+# see what Mnemos heard and saw, and judge what's good, low-confidence, or junk.
 
 def _console_row(d: dict) -> dict:
     """Flatten an event dict into the compact shape the console renders."""
@@ -3534,7 +3534,7 @@ def _reflection_view(store, reflection: dict) -> dict:
 
 @router.post("/reflect/run")
 def reflect_run(scope: str = "daily") -> dict:
-    """Run a reflection now (manual trigger — vinceo.ai has no cron yet). v1 supports
+    """Run a reflection now (manual trigger — Mnemos has no cron yet). v1 supports
     the daily scope; returns the reflection so the caller can render it."""
     from app.services.reflector import reflector
 
@@ -3743,7 +3743,7 @@ def chat(body: ChatIn) -> dict:
     """Dispatch a chat turn to the browser agent (the hear -> act loop).
 
     Non-blocking: the agent routes the message (answer directly vs. drive the
-    browser), grounded in vinceo.ai's memory, on its own thread. Poll /chat/poll for
+    browser), grounded in Mnemos's memory, on its own thread. Poll /chat/poll for
     progress, results, and any approval/ask_human prompts. Set QUILL_AGENT=0 to
     fall back to the memory-only retriever.
 
@@ -4262,7 +4262,7 @@ def onboarding_documents() -> dict:
 
 @router.post("/onboarding/ingest")
 def onboarding_ingest(body: OnboardingIn | None = None) -> dict:
-    """Feed the profile into vinceo.ai's knowledge (people/entities/facts/graph).
+    """Feed the profile into Mnemos's knowledge (people/entities/facts/graph).
 
     Reads the sheet on disk unless inline answers are posted. Idempotent —
     only new/changed answers are added, so it's safe to edit and re-run."""
@@ -4288,7 +4288,7 @@ class AuthUnlockIn(BaseModel):
 
 _AUTH_PAGE = """<!doctype html>
 <html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
-<title>vinceo — unlock</title>
+<title>mnemos — unlock</title>
 <style>
 body{font:15px/1.45 system-ui,sans-serif;max-width:28rem;margin:3rem auto;padding:0 1rem;
 color:#1a1a1a;background:#f6f5f2}
@@ -4462,7 +4462,7 @@ async def phone_photo(request: Request, caption: str = "",
 def phone_sync(body: dict | None = None,
                authorization: str | None = Header(None)) -> dict:
     """Unified phone exchange: optionally ingest {kind,text,meta}, always drain
-    the outbox. One authenticated call powers the single "vinceo" shortcut for
+    the outbox. One authenticated call powers the single "mnemos" shortcut for
     both directions."""
     from app.services import phone_channel
 
@@ -4836,7 +4836,7 @@ def speakers_enroll(body: EnrollIn) -> dict:
     return {"ok": True, "enrolled": spk.enrolled_names()}
 
 
-_CHAT_PAGE = _vinceo(r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+_CHAT_PAGE = _mnemos(r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <title>@@BRAND@@ — Chat</title><meta name="viewport" content="width=device-width, initial-scale=1">
 @@FONTS@@
 <style>
@@ -4853,9 +4853,12 @@ body{
     linear-gradient(180deg, #FBF9F4 0%, var(--paper) 40%, var(--workspace) 100%);
 }
 #ambientChat{
-  position:fixed;left:12px;top:72px;width:min(200px,18vw);z-index:20;
+  position:fixed;left:12px;top:72px;width:min(200px,18vw);z-index:15;
   pointer-events:none;
 }
+/* Approval banner owns this strip — ambient must not paint over it. */
+body.has-approval #ambientChat{display:none}
+body.has-approval #mnemosApproval{position:relative;z-index:25}
 @media(max-width:900px){#ambientChat{display:none}}
 .top{
   display:flex;align-items:center;gap:18px;flex-wrap:wrap;
@@ -4937,7 +4940,7 @@ body{
   padding:0 0 10px;border-bottom:1.5px solid rgba(184,115,51,.35);
   text-align:right;box-shadow:none;border-radius:0;
 }
-/* Vinceo — paper page of a reply */
+/* Mnemos — paper page of a reply */
 .msg.result{
   margin:18px 0 8px;padding:0;
 }
@@ -5298,13 +5301,13 @@ function fillDockDetail(s){
   const pkt=s&&s.packet;
   const fields=(pkt&&pkt.fields)||{};
   const intent=(fields.action||(pkt&&pkt.summary)||s.waiting_on||s.question||'').trim();
-  document.getElementById('dockIntent').textContent=intent||'Vinceo is waiting for your decision.';
+  document.getElementById('dockIntent').textContent=intent||'Mnemos is waiting for your decision.';
   const steps=[];
   if(fields.to) steps.push('Compose to '+fields.to);
   if(fields.subject) steps.push('Subject: '+fields.subject);
   if(fields.action&&!steps.length) steps.push(fields.action);
   if(!steps.length&&intent) steps.push(intent);
-  document.getElementById('dockSteps').innerHTML=steps.map(x=>'<li>'+VinceoEsc(String(x))+'</li>').join('');
+  document.getElementById('dockSteps').innerHTML=steps.map(x=>'<li>'+MnemosEsc(String(x))+'</li>').join('');
   const body=(fields.body||fields.details||'').trim();
   const payload=document.getElementById('dockPayload');
   const outbound=!!(body||fields.to||/email|message|send|post|sms|text/i.test(intent));
@@ -5314,8 +5317,8 @@ function fillDockDetail(s){
   // Show detail whenever the bar is visible (mobile + minimized ghost).
   det.style.display=(s&&(s.awaiting||s.todo_pending))?'block':'none';
 }
-window.addEventListener('vinceo:approval-resolved',()=>{ try{ poll(); }catch(e){} });
-window.addEventListener('vinceo:approval',()=>{ try{ poll(); }catch(e){} });
+window.addEventListener('mnemos:approval-resolved',()=>{ try{ poll(); }catch(e){} });
+window.addEventListener('mnemos:approval',()=>{ try{ poll(); }catch(e){} });
 const ctxBtn=document.getElementById('ctxBtn'), ctxPanel=document.getElementById('ctxPanel'),
       ctxBox=document.getElementById('ctxBox'), ctxClear=document.getElementById('ctxClear'),
       ctxAttach=document.getElementById('ctxAttach'), ctxFileInput=document.getElementById('ctxFileInput'),
@@ -5329,9 +5332,9 @@ const pastBtn=document.getElementById('pastBtn'), pastPanel=document.getElementB
 // Pending attachments for the next send: {id,name,kind,context,summary,status,error}
 let pendingAttach=[];
 let attachSeq=0;
-VinceoMemory.set('lastRoute','/chat');
+MnemosMemory.set('lastRoute','/chat');
 (function restoreChat(){
-  const st=VinceoMemory.get('chat',{});
+  const st=MnemosMemory.get('chat',{});
   if(st.dry) document.getElementById('dry').value=st.dry;
   if(st.mode) document.getElementById('studyMode').value=st.mode;
   if(st.draft) box.value=st.draft;
@@ -5339,7 +5342,7 @@ VinceoMemory.set('lastRoute','/chat');
   if(st.ctxOpen){ ctxPanel.classList.add('open'); ctxBtn.classList.add('on'); }
 })();
 function persistChat(){
-  VinceoMemory.set('chat',{
+  MnemosMemory.set('chat',{
     dry:document.getElementById('dry').value||'',
     mode:document.getElementById('studyMode').value||'general',
     draft:box.value||'',
@@ -5560,12 +5563,12 @@ function bindFolioSeal(root){
         add('system', (j&&j.error)||('Approval refused ('+r.status+')'));
         return;
       }
-      try{ window.dispatchEvent(new CustomEvent('vinceo:approval-resolved',{detail:j})); }catch(e){}
+      try{ window.dispatchEvent(new CustomEvent('mnemos:approval-resolved',{detail:j})); }catch(e){}
     }catch(e){
       add('system','Approval request failed: '+String(e.message||e));
     }
   }
-  VinceoSeal.bind(approve,{
+  MnemosSeal.bind(approve,{
     onApprove:()=>{
       const subjEl=root.querySelector('[data-field=subject]');
       const bodyEl=root.querySelector('[data-field=body]');
@@ -5591,10 +5594,10 @@ function bindFolioSeal(root){
 }
 function add(kind,text,distillId,sources,packet,compiled){
   const d=document.createElement('div');d.className='msg '+kind;
-  const pkt=packet||(kind==='ask'?VinceoParsePacket(text):null);
+  const pkt=packet||(kind==='ask'?MnemosParsePacket(text):null);
   if(kind==='ask' && pkt && pkt.kind==='approval'){
     d.className='msg ask folio-wrap';
-    d.innerHTML=VinceoRenderFolio(pkt,{editable:true,meta:'Hold to seal · release early to abort'});
+    d.innerHTML=MnemosRenderFolio(pkt,{editable:true,meta:'Hold to seal · release early to abort'});
     bindFolioSeal(d);
     log.appendChild(d);log.scrollTop=log.scrollHeight;
     return;
@@ -5612,10 +5615,10 @@ function add(kind,text,distillId,sources,packet,compiled){
   const body=document.createElement('div');body.className='msg-body';
   const doc=compiled||null;
   const useDoc=kind==='result' && doc && doc.sections && doc.sections.length
-    && window.VinceoResponse;
+    && window.MnemosResponse;
   if(useDoc){
     // Grounding lives inside the compiled document (collapsed).
-    VinceoResponse.mount(body, doc, {
+    MnemosResponse.mount(body, doc, {
       includeGrounding:true,
       onAction:(prompt)=>{
         if(!prompt) return;
@@ -5706,15 +5709,18 @@ async function poll(){
   box.placeholder=!liveMode?'Viewing a saved chat — Back to live to continue…'
     :(awaiting||todo)?(approvalMode?'Edit the folio, or type a revision…':'Yes/no above, or type a new request…')
     :'Ask @@BRAND@@, or give the agent a task…';
+  // Banner + NEEDS YOU card + dock Yes/No already show pending offers —
+  // never mirror waiting_on into the fixed ambient column (that was the overlap).
   const notes=[];
   if(liveMode){
-    if(approvalMode) notes.push({text:'An approval awaits your seal.',attention:true});
-    else if(todo) notes.push({text:s.waiting_on||'A quiet offer is waiting.',attention:false});
-    else if(s.waiting_on) notes.push({text:s.waiting_on,attention:false});
+    if(!(approvalMode || todo)){
+      if(s.waiting_on) notes.push({text:s.waiting_on,attention:false});
+    }
   } else {
     notes.push({text:'Reading a saved conversation.',attention:false});
   }
-  VinceoAmbient.render(document.getElementById('ambientChat'), notes);
+  document.body.classList.toggle('has-approval', !!(approvalMode || todo));
+  MnemosAmbient.render(document.getElementById('ambientChat'), notes);
   if(liveMode && s.error) add('error', s.error);
  }catch(e){}
  finally{ polling=false; }
@@ -5787,7 +5793,7 @@ setInterval(ghostPoll, 1200); ghostPoll();
 </script></body></html>""")
 
 
-_DESKTOP_ACCESS_PAGE = _vinceo(r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+_DESKTOP_ACCESS_PAGE = _mnemos(r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <title>@@BRAND@@ — Desktop Access</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 @@FONTS@@
@@ -5991,7 +5997,7 @@ load();
 </body></html>""")
 
 
-_CONSOLE_PAGE = _vinceo(r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+_CONSOLE_PAGE = _mnemos(r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <title>@@BRAND@@ — Memory Console</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 @@FONTS@@
@@ -6344,9 +6350,9 @@ img.thumb.big{max-height:none;max-width:100%}
 @@UI_JS@@
 <script>
 let mod="", src="", low=false, view="raw", timer=null, layer="archive", constCtl=null;
-VinceoMemory.set('lastRoute','/memory');
+MnemosMemory.set('lastRoute','/memory');
 (function restoreConsole(){
-  const st=VinceoMemory.get('console',{});
+  const st=MnemosMemory.get('console',{});
   if(st.q) document.getElementById('q').value=st.q;
   if(st.layer==='constellation') layer='constellation';
   if(st.view) view=st.view;
@@ -6361,8 +6367,8 @@ VinceoMemory.set('lastRoute','/memory');
   }catch(e){}
 })();
 function persistConsole(){
-  VinceoMemory.set('console',{q:document.getElementById('q').value,layer,view,mod,src,low,
-    expanded:VinceoMemory.get('console.expanded',[])});
+  MnemosMemory.set('console',{q:document.getElementById('q').value,layer,view,mod,src,low,
+    expanded:MnemosMemory.get('console.expanded',[])});
 }
 function setLayer(name){
   layer=name; persistConsole();
@@ -6399,9 +6405,9 @@ function renderHorizonStrip(data){
   }
   host.innerHTML=items.map(it=>{
     const why=(it.reason&&it.reason[0])?it.reason[0]:'';
-    return '<span class="pill" title="'+VinceoEsc(why)+'" style="cursor:pointer" data-hid="'
-      +VinceoEsc(it.id||'')+'">'
-      +'<b>in '+(it.when_label||'?')+'</b> · '+VinceoEsc(it.label||it.id||'')
+    return '<span class="pill" title="'+MnemosEsc(why)+'" style="cursor:pointer" data-hid="'
+      +MnemosEsc(it.id||'')+'">'
+      +'<b>in '+(it.when_label||'?')+'</b> · '+MnemosEsc(it.label||it.id||'')
       +' <span class="mut" style="margin-left:4px">×</span></span>';
   }).join('');
   host.querySelectorAll('[data-hid]').forEach(el=>{
@@ -6436,7 +6442,7 @@ function renderModeChips(data){
   host.innerHTML=modes.map(m=>{
     const on=m.id===cur.id;
     return '<button type="button" class="chip'+(on?' on':'')+'" data-mode="'+m.id+'" title="Reweights gravity for this context — does not filter">'
-      +VinceoEsc(m.label||m.id)+'</button>';
+      +MnemosEsc(m.label||m.id)+'</button>';
   }).join('')
     +'<button type="button" class="chip'+(cur.source!=='manual'?' on':'')+'" data-mode="auto" title="Infer context from recent events">Auto</button>';
   host.querySelectorAll('[data-mode]').forEach(btn=>{
@@ -6461,8 +6467,8 @@ async function loadConstellation(){
   }catch(e){}
   renderHorizonStrip(data);
   renderModeChips(data);
-  if(!constStreamOn && window.VinceoFieldStream){
-    constStreamOn=!!VinceoFieldStream.connect((d)=>{
+  if(!constStreamOn && window.MnemosFieldStream){
+    constStreamOn=!!MnemosFieldStream.connect((d)=>{
       if(layer!=='constellation') return;
       if(d.version!=null) constVersion=d.version;
       loadConstellation();
@@ -6471,14 +6477,14 @@ async function loadConstellation(){
   // Poll is fallback; slow down when SSE is live.
   if(!constPoll) constPoll=setInterval(constCheck, constStreamOn?20000:4000);
   if(constCtl){ constCtl.update(data); return; }
-  constCtl=VinceoConstellation.mount(document.getElementById('memConst'), data, {
+  constCtl=MnemosConstellation.mount(document.getElementById('memConst'), data, {
     persistKey:'console.constellation.cam',
     onSelect(node){
       if(!node) return;
       if(node.kind==='person'){
-        const fav=new Set(VinceoMemory.get('favoritePeople',[])||[]);
+        const fav=new Set(MnemosMemory.get('favoritePeople',[])||[]);
         if(fav.has(node.id)) fav.delete(node.id); else fav.add(node.id);
-        VinceoMemory.set('favoritePeople',[...fav]);
+        MnemosMemory.set('favoritePeople',[...fav]);
       }
     }
   });
@@ -6487,11 +6493,11 @@ async function loadConstellation(){
 async function loadAmbient(){
   try{
     const intel=await (await fetch('/home/intelligence')).json();
-    VinceoAmbient.render(document.getElementById('ambientBox'), intel.ambient||[], {
+    MnemosAmbient.render(document.getElementById('ambientBox'), intel.ambient||[], {
       constellation: constCtl,
     });
   }catch(e){
-    VinceoAmbient.render(document.getElementById('ambientBox'), [{text:'Listening…'}]);
+    MnemosAmbient.render(document.getElementById('ambientBox'), [{text:'Listening…'}]);
   }
 }
 async function revealProvenance(rowEl){
@@ -6520,9 +6526,9 @@ async function revealProvenance(rowEl){
       {label:'Timestamp', body:chain.captured_at?new Date(chain.captured_at*1000).toLocaleString():'—'},
       {label:'Source', body:j.rendered||chain.raw_audio||'—'},
     ];
-    VinceoBleed.renderStack(host, steps);
-    const exp=new Set(VinceoMemory.get('console.expanded',[])||[]);
-    exp.add(String(eid)); VinceoMemory.set('console.expanded',[...exp]);
+    MnemosBleed.renderStack(host, steps);
+    const exp=new Set(MnemosMemory.get('console.expanded',[])||[]);
+    exp.add(String(eid)); MnemosMemory.set('console.expanded',[...exp]);
   }catch(e){
     host.innerHTML='<div class="meta">No provenance chain for this row.</div>';
   }
@@ -6616,8 +6622,8 @@ function row(e){
 }
 function bindBleedRows(){
   list.querySelectorAll('.row[data-event-id]').forEach(el=>{
-    VinceoBleed.bind(el, revealProvenance);
-    const exp=VinceoMemory.get('console.expanded',[])||[];
+    MnemosBleed.bind(el, revealProvenance);
+    const exp=MnemosMemory.get('console.expanded',[])||[];
     if(exp.includes(String(el.dataset.eventId))) revealProvenance(el);
   });
 }

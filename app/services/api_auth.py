@@ -67,6 +67,7 @@ _PREFIX_EXEMPT = (
 # GET-only prefixes: POST siblings (e.g. /phone/outbox/queue) need the LAN token.
 _PREFIX_EXEMPT_GET = (
     "/phone/outbox",  # GET drain uses device Bearer; enqueue is desktop-gated
+    "/static",        # brand assets on welcome / chrome before session unlock
 )
 
 # HTML shells the phone / local browser loads before (or without) a session.
@@ -292,7 +293,7 @@ def csrf_header_ok(request: Request) -> bool:
     cookie = (request.cookies.get(CSRF_COOKIE) or "").strip()
     header = (
         request.headers.get(CSRF_HEADER)
-        or request.headers.get("x-vinceo-csrf")
+        or request.headers.get("x-mnemos-csrf")
         or ""
     ).strip()
     if not cookie or not header:

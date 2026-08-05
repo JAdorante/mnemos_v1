@@ -143,7 +143,7 @@ class VocabularyProvider:
 
         Supplements recipient grounding: when the Phone Link contact scrape is
         thin or returns the notifications feed instead of real contacts, the
-        people vinceo.ai has *heard* the user talk about are a second candidate
+        people Mnemos has *heard* the user talk about are a second candidate
         source — so "text Abby" can snap to "Abby Nengel" even if the phone
         scrape missed her. Names only (not projects/orgs) — a recipient is a
         person."""

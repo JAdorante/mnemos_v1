@@ -2,10 +2,10 @@
 page the QR code opens. Device-specific behavior stays on the phone (Shortcuts
 recipes are instructions, not code); these pages only pair and explain."""
 
-from app.api.vinceo_theme import apply as _vinceo
+from app.api.mnemos_theme import apply as _mnemos
 
 # --- desktop: /phone --------------------------------------------------------
-PHONE_PAGE = _vinceo(r"""<!doctype html>
+PHONE_PAGE = _mnemos(r"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -84,7 +84,7 @@ td{border-top:1px solid var(--line);padding:9px 8px}
   <div class="panel">
     <h2>Send to your phone</h2>
     <p class="muted">Queue something for the phone to pick up. Nothing is pushed —
-    the phone pulls when you run the <b>Check vinceo</b> shortcut (by Siri, a tap,
+    the phone pulls when you run the <b>Check Mnemos</b> shortcut (by Siri, a tap,
     or an iOS automation like "when I arrive home").</p>
     <div style="display:flex;gap:10px;flex-wrap:wrap;margin:10px 0">
       <select id="outKind" style="font:inherit;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:var(--bg-elev)">
@@ -100,7 +100,7 @@ td{border-top:1px solid var(--line);padding:9px 8px}
     <div id="outMsg" class="muted"></div>
     <div id="outPending" class="muted" style="margin-top:8px"></div>
     <details id="recipeDetails" style="margin-top:14px">
-      <summary style="cursor:pointer;font-weight:600">The one "vinceo" shortcut (does send + receive)</summary>
+      <summary style="cursor:pointer;font-weight:600">The one "mnemos" shortcut (does send + receive)</summary>
       <p class="muted" style="margin-top:8px">One shortcut covers both directions
       via a single call to <span class="url" id="syncUrlD" style="display:inline"></span>.
       The exact steps — with your device key already filled in — are shown on the
@@ -115,7 +115,7 @@ td{border-top:1px solid var(--line);padding:9px 8px}
         <li>Optional branches on each item's <b>kind</b>: <code>reminder</code> →
           Add Reminder, <code>url</code> → Open URLs, <code>query</code> → read
           the asked-for value (battery, location…) and POST it back.</li>
-        <li>Name it <b>vinceo</b>; enable Share Sheet + Siri, and add Automations
+        <li>Name it <b>mnemos</b>; enable Share Sheet + Siri, and add Automations
           (arrive home / a time / on charge) that run it to receive hands-free.</li>
       </ol>
     </details>
@@ -214,7 +214,7 @@ async function queueOut(){
     const r=await (await fetch("/phone/outbox/queue",{method:"POST",
       headers:{"Content-Type":"application/json"},
       body:JSON.stringify({kind, text})})).json();
-    msg.textContent = r.ok ? "Queued — run \"Check vinceo\" on the phone to receive it."
+    msg.textContent = r.ok ? "Queued — run \"Check Mnemos\" on the phone to receive it."
                            : (r.detail||"Could not queue");
     if(r.ok) document.getElementById("outText").value="";
   }catch(e){ msg.textContent="Network error."; }
@@ -295,7 +295,7 @@ refresh(); setInterval(refresh, 3000);
 </html>""")
 
 # --- mobile: /phone/setup?code= ---------------------------------------------
-PHONE_SETUP_PAGE = _vinceo(r"""<!doctype html>
+PHONE_SETUP_PAGE = _mnemos(r"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">

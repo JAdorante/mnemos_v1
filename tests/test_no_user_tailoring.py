@@ -17,8 +17,6 @@ Scope — RUNTIME code only:
 What's banned in a runtime string literal:
   * personal names this developer used as few-shot examples (now sourced from the
     user's own vocabulary at runtime — see app/services/vocabulary.example_terms)
-  * the `'vinceo.ai's`-as-example form (the product name as a possessive/subject is
-    fine; quoted as an example ENTITY it was user-tailoring)
   * this machine's home path (Users\Dell...)
   * version-stamped app folders (FL Studio 2024, ...) — those belong in the
     shipped app registry JSON (data), not in config.py logic
@@ -43,7 +41,6 @@ _DENYLIST = [
     (re.compile(r"\bChris\b"), "personal name 'Chris'"),
     (re.compile(r"\bTechCorp\b"), "example company 'TechCorp'"),
     (re.compile(r"Dell Capital"), "example org 'Dell Capital'"),
-    (re.compile(r"""['"]vinceo.ai['"]"""), "'vinceo.ai's-as-example-entity form"),
     (re.compile(r"[Uu]sers[\\/]+Dell"), r"this machine's home path (Users\Dell)"),
     (re.compile(r"FL Studio\s+\d"), "version-stamped app folder (FL Studio NN)"),
 ]

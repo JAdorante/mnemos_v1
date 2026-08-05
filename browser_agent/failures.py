@@ -171,11 +171,11 @@ def classify(status: str, hist: list[dict] | None, scan: dict | None,
 
 
 def missing_memory_failure() -> Failure:
-    """Explicit case: the task referenced something vinceo.ai should know but the
+    """Explicit case: the task referenced something Mnemos should know but the
     grounded memory came back empty. Raised by the caller, not auto-detected."""
     return Failure(
         "missing_memory", "missing context",
         "the task refers to something I don't have in memory (I couldn't find "
-        "the detail vinceo.ai was supposed to have heard/seen).",
+        "the detail Mnemos was supposed to have heard/seen).",
         [Option(INSTRUCT, "Tell me the missing detail and I'll continue."),
          Option(STOP, "Stop here.")])
