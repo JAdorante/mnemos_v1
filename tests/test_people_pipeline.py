@@ -216,6 +216,43 @@ class PeoplePipelineTests(unittest.TestCase):
         self.assertTrue(absorbed.get("hide_from_people"))
         self.assertEqual(absorbed.get("canonical_person_id"), a)
 
+    def test_email_window_classification(self):
+        from app.services.source_policy import classify_source
+        self.assertEqual(
+            classify_source(event_source="desktop.screen",
+                            window="Inbox - Jane - Outlook"),
+            "email")
+        self.assertEqual(
+            classify_source(event_source="desktop.screen",
+                            window="Mail - jane@x.com - New Outlook"),
+            "email")
+        self.assertEqual(
+            classify_source(event_source="desktop.screen",
+                            window="Inbox (3) - Gmail - Google Chrome",
+                            text="From: a@b.com\nTo: c@d.com\n"),
+            "email")
+
+    def test_email_capture_contacts_and_affiliation(self):
+        from pathlib import Path
+        sample = (Path(__file__).resolve().parent / "fixtures"
+                  / "email_capture_sample.txt").read_text(encoding="utf-8")
+        out = pp.ingest_email_network(
+            sample, store=self.store, event_id=99,
+            event_source="desktop.screen",
+            window="Inbox - Jane - Outlook", now=NOW)
+        self.assertTrue(out.get("ok"), out)
+        self.assertGreaterEqual(out.get("contacts") or 0, 1)
+        self.assertGreaterEqual(out.get("affiliations") or 0, 1)
+        pid = self.store.find_person_by_contact(
+            "email", "jordan.lee@acmerobotics.com")
+        self.assertIsNotNone(pid)
+        eid = self.store.find_entity_exact("Acme Robotics")
+        self.assertIsNotNone(eid, "signature org should beat bare domain label")
+        rel = self.store.relations_of("person", int(pid))
+        preds = {(e["predicate"], e["obj_type"], int(e["obj_id"]))
+                 for e in (rel.get("out") or [])}
+        self.assertIn(("works_at", "entity", int(eid)), preds)
+
 
 if __name__ == "__main__":
     unittest.main()

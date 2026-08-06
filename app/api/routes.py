@@ -1253,10 +1253,16 @@ def kg_parity_status(run: bool = False) -> dict:
     store = memory._ensure_store()
     if run:
         kg_parity.run(store)
-    gate = kg_parity.cutover_ready(store)
-    return {"gate": gate,
-            "read_v2": kg_parity.read_v2_enabled(store),
-            "reports": kg_parity.latest_reports(store)}
+    st = kg_parity.status(store)
+    return {
+        "gate": st["gate"],
+        "read_v2": st["read_v2"],
+        "shadow": st["shadow"],
+        "interval_s": st["interval_s"],
+        "env_override": st["env_override"],
+        "reports_needed": st["reports_needed"],
+        "reports": kg_parity.latest_reports(store),
+    }
 
 
 @router.get("/kg/adjudications")
@@ -2629,6 +2635,68 @@ def profile_ui() -> HTMLResponse:
     believes about its user. Cards reuse the /facts verdict endpoints."""
     from app.api.profile_page import PROFILE_PAGE
     return _html_with_approval(PROFILE_PAGE, next_url="/profile")
+
+
+@router.get("/org/{entity_id}", response_class=HTMLResponse)
+def org_ui(entity_id: int) -> HTMLResponse:
+    """Living brief for one org/entity — people, facts, open work."""
+    from app.api.org_page import ORG_PAGE
+    return HTMLResponse(ORG_PAGE)
+
+
+@router.get("/org/{entity_id}/data")
+def org_data(entity_id: int) -> dict:
+    """JSON payload for the org living brief (and tests)."""
+    from app.services import entity_details, graph
+
+    store = memory._ensure_store()
+    e = store.get_entity(entity_id)
+    if e is None:
+        raise HTTPException(status_code=404, detail="no such entity")
+    name = e.get("name") or ""
+    edges = store.relations_of("entity", entity_id).get("in", [])
+    fact_ids = [x["subj_id"] for x in edges if x.get("subj_type") == "fact"]
+    fmap = store.facts_by_ids(list(dict.fromkeys(fact_ids)))
+    facts = []
+    for fid in dict.fromkeys(fact_ids):
+        f = fmap.get(fid)
+        if not f or (f.get("state") or "active") != "active" \
+                or f.get("review") == "dismissed":
+            continue
+        facts.append({k: f.get(k) for k in
+                      ("fact_id", "kind", "text", "status", "review",
+                       "confidence", "updated_at")})
+    facts.sort(key=lambda r: -(r.get("updated_at") or 0))
+    mined = entity_details.mine(name, e.get("aliases") or [], facts)
+    details = entity_details.merge(mined, store.entity_attrs(entity_id))
+    org_people = graph.people_for_entity(store, name)
+    people = org_people.get("people") or []
+    # Open work mentioning the org name (grounding-style substring match).
+    needle = name.casefold()
+    aliases = [str(a).casefold() for a in (e.get("aliases") or []) if a]
+    work = []
+    for f in store.list_facts(limit=400, actionable=True):
+        if f.get("kind") not in ("task", "commitment"):
+            continue
+        if (f.get("state") or "active") != "active" \
+                or f.get("review") == "dismissed" or f.get("status") != "open":
+            continue
+        text = str(f.get("text") or "")
+        low = text.casefold()
+        if (needle and needle in low) or any(a and a in low for a in aliases):
+            work.append({k: f.get(k) for k in
+                         ("fact_id", "kind", "text", "status", "due",
+                          "confidence", "updated_at")})
+    work.sort(key=lambda r: -(r.get("updated_at") or 0))
+    return {
+        "entity": {k: e.get(k) for k in
+                   ("id", "name", "kind", "aliases", "last_seen", "canonical_id")},
+        "details": details,
+        "people": people,
+        "org_people": org_people,
+        "facts": facts[:40],
+        "work": work[:40],
+    }
 
 
 @router.get("/profile/data")
@@ -4544,6 +4612,16 @@ class PeerRevokeIn(BaseModel):
     peer_id: str
 
 
+class PeerLinkIn(BaseModel):
+    peer_id: str
+    person_id: int | None = None
+    create_name: str | None = None  # optional: create Person then link
+
+
+class PeerUnlinkIn(BaseModel):
+    peer_id: str
+
+
 class PeerPolicyIn(BaseModel):
     peer_id: str
     policy: dict   # {class: "auto"|"offer"|"deny"}; `personal` can never be auto
@@ -4678,6 +4756,35 @@ def peer_revoke(body: PeerRevokeIn) -> dict:
     if not peer_channel.revoke(body.peer_id):
         raise HTTPException(status_code=404, detail="unknown peer")
     return {"ok": True}
+
+
+@router.post("/peer/link")
+def peer_link(body: PeerLinkIn) -> dict:
+    """User-asserted peer ↔ Person link (never auto on pair)."""
+    from app.services import peer_channel
+
+    if body.create_name is not None and str(body.create_name).strip():
+        res = peer_channel.create_and_link_person(
+            body.peer_id, str(body.create_name).strip())
+    elif body.person_id is not None:
+        res = peer_channel.link_person(body.peer_id, int(body.person_id))
+    else:
+        raise HTTPException(status_code=400,
+                            detail="person_id or create_name required")
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error") or "link failed")
+    return res
+
+
+@router.post("/peer/unlink")
+def peer_unlink(body: PeerUnlinkIn) -> dict:
+    """Clear peer ↔ Person link; pairing unchanged."""
+    from app.services import peer_channel
+
+    res = peer_channel.unlink_person(body.peer_id)
+    if not res.get("ok"):
+        raise HTTPException(status_code=404, detail=res.get("error") or "unknown peer")
+    return res
 
 
 # --- iCloud account connection (guided; public-product onboarding) ----------

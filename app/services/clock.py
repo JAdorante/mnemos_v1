@@ -18,6 +18,12 @@ _ISO_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}"
     r"(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?$"
 )
+# Unambiguous US slash dates the model sometimes emits instead of ISO.
+_US_DATE_RE = re.compile(
+    r"^(\d{1,2})/(\d{1,2})/(\d{4})"
+    r"(?:[,\s]+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?)?$",
+    re.I,
+)
 
 
 def now_local() -> dt.datetime:
@@ -76,27 +82,55 @@ def parse_due(value: str) -> dt.datetime:
     return raw
 
 
-def coerce_due(value: str | None) -> str | None:
-    """Normalize extractor/UI dues: keep valid ISO, else keep original text.
+def _try_us_due(s: str) -> str | None:
+    """Parse M/D/YYYY[ time] → ISO. None if not that shape."""
+    m = _US_DATE_RE.match(s.strip())
+    if not m:
+        return None
+    month, day, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    hh, mm, ss = m.group(4), m.group(5), m.group(6)
+    ampm = (m.group(7) or "").upper()
+    try:
+        if hh is None:
+            return dt.date(year, month, day).isoformat()
+        hour = int(hh)
+        minute = int(mm)
+        second = int(ss or 0)
+        if ampm == "PM" and hour < 12:
+            hour += 12
+        elif ampm == "AM" and hour == 12:
+            hour = 0
+        return dt.datetime(year, month, day, hour, minute, second).strftime(
+            "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        return None
 
-    Empty → None. Valid ISO → canonical form. Free text left as-is so we never
-    invent a date in code (the LLM + clock_instruction own that job).
+
+def coerce_due(value: str | None) -> str | None:
+    """Normalize dues to ISO, or None when unrankable.
+
+    Empty → None. Valid ISO → canonical form. Unambiguous US M/D/YYYY → ISO.
+    Opaque free text ("Friday", "immediate", "Jul 7") → None so at-risk /
+    reasoners never treat junk as a due (audit: free-text dues were stored and
+    then silently ignored by ISO-only parsers).
     """
     if value is None:
         return None
     s = str(value).strip()
     if not s:
         return None
-    if not is_iso_due(s):
-        return s
-    try:
-        parsed = parse_due(s)
-    except ValueError:
-        return s
-    # Date-only inputs stay date-only; timed inputs keep second resolution.
-    if len(s) <= 10 or ("T" not in s and " " not in s[10:]):
-        return parsed.date().isoformat()
-    return parsed.strftime("%Y-%m-%dT%H:%M:%S")
+    if is_iso_due(s):
+        try:
+            parsed = parse_due(s)
+        except ValueError:
+            return None
+        if len(s) <= 10 or ("T" not in s and " " not in s[10:]):
+            return parsed.date().isoformat()
+        return parsed.strftime("%Y-%m-%dT%H:%M:%S")
+    us = _try_us_due(s)
+    if us is not None:
+        return us
+    return None
 
 
 def format_due_for_prompt(due: str | None,

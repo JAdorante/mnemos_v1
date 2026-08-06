@@ -2,7 +2,7 @@
 # Prefer the project venv when present.
 PYTHON ?= python
 
-.PHONY: eval eval-live eval-people eval-grounding eval-planner golden-commitments golden-entity-resolution golden-contact-attribution
+.PHONY: eval eval-live eval-people eval-people-live eval-grounding eval-planner golden-commitments golden-entity-resolution golden-contact-attribution
 
 # Plan 2.2 + 2.3 + 2.4 + 3.3 + 5.2: golden thresholds (offline, no API key).
 eval: golden-commitments golden-entity-resolution golden-contact-attribution
@@ -13,6 +13,7 @@ eval: golden-commitments golden-entity-resolution golden-contact-attribution
 	$(PYTHON) scripts/eval_planner_routing.py
 
 # Optional live LLM pass for commitments/ownership (needs API key).
+# Not the People-v2 gate — use eval-people / eval-people-live for that.
 eval-live: golden-commitments
 	$(PYTHON) scripts/eval_commitments_ownership.py --live
 
@@ -20,6 +21,10 @@ eval-live: golden-commitments
 eval-people: golden-entity-resolution golden-contact-attribution
 	$(PYTHON) scripts/eval_entity_resolution.py
 	$(PYTHON) scripts/eval_contact_attribution.py
+
+# People v2 live smoke against local quill.db (no LLM; informational).
+eval-people-live:
+	$(PYTHON) scripts/eval_people_live.py
 
 # Plan 3.3 — query-type grounding routes (Golden #4).
 eval-grounding:

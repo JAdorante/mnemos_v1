@@ -114,6 +114,7 @@ const TOPIC={availability:'Schedule & availability',work:'Work & projects',conta
 let CLASSES=[],ACTIONS=[];
 
 async function refresh(){
+  if(!PEOPLE.length)await loadPeople();
   const s=await fetch('/peer/status').then(r=>r.json());
   CLASSES=s.classes||[];ACTIONS=s.actions||[];
   $('myUrl').textContent=s.base_url||'';
@@ -136,16 +137,46 @@ async function decide(id,yes){
   if(r.answer!==undefined&&yes)alert('Sent:\n\n'+r.answer);
   refresh();
 }
+let PEOPLE=[];
+async function loadPeople(){
+  try{
+    const r=await fetch('/people/list?include_candidates=1').then(x=>x.json());
+    PEOPLE=r.people||[];
+  }catch(e){PEOPLE=[]}
+}
+function personOpts(selected){
+  const opts=['<option value="">— not linked —</option>']
+    .concat(PEOPLE.filter(p=>!p.is_self).map(p=>
+      `<option value="${p.id}" ${String(selected||'')===String(p.id)?'selected':''}>${esc(p.name)}</option>`));
+  opts.push('<option value="__create__">Create new person…</option>');
+  return opts.join('');
+}
 function renderPeers(peers){
   if(!peers.length){$('peersBox').textContent='No teammates paired yet.';return}
-  $('peersBox').innerHTML='<table><tr><th>Teammate</th><th>Allowed without asking</th><th></th></tr>'+
-    peers.map(p=>`<tr><td><b>${esc(p.name)}</b><div class="muted" style="font-family:var(--mono);font-size:.78rem">${esc(p.base_url)}</div></td>
+  $('peersBox').innerHTML='<table><tr><th>Teammate</th><th>Person in memory</th><th>Allowed without asking</th><th></th></tr>'+
+    peers.map(p=>`<tr><td><b>${esc(p.name)}</b><div class="muted" style="font-family:var(--mono);font-size:.78rem">${esc(p.base_url)}</div>
+      ${p.person_name?`<div class="muted" style="font-size:.82rem">Linked: ${esc(p.person_name)}</div>`:''}</td>
+    <td><select data-link="${p.peer_id}" onchange="linkPerson('${p.peer_id}',this)">${personOpts(p.person_id)}</select></td>
     <td><div class="pol">${CLASSES.map(c=>`<label>${esc(TOPIC[c]||c)}
       <br><select data-peer="${p.peer_id}" data-cls="${c}" onchange="savePolicy('${p.peer_id}')"
         ${c==='personal'?'title="Personal topics can never be shared automatically"':''}>
       ${ACTIONS.map(a=>(c==='personal'&&a==='auto')?'':`<option value="${a}" ${((p.policy||{})[c]||'offer')===a?'selected':''}>${LABEL[a]}</option>`).join('')}
       </select></label>`).join('')}</div></td>
     <td><button class="linkish" onclick="revoke('${p.peer_id}')">unpair</button></td></tr>`).join('')+'</table>';
+}
+async function linkPerson(pid,sel){
+  const v=sel.value;
+  if(!v){await post('/peer/unlink',{peer_id:pid});refresh();return}
+  if(v==='__create__'){
+    const name=prompt('Create person name (must look like a real name):');
+    if(!name){refresh();return}
+    const r=await post('/peer/link',{peer_id:pid,create_name:name.trim()});
+    if(r.detail||r.error)alert(r.detail||r.error);
+    await loadPeople();refresh();return;
+  }
+  const r=await post('/peer/link',{peer_id:pid,person_id:Number(v)});
+  if(r.detail||r.error)alert(r.detail||r.error);
+  refresh();
 }
 async function savePolicy(pid){
   const policy={};

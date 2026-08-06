@@ -13,12 +13,17 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from typing import Any
 
 # Derived edges are features only — never in the belief store — so parity is
 # defined over asserted/user rows exclusively.
 _ORIGINS = ("asserted", "user")
+
+_attach_lock = threading.Lock()
+_timer: threading.Timer | None = None
+_INTERVAL_S = float(os.environ.get("QUILL_KG_PARITY_INTERVAL_S", "86400") or "86400")
 
 
 def shadow_mode() -> bool:
@@ -164,3 +169,58 @@ def read_v2_enabled(store=None) -> bool:
         return bool(cutover_ready(store).get("ready"))
     except Exception:
         return False
+
+
+def status(store=None) -> dict[str, Any]:
+    """Compact cutover status for /kg/parity and the soak script."""
+    gate = {"ready": False, "reports": 0, "critical_in_window": 0}
+    read_v2 = False
+    if store is not None:
+        try:
+            gate = cutover_ready(store)
+        except Exception:
+            pass
+        try:
+            read_v2 = bool(read_v2_enabled(store))
+        except Exception:
+            pass
+    override = os.environ.get("QUILL_KG_READ_V2")
+    return {
+        "shadow": shadow_mode(),
+        "interval_s": _INTERVAL_S,
+        "gate": gate,
+        "read_v2": read_v2,
+        "env_override": (None if override is None or str(override).strip() == ""
+                         else str(override).strip()),
+        "reports_needed": 7,
+    }
+
+
+def attach() -> None:
+    """Periodic parity enqueue while shadow mode is on (M3 soak)."""
+    if not shadow_mode():
+        return
+    with _attach_lock:
+        _schedule_next(immediate=False)
+    print(f"[kg_parity] attached (every {int(max(60.0, _INTERVAL_S))}s while shadow on).")
+
+
+def _schedule_next(*, immediate: bool = False) -> None:
+    global _timer
+    if not shadow_mode():
+        return
+    delay = 5.0 if immediate else max(60.0, _INTERVAL_S)
+
+    def _tick() -> None:
+        try:
+            from app.services.worker import worker
+            worker.enqueue("kg_parity_diff", unique=True)
+        except Exception as exc:
+            print(f"[kg_parity] schedule tick skipped ({exc}).")
+        with _attach_lock:
+            _schedule_next(immediate=False)
+
+    t = threading.Timer(delay, _tick)
+    t.daemon = True
+    t.start()
+    _timer = t

@@ -140,6 +140,18 @@ def run_once() -> dict:
             n = _persist_facts(
                 store, facts, anchor, joined, now,
                 event_source=SOURCE, window=window_blob)
+            # Desktop email → People v2 contacts / works_at (capture-first CRM).
+            try:
+                from app.services import people_pipeline as pp
+                from app.services import source_policy as sp
+                if sp.classify_source(
+                        event_source=SOURCE, window=window_blob,
+                        text=joined) == "email":
+                    pp.ingest_email_network(
+                        joined, store=store, event_id=anchor,
+                        event_source=SOURCE, window=window_blob, now=now)
+            except Exception as exc:
+                print(f"[screen_extract] email-network skipped ({exc}).")
             # Plan 4.2 (c): Sent-toast / Sent-folder OCR → completion
             # *candidate* (offer only — never auto-complete).
             try:

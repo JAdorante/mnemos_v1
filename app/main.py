@@ -339,6 +339,10 @@ async def _startup() -> None:
         worker.enqueue("kg_confidence_recal", unique=True)
         if kg_parity.shadow_mode():
             worker.enqueue("kg_parity_diff", unique=True)
+            try:
+                kg_parity.attach()
+            except Exception as exc:
+                print(f"[kg_parity] attach skipped ({exc}).")
         # A4: meta-memory audit + β promote gate when due; horizon refresh.
         worker.enqueue("meta_memory", unique=True)
         worker.enqueue("horizon_refresh", unique=True)

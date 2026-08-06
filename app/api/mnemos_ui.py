@@ -720,6 +720,17 @@ window.MnemosConstellation = {
           + '<button type="button" class="const-link-btn" data-act="do-focus">Focus</button>'
           + '<button type="button" class="const-link-btn" data-act="do-pin">'
           + (n.pinned ? 'Unpin' : 'Pin') + '</button></div>';
+        // Org / entity living brief deep-link (entity:<id> constellation nodes).
+        const idStr = String(id || '');
+        if (idStr.indexOf('entity:') === 0) {
+          const eid = idStr.split(':')[1];
+          const kind = String(n.kind || data.current_kind || '').toLowerCase();
+          if (eid && (kind === 'org' || kind === 'company' || kind === 'organization'
+              || kind === 'project' || kind === 'entity' || !kind)) {
+            html += '<div style="margin:8px 0"><a class="const-link-btn" href="/org/'
+              + MnemosEsc(eid) + '">Open living brief →</a></div>';
+          }
+        }
         const sources = data.sources || [];
         if (sources.length) {
           html += '<div class="const-edit-list"><div class="const-edit-hint">Evidence</div>';

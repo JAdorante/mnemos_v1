@@ -549,5 +549,75 @@ class HandoffTests(PeerChannelBase):
         self.assertIn("Accepted", row["answer"])
 
 
+class PeerPersonLinkTests(PeerChannelBase):
+    """User-asserted peer ↔ Person links — never auto on pair."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._claim = self._claimed_peer("Sarah Chen")
+        self.pid = next(iter(self._registry()))
+
+    def test_pair_does_not_auto_link_person(self) -> None:
+        rec = self._registry()[self.pid]
+        self.assertIsNone(rec.get("person_id"))
+        peers = pch.peers()
+        self.assertEqual(peers[0]["person_id"], None)
+
+    def test_link_unlink_person(self) -> None:
+        store = mock.MagicMock()
+        store.get_person.return_value = {
+            "id": 42, "name": "Sarah Chen", "aliases": ["Sarah"],
+            "canonical_person_id": None, "hide_from_people": False,
+        }
+        mem = SimpleNamespace(_ensure_store=lambda: store)
+        with mock.patch.dict("sys.modules", {}), \
+             mock.patch("app.services.memory.memory", mem, create=True):
+            # Patch where link_person imports it.
+            with mock.patch.object(pch, "link_person", wraps=pch.link_person):
+                pass
+        with mock.patch("app.services.memory.memory", mem):
+            res = pch.link_person(self.pid, 42)
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(self._registry()[self.pid]["person_id"], 42)
+        peers = pch.peers()
+        # person_name may be None if display lookup fails without store on peers()
+        self.assertEqual(peers[0]["person_id"], 42)
+
+        with mock.patch("app.services.memory.memory", mem):
+            un = pch.unlink_person(self.pid)
+        self.assertTrue(un["ok"], un)
+        self.assertIsNone(self._registry()[self.pid].get("person_id"))
+
+    def test_alias_resolves_to_linked_peer(self) -> None:
+        store = mock.MagicMock()
+        store.get_person.return_value = {
+            "id": 7, "name": "Sarah Chen", "aliases": ["S. Chen", "Sar"],
+            "canonical_person_id": None, "hide_from_people": False,
+        }
+        mem = SimpleNamespace(_ensure_store=lambda: store)
+        with mock.patch("app.services.memory.memory", mem):
+            self.assertTrue(pch.link_person(self.pid, 7)["ok"])
+            got = pch.parse_team_ask("ask Sar: are the slides done?")
+        self.assertIsNotNone(got)
+        self.assertEqual(got["peer_id"], self.pid)
+        self.assertEqual(got["kind"], "question")
+
+    def test_disclosure_still_keyed_by_peer_id(self) -> None:
+        """Linking a person must not change policy storage or enforcement key."""
+        store = mock.MagicMock()
+        store.get_person.return_value = {
+            "id": 9, "name": "Sarah Chen", "aliases": [],
+            "canonical_person_id": None, "hide_from_people": False,
+        }
+        mem = SimpleNamespace(_ensure_store=lambda: store)
+        with mock.patch("app.services.memory.memory", mem):
+            pch.link_person(self.pid, 9)
+        pol = pch.set_policy(self.pid, {"work": "deny"})
+        self.assertTrue(pol["ok"], pol)
+        self.assertEqual(pch.get_policy(self.pid)["work"], "deny")
+        peer = pch.authenticate(f"Bearer {self._claim['token']}")
+        self.assertEqual(peer["peer_id"], self.pid)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

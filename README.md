@@ -1,6 +1,6 @@
 # Mnemos
 
-**A personal memory + agent system that hears, sees, remembers, reflects — and, with your approval, acts.**
+**A local-first personal memory system: it captures what happens around you, builds a living network of people and work, connects to teammates on your terms, and — with your approval — acts.**
 
 > The product and in-app assistant are **Mnemos** (Mnemos Labs). Env vars and
 > the database keep the `QUILL_` prefix — see the
@@ -10,40 +10,40 @@
 ![python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![platform](https://img.shields.io/badge/platform-Windows%20(primary)%20·%20macOS%2FLinux-lightgrey)
 ![local-first](https://img.shields.io/badge/inference-local--first-brightgreen)
-![license](https://img.shields.io/badge/license-unspecified-lightgrey)
+![license](https://img.shields.io/badge/license-MIT-blue)
 
-Mnemos is a laptop prototype of a wearable (a "pen") that continuously **hears**
-(microphone), **sees** (webcam, and optionally your screen), and — on Windows —
-mirrors your **phone notifications**. It distills that raw stream into a
-searchable, provenance-linked memory; extracts the **tasks, commitments, and
-claims** buried in ordinary conversation; rolls your desktop into "what was I
-doing?" **activity blocks**; reflects daily into durable **insights**; and then
-**acts** — driving a real web browser, your desktop, or Phone Link — pausing at
-a human approval gate before anything irreversible.
+Mnemos runs on your laptop and turns everyday signal — speech, camera, optional
+screen, phone notifications — into a **searchable, provenance-linked memory**.
+From that stream it grows a **people and org network** (who you work with, what
+you owe them, what’s still open), and can **connect** to another Mnemos instance
+or a paired phone so assistants can ask each other questions without shipping
+raw memory off your machine. When you want something done, it can drive a
+browser, desktop app, or Phone Link — always pausing at a human approval gate
+before anything irreversible.
 
-The one-sentence pitch is the **hear → act loop**: Mnemos overhears
-*"I'll send Justin the pricing follow-up — Marc said forty-nine a month,"* files
-the commitment with a verbatim source quote and the audio clip to prove it, and
-later hands that task to an autonomous browser agent that drafts the email and
-stops for your **Approve / Edit / Cancel** before anything sends.
-
-> The laptop is the hardware prototype: prove the software experience first,
-> shrink it into a pen later.
+```
+  Capture  →  Memory  →  People / Org network  →  Peer & phone connections
+                              │
+                              └─→ grounded chat · review · approve · act
+```
 
 > **Status (August 2026):** experimental research prototype under active
-> development. Capture, memory, facts, reflection, the knowledge graph,
-> local-first model routing, the meeting layer, and the browser/desktop/phone
-> agents all work today, behind a hardened trust layer (hash-bound approvals,
-> source policies, evidence-verified outcomes). ~1,600 tests pass. Some pieces
-> remain feature-flagged — see [Known gaps & roadmap](#known-gaps--roadmap).
-> Not production software.
+> development. Capture, memory, facts, the knowledge graph, peer/phone
+> channels, local-first model routing, the meeting layer, and the
+> browser/desktop/phone agents all work today, behind a hardened trust layer
+> (hash-bound approvals, source policies, evidence-verified outcomes).
+> ~1,600 tests pass. Some pieces remain feature-flagged — see
+> [Known gaps & roadmap](#known-gaps--roadmap). Not production software.
 
 ---
 
 ## Table of contents
 
+- [What Mnemos does](#what-mnemos-does)
 - [How it works — the short version](#how-it-works--the-short-version)
-- [Recent additions (July-August 2026)](#recent-additions-july-august-2026)
+- [Memory](#memory)
+- [People & org network](#people--org-network)
+- [Connections — peers and phone](#connections--peers-and-phone)
 - [One moment, end to end](#one-moment-end-to-end)
 - [The Event: one schema for everything](#the-event-one-schema-for-everything)
 - [Layer 1 — Perceive](#layer-1--perceive)
@@ -70,6 +70,23 @@ stops for your **Approve / Edit / Cancel** before anything sends.
 
 ---
 
+## What Mnemos does
+
+Four capabilities sit on top of the same local store:
+
+| Capability | What you get |
+|---|---|
+| **Memory** | A durable timeline of what was said and seen, searchable by meaning, every fact linked back to the clip or frame it came from. |
+| **Network** | People, orgs, commitments, and open loops as a traversable graph — *who is Justin, what’s open with him, who else comes up with him?* |
+| **Connection** | Pair with a teammate’s Mnemos (or a phone) so their assistant can ask yours a question. Answers are composed from *your* memory, behind *your* disclosure policy. Raw memory never leaves the machine. |
+| **Action** | Browser, desktop, and phone agents that ground drafts in memory and stop for **Approve / Edit / Cancel** before send, buy, or mutate. |
+
+Everything stays on your machine by default. Local models handle VAD, ASR,
+speaker ID, embeddings, and (opt-in) vision/text; Claude is called only when
+stakes or confidence warrant it, with spend caps and privacy redaction.
+
+---
+
 ## How it works — the short version
 
 Mnemos is a stack of five layers. Each layer only depends on the one below it,
@@ -77,15 +94,15 @@ and everything between them travels as a single `Event` on an in-process bus:
 
 ```
   ┌───────────────────────────────────────────────────────────────┐
-  │  ACT       Browser agent (Exec.AI) · Desktop agent · Phone Link│  ← touches the world, approval-gated
+  │  ACT       Browser agent · Desktop agent · Phone Link         │  ← touches the world, approval-gated
   ├───────────────────────────────────────────────────────────────┤
-  │  DECIDE    Personal Agent Layer — goal → risk-classified plan  │  ← plans, grounds, classifies risk
+  │  DECIDE    Personal Agent Layer — goal → risk-classified plan │  ← plans, grounds, classifies risk
   ├───────────────────────────────────────────────────────────────┤
-  │  UNDERSTAND Facts · Activities · Reflection · Knowledge graph  │  ← what the stream *means*
+  │  UNDERSTAND Facts · People · Graph · Reflection · Activities  │  ← what the stream *means*
   ├───────────────────────────────────────────────────────────────┤
-  │  REMEMBER  Memory Engine — SQLite timeline + LanceDB semantic  │  ← durable, searchable, provenance-linked
+  │  REMEMBER  Memory Engine — SQLite timeline + LanceDB semantic │  ← durable, searchable, provenance-linked
   ├───────────────────────────────────────────────────────────────┤
-  │  PERCEIVE  Audio · Vision · Desktop capture · Phone notifs     │  ← raw perception → Event
+  │  PERCEIVE  Audio · Vision · Desktop capture · Phone notifs    │  ← raw perception → Event
   └───────────────────────────────────────────────────────────────┘
 ```
 
@@ -95,119 +112,146 @@ Three principles run through every layer:
   embeddings run on the CPU with no GPU and no PyTorch. Vision — and, opt-in,
   text — go to a **local Ollama model first**; a paid Claude call happens only
   when a task is high-stakes or the local model is unsure. Every escalation is
-  logged as a distillation row, so the paid calls are also training data for
-  making the local models better.
+  logged as a distillation row, so paid calls also become training data.
 - **Provenance everywhere.** Every memory links back to the raw audio clip or
   frame it came from; every extracted fact carries a verbatim `source_span`
-  quote and a pointer to its source event. Nothing is a black box you have to
-  trust — the Console lets you play the exact sound a fact came from.
+  quote and a pointer to its source event. The Console lets you play the exact
+  sound a fact came from.
 - **Memory is context, never command authority.** Perception is
   attacker-influenceable (anything said in the room, shown to a camera, or
-  pushed as a notification). Retrieved memory can *inform* an action but can
-  never *approve* one — only a live human reply authorizes anything
-  irreversible.
+  pushed as a notification). Retrieved memory — and answers from peers — can
+  *inform* an action but can never *approve* one. Only a live human reply
+  authorizes anything irreversible.
 
 ---
 
-## Recent additions (July-August 2026)
+## Memory
 
-The July–August push was about **trust**: proving what the system heard,
-bounding what it may mint and do, and verifying what it actually did.
+**Files:** [app/services/memory.py](app/services/memory.py) ·
+[app/storage.py](app/storage.py) · [app/vectorstore.py](app/vectorstore.py)
 
-- **Meeting layer** ([meeting_join](app/services/meeting_join.py) ·
-  [meeting_notes](app/services/meeting_notes.py) ·
-  [meeting_enhance](app/services/meeting_enhance.py) ·
-  [meeting_chat](app/services/meeting_chat.py) ·
-  [meeting_mode](app/services/meeting_mode.py)) — sessions matched to calendar
-  events, live jots that boost co-timed memories in ranking, template-driven
-  meeting briefs persisted as reflections, session-scoped meeting chat, and a
-  per-session transcript-only retention switch. Browse at `/meetings`.
-- **Approval hash binding** (`QUILL_APPROVAL_BIND=enforce`, the code default) —
-  the packet you approve is canonicalized and hashed; at the irreversible click
-  the about-to-execute fields must hash-match the approved row in the database
-  (so it survives agent restarts) or the agent stops, shows a diff, and re-asks
-  on a fresh packet. Approvals expire after 15 minutes; a duplicate-send
-  lookback stops double-fires.
-- **Source policy table** ([data/source_policies.json](data/source_policies.json),
-  checked in) — per source-class rules for what a terminal window, news page,
-  social feed, email, or document may contribute: mint people, commitments,
-  claims, contacts, identity/relationship evidence. A missing table degrades to
-  **deny minting, never allow** — with a loud log, a `/health` flag, and a
-  Memory Console banner.
-- **Commitment lifecycle + open loops** — a real state machine with completion
-  only from *verified* sends, plus detectors for waiting-on-me /
-  waiting-on-them / unanswered questions ([open_loops](app/services/open_loops.py)).
-- **Evidence-anchored outcome verification** — an action "worked" only if
-  evidence says so (Sent-folder check, CalDAV read-back, file stat). An
-  LLM-only success claim records `outcome_uncertain`, never verified.
-- **Privacy-gated cloud egress + spend cap** — never-send classes are refused,
-  sensitive/personal content is redacted before any Anthropic call, the max
-  privacy class of every call is logged, and a hard spend cap bounds cost.
-- **Speaker-labeled extraction + assertion classes** — every extracted fact
-  carries who said it and how (stated by user / by other / inferred / quoted /
-  hypothetical), so overheard speech can't create wrong-owner commitments.
-- **Team + phone channels** — paired Mnemos↔Mnemos asks with per-peer
-  disclosure policies (`/peer`), and a direct QR-paired phone channel (no
-  Phone Link required).
-- **Standing triggers** (`/triggers`) — chat-authored data-row triggers with a
-  7-day backtest before arming; offer-only by design.
-- **Eval harness** — checked-in goldens with hard thresholds (`make eval`),
-  CI-able exit codes, plus golden-snapshot ranking tests.
+The Memory Engine subscribes to every `Event` on the bus and does three things:
+
+1. **Writes a durable timeline** to SQLite (`data/quill.db`) — events, facts,
+   people, relations, reflections, turns, sessions, activities, jobs, and agent
+   runs in one joinable file that reloads on startup.
+2. **Embeds for semantic search** into LanceDB (`all-MiniLM-L6-v2`, local CPU)
+   so *"what did Marc say about pricing?"* finds the right episode even with
+   little keyword overlap. Facts are indexed alongside episodes.
+3. **Keeps the raw evidence** — WAV clips and JPEGs on disk, referenced from
+   the event, served only through path-confined `/artifact`.
+
+Upstream, consolidation merges utterances into **turns** and **sessions**;
+extraction pulls out **tasks, commitments, and claims**; reflection asks what
+changed and what’s still open. Meta-memory audits surface at-risk commitments,
+stale facts, fading threads, and forget candidates for human review.
+
+Browse and correct everything in the [Memory Console](#the-memory-console--the-trust-layer)
+at `/memory`. Your living self-view is at `/profile`.
+
+---
+
+## People & org network
+
+**Files:** [app/services/people_pipeline.py](app/services/people_pipeline.py) ·
+[app/services/graph.py](app/services/graph.py) ·
+[app/services/resolution.py](app/services/resolution.py)
+
+Mnemos doesn’t just store transcripts — it grows a **network of people and
+organizations** tied to evidence:
+
+- **People Intelligence (v2)** resolves names and aliases into person records
+  with deterministic scoring (exact → prefix → embedding). Mentions start as
+  candidates; contacts are evidence-linked. Source policies decide what a
+  terminal, news page, social feed, or email may mint. Kill-switch:
+  `QUILL_PEOPLE_V2=0`.
+- **Knowledge graph** rebuilds typed edges without LLM calls: person ↔ fact
+  (`responsible_for` / `committed` / `owed`), mentions, provenance, and
+  co-occurrence. Asserted edges (e.g. `works_at` from onboarding or email
+  network ingest) survive rebuilds. `context_for_person(name)` answers
+  relational questions flat search can’t.
+- **Org briefs** at `/org/{entity_id}` show people, facts, and open work for an
+  organization. Profile at `/profile` shows what the system currently believes
+  about *you*, with Confirm / Edit / Forget on every card.
+- **Onboarding** (`/onboarding`) seeds identity, people, work, and rhythm so
+  the graph isn’t empty on day one.
+
+API surface: `GET /graph/context` · `POST /graph/rebuild` · `GET /people/*` ·
+`GET /org/{id}/data` · `GET /profile/data`.
+
+---
+
+## Connections — peers and phone
+
+Mnemos is personal by default, but it can **connect** without becoming a shared
+cloud memory.
+
+### Team peer channel (`/peer`)
+
+**File:** [app/services/peer_channel.py](app/services/peer_channel.py)
+
+Two people each run their own Mnemos. They pair with a short-lived code; after
+that, one assistant can ask the other a question. The answer is composed from
+the **answerer’s** memory by **their** models, then redacted and returned.
+Raw timeline rows never cross the wire.
+
+- Pairing is mutual, single-use, and expires; tokens authenticate peers.
+- Disclosure is per-peer and per-class (`availability` / `work` / `contact` /
+  `personal` / `other` → `auto` | `offer` | `deny`). Default is **offer** —
+  you approve each disclosure. `personal` can never be set to auto.
+- Inbound asks land as observed-tier context; they never authorize actions.
+- Peer ↔ Person links are user-asserted only (`POST /peer/link`).
+
+> Peer channel over LAN needs TLS before pairing beyond localhost — see
+> [roadmap](#known-gaps--roadmap).
+
+### Phone channel
+
+**Files:** [app/services/phone_channel.py](app/services/phone_channel.py) ·
+[app/services/notifications.py](app/services/notifications.py) ·
+[app/services/phone_link.py](app/services/phone_link.py)
+
+- **QR-paired phone channel** — a direct device link (no Phone Link required)
+  for ingesting phone-side events with the same trust primitives as peers.
+- **Windows Phone Link** — optional capture of mirrored iPhone toasts via
+  `UserNotificationListener`, and outbound SMS through the Phone Link UI after
+  approval.
 
 ---
 
 ## One moment, end to end
 
-The fastest way to understand the program is to follow one sentence through it.
 You say, near the laptop:
 
 > *"I still owe Justin the pricing follow-up — Marc said forty-nine a month."*
 
-1. **Capture** ([app/services/audio.py](app/services/audio.py)). The mic stream
-   runs through Silero VAD, which segments it into an utterance; faster-whisper
-   transcribes it on a worker thread; SpeechBrain ECAPA voiceprints attribute
-   the speaker. An ingest filter drops Whisper's silence-hallucinations before
-   they pollute memory. The result is one `Event` (modality `audio`, the
-   transcript, the speaker, a confidence, and a link to the saved WAV clip),
-   published to the bus.
-2. **Memory** ([app/services/memory.py](app/services/memory.py)). The Memory
-   Engine subscribes to the bus: the event is written to the SQLite timeline
-   (`data/quill.db`) and embedded into LanceDB, so it's findable later by
-   *meaning* ("what did Marc say about pricing?"), not just keywords.
-3. **Consolidation** ([app/services/consolidation.py](app/services/consolidation.py)).
-   A durable background worker merges adjacent utterances into a conversational
-   **turn**, so extraction sees whole thoughts, not fragments. Turns group
-   further into **sessions** at long silence gaps.
-4. **Extraction** ([app/services/extractor.py](app/services/extractor.py)). A
-   windowed pass over settled turns distills structured facts: a **commitment**
-   (*owe Justin a follow-up*) and a **claim** (*$49/mo*), each with the verbatim
-   quote and a `source_event_id` pointing back at the audio. Person resolution
-   (exact → prefix → embedding) works out who "Justin" is.
-5. **Review** (the [Console](#the-memory-console--the-trust-layer)). The fact
-   appears in the Tasks tab with approve / edit / dismiss / done controls and
-   inline playback of the source clip. Correcting a misheard name here is the
-   human signal the whole system learns from.
-6. **Graph & reflection.** A deterministic rebuild wires the fact into the
-   knowledge graph (Justin ↔ commitment ↔ evidence); the daily reflection later
-   notices if it's still open and surfaces it as an `open_loop` insight.
-7. **Act** — you ask in chat (or Mnemos proactively offers): *"email Justin the
-   pricing follow-up."* The router picks the browser surface, the agent pulls
-   "$49/mo" straight from memory (no re-explaining), drafts the email, and stops
-   at a source-grounded approval packet — Action / To / Subject / Body /
-   **Why / Source** — with **Approve / Edit / Cancel**. Nothing sends until you
-   say so.
+1. **Capture** ([audio.py](app/services/audio.py)). Mic → Silero VAD →
+   faster-whisper → speaker ID → one `Event` with transcript, speaker, and a
+   link to the saved WAV.
+2. **Memory** ([memory.py](app/services/memory.py)). Written to SQLite and
+   embedded into LanceDB.
+3. **Consolidation** ([consolidation.py](app/services/consolidation.py)).
+   Adjacent utterances become a **turn**; turns group into **sessions**.
+4. **Extraction** ([extractor.py](app/services/extractor.py)). A
+   **commitment** (*owe Justin a follow-up*) and a **claim** (*$49/mo*), each
+   with a verbatim quote and `source_event_id`. People pipeline resolves who
+   "Justin" is.
+5. **Network.** Deterministic graph rebuild wires Justin ↔ commitment ↔
+   evidence; daily reflection can surface it as an `open_loop`.
+6. **Review** in the Console — approve / edit / dismiss with inline clip
+   playback.
+7. **Act** (optional) — *"email Justin the pricing follow-up."* The agent
+   pulls "$49/mo" from memory, drafts the email, and stops at a
+   source-grounded approval packet. Nothing sends until you say so.
 
-Every hop in that chain is inspectable after the fact: the clip, the transcript,
-the turn, the fact, the packet, and your verdict are all in `data/quill.db`.
+Every hop is inspectable after the fact in `data/quill.db`.
 
 ---
 
 ## The Event: one schema for everything
 
-Every input modality is independent and normalizes what it perceives into a
-single **`Event`** ([app/events.py](app/events.py)) pushed onto an in-process
-**`EventBus`** (a minimal async pub/sub). Subscribers react without knowing
-about each other:
+Every input modality normalizes into a single **`Event`**
+([app/events.py](app/events.py)) on an in-process **`EventBus`**:
 
 ```
         Webcam ─▶ Vision pipeline ──┐
@@ -217,25 +261,16 @@ about each other:
                                     ├─▶ EventBus ─▶ Memory Engine ─▶ SQLite + LanceDB
    watchers (todo/phone/task) ◀─────┘                   │
         │                                               │ semantic search
-        ▼          consolidate ─▶ extract facts ─▶ rebuild graph ─▶ reflect (daily)
-  proactive offers               (durable background worker)
-        │                                               │
+        ▼          consolidate ─▶ extract ─▶ people/graph ─▶ reflect
+  proactive offers                                      │
         ▼                                               ▼
    /chat ──▶ Planner ──▶ Browser / Desktop / Phone agent (memory-grounded, approval-gated)
 ```
 
-The schema is the lingua franca: `time, modality, raw, summary, source,
-confidence, people, tasks, entities, meta`. `Modality` is one of `audio`,
-`vision`, `notification`, `input`, or `system`; `source` says which pipeline
-produced it (`audio.whisper`, `vision.claude`, `desktop.screen`,
-`desktop.click`, …). Everything downstream — memory, search, facts, activities,
-reflection, the graph, the agents, the console — speaks `Event`. Adding a new
-capture modality means publishing `Event`s to the bus; no downstream code
-changes.
-
-The bus supports async producers (`publish`) and synchronous ones on other
-threads (`publish_nowait`, used by the audio-capture and notification-poll
-threads), so capture never blocks on downstream processing.
+Schema fields: `time, modality, raw, summary, source, confidence, people,
+tasks, entities, meta`. Modalities: `audio`, `vision`, `notification`,
+`input`, `system`. Adding a capture source means publishing `Event`s; no
+downstream rewrite.
 
 ---
 
@@ -247,111 +282,57 @@ threads), so capture never blocks on downstream processing.
 [app/services/speakers.py](app/services/speakers.py) ·
 [app/services/ingest_filter.py](app/services/ingest_filter.py)
 
-Microphone → **Silero VAD** (ONNX) segments the stream into utterances →
-**faster-whisper** (CTranslate2, no PyTorch/GPU) transcribes → `Event`.
+Microphone → **Silero VAD** (ONNX) → **faster-whisper** (CTranslate2) → `Event`.
 
-- **Two-thread design.** Capture runs on the `sounddevice` audio thread doing
-  only cheap work (VAD + buffering); transcription runs on a separate worker
-  thread, so audio frames are never dropped waiting on the ASR.
-- **Ingest hygiene.** Whisper hallucinates on silence (endless *"Thank you."*).
-  The ingest filter uses per-segment `avg_logprob` and `no_speech_prob` to
-  hard-drop hallucinations and confident duplicates, and flags-but-keeps
-  low-confidence utterances so the Console can surface them. Disable with
-  `QUILL_INGEST_FILTER=0`.
-- **Speaker ID.** SpeechBrain ECAPA-TDNN voice embeddings. Anonymous out of the
-  box (`Speaker 1`, `Speaker 2`, … clustered by cosine similarity); named once
-  you enroll someone (`python scripts/enroll_speaker.py Marc`). Voiceprints
-  persist as `.npy` files.
-- **Provenance chain.** Each utterance keeps its evidence trail — raw clip →
-  enhanced audio → transcript → the ordered correction log — addressable per
-  event (`GET /console/provenance/{event_id}`), so any fact can be traced to
-  the exact sound it came from.
+- Capture thread stays cheap (VAD + buffer); transcription runs on a worker so
+  frames aren’t dropped.
+- Ingest filter drops Whisper silence-hallucinations via `avg_logprob` /
+  `no_speech_prob` (`QUILL_INGEST_FILTER=0` to disable).
+- **Speaker ID** via SpeechBrain ECAPA — anonymous clusters by default; enroll
+  with `python scripts/enroll_speaker.py Marc`.
+- Provenance chain per utterance: clip → transcript → corrections
+  (`GET /console/provenance/{event_id}`).
 
 ### Vision (M2)
 
 **Files:** [app/services/vision.py](app/services/vision.py) ·
-[app/services/vlm.py](app/services/vlm.py) ·
-[app/services/vlm_gemini.py](app/services/vlm_gemini.py)
+[app/services/vlm.py](app/services/vlm.py)
 
 Webcam → OpenCV frame selection → VLM structured extraction → `Event`.
 
-- **Frame selection is the cost control.** Capture continuously, but analyze a
-  frame only when the scene *changes* (mean absolute pixel difference over a
-  threshold), rate-limited between `min_interval_s` and `max_interval_s`.
-  Dark/covered-lens frames are skipped so a black frame never burns a VLM call;
-  a frame-quality gate tells "the camera is broken" apart from "the model
-  failed".
-- **Structured output.** The VLM returns a JSON schema: description, verbatim
-  OCR text, people count, objects, scene type — plus **page understanding**: a
-  shown page is classified (`todo_list / questions / notes / table / code /
-  diagram …`) and its discrete `items` transcribed with per-item confidence.
-  The `todo_list` classification is what fires the proactive see → offer → act
-  loop.
-- **Local-first.** Frames go to a local Ollama model (`minicpm-v`) first;
-  Claude is the paid fallback — see
-  [the escalation ladder](#local-first-models--the-escalation-ladder).
-- **Windows camera quirks handled.** The default MSMF backend often fails;
-  Mnemos uses **DirectShow** (`dshow`) and forces **MJPG** to avoid mis-strided
-  green frames. All overridable.
+- Motion-gated + rate-limited; dark frames skipped.
+- Structured JSON: description, OCR, people, objects, page type
+  (`todo_list` / `notes` / …) with items — `todo_list` feeds the proactive
+  see → offer → act loop.
+- Local-first Ollama (`minicpm-v`) with Claude fallback.
+- Windows: DirectShow + MJPG by default.
 
 ### Desktop capture (screen + clicks, opt-in)
 
 **File:** [app/services/desktop_capture.py](app/services/desktop_capture.py)
 
-Passive observation of your own screen — off by default, enabled with
-`QUILL_DESKTOP_CAPTURE=1` (or `python run_all.py --desktop-capture`). No
-keystrokes are captured.
-
-- **Screen frames** are motion-gated like webcam vision and go through the same
-  local-first VLM → `Event` (modality `vision`, source `desktop.screen`, with
-  the focused window title in `meta.window`).
-- **Mouse clicks** become lightweight `Event`s (modality `input`, source
-  `desktop.click`) with coordinates, button, window title, and a context crop
-  saved to `data/desktop_frames/`. Click crops are described only by the local
-  model, and only if you opt in — clicks never trigger a paid call.
-- Downstream, these events fold into **activity blocks** (see
-  [Layer 3](#layer-3--understand)) and get their own Desktop and Activity tabs
-  in the Console.
+Off by default (`QUILL_DESKTOP_CAPTURE=1` or `--desktop-capture`). No
+keystrokes. Screen frames and click crops become events that fold into
+**activity blocks** (“what was I doing?”).
 
 ### Phone notifications (Windows)
 
-**Files:** [app/services/notifications.py](app/services/notifications.py)
-(capture) · [app/services/phone_link.py](app/services/phone_link.py) (control) ·
-[app/services/phone_watcher.py](app/services/phone_watcher.py) (proactive)
+**Files:** [app/services/notifications.py](app/services/notifications.py) ·
+[app/services/phone_link.py](app/services/phone_link.py) ·
+[app/services/phone_watcher.py](app/services/phone_watcher.py)
 
-Microsoft ships no public Phone Link API, so Mnemos reads iPhone notifications
-the way they actually surface: as ordinary **Windows toast notifications** from
-the Phone Link app, via `UserNotificationListener` (`winsdk`). Each becomes an
-`Event` with `Modality.NOTIFICATION` in the same pipeline as speech and vision.
-App-filtered (Phone Link only by default; widen with `QUILL_NOTIFICATION_APPS`),
-needs a one-time OS grant (Settings → Privacy → Notifications → allow Python),
-Windows-only and cleanly off elsewhere. Sending back out (SMS) is the
-[Phone Link agent](#layer-5--act).
+Mirrored iPhone toasts via Phone Link → `UserNotificationListener` →
+`Event`. Outbound SMS is the Phone Link agent (approval-gated).
 
 ---
 
 ## Layer 2 — Remember
 
-**Files:** [app/services/memory.py](app/services/memory.py) ·
-[app/storage.py](app/storage.py) (SQLite) ·
-[app/vectorstore.py](app/vectorstore.py) (LanceDB) ·
-[app/services/embeddings.py](app/services/embeddings.py)
+See [Memory](#memory) above for the product view. Implementation detail:
 
-The Memory Engine subscribes to the bus; every `Event` is:
-
-- **Written to SQLite** (`data/quill.db`) — a durable timeline that reloads on
-  startup, so transcripts and frames survive restarts. The same database holds
-  facts, relations, reflections, turns, sessions, activities, jobs, and agent
-  runs — one file, everything joinable.
-- **Embedded into LanceDB** with local sentence-transformers
-  (`all-MiniLM-L6-v2`, 384-d, CPU) for **semantic search** — *"what did I see
-  on the whiteboard?"* matches a frame described as *"Series A timeline"* even
-  with zero word overlap. Falls back to substring search if disabled;
-  un-indexed events are backfilled on startup. Extracted facts are indexed into
-  the same store, so search returns episodes and facts side by side.
-- **Linked to its raw artifact** — WAV clips and JPEGs are saved to disk and
-  referenced from `meta.audio_path` / `meta.frame_path`; the `/artifact`
-  endpoint serves them back, path-confined to the data directory.
+- SQLite timeline + LanceDB embeddings + artifact links.
+- Un-indexed events backfill on startup; substring search if semantic is off
+  (`QUILL_SEMANTIC=0`).
 
 ---
 
@@ -359,134 +340,66 @@ The Memory Engine subscribes to the bus; every `Event` is:
 
 ### Consolidation & the durable job queue
 
-**Files:** [app/services/consolidation.py](app/services/consolidation.py) ·
-[app/services/sessions.py](app/services/sessions.py) ·
-[app/services/worker.py](app/services/worker.py)
+**Files:** [consolidation.py](app/services/consolidation.py) ·
+[sessions.py](app/services/sessions.py) · [worker.py](app/services/worker.py)
 
-Adjacent utterances merge into **turns** (a new turn starts after a silence gap
-exceeds `QUILL_CONSOLIDATE_MAX_GAP_S`); turns group into **sessions** at
-long-gap boundaries. All heavy processing — `consolidate` → `extract` →
-`graph`, plus time-driven `reflect_daily` — runs on **one `jobs` table and one
-background worker thread**, off the capture path. It survives crashes,
-coalesces bursts (a flurry of new audio queues exactly one re-consolidation,
-not dozens), and drains backlogs in small batches. No Celery, no Redis. The
-chain is wired in [app/main.py](app/main.py) at startup.
+Utterances → turns (gap `QUILL_CONSOLIDATE_MAX_GAP_S`) → sessions. Heavy work
+(`consolidate` → `extract` → `graph`, plus `reflect_daily`) runs on one
+`jobs` table and one background worker — crash-safe, coalesced, no Redis.
 
 ### Facts — tasks, commitments, claims
 
-**Files:** [app/services/extractor.py](app/services/extractor.py) ·
-[app/services/resolution.py](app/services/resolution.py)
+**Files:** [extractor.py](app/services/extractor.py) ·
+[resolution.py](app/services/resolution.py) ·
+[people_pipeline.py](app/services/people_pipeline.py)
 
-The heart of "captures **and** understands." A windowed pass over settled turns
-produces **tasks**, **commitments**, and **claims** via structured LLM output.
-Every fact carries a `source_span` (verbatim quote) and a `source_event_id`.
-Person resolution cascades exact match → prefix (Chris/Christopher) → embedding
-similarity; fuzzy merges are recorded as aliases, never silently collapsed.
-Tasks have a lifecycle (`open → done → cancelled`); vision to-do items become
-task facts too. **The review loop is the training layer**: the Console exposes
-every fact with approve / edit / dismiss / done and inline source-clip playback.
+Windowed pass over settled turns → structured facts with `source_span` +
+`source_event_id`. Tasks lifecycle: `open → done → cancelled`. Console review
+(approve / edit / dismiss / done) is the training signal.
 
-### Desktop activities — "what was I doing?"
+### Desktop activities
 
-**File:** [app/services/activity.py](app/services/activity.py)
+**File:** [activity.py](app/services/activity.py)
 
-The desktop-capture stream folds into **activity blocks** per app-focus
-stretch: app, window titles, screen/click counts, and a summary — the same
-derived-table pattern as turns, built by the same worker. Activities are
-multimodal where the data allows (what you *heard* and *saw* during the block
-is joined in), ground the chat's "recent desktop activity" context, and feed
-the [anticipation watcher](#proactive-behavior). Browse them in the Console's
-Activity tab; each block expands to its underlying evidence rows.
+App-focus stretches become activity blocks (app, windows, screen/click counts,
+summary), grounding chat and the anticipation watcher.
 
-### Reflection — durable intelligence
+### Reflection
 
-**File:** [app/services/reflector.py](app/services/reflector.py)
+**File:** [reflector.py](app/services/reflector.py)
 
-The extractor answers *"what was said?"*; reflection answers *"what changed,
-what matters, what is unresolved, what should happen next?"* over a period. It
-reads the facts the pipeline already produced and emits structured, individually
-reviewable **insights** (`change · pattern · risk · open_loop · project_update ·
-relationship_update · policy · recommendation`).
+Period insights (`change · pattern · risk · open_loop · …`), grounded only on
+fact ids it was handed, each reviewable (approve / edit / dismiss /
+convert-to-task). Daily auto-enqueue when stale; `POST /reflect/run` on demand.
 
-- **Grounded:** the model may only cite fact ids it was handed; invented ids
-  are dropped before persistence. No ungrounded oracle.
-- **Reviewable:** each insight gets approve / edit / dismiss /
-  **convert-to-task** — a recommendation becomes a task only when a human
-  converts it.
-- **Time-driven:** a daily reflection auto-enqueues on startup if the last one
-  is stale (>20h); run on demand via `POST /reflect/run`.
+### Knowledge graph & onboarding
 
-### Knowledge graph (M5 v1)
-
-**File:** [app/services/graph.py](app/services/graph.py)
-
-Turns the nodes the facts pipeline already produces (people, facts, events)
-into a traversable graph — **deterministically, no LLM calls**. `rebuild()`
-recomputes typed person↔fact edges (`responsible_for` / `committed` / `owed`),
-mention edges, provenance edges, and weighted co-occurrence; *asserted* edges
-(e.g. `works_at`, including those seeded by onboarding) are preserved across
-rebuilds. `context_for_person(name)` answers *"who is this, what's open with
-them, who do they come up with"* in one traversal — relational questions flat
-text search can't do. API: `GET /graph/context?name=…` · `POST /graph/rebuild` ·
-`GET /graph/stats`.
-
-### Onboarding — don't start cold
-
-**File:** [app/services/onboarding.py](app/services/onboarding.py)
-
-A one-time guided profile (identity → people → work → rhythm) at
-[/onboarding](http://127.0.0.1:8000/onboarding) seeds people, entities,
-asserted graph edges, and accepted claims, so a new user's Mnemos knows their
-world on day one. Idempotent and delta-aware: edit and re-save later, only new
-answers are ingested. A JSON backup lands at `data/onboarding_profile.json`.
+See [People & org network](#people--org-network). Onboarding seeds the graph
+from a guided profile at `/onboarding`.
 
 ---
 
 ## Layer 4 — Decide
 
-**Files:** [app/services/agent_planner.py](app/services/agent_planner.py) ·
-[app/services/agent_log.py](app/services/agent_log.py) ·
-[app/services/readiness.py](app/services/readiness.py) ·
-[app/services/multitask.py](app/services/multitask.py)
+**Files:** [agent_planner.py](app/services/agent_planner.py) ·
+[agent_log.py](app/services/agent_log.py) ·
+[readiness.py](app/services/readiness.py) ·
+[multitask.py](app/services/multitask.py)
 
-The brain above the hands. **On by default** (`QUILL_PLANNER=1` is the code
-default since approval binding graduated to enforce; `QUILL_PLANNER=0`
-restores core-workflow-only gating), the **Personal Agent Layer** compiles a
-user goal into a grounded, risk-classified **Plan** of `ActionPacket`s before
-anything touches a browser:
+On by default (`QUILL_PLANNER=1`). Compiles a goal into a risk-classified
+**Plan** of `ActionPacket`s from facts / graph / reflections / commitments:
 
 ```
-Facts / Graph / Reflections / Commitments
-        │  select_context()   (the 3 relevant memories, not 30)
-        ▼
-compile(goal) → Plan
-   1. select_context   2. decompose   3. per step: choose compiler → ActionPacket
-   4. classify_risk    (read/draft = low … send/buy = high, delete = blocked)
-        │
-        ▼
-Execution surfaces (browser / desktop / phone) → human approval → Recorder logs the verdict
+select_context → decompose → compile steps → classify_risk
+     → surfaces (browser / desktop / phone) → human approval → Recorder
 ```
 
-- **Risk is a table, not an LLM guess.** A precise, inspectable `RISK_TABLE`
-  maps action verbs to `low / medium / high / blocked`: `blocked` never reaches
-  a surface, `high` always forces the approval gate, and any brush with a
-  sensitive domain (medical / financial / password / …) escalates.
-- **Action readiness.** Each open task also gets a unified, risk-aware
-  readiness score with decision bands — `auto / offer / review / hold` — the
-  same score the proactive offer gate keys off (`GET /console/readiness`).
-- **Multi-task fan-out.** A mixed message ("email Justin, then text Marc")
-  is split *before* routing, each task dispatched to its own surface in
-  dependency order.
-- **Cognitive agents are plug-ins.** An `IntentCompiler` turns *(goal,
-  context)* into an `ActionPacket`; a Writing Agent (drafts bodies from memory
-  instead of asking "what should I say?") and a Meeting Agent (read-only
-  briefing from the relationship graph) ship today; adding one is a single
-  `register()` call.
-- **The substrate.** [agent_log.py](app/services/agent_log.py) persists every
-  run, compiled packet, and human verdict — including the *edit* revision, the
-  richest training signal — surfaced at `GET /console/agent-runs`.
-- **Best-effort & reversible.** If the Planner is off or errors, callers fall
-  back to handing the raw goal to the browser agent.
+- **Risk is a table**, not an LLM guess (`low / medium / high / blocked`).
+- **Readiness bands** `auto / offer / review / hold` gate proactive offers
+  (`GET /console/readiness`).
+- Mixed messages fan out per surface in dependency order.
+- Every run, packet, and human verdict (including edits) is logged at
+  `GET /console/agent-runs`.
 
 ---
 
@@ -495,212 +408,104 @@ Execution surfaces (browser / desktop / phone) → human approval → Recorder l
 ### Browser agent — "Exec.AI"
 
 **Directory:** [browser_agent/](browser_agent/) · **standalone:**
-[exec_webapp.py](exec_webapp.py) · **memory bridge:**
+[exec_webapp.py](exec_webapp.py) · **bridge:**
 [app/services/agent_bridge.py](app/services/agent_bridge.py)
 
-A self-contained autonomous web agent with a mature **route → plan → execute →
-verify** loop over deterministic Playwright actions.
-
-- **Routing.** An envelope (intent, `requires_browser`, `requires_approval`,
-  `site`, `surface`) decides answer-directly vs. drive-the-browser vs. hand off
-  to the desktop or phone agent.
-- **Tiered models** ([browser_agent/config.py](browser_agent/config.py)):
-  Sonnet for routing/execution (the hot path), Opus for planning and
-  escalation, Haiku for high-volume yes/no verification. This ladder is
-  Claude-internal by design — it does not route through the local-first text
-  policy below.
-- **Executor vision.** DOM + screenshot; Claude reads the pixels itself.
-  Adaptive — the screenshot is attached only when the accessibility tree is
-  thin or the agent is stuck. Proven load-bearing: an eval renders an access
-  code inside a `<canvas>` (no DOM text); the agent fails text-only and
-  succeeds with vision on.
-- **Source-grounded approval packets.** Irreversible steps stop at a structured
-  Action / To / Subject / Body / **Why / Source** packet with **Approve / Edit /
-  Cancel** (an edit feeds a revision back for re-drafting).
-- **Modes & safety.** 7 task-specific policies (email / calendar / research /
-  shopping / crm / form / general), each only ever *adding* approval patterns
-  to the global commit net; research mode is read-only. Dry-run levels
-  (`plan / navigate / draft / approval / full`) cap how far any run may go. A
-  failure taxonomy (login / captcha / timeout / wrong page / no-progress) maps
-  blocks to recovery actions; it refuses to enter credentials or solve
-  CAPTCHAs.
-- **Learning + sessions.** Procedural memory recalls what worked for
-  `intent@site`; a named persistent browser profile (`QUILL_AGENT_PROFILE`)
-  reuses your hand-authenticated Gmail/CRM session; `QUILL_AGENT_CHANNEL=chrome`
-  uses real installed Chrome.
-- **Memory-grounded.** The agent semantic-searches Mnemos's own timeline, so
-  *"follow up on what Marc said about pricing"* pulls the "$49/mo" it overheard.
+Route → plan → execute → verify over Playwright. Source-grounded approval
+packets (Action / To / Subject / Body / **Why / Source**). Mode policies, dry-run
+levels (`plan / navigate / draft / approval / full`), failure taxonomy,
+procedural memory per `intent@site`, and semantic search over Mnemos’s own
+timeline for grounding.
 
 ### Desktop agent
 
 **Directory:** [desktop_agent/](desktop_agent/)
-([guards.py](desktop_agent/guards.py) · [driver.py](desktop_agent/driver.py))
 
-OS-level control for tasks that live in apps rather than the web. There is no
-browser sandbox here, so **the allowlist *is* the sandbox** — layered guards:
-a path jail (`QUILL_DESKTOP_JAIL`), an app allowlist (launch by key, never raw
-path), a shell-verb allowlist (read verbs auto-run, mutating verbs
-approval-gated, everything else blocked), a hard-block list no prompt can
-unlock (`rm`, `del`, `format`, `reg`, `sudo`, shell metacharacters, secret-path
-markers, `..`), args-as-list with `shell=False`, tiered human approval, an
-audit log, per-task action budgets, and command timeouts. The router's
-`surface == 'desktop'` dispatches into a guarded observe→act loop
-(also `POST /desktop`). Approval always comes from the live human, never from
-memory.
+OS-level control where the allowlist *is* the sandbox: path jail, app
+allowlist, shell-verb allowlist, hard-block list, `shell=False`, tiered
+approval, budgets. Approval always from the live human, never from memory.
 
 ### Phone Link agent
 
-**File:** [app/services/phone_link.py](app/services/phone_link.py) ·
-**scripts:** [scripts/phone_link/](scripts/phone_link/)
+**File:** [app/services/phone_link.py](app/services/phone_link.py)
 
-The outbound counterpart to notification capture: drives the installed Windows
-**Phone Link** UI via PowerShell + UI Automation (adapted from the MIT-licensed
-`phonelink-mcp-server`) to launch it, read conversations, and **send SMS** from
-the laptop — after the approval gate. *"Text Justin I'll be late"* → router
-picks `surface = phone_link` → approval → sent. Windows-only
-(`QUILL_PHONE_LINK=0` to disable), also reachable via `POST /phone`.
+Outbound SMS via Windows Phone Link UI automation after approval
+(`POST /phone`). Windows-only; `QUILL_PHONE_LINK=0` to disable.
 
 ---
 
 ## Local-first models & the escalation ladder
 
-**Files:** [app/services/vlm.py](app/services/vlm.py) (vision) ·
-[app/services/ollama_text.py](app/services/ollama_text.py) +
-[app/services/model_router.py](app/services/model_router.py) (text) ·
-[app/services/escalate_log.py](app/services/escalate_log.py) ·
-[app/services/model_log.py](app/services/model_log.py)
+**Files:** [vlm.py](app/services/vlm.py) ·
+[ollama_text.py](app/services/ollama_text.py) ·
+[model_router.py](app/services/model_router.py) ·
+[escalate_log.py](app/services/escalate_log.py)
 
-The same pattern twice — **local model first, Claude only when it matters, and
-every escalation logged as future training data**:
-
-- **Vision** (`QUILL_VISION_LOCAL=1`, default on): every selected frame goes to
-  Ollama `minicpm-v` (strong local OCR). Claude is called only for high-stakes
-  pages (`todo_list` / `form` / `code`), low local confidence, weak capture
-  quality, or when Ollama is unreachable.
-- **Text** (`QUILL_TEXT_LOCAL=1`, default **off**): router-served text calls
-  (chat, extract, reflect, activity summaries) run on a local Ollama text model
-  (`QUILL_TEXT_LOCAL_MODEL`; `qwen2.5:7b-instruct` benched champion over
-  `llama3.2` — +19pt pass rate, ⅓ fewer escalations) and escalate to Claude
-  when the local model is unreachable/errors, its output doesn't parse, its
-  *calibrated* confidence falls below `QUILL_TEXT_ESCALATE_MIN_CONF`, the
-  answer looks suspect (a refusal despite substantive context, or an echo of
-  the request), or the task is in the high-stakes set (default: `plan`). Off
-  keeps Claude-only routing, unchanged.
-- **Fail open, never double-bill.** Local down → straight to Claude; Claude
-  failing after a usable local answer → keep the local answer. A local success
-  costs zero paid calls.
-- **The distill trail.** Each escalation appends a row to
-  `data/escalate_distill.jsonl` — task, reason (`local_error` /
-  `low_confidence` / `parse_failure` / `high_stakes_task` / …), the local
-  attempt, and the parent answer (prompts truncated; frames by path, never
-  bytes). That file is the dataset for eventually distilling Claude's judgment
-  into the local models. Summary at `GET /console/escalate`.
-- **Telemetry.** Every model call (local and paid) is logged to
-  `data/model_calls.jsonl` with latency and estimated cost, aggregated at
-  `GET /console/models` — the measure of what local-first actually saves.
+- **Vision** (`QUILL_VISION_LOCAL=1`): Ollama first; Claude for high-stakes /
+  low confidence / weak capture / unreachable local.
+- **Text** (`QUILL_TEXT_LOCAL=1`, default off): local Ollama for chat /
+  extract / reflect; escalate on error, parse failure, low confidence, or
+  high-stakes tasks (default: `plan`).
+- Fail open to Claude if local is down; never double-bill after a usable local
+  answer.
+- Distill trail: `data/escalate_distill.jsonl` · summary `GET /console/escalate`.
+- Telemetry: `data/model_calls.jsonl` · `GET /console/models`.
 
 ---
 
 ## The learning loop — from verdicts to weights
 
-**Files:** [app/services/few_shot.py](app/services/few_shot.py) ·
-[app/services/grounding.py](app/services/grounding.py) ·
+**Files:** [few_shot.py](app/services/few_shot.py) ·
+[grounding.py](app/services/grounding.py) ·
 [scripts/bench_text.py](scripts/bench_text.py) ·
 [scripts/distill_curate.py](scripts/distill_curate.py) ·
 [scripts/train_lora.py](scripts/train_lora.py)
 
-The distill trail isn't just a log — it's a complete, closed learning loop.
-The local model gets measurably better from nothing but normal use:
-
 ```
-every chat answer → 👍/👎/✏️ verdict → distill row (data/escalate_distill.jsonl)
-      │
-      ├─ few-shot (minutes): similar verified answers are retrieved into the
-      │    LOCAL prompt as worked examples — lessons apply the same day
-      ├─ calibration: retrieval evidence floors the model's miscalibrated
-      │    self-confidence, but only when its answer AGREES with the verified
-      │    answer it matched; refusal-despite-context and echo answers force
-      │    escalation at any confidence
-      ├─ bench (on demand): replay labeled rows, score vs the human gold by
-      │    embedding similarity — "is it getting better?" is a number
-      └─ LoRA (periodic, ~100+ pairs): one command curates → trains a QLoRA
-           adapter (Unsloth under WSL2) → packages a dated Ollama tag → gates
-           on a held-out exam vs the incumbent. No promotion without numbers;
-           rollback is a config flip.
+chat answer → 👍/👎/✏️ verdict → distill row
+  ├─ few-shot: verified answers retrieved into the LOCAL prompt
+  ├─ calibration: evidence floors miscalibrated confidence
+  ├─ bench: replay labeled rows vs human gold
+  └─ LoRA (periodic): curate → train → package → gate on holdout
 ```
 
-Rules learned the hard way, now enforced in code: **refusal-shaped answers
-are never taught as examples** (correct answer ≠ good exemplar — they poison
-the model into refusing everything); **training uses the clean stored prompt,
-never the few-shot-augmented one** (the model must learn the skill, not the
-crutch); **the bench holdout is excluded from both retrieval and training**
-(the exam is never in the study guide); and **a 👍 on a kept-local answer
-makes the local text itself the verified gold** — every answer bubble is
-labelable, so wrong-but-confident local answers are correctable, and every
-verdict is a training pair.
-
-Every answer also shows its work: a collapsible **Sources:** line names the
-grounding sections it drew from (person graph / open tasks / screen & camera /
-timeline memories / recent activity), so a bad answer is diagnosable at a
-glance — wrong drawer vs. right drawer, wrong words.
-
-This is also the product's onboarding invariant: **new users never train
-anything.** Day one runs stock models at parent quality; personalization
-accrues silently from natural verdicts, and the per-user adapter is a derived
-artifact of each install's own trail — user-specificity lives in data and
-weights, never in code (`tests/test_no_user_tailoring.py` enforces it).
+Answers show **Sources:** (person graph / open tasks / screen & camera /
+timeline / activity). New installs never ship user-specific weights —
+personalization accrues from natural verdicts
+(`tests/test_no_user_tailoring.py`).
 
 ---
 
 ## The Memory Console — the trust layer
 
-**Where:** <http://127.0.0.1:8000/memory> (`/console` 301-redirects there; all
-endpoints + the embedded UI live in [app/api/routes.py](app/api/routes.py))
-
-Mnemos asks you to trust what it heard, saw, and inferred — the Console is
-where you check. One page, tabbed:
+**Where:** <http://127.0.0.1:8000/memory> (`/console` redirects here)
 
 | Tab | What you see |
 |---|---|
-| **All / Audio / Vision** | The raw event timeline, newest first: transcript or frame description, speaker, confidence, and the **actual clip or frame** inline. Semantic search across everything. |
-| **Desktop** | Only desktop-capture events (`source=desktop.*`) — screen analyses and clicks, badged `screen`/`click`, window title shown, click-crop thumbnails. |
-| **Activity** | "What was I doing?" blocks: app badge, window pills, `N screens · N clicks`, duration, summary — each expandable to the underlying evidence rows. |
-| **Turns / Sessions** | Consolidated conversation view, with per-turn audio playback. |
-| **Tasks** | The fact review queue: open tasks and commitments with approve / done / edit / dismiss and verbatim source quote + clip. |
-| **Reflection** | The latest daily reflection and its insights, each with approve / edit / dismiss / convert-to-task. |
-| **Audio Health** | Utterance/drop rates, ASR latency, SNR/clipping quality mix, low-confidence and speaker-unknown rates, offer surfaced/accept rates. |
-| **Low-confidence** | One click to see exactly what the system is *unsure* about. |
+| **All / Audio / Vision** | Event timeline with clips/frames and semantic search |
+| **Desktop** | Screen analyses and clicks |
+| **Activity** | “What was I doing?” blocks |
+| **Turns / Sessions** | Consolidated conversation + playback |
+| **Tasks** | Fact review: approve / done / edit / dismiss + source quote |
+| **Reflection** | Daily insights with convert-to-task |
+| **Audio Health / Low-confidence** | Capture quality and unsure items |
 
-Vision rows carry a **provider pill** (which VLM produced the description, with
-the routing reason on hover) — local-first routing, validated per row. Rebuild
-buttons re-derive turns / sessions / activities on demand. Related pages:
-`/today` (day view), `/chat` and `/ui` (live chat + offers), `/profile` (the
-living user profile), `/meetings`, `/triggers` (standing triggers), `/peer`
-(team pairing + disclosure policy), `/desktop-access` (desktop capture control
-+ metrics), `/onboarding` (profile setup), `/docs` (Swagger).
+Related surfaces: `/today` · `/chat` · `/ui` · `/profile` · `/org/{id}` ·
+`/meetings` · `/triggers` · `/peer` · `/desktop-access` · `/onboarding` ·
+`/docs`.
 
 ---
 
 ## Proactive behavior
 
-All watchers are gated by `QUILL_AGENT` (set `0` to make `/chat` a pure memory
-retriever and silence every offer). Offers are exactly that — a yes/no in chat;
-nothing runs without your reply.
+Gated by `QUILL_AGENT` (`0` = pure memory retriever, no offers). Offers are
+yes/no in chat — nothing runs without your reply.
 
-- **To-do watcher** ([todo_watcher.py](app/services/todo_watcher.py)) — vision
-  classifies a page as `todo_list` → Mnemos offers in chat to run the items
-  through the browser agent (debounced by items-hash + cooldown). The fully
-  autonomous **see → offer → act** trigger.
-- **Task offer** ([task_offer.py](app/services/task_offer.py)) — spoken tasks
-  surface as "run this?" offers, gated by a two-signal readiness check so it
-  isn't chatty.
-- **Phone watcher** ([phone_watcher.py](app/services/phone_watcher.py)) — an
-  iPhone notification arrives → offer to reply or open the thread
-  (`QUILL_PHONE_WATCH=0` to disable).
-- **Anticipation** ([anticipation.py](app/services/anticipation.py), opt-in
-  `QUILL_ANTICIPATE=1`) — heuristic likely-next suggestions from your recent
-  activity blocks (app-transition patterns + open tasks), offered only after an
-  idle gap, with cooldowns.
+- **To-do watcher** — vision `todo_list` → offer to run items in the browser.
+- **Task offer** — spoken tasks as “run this?”, readiness-gated.
+- **Phone watcher** — incoming notification → offer to reply/open.
+- **Anticipation** (`QUILL_ANTICIPATE=1`) — likely-next from activity
+  patterns after an idle gap.
 
 ---
 
@@ -708,65 +513,43 @@ nothing runs without your reply.
 
 ### 1. Prerequisites
 
-- **Python 3.10+** (uses `X | None` type hints).
-- **Windows 11** is the primary target (audio, vision, desktop capture, and
-  Phone Link are developed there). macOS/Linux run the capture + memory + agent
-  stack; the Windows-only pieces degrade gracefully.
-- A working **microphone** and **webcam** for live capture (optional — you can
-  run headless and drive it over the API).
-- An **Anthropic API key** for the Claude tiers (vision fallback, extraction,
-  reflection, the browser agent). Everything local runs without it; paid
-  features simply skip if the key is missing.
+- **Python 3.10+**
+- **Windows 11** primary (audio, vision, desktop capture, Phone Link).
+  macOS/Linux run capture + memory + agents; Windows-only pieces degrade
+  cleanly.
+- Microphone / webcam optional for live capture.
+- **Anthropic API key** for Claude tiers (vision fallback, extraction,
+  reflection, browser agent). Local pieces run without it.
 
 ### 2. Install
 
 ```powershell
-# from the project root
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1      # Windows PowerShell
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+python scripts/download_models.py            # ~460 MB speech models, one-time
+playwright install chromium                  # browser agent
 ```
 
-**Pre-download the speech models** (one-time, ~460 MB, cached under
-`~/.cache/huggingface`) so the first live run starts instantly:
-
-```powershell
-python scripts/download_models.py            # the configured Whisper model + VAD
-python scripts/download_models.py base small # or specific sizes
-```
-
-**One-time browser setup** (for the agent):
-
-```powershell
-playwright install chromium
-```
+Testers can use **`install.bat`** / **`start.bat`** — see
+[TESTER_SETUP.md](TESTER_SETUP.md).
 
 ### 3. Add your API key
 
-Put it in a `.env` (or `.credentials.env`) at the project root — **never commit
-this file**:
-
 ```dotenv
 ANTHROPIC_API_KEY=sk-ant-...
-# optional: enables the Gemini vision backend
+# optional
 GOOGLE_API_KEY=...
 ```
 
-Without a key the system degrades gracefully — frames are still captured and
-saved, just not analyzed by Claude; extraction and reflection are skipped. It
-never crashes.
+Put this in `.env` or `.credentials.env` at the project root — never commit it.
 
 ### 4. (Optional) local-first models
-
-Install [Ollama](https://ollama.com) and pull the local models:
 
 ```powershell
 ollama pull minicpm-v    # vision (default on)
 ollama pull llama3.2     # text  (opt-in: QUILL_TEXT_LOCAL=1)
 ```
-
-If Ollama isn't running, everything falls back to Claude automatically — this
-step is safe to skip.
 
 ### 5. Run everything
 
@@ -774,18 +557,18 @@ step is safe to skip.
 python run_all.py
 ```
 
-One command starts the Memory Engine, live audio + vision + notification
-capture, the FastAPI server, and the browser-agent UI. Then open:
+Then open:
 
 - **Memory Console** — <http://127.0.0.1:8000/memory>
-- **Live chat UI** — <http://127.0.0.1:8000/ui>
-- **Onboarding (first run)** — <http://127.0.0.1:8000/onboarding>
-- **API docs (Swagger)** — <http://127.0.0.1:8000/docs>
-- **Browser-agent UI** — <http://127.0.0.1:5000>
+- **Live chat** — <http://127.0.0.1:8000/ui>
+- **You (profile)** — <http://127.0.0.1:8000/profile>
+- **Team (peer)** — <http://127.0.0.1:8000/peer>
+- **Onboarding** — <http://127.0.0.1:8000/onboarding>
+- **API docs** — <http://127.0.0.1:8000/docs>
+- **Browser agent** — <http://127.0.0.1:5000>
 
-`Ctrl+C` stops everything, including the agent's Chromium.
-**Flags:** `--no-audio` · `--no-vision` · `--no-notifications` · `--no-browser`
-· `--desktop-capture` · `--browser-headless` · `--port` · `--browser-port` ·
+Flags: `--no-audio` · `--no-vision` · `--no-notifications` · `--no-browser` ·
+`--desktop-capture` · `--browser-headless` · `--port` · `--browser-port` ·
 `--host`.
 
 ---
@@ -795,53 +578,50 @@ capture, the FastAPI server, and the browser-agent UI. Then open:
 ### Run one piece at a time
 
 ```powershell
-python run_audio.py                 # live transcription in the terminal
+python run_audio.py                 # live transcription
 python run_vision.py                # live webcam understanding
 uvicorn app.main:app --reload       # API server alone
-python exec_webapp.py               # browser agent standalone (with memory bridge)
+python exec_webapp.py               # browser agent + memory bridge
 ```
 
 ### Teach it who's talking
 
 ```powershell
-python scripts/enroll_speaker.py Marc          # record 10s of Marc from the mic
-python scripts/enroll_speaker.py Justin 15     # 15 seconds
-python scripts/enroll_speaker.py Marc clip.wav # or from a 16 kHz mono WAV
+python scripts/enroll_speaker.py Marc
+python scripts/enroll_speaker.py Justin 15
+python scripts/enroll_speaker.py Marc clip.wav
 ```
 
-### Drive the hear → act loop from the API
+### Memory-grounded action from the API
 
 ```powershell
-# Kick off a goal (non-blocking) — the agent routes it and drives the browser
 $r = Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/chat `
      -ContentType application/json `
      -Body '{"message": "email Justin the pricing follow-up"}'
 $since = $r.since
-
-# Poll for progress, results, and approval prompts
 Invoke-RestMethod -Uri "http://127.0.0.1:8000/chat/poll?since=$since"
-
-# When it surfaces an approval packet, answer it
 Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/chat/answer `
      -ContentType application/json -Body '{"text": "approve"}'
 ```
 
-### Cap how far a run may go (safe demos)
-
-Prefix a message with a dry-run level, or set `AGENT_DRY_RUN` globally:
+### Cap how far a run may go
 
 ```jsonc
 { "message": "/draft reply to Marc about the Series A timeline" }
 // levels: /plan · /navigate · /draft · /approval (default) · /full
 ```
 
-`/draft` prepares everything but stops at the first commit gate without
-prompting — perfect for a demo that must never actually send.
-
 ### Search your memory
 
 ```bash
 curl -s "http://127.0.0.1:8000/memory/search?q=whiteboard%20series%20A"
+```
+
+### Ask a teammate's Mnemos (after pairing on `/peer`)
+
+```bash
+# Chat shorthand once a Person is linked to a peer:
+# "ask Name: when is Justin free Thursday?"
 ```
 
 ---
@@ -850,46 +630,37 @@ curl -s "http://127.0.0.1:8000/memory/search?q=whiteboard%20series%20A"
 
 | Surface | What it is |
 |---|---|
-| **`/memory`** | The Memory Console (see [above](#the-memory-console--the-trust-layer)); `/console` redirects here. |
-| **`/ui`** | Live chat — watch capture happen, see offers, reply, approve. |
-| **`/desktop-access`** | Desktop-capture control + metrics page. |
-| **`/onboarding`** | One-time guided profile setup. |
-| **`/facts` API** | Programmatic review — list/filter, `open_tasks`, approve / dismiss / done / edit. |
-| **`/reflections` API** | List reflections & insights; approve / dismiss / edit / convert; `POST /reflect/run`. |
-| **`/chat`** | Dispatch a turn to the agents; memory-grounded; non-blocking — poll `/chat/poll`, answer via `/chat/answer`, `/chat/new` for a fresh session. |
-| **`/graph`** | `context` / `rebuild` / `stats` over the knowledge graph. |
-| **Browser-agent UI** | The Exec.AI web chat (Flask) at <http://127.0.0.1:5000>. |
+| **`/memory`** | Memory Console (timeline, tasks, reflection, search) |
+| **`/profile`** | Living user profile — confirm / edit / forget |
+| **`/org/{id}`** | Org living brief — people, facts, open work |
+| **`/peer`** | Team pairing + per-peer disclosure policy |
+| **`/people/*`** | People roster, unresolved mentions, merge/rename |
+| **`/ui` · `/chat`** | Live chat, offers, approvals |
+| **`/meetings`** | Meeting sessions, briefs, session chat |
+| **`/triggers`** | Standing data-row triggers (offer-only) |
+| **`/onboarding`** | Guided profile seeding |
+| **`/graph`** | Graph context / rebuild / stats |
+| **`/facts` · `/reflections`** | Programmatic review APIs |
+| **Browser agent** | Exec.AI UI at <http://127.0.0.1:5000> |
 
-**Full endpoint list** (see [app/api/routes.py](app/api/routes.py)):
+**Selected endpoints** (full list in [app/api/routes.py](app/api/routes.py)):
 
 ```
 GET  /health
-POST /audio/start · /audio/stop
-POST /vision/start · /vision/stop
-POST /notifications/start · /notifications/stop
-POST /desktop-capture/start · /desktop-capture/stop
+POST /audio/start · /audio/stop · /vision/start · /vision/stop
+POST /notifications/start · /desktop-capture/start
 GET  /memory · /memory/search?q=
-GET  /console (301 → /memory) · /console/events (modality/source/q filters) · /console/turns
-GET  /console/sessions · /console/activity · /console/activity/events?ids=
-POST /console/consolidate · /console/sessions/rebuild · /console/activity/rebuild
-GET  /console/jobs · /console/models · /console/escalate · /console/readiness
-GET  /console/cognition · /console/camera-health · /console/audio-health
-GET  /console/provenance/{event_id}
-GET  /console/agent-runs · /console/agent-runs/{run_id}
-GET  /artifact                         (path-confined raw clip/frame serving)
-GET  /graph/context · POST /graph/rebuild · GET /graph/stats
-GET  /facts · /facts/open_tasks
-POST /facts/{id}/approve · /dismiss · /done · /edit
-POST /reflect/run
-GET  /reflections · /reflections/list
-POST /reflection_items/{id}/approve · /dismiss · /edit · /convert
+GET  /console/*  (events, turns, sessions, activity, jobs, models, escalate, readiness, provenance, agent-runs)
+GET  /artifact
+GET  /graph/context · /graph/stats · POST /graph/rebuild
+GET  /people/list · /people/{id} · /people/unresolved-mentions
+GET  /profile · /profile/data · /org/{id} · /org/{id}/data
+GET/POST /peer/*  (pair, ask, answer, policy, link)
+GET  /facts · /facts/open_tasks · POST /facts/{id}/approve|dismiss|done|edit
+POST /reflect/run · GET /reflections*
 POST /chat · GET /chat/poll · POST /chat/answer · POST /chat/new
 POST /desktop · POST /phone
-GET  /onboarding · /onboarding/status · /onboarding/profile
-POST /onboarding/template · /onboarding/ingest
-GET/POST /credentials
-POST /speak · GET /speakers · POST /speakers/enroll
-GET  /ui
+GET  /onboarding* · GET /ui · POST /speak · GET /speakers
 ```
 
 ---
@@ -898,22 +669,18 @@ GET  /ui
 
 | Layer | Tool | Role |
 |---|---|---|
-| **API / server** | FastAPI + Uvicorn, Pydantic | HTTP surface, async event loop |
-| **Config** | python-dotenv | env / `.env` settings |
-| **Audio capture** | sounddevice, NumPy | low-latency mic |
-| **VAD** | silero-vad (ONNX) | utterance segmentation |
-| **ASR** | faster-whisper (CTranslate2) | transcription, no GPU/torch |
-| **Speaker ID** | SpeechBrain ECAPA-TDNN | diarization + named voiceprints |
-| **Vision capture** | OpenCV | webcam/screen + frame selection |
-| **Vision / VLM** | Ollama `minicpm-v` (local) → Claude fallback; Gemini optional | structured frame understanding |
-| **Local text** | Ollama `llama3.2` (opt-in) → Claude fallback | chat / extract / reflect / summaries |
-| **Phone notifications** | winsdk (`UserNotificationListener`) | Windows toast / iPhone mirror capture |
-| **Phone control** | PowerShell + UI Automation | drive Phone Link (launch / read / send SMS) |
-| **Embeddings** | sentence-transformers (MiniLM, local) | semantic search vectors |
-| **Vector store** | LanceDB (embedded, file-based) | meaning-based retrieval |
-| **Timeline store** | SQLite | events, facts, relations, reflections, activities, jobs, agent runs |
-| **Browser agent** | Playwright (Chromium) + Claude (Sonnet / Opus / Haiku) | autonomous web actions |
-| **Agent UI** | Flask | browser-agent web chat |
+| **API / server** | FastAPI + Uvicorn, Pydantic | HTTP surface |
+| **Config** | python-dotenv | env / `.env` |
+| **Audio** | sounddevice, Silero VAD, faster-whisper | capture → transcript |
+| **Speaker ID** | SpeechBrain ECAPA-TDNN | clusters + voiceprints |
+| **Vision** | OpenCV + Ollama `minicpm-v` → Claude | frame understanding |
+| **Local text** | Ollama (opt-in) → Claude | chat / extract / reflect |
+| **Phone** | winsdk toasts · PowerShell Phone Link · QR phone channel | notify / SMS / pair |
+| **Peers** | HTTP + mutual tokens | Mnemos↔Mnemos asks |
+| **Embeddings** | sentence-transformers MiniLM | semantic vectors |
+| **Stores** | SQLite + LanceDB | timeline + meaning search |
+| **Browser agent** | Playwright + Claude tiers | web actions |
+| **Desktop agent** | allowlisted OS control | app-level actions |
 
 ---
 
@@ -939,7 +706,7 @@ loaded after `.env` with override, for secrets.
 | `QUILL_DATA_DIR` | `data` | relocate all persisted data |
 | `QUILL_CREDENTIALS_FILE` | `.credentials.env` | secrets file loaded after `.env` |
 | `QUILL_AUTOSTART` | `0` | `1` = start capture on server boot (set by `run_all.py`) |
-| `QUILL_AGENT` | `1` | `0` reverts `/chat` to the memory-only retriever, disables watchers |
+| `QUILL_AGENT` | `1` | `0` = memory-only retriever, disables watchers |
 
 ### Audio (M1)
 
@@ -990,7 +757,7 @@ loaded after `.env` with override, for secrets.
 
 | Var | Default | Notes |
 |---|---|---|
-| `QUILL_TEXT_LOCAL` | `0` | local-first TEXT via Ollama; off = Claude-only, unchanged |
+| `QUILL_TEXT_LOCAL` | `0` | local-first TEXT via Ollama; off = Claude-only |
 | `QUILL_TEXT_LOCAL_MODEL` | `llama3.2` | local Ollama text model |
 | `QUILL_TEXT_LOCAL_TIMEOUT_S` | `45` | local text timeout |
 | `QUILL_TEXT_ESCALATE_MIN_CONF` | `0.6` | escalate below this self-reported confidence |
@@ -1050,7 +817,7 @@ Off by default; enable with `QUILL_DESKTOP_CAPTURE=1` or
 | `QUILL_PHONE_LINK_PS` | `powershell.exe` | PowerShell used for the automation scripts |
 | `QUILL_PHONE_WATCH` | `1` | proactive reply/open offers for incoming notifications |
 
-### Memory, storage, hygiene, consolidation, worker, reflection
+### Memory, people, consolidation, worker, reflection
 
 | Var | Default | Notes |
 |---|---|---|
@@ -1063,7 +830,7 @@ Off by default; enable with `QUILL_DESKTOP_CAPTURE=1` or
 | `QUILL_WORKER` | `1` | durable background job runner |
 | `QUILL_WORKER_POLL_S` / `_MAX_ATTEMPTS` | `2.0` / `3` | worker poll / retry cap |
 | `QUILL_EXTRACT` | `1` | run fact/task extraction (calls the LLM) |
-| `QUILL_PEOPLE_V2` | `1` | People Intelligence v2 (source policies, candidates, contacts) |
+| `QUILL_PEOPLE_V2` | `1` | People Intelligence v2 (candidates, contacts, policies) |
 | `QUILL_OPEN_LOOPS` | `1` | waiting-on-me / waiting-on-them / unanswered-question detectors |
 | `QUILL_MEETING_MODE` | `1` | meeting layer (calendar join, jots, briefs, session chat) |
 | `QUILL_REFLECT` | `1` | run daily reflection (calls the LLM) |
@@ -1074,8 +841,8 @@ Off by default; enable with `QUILL_DESKTOP_CAPTURE=1` or
 
 | Var | Default | Notes |
 |---|---|---|
-| `QUILL_PLANNER` | `1` | Personal Agent Layer on by default; `0` = core-workflow-only gating |
-| `QUILL_APPROVAL_BIND` | `enforce` | `off` / `shadow` / `enforce` — hash-bind approvals to what executes |
+| `QUILL_PLANNER` | `1` | Personal Agent Layer on by default |
+| `QUILL_APPROVAL_BIND` | `enforce` | `off` / `shadow` / `enforce` — hash-bind approvals |
 | `QUILL_AGENT_CHANNEL` | — | e.g. `chrome` — browser channel for the in-app agent |
 | `QUILL_AGENT_PROFILE` | — | persistent browser profile (logged-in session reuse) |
 | `AGENT_DRY_RUN` | `approval` | `plan` / `navigate` / `draft` / `approval` / `full` |
@@ -1105,24 +872,24 @@ planner/escalation = Opus, verifier = Haiku.
 
 | Data | Location |
 |---|---|
-| Timeline + facts + relations + reflections + activities + jobs + agent runs | `data/quill.db` (SQLite) |
-| Raw audio utterances | `data/audio/<epoch>.wav` (16-bit mono, one per utterance) |
+| Timeline + facts + people + relations + reflections + activities + jobs + agent runs | `data/quill.db` (SQLite) |
+| Raw audio utterances | `data/audio/<epoch>.wav` |
 | Captured webcam frames | `data/frames/<epoch>.jpg` |
 | Desktop screen frames + click crops | `data/desktop_frames/*.jpg` |
-| Voiceprints | `data/speakers/*.npy` (one per enrolled person) |
-| Semantic index | `data/lance/` (LanceDB, 384-d embeddings) |
+| Voiceprints | `data/speakers/*.npy` |
+| Semantic index | `data/lance/` (LanceDB) |
 | Model-call log | `data/model_calls.jsonl` |
 | Escalation distill trail | `data/escalate_distill.jsonl` |
 | Onboarding profile | `data/onboarding_profile.json` |
-| Source policy table (checked in — ships with the repo) | `data/source_policies.json` |
+| Source policy table (checked in) | `data/source_policies.json` |
+| Peer / phone channel state | under `data/` (peer + phone registries) |
 | Browser-agent sessions & profiles | `./sessions/` |
 | Model weights | `~/.cache/huggingface` |
 
-The timeline reloads from `data/quill.db` on startup, so everything survives
-restarts. Raw artifacts are served back through `/artifact`, which is
-**path-confined to the data directory** so it can't read arbitrary files. The
-`data/` and `sessions/` trees are git-ignored, except the checked-in config
-tables (`model_prices.json`, `source_policies.json`).
+The timeline reloads from `data/quill.db` on startup. `/artifact` is
+**path-confined to the data directory**. `data/` and `sessions/` are
+git-ignored except checked-in config tables (`model_prices.json`,
+`source_policies.json`).
 
 ---
 
@@ -1130,84 +897,42 @@ tables (`model_prices.json`, `source_policies.json`).
 
 ```
 run_all.py               launch everything (capture in-process + agent as child)
-run_audio.py             M1 standalone — live transcription
-run_vision.py            M2 standalone — live webcam understanding
+run_audio.py             live transcription
+run_vision.py            live webcam understanding
 run_desktop.py           desktop-agent standalone driver
 exec_webapp.py           browser agent standalone (with Mnemos memory bridge)
 
 app/
   config.py              central settings (frozen dataclasses, env-driven)
-  events.py              Event schema + EventBus (async pub/sub)
-  main.py                FastAPI app + startup wiring (worker chain, watchers)
-  storage.py             SQLite: events, facts, people, relations, reflections,
-                         turns, sessions, activities, jobs, agent runs
+  events.py              Event schema + EventBus
+  main.py                FastAPI app + startup wiring
+  storage.py             SQLite: events, facts, people, relations, …
   vectorstore.py         LanceDB semantic index
-  api/routes.py          every HTTP endpoint + the Console HTML
+  api/routes.py          HTTP endpoints + Console HTML
+  api/peer_page.py       Team pairing UI
+  api/profile_page.py    Living user profile UI
+  api/org_page.py        Org living brief UI
   services/
-    audio.py             mic → VAD → Whisper → Event
-    ingest_filter.py     ASR hygiene (drops hallucinations / dupes)
-    speakers.py          ECAPA speaker ID (clusters + named voiceprints)
-    vision.py            webcam → frame selection → VLM → Event
-    vlm.py / vlm_gemini.py   vision clients (local-first / Claude / Gemini)
-    desktop_capture.py   screen + click capture (opt-in)
-    notifications.py     Windows toast capture (Phone Link / iPhone mirror)
-    phone_link.py        drive Phone Link (launch / read / send SMS)
-    phone_watcher.py     proactive "reply to this?" offers
-    memory.py            Memory Engine (subscribes to the bus)
-    embeddings.py        local sentence-transformers embedder
-    consolidation.py     utterances → turns
-    sessions.py          turns → sessions
-    activity.py          desktop events → activity blocks
-    worker.py            durable background job runner (one queue, one worker)
-    extractor.py         turns → tasks / commitments / claims
-    resolution.py        person resolution (exact → prefix → embedding)
-    reflector.py         daily facts → grounded, reviewable insights
-    graph.py             knowledge graph (rebuild + context_for_person)
-    onboarding.py        one-time profile seeding
-    agent_planner.py     Personal Agent Layer (goal → Plan of ActionPackets)
-    agent_log.py         Recorder + ActionPacket (runs / packets / verdicts)
-    agent_bridge.py      lazily-started worker owning the browser agent
-    multitask.py         mixed-message split-before-route fan-out
-    readiness.py         unified action-readiness score (auto/offer/review/hold)
-    anticipation.py      likely-next offers from activity patterns (opt-in)
-    todo_watcher.py      proactive "run these to-dos?" offers
-    task_offer.py        proactive "run this spoken task?" offers
-    model_router.py      model selection + local-first text policy + suspect gates
-    ollama_text.py       local Ollama text client
-    escalate_log.py      local→parent distillation trail (+ human verdicts)
-    few_shot.py          retrieval few-shot correction from verified verdicts
-    grounding.py         structured chat grounding (graph/tasks/screen first) + sources
-    model_log.py         per-call model usage log
-    llm.py               chat entry (memory retriever; local-first when enabled)
-    voice.py             TTS (stub)
+    memory.py            Memory Engine
+    people_pipeline.py   People Intelligence v2
+    graph.py             knowledge graph rebuild + context_for_person
+    peer_channel.py      Mnemos↔Mnemos asks + disclosure policy
+    phone_channel.py     QR-paired phone channel
+    meta_memory.py       at-risk / stale / forget audits
+    audio.py · vision.py · desktop_capture.py · notifications.py
+    consolidation.py · sessions.py · activity.py · worker.py
+    extractor.py · resolution.py · reflector.py · onboarding.py
+    agent_planner.py · agent_bridge.py · readiness.py · multitask.py
+    model_router.py · ollama_text.py · escalate_log.py · few_shot.py
+    grounding.py · llm.py · voice.py
+    todo_watcher.py · task_offer.py · anticipation.py · phone_watcher.py
+    meeting_*.py         meeting join / notes / enhance / chat / mode
 
-browser_agent/           Exec.AI — route → plan → execute → verify web agent
-  orchestrator.py        the run_goal() loop
-  config.py              tiered models, dry-run levels, vision knobs
-  tools.py               click / type / navigate / read / ask_human / request_approval
-  perception.py          DOM + screenshot perception
-  modes.py               7 task-specific policies
-  failures.py            failure taxonomy + recovery ladder
-  memory.py              intent@site procedural learning
-  browser.py / llm.py / prompts.py / credentials.py / eval_tasks.py
-
-desktop_agent/           guarded OS control (the allowlist IS the sandbox)
-  guards.py              the security boundary — pure decision logic
-  driver.py              DesktopDriver (launch apps, make dirs, allowlisted cmds)
-  config.py              jail, allowlists, budgets
-
-tests/                   unit suite (~1,600 tests; run with
-                         `python -m pytest tests -q`)
-scripts/                 download_models · enroll_speaker · run_extract ·
-                         eval_agent · eval_vision_task · test_track_a ·
-                         test_reflection · test_planner · bench_vision ·
-                         diagnose_camera · …
-  bench_text.py          learning-loop bench: replay labeled rows vs human gold
-  distill_label.py       CLI verdicts on distill rows (list / show / label)
-  distill_curate.py      training-set curation + readiness report
-  train_lora.py          Phase 3: curate → train (WSL2) → package → gate
-  lora_train_wsl.py      the Linux half — Unsloth QLoRA + merged-GGUF export
-  phone_link/            PowerShell UI-automation scripts
+browser_agent/           Exec.AI web agent
+desktop_agent/           guarded OS control
+tests/                   ~1,600 unit tests
+scripts/                 download_models · enroll_speaker · eval_* · distill_* ·
+                         train_lora · kg_cutover_soak · phone_link/ …
 ```
 
 ---
@@ -1215,118 +940,85 @@ scripts/                 download_models · enroll_speaker · run_extract ·
 ## Development & testing
 
 ```powershell
-python -m pytest tests -q               # the unit suite (~1,600 tests)
-make eval                               # golden evals with hard thresholds
-python scripts/test_track_a.py          # facts layer, assertion-based
-python scripts/test_reflection.py       # daily reflection + grounding check
-python scripts/test_planner.py          # context selection, risk table, compilers
-python scripts/eval_agent.py            # browser-agent eval (routing + live tiers)
+python -m pytest tests -q               # ~1,600 tests
+make eval                               # golden harness (hard thresholds)
+make eval-people                        # people entity-resolution goldens
+make eval-people-live                   # smoke against local quill.db (no LLM)
 ```
 
-| Area | Coverage |
+| Suite | What it covers |
 |---|---|
-| **Unit suite** (`tests/`) | ~1,600 tests: approval binding, source policies, commitment lifecycle, meeting layer, ranking golden snapshots, escalate log, text/vision local routing, few-shot recall, grounding, the LoRA gate, chat verdicts, and friends — fast, hermetic (no network). Windows-only desktop suites skip cleanly on other platforms. |
-| **Golden evals** (`make eval`) | Checked-in goldens for commitment ownership, entity resolution, and contact attribution with hard pass thresholds and exit codes — CI-able today. `make eval-live` runs against your live corpus. |
-| **Facts layer** | `scripts/test_track_a.py`, `scripts/facts_schema_check.py`, `scripts/run_extract.py --demo`. |
-| **Reflection** | `scripts/test_reflection.py` — runs a daily reflection, checks grounding. |
-| **Personal Agent Layer** | `scripts/test_planner.py`, `scripts/test_agent_log.py`. |
-| **Browser agent** | `scripts/eval_agent.py` (routing tier tracks approval false-negatives, baseline 0), `scripts/test_approval_packet.py`, `scripts/eval_modes_dryrun.py`, `scripts/eval_vision_task.py` (the canvas-only access-code test). |
-| **Vision** | `scripts/check_vision.py`, `scripts/bench_vision.py`, `scripts/diagnose_camera.py`. |
-| **Desktop agent** | `tests/test_desktop_guards.py` (31) — the security boundary under direct test: path jail (traversal, absolute paths, Windows reserved device names), hard-block scan (destructive verbs, nested shells, metacharacters, secret paths), default-deny classification, launch-arg jailing, per-app open-target capability, and the autonomy auto-approve ladder (shell as its own axis). |
-
-**Conventions.** Config is centralized and env-driven (`app/config.py` frozen
-dataclasses); every service degrades gracefully rather than crashing on a
-missing key, camera, or model; each LLM boundary hides behind one swappable
-model constant so the router can retarget it; new capture modalities just
-publish `Event`s to the bus — no downstream changes.
+| **Unit suite** | Approval binding, source policies, commitment lifecycle, meeting layer, ranking snapshots, escalate log, local routing, few-shot, grounding, LoRA gate, peer channel, people pipeline — hermetic (no network). |
+| **Golden evals** | Commitment ownership, entity resolution, contact attribution with CI-able exit codes. |
+| **Desktop agent** | `tests/test_desktop_guards.py` — path jail, hard blocks, default-deny, autonomy ladder. |
 
 ---
 
 ## Security model
 
-Mnemos acts on your behalf, so its trust boundaries are explicit and layered:
+1. **Memory is context, never command authority.** Retrieved memory and peer
+   answers can inform a draft; only a **live human reply** authorizes send /
+   buy / delete / mutate.
+2. **Risk classification is a table**, not a guess (`blocked` never reaches a
+   surface).
+3. **Browser agent:** hash-bound, source-grounded approval packets; no
+   credential entry or CAPTCHA solving; dry-run levels cap every run.
+4. **Desktop agent:** allowlist *is* the sandbox (path jail, app/shell
+   allowlists, hard-block list, budgets).
+5. **Phone / peer channels:** pairing codes, token auth, redaction, offer-by-
+   default disclosure; inbound messages never grant command authority.
+6. **Desktop capture is opt-in**; no keystrokes.
+7. **`/artifact` is path-confined** to the data directory.
+8. **Approval hash binding** (`QUILL_APPROVAL_BIND=enforce`) — what you
+   approved is what executes; drift forces a fresh ask. Approvals expire;
+   duplicate sends are caught.
+9. **Source policies** (`data/source_policies.json`) bound what each source
+   class may mint. Missing table → deny, never allow.
+10. **Cloud egress is privacy-gated** — never-send refused, sensitive content
+    redacted, spend capped. Outcomes need evidence, not LLM claims alone.
 
-1. **Memory is context, never command authority.** Perception is
-   attacker-influenceable (anything said in the room, shown to the camera, or
-   pushed as a notification), so retrieved memory can inform a draft but can
-   never *approve* an irreversible action. Only a **live human reply**
-   authorizes send / buy / delete / mutate.
-2. **Risk classification is a table, not a guess.** The Planner's `RISK_TABLE`
-   maps action verbs to `low / medium / high / blocked`; `blocked` never
-   reaches an execution surface, anything ≥ medium forces the approval gate.
-3. **Browser agent:** irreversible steps gate behind a source-grounded approval
-   packet; it refuses to enter credentials or solve CAPTCHAs; dry-run levels
-   cap every run; per-mode approval patterns only ever *add* to the global
-   commit net.
-4. **Desktop agent — the allowlist *is* the sandbox:** path jail, app
-   allowlist, shell-verb allowlist, an unremovable hard-block list,
-   `shell=False` with args-as-list, tiered approval, audit log, budgets.
-5. **Phone Link** sends SMS only through the approval gate.
-6. **Desktop capture is opt-in**, captures no keystrokes, and click crops never
-   leave the machine unless screen VLM escalation is warranted.
-7. **Provenance serving** (`/artifact`) is path-confined to the data directory.
-8. **What you approved is what executes.** Approval packets are canonicalized
-   and hash-bound (`QUILL_APPROVAL_BIND=enforce`, the default): if the fields
-   about to execute drift from the approved hash — even across an agent
-   restart — the click is stopped, a diff is shown, and a fresh approval is
-   required. Approvals expire; duplicate sends are caught by lookback.
-9. **Perception minting is policy-bound.** `data/source_policies.json` decides
-   per source class what a terminal / news page / social feed / document may
-   mint (people, commitments, claims, contacts). A missing table degrades to
-   deny, never allow.
-10. **Cloud egress is privacy-gated** — never-send classes are refused,
-    sensitive/personal content is redacted before any Anthropic call, and each
-    call's max privacy class is logged. And **success claims need evidence**:
-    an LLM-only "it worked" records `outcome_uncertain`, never verified.
-
-> **Handle your keys carefully.** `.env` and `.credentials.env` are git-ignored
-> but hold live API keys in plaintext — don't share them, don't paste them into
-> screenshots, rotate anything exposed.
+> **Handle your keys carefully.** `.env` and `.credentials.env` are
+> git-ignored but hold live API keys in plaintext.
 
 ---
 
 ## Design ethos
 
-- **Local-first.** VAD, ASR, speaker ID, embeddings, vision — and, opt-in,
-  text — all run without a paid API call. Claude is used only where reasoning
-  or high stakes genuinely need it, and every such call is logged as
-  distillation data for shrinking the dependency over time.
-- **Cost control at every model boundary.** Frame selection, motion gating,
-  local-first routing with selective escalation, tiered agent models,
-  reasoning-effort knobs, adaptive screenshot attachment.
-- **Graceful degradation.** A missing API key, camera, local model, or
-  non-Windows OS degrades one feature — it never crashes the pipeline.
-- **Provenance + human review make trust earnable.** Every inference is
-  traceable to raw perception, every action is approvable, and every human
-  verdict is recorded as training signal.
+- **Memory first.** Capture exists to feed a trustworthy personal store —
+  searchable, provenance-linked, human-correctable.
+- **Network over notes.** People, orgs, and open loops are first-class so the
+  system can answer relational questions and keep work from falling through.
+- **Connection without surrender.** Peers and phones get composed answers under
+  your policy; raw memory stays local.
+- **Local-first.** VAD, ASR, speaker ID, embeddings, and opt-in vision/text run
+  without a paid call. Claude is for stakes and distillation.
+- **Graceful degradation.** Missing key, camera, local model, or non-Windows OS
+  drops a feature — never the pipeline.
+- **Trust is earned in the Console.** Every inference is traceable; every
+  action is approvable; every verdict is training signal.
 
 ---
 
 ## Known gaps & roadmap
 
-- **KG v2 read cutover** — the belief-store read path runs in shadow until
-  `cutover_ready()` sees 7 clean nightly parity reports (manual override:
-  `QUILL_KG_READ_V2`). Deliberately gated, not forced.
-- **Live evals** — `make eval` (offline goldens) is the gate that matters, but
-  `make eval-live` should run once against a real corpus before trusting the
-  People-v2 thresholds in production.
+- **KG v2 read cutover** — affiliation primary-read follows `cutover_ready()`
+  or `QUILL_KG_READ_V2`. Parity while `QUILL_KG_SHADOW=1`. Soak:
+  `python scripts/kg_cutover_soak.py`. Rollback: `QUILL_KG_READ_V2=0`.
+- **People calibration** — `make eval-people` / `make eval-people-live`.
+  Threshold overrides: `QUILL_PEOPLE_AUTO_RESOLVE` /
+  `QUILL_PEOPLE_AUTO_MARGIN` / `QUILL_PEOPLE_CREATE_NEW` (re-run goldens
+  before loosening defaults).
 - **Peer channel over LAN needs TLS** before pairing beyond localhost.
-- ~~**Voice / TTS stub**~~ — **closed**: [voice.py](app/services/voice.py) is
-  a real local TTS (SAPI5 on Windows, queue-threaded, auto-speaks replies).
-- ~~**Personal Agent Layer behind a flag**~~ — **closed 2026-08**: planner on
-  by default; risk table, readiness bands, and multi-task fan-out live.
-- ~~**Unit-test `desktop_agent/guards.py`**~~ — **closed 2026-07-17**:
-  the jail, hard blocks, default-deny classification, and the autonomy ladder
-  are pinned by tests (and the jail is now platform-independent).
-- ~~**Output-side feedback loop**~~ — **closed 2026-07-17**: verdicts flow
-  back as few-shot corrections, calibration evidence, bench data, and LoRA
-  training pairs (see [the learning loop](#the-learning-loop--from-verdicts-to-weights)).
-- ~~**Idle scheduling**~~ — **closed 2026-07-28**: the LoRA trainer runs on a
-  condition-driven idle scheduler (new-pairs + idle + AC + disk, with
-  backoff); reflection remains time-triggered.
-- **M6 connectors** — native email / CRM (the browser agent drives those UIs
-  directly for now; iCloud calendar sync exists).
+  Peer↔Person links are user-asserted only (`POST /peer/link`).
+- **M6 connectors** — native Gmail/Outlook/HubSpot OAuth or IMAP still
+  deferred. Capture-first slice: Outlook/Gmail windows classify as `email` and
+  enrich People v2 contacts + `works_at` via
+  `people_pipeline.ingest_email_network`.
 - **Postgres / object storage** — deferred, gated on a second device.
+
+Closed recently: local TTS (`voice.py`), Personal Agent Layer on by default,
+desktop-agent guard tests, verdict → few-shot/LoRA learning loop, idle LoRA
+scheduler.
 
 ---
 
@@ -1339,7 +1031,6 @@ production software; APIs and schemas may change without notice.
 under [scripts/phone_link/](scripts/phone_link/) are adapted from the
 MIT-licensed `phonelink-mcp-server` project and retain that attribution.
 
-**Deeper docs:** the interactive API reference lives at
-<http://127.0.0.1:8000/docs> when the server is running; per-subsystem design
-notes are inline as module docstrings. Dated build logs and architecture
-deep-dives are maintained in a separate internal docs repo.
+**Deeper docs:** interactive API at <http://127.0.0.1:8000/docs> when the
+server is running; per-subsystem design notes live in module docstrings.
+Tester install: [TESTER_SETUP.md](TESTER_SETUP.md).

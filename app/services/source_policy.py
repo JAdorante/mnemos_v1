@@ -67,7 +67,25 @@ _ARTICLE_MENTIONED = re.compile(
     r"\b(?:according\s+to|per)\s+(?:the\s+)?(?:article|story|report)\b",
     re.I,
 )
-_EMAIL_WINDOW = re.compile(r"\b(?:outlook|gmail|mail|inbox|thunderbird)\b", re.I)
+# Desktop + webmail titles: classic Outlook, New Outlook, Gmail tab, Apple Mail.
+_EMAIL_WINDOW = re.compile(
+    r"\b(?:(?:new\s+)?outlook(?:\s+mail)?|outlook\.office(?:365)?|"
+    r"mail\.google|gmail|google\s*mail|yahoo\s*mail|hotmail|proton\s*mail|"
+    r"thunderbird|apple\s*mail|\bmail\b|\binbox\b|"
+    r"microsoft\s*365.*mail|ola\.office)\b",
+    re.I,
+)
+# OCR / transcript chrome that marks a captured email even when the window
+# title is just "Chrome" or "Edge". Require header-shaped lines — a lone
+# address must NOT reclassify news / docs as email.
+_EMAIL_HEADERS = re.compile(
+    r"(?:^|\n)\s*(?:from|to|cc|bcc|subject)\s*:\s*\S",
+    re.I,
+)
+_EMAIL_CHROME = re.compile(
+    r"\b(?:reply\s+all|forward(?:ed)?\s+message)\b",
+    re.I,
+)
 _CODE_WINDOW = re.compile(
     r"\b(?:visual studio code|vscode|\bcursor\b|intellij|pycharm|sublime|"
     r"atom|neovim|\bvim\b|xcode)\b",
@@ -158,10 +176,18 @@ def classify_source(
         return "social_composer"
     if _EMAIL_WINDOW.search(win):
         return "email"
+    # News / article markers win over header heuristics (contacts must stay deny).
     if (_NEWS_WINDOW.search(win) or _NEWS_WINDOW.search(blob)
             or _NEWS_CONTENT.search(blob)
             or _ARTICLE_MENTIONED.search(blob)):
         return "news_page"
+    # Browser chrome often drops the product name from the tab; trust
+    # From/To/Subject OCR when the window is a generic browser frame.
+    if (_EMAIL_HEADERS.search(blob) or _EMAIL_CHROME.search(blob)) and (
+            _EMAIL_WINDOW.search(blob)
+            or re.search(r"\b(?:chrome|edge|firefox|brave|safari|opera)\b", win, re.I)
+            or src.startswith("desktop")):
+        return "email"
     if _CODE_WINDOW.search(win) and (content_type or "").lower() == "code":
         return "code_editor"
     if _DOC_WINDOW.search(win):

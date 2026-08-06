@@ -47,9 +47,10 @@ without interrupting the human. A question is classified by the LOCAL model
 back to "offer" — the gate never widens on uncertainty, and the `personal`
 class can never be set to auto (enforced at write AND at enforcement time).
 
-Phase 3+ (not here): claims -> belief store, peer <-> Person node linking
-(deferred on purpose: the entity-hygiene gates must vet peer names like any
-other, or we recreate the junk-people bug), presence, task handoff.
+Phase 3 (partial): peer <-> Person linking is USER-ASSERTED only (no auto-mint
+on pair — junk-people risk). Disclosure stays keyed by peer_id. Chat "ask Name:"
+may match linked Person aliases only when that person maps to a still-paired peer.
+Further: presence / broader claim ingest.
 """
 from __future__ import annotations
 
@@ -203,6 +204,8 @@ def claim_pairing(code: str, name: str, base_url: str,
             "last_seen": None,
             "asks": 0,
             "answers": 0,
+            # Never auto-mint a Person on pair (junk-people risk).
+            "person_id": None,
         }
         _save(_peers_path(), peers)
         name_out = peers[peer_id]["name"]
@@ -250,6 +253,7 @@ def join(url: str, code: str) -> dict:
             "last_seen": None,
             "asks": 0,
             "answers": 0,
+            "person_id": None,
         }
         _save(_peers_path(), peers)
         name = peers[peer_id]["name"]
@@ -287,6 +291,19 @@ def revoke(peer_id: str) -> bool:
         return True
 
 
+def _person_display(person_id: int | None) -> str | None:
+    if person_id is None:
+        return None
+    try:
+        from app.services.memory import memory
+        p = memory._ensure_store().get_person(int(person_id))
+        if p:
+            return str(p.get("name") or "").strip() or None
+    except Exception:
+        pass
+    return None
+
+
 def peers() -> list[dict]:
     """Registry rows for the UI — no tokens or hashes leave this module."""
     out = []
@@ -298,14 +315,96 @@ def peers() -> list[dict]:
             policy = _sanitize_policy(rec.get("policy") or {})
         except ValueError:
             policy = default_policy()
+        pid = rec.get("person_id")
+        try:
+            pid = int(pid) if pid is not None else None
+        except (TypeError, ValueError):
+            pid = None
         out.append({"peer_id": peer_id, "name": rec.get("name", "?"),
                     "base_url": rec.get("base_url", ""),
                     "created_at": rec.get("created_at"),
                     "last_seen": rec.get("last_seen"),
                     "asks": int(rec.get("asks") or 0),
                     "answers": int(rec.get("answers") or 0),
+                    "person_id": pid,
+                    "person_name": _person_display(pid),
                     "policy": policy})
     return out
+
+
+def link_person(peer_id: str, person_id: int) -> dict:
+    """User-asserted link from a paired peer to an existing Person row.
+
+    Never creates a Person here — caller may create first (with name_quality
+    gate) then pass the id. Disclosure remains keyed by peer_id.
+    """
+    try:
+        person_id = int(person_id)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "person_id required"}
+    try:
+        from app.services.memory import memory
+        person = memory._ensure_store().get_person(person_id)
+    except Exception as exc:
+        return {"ok": False, "error": f"store unavailable ({exc})"}
+    if not person:
+        return {"ok": False, "error": "unknown person"}
+    if person.get("canonical_person_id") or person.get("hide_from_people"):
+        return {"ok": False, "error": "person is hidden or merged"}
+    with _lock:
+        peers_reg = _load(_peers_path(), {})
+        rec = peers_reg.get(peer_id)
+        if not rec:
+            return {"ok": False, "error": "unknown peer"}
+        # One peer per person (and one person per peer).
+        for other_id, other in peers_reg.items():
+            if other_id == peer_id:
+                continue
+            try:
+                if int(other.get("person_id") or 0) == person_id:
+                    return {"ok": False,
+                            "error": f"person already linked to peer {other_id}"}
+            except (TypeError, ValueError):
+                continue
+        rec["person_id"] = person_id
+        peers_reg[peer_id] = rec
+        _save(_peers_path(), peers_reg)
+    return {"ok": True, "peer_id": peer_id, "person_id": person_id,
+            "person_name": str(person.get("name") or "")}
+
+
+def unlink_person(peer_id: str) -> dict:
+    """Clear the optional Person link on a peer (pairing unchanged)."""
+    with _lock:
+        peers_reg = _load(_peers_path(), {})
+        rec = peers_reg.get(peer_id)
+        if not rec:
+            return {"ok": False, "error": "unknown peer"}
+        rec["person_id"] = None
+        peers_reg[peer_id] = rec
+        _save(_peers_path(), peers_reg)
+    return {"ok": True, "peer_id": peer_id, "person_id": None}
+
+
+def create_and_link_person(peer_id: str, name: str | None = None) -> dict:
+    """Create a Person (name_quality gated) then link — only on user confirm."""
+    with _lock:
+        peers_reg = _load(_peers_path(), {})
+        rec = peers_reg.get(peer_id)
+        if not rec:
+            return {"ok": False, "error": "unknown peer"}
+        display = (name or rec.get("name") or "").strip()
+    from app.services.name_quality import is_plausible_person, normalize_person_name
+    if not is_plausible_person(display):
+        return {"ok": False, "error": "name fails person-quality gate"}
+    try:
+        from app.services.memory import memory
+        store = memory._ensure_store()
+        canon = normalize_person_name(display) or display
+        pid = int(store.insert_person(canon))
+    except Exception as exc:
+        return {"ok": False, "error": f"could not create person ({exc})"}
+    return link_person(peer_id, pid)
 
 
 def _touch(peer_id: str, counter: str) -> None:
@@ -852,9 +951,35 @@ _ASK_PLAIN_RE = re.compile(
 _POSSESSIVE_RE = re.compile(r"(?:'s)?\s+(?:mnemos|assistant|instance)\s*$", re.I)
 
 
+def _person_alias_keys(person_id: int) -> set[str]:
+    """Display + alias tokens for a linked Person (casefolded)."""
+    keys: set[str] = set()
+    try:
+        from app.services.memory import memory
+        p = memory._ensure_store().get_person(int(person_id))
+        if not p:
+            return keys
+        names = [p.get("name"), p.get("canonical_name")]
+        aliases = p.get("aliases") or []
+        if isinstance(aliases, list):
+            names.extend(aliases)
+        for raw in names:
+            n = str(raw or "").casefold().strip()
+            if n:
+                keys.add(n)
+                keys.add(n.split()[0])
+    except Exception:
+        pass
+    return keys
+
+
 def _resolve_peer_name(who: str) -> dict | None:
     """A paired peer whose name matches `who` (case-insensitive; full name or
-    first token; trailing "'s mnemos/assistant" stripped), else None."""
+    first token; trailing "'s mnemos/assistant" stripped), else None.
+
+    Also matches aliases of a user-linked Person — only when that person still
+    maps to a paired peer_id (never invents a peer from a Person alone).
+    """
     who = _POSSESSIVE_RE.sub("", (who or "").strip())
     who = re.sub(r"'s$", "", who, flags=re.I)
     key = who.casefold().strip()
@@ -863,6 +988,9 @@ def _resolve_peer_name(who: str) -> dict | None:
     for p in peers():
         name = str(p.get("name") or "").casefold()
         if name and (key == name or key == name.split()[0]):
+            return p
+        pid = p.get("person_id")
+        if pid is not None and key in _person_alias_keys(int(pid)):
             return p
     return None
 

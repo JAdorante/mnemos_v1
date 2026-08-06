@@ -1,0 +1,14 @@
+Inbox - Jane Doe - Outlook
+From: Jordan Lee <jordan.lee@acmerobotics.com>
+To: you@example.com
+Cc: Sam Rivera <sam.rivera@acmerobotics.com>
+Subject: Q3 deck follow-up
+
+Hi —
+
+Attached is the latest deck. Let's sync Thursday.
+
+Best,
+Jordan Lee
+Acme Robotics
+Principal Engineer

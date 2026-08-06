@@ -5,6 +5,7 @@ stale facts, and forget candidates (review-first reflection items).
 """
 from __future__ import annotations
 
+import os
 import time
 from typing import Any
 
@@ -15,6 +16,10 @@ DROPPED_DAYS = 21.0
 FADING_DAYS = 60.0
 QUESTION_DAYS = 14.0
 WEAKEN_DAYS = 30.0
+# Multi-year wrong-year ISO dues (audit: 2023-07-07 → 1125d) are Memory cleanup,
+# not urgency / chat fuel. Align with QUILL_REASONER_MAX_OVERDUE_D.
+MAX_AT_RISK_OVERDUE_D = float(
+    os.environ.get("QUILL_REASONER_MAX_OVERDUE_D", "60") or "60")
 
 
 def _auto_urgency_enabled() -> bool:
@@ -44,8 +49,11 @@ def scan_at_risk(store, *, now: float | None = None) -> list[dict]:
             due_ts = float(due)
         elif isinstance(due, str) and due.strip():
             try:
-                from datetime import datetime
-                due_ts = datetime.fromisoformat(due.replace("Z", "+00:00")).timestamp()
+                from app.services.clock import coerce_due, is_iso_due, parse_due
+                # ISO as-is; legacy US slash / free text via coerce (junk → None).
+                norm = due if is_iso_due(due) else coerce_due(due)
+                if norm and is_iso_due(norm):
+                    due_ts = parse_due(norm).timestamp()
             except Exception:
                 due_ts = None
         extracted = float(f.get("extracted_at") or f.get("updated_at") or 0)
@@ -54,8 +62,11 @@ def scan_at_risk(store, *, now: float | None = None) -> list[dict]:
         if due_ts is not None:
             dt = due_ts - now
             if dt < 0:
-                risk = min(1.0, 0.75 + min(14.0, -dt / 86400.0) * 0.04)
-                why.append(f"overdue by {int(-dt / 86400) or 1}d")
+                overdue_d = int(-dt / 86400) or 1
+                if overdue_d > MAX_AT_RISK_OVERDUE_D:
+                    continue  # wrong-year / multi-year junk → Memory cleanup
+                risk = min(1.0, 0.75 + min(14.0, float(overdue_d)) * 0.04)
+                why.append(f"overdue by {overdue_d}d")
             elif dt < 2 * 86400:
                 risk = 0.78
                 why.append("due within 2 days")

@@ -510,9 +510,11 @@ function renderEntityList(){
   const rows=entityCache.filter(x=>!q||x.name.toLowerCase().includes(q));
   if(!rows.length){el.innerHTML='<div class="empty">Nothing yet — mention orgs, projects, and tools in chat or speech.</div>';return;}
   el.innerHTML=rows.map(x=>{
+    const brief=(x.kind==='org'||x.kind==='company'||x.kind==='organization')
+      ?' <a class="chip" href="/org/'+x.id+'" onclick="event.stopPropagation()">brief</a>':'';
     const row='<div class="prow" data-eid="'+x.id+'">'
       +'<div style="flex:1"><span class="nm">'+MnemosEsc(x.name)+'</span>'
-      +' <span class="chip">'+MnemosEsc(x.kind)+'</span>'
+      +' <span class="chip">'+MnemosEsc(x.kind)+'</span>'+brief
       +'<div class="meta">connection '+x.weight.toFixed(1)+' · '+fmtSeen(x.last_seen)+'</div></div>'
       +'<span class="meta">'+(openEntityId===x.id?'▾':'▸')+'</span></div>';
     return row+(openEntityId===x.id?'<div class="pdetail" id="eDetail"><div class="lead">Loading…</div></div>':'');
@@ -534,6 +536,8 @@ async function loadEntityDetail(eid){
   const host=document.getElementById('eDetail'); if(!host) return;
   const x=await (await fetch('/entities/'+eid)).json();
   let h='<h3>'+MnemosEsc(x.name)+'</h3>';
+  if(x.kind==='org'||x.kind==='company'||x.kind==='organization')
+    h+='<div style="margin:6px 0 10px"><a href="/org/'+eid+'">Open living brief →</a></div>';
   if(x.aliases&&x.aliases.length)
     h+='<div>'+x.aliases.map(a=>'<span class="chip">'+MnemosEsc(a)+'</span>').join('')+'</div>';
   h+='<div class="plabel">Category</div><div>'

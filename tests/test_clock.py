@@ -26,16 +26,25 @@ class ClockTests(unittest.TestCase):
         self.assertEqual(
             clock.coerce_due("2026-07-25T15:00:00"), "2026-07-25T15:00:00")
 
-    def test_coerce_due_preserves_free_text(self) -> None:
-        self.assertEqual(clock.coerce_due("Friday"), "Friday")
+    def test_coerce_due_drops_free_text(self) -> None:
+        self.assertIsNone(clock.coerce_due("Friday"))
+        self.assertIsNone(clock.coerce_due("immediate"))
+        self.assertIsNone(clock.coerce_due("Jul 7"))
+        self.assertIsNone(clock.coerce_due("overdue by 112d"))
         self.assertIsNone(clock.coerce_due(""))
         self.assertIsNone(clock.coerce_due(None))
+
+    def test_coerce_due_normalizes_us_slash(self) -> None:
+        self.assertEqual(clock.coerce_due("3/27/2026"), "2026-03-27")
+        self.assertEqual(
+            clock.coerce_due("7/18/2026, 3:01:41 PM"), "2026-07-18T15:01:41")
 
     def test_format_due_relative(self) -> None:
         now = dt.datetime(2026, 7, 23, 12, 0, 0)
         self.assertIn("today", clock.format_due_for_prompt("2026-07-23", now))
         self.assertIn("tomorrow", clock.format_due_for_prompt("2026-07-24", now))
         self.assertIn("overdue", clock.format_due_for_prompt("2026-07-20", now))
+        # Legacy free-text still displays as-is when already on disk.
         self.assertEqual(clock.format_due_for_prompt("Friday", now), "Friday")
 
     def test_graph_due_days_understands_iso(self) -> None:

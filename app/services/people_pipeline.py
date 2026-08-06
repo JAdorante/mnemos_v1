@@ -711,3 +711,179 @@ def _bump_promotion(store, person_id: int, relevance: float, ts: float) -> None:
 def _sigmoid(x: float) -> float:
     import math
     return 1.0 / (1.0 + math.exp(-x))
+
+
+# --- desktop email capture → contacts + org affiliation -------------------
+_FREE_MAIL = frozenset({
+    "gmail.com", "googlemail.com", "yahoo.com", "yahoo.co.uk", "hotmail.com",
+    "outlook.com", "live.com", "msn.com", "icloud.com", "me.com", "mac.com",
+    "aol.com", "proton.me", "protonmail.com", "mail.com", "gmx.com",
+})
+_FROM_TO_RE = re.compile(
+    r"(?im)^\s*(?P<field>from|to|cc|bcc)\s*:\s*(?P<body>.+)$")
+_ANGLE_EMAIL = re.compile(
+    r"(?:(?P<name>[A-Z][\w.'\-]+(?:\s+[A-Z][\w.'\-]+){0,3})\s*)?"
+    r"[<\[]?(?P<email>[\w.+-]+@[\w.-]+\.\w{2,})[>\]]?",
+)
+_SIG_BLOCK_RE = re.compile(
+    r"(?:^|\n)--\s*\n(?P<sig>.{10,400})$|"
+    r"(?:^|\n)(?:best|regards|thanks|thank you|cheers)[,!]?\s*\n(?P<sig2>.{10,400})$",
+    re.I | re.S)
+_ORG_HINT = re.compile(
+    r"\b(?:inc|llc|ltd|corp|corporation|company|co\.|labs?|robotics|"
+    r"systems|technologies|group|partners|ventures|studio|agency)\b",
+    re.I)
+
+
+def parse_email_parties(text: str) -> list[dict]:
+    """Pull From/To/Cc parties + signature hint from OCR/transcript text."""
+    parties: list[dict] = []
+    seen: set[str] = set()
+    for m in _FROM_TO_RE.finditer(text or ""):
+        field = m.group("field").lower()
+        body = m.group("body") or ""
+        for em in _ANGLE_EMAIL.finditer(body):
+            email = (em.group("email") or "").strip().lower()
+            if not email or email in seen:
+                continue
+            seen.add(email)
+            name = (em.group("name") or "").strip()
+            if not name:
+                local = email.split("@", 1)[0]
+                name = re.sub(r"[._]+", " ", local).title()
+            parties.append({
+                "role": field, "name": name, "email": email,
+                "quote": body.strip()[:200],
+            })
+    # Signature org: prefer a line with company cues or matching the From domain.
+    sig_org = None
+    sm = _SIG_BLOCK_RE.search(text or "")
+    from_domain = ""
+    for p in parties:
+        if p["role"] == "from":
+            from_domain = (p["email"].split("@", 1) + [""])[1]
+            break
+    brand = from_domain.split(".")[0] if from_domain else ""
+    if sm:
+        sig = sm.group("sig") or sm.group("sig2") or ""
+        lines = [ln.strip() for ln in sig.splitlines() if ln.strip()]
+        for line in lines:
+            if "@" in line or _EMAIL.search(line):
+                continue
+            if re.search(r"\b(?:phone|tel|mobile|www\.|http)\b", line, re.I):
+                continue
+            if not (2 <= len(line) <= 48):
+                continue
+            low = line.casefold().replace(" ", "")
+            if brand and brand in low:
+                sig_org = line
+                break
+            if _ORG_HINT.search(line):
+                sig_org = line
+                break
+    if sig_org:
+        for p in parties:
+            if p["role"] == "from" and not p.get("org"):
+                p["org"] = sig_org
+    return parties
+
+
+def org_from_email_domain(email: str) -> str | None:
+    """Corporate domain → org display name; free-mail domains → None."""
+    try:
+        domain = (email or "").split("@", 1)[1].lower().strip()
+    except IndexError:
+        return None
+    if not domain or domain in _FREE_MAIL or domain.endswith(".example.com") \
+            or domain == "example.com":
+        return None
+    # strip common second-level consumer-ish hosts
+    if domain.startswith("mail.") or domain.startswith("email."):
+        domain = domain.split(".", 1)[-1]
+    label = domain.split(".")[0]
+    if not label or len(label) < 2:
+        return None
+    return label.replace("-", " ").title()
+
+
+def ingest_email_network(
+    text: str,
+    *,
+    store,
+    event_id: int | None = None,
+    event_source: str = "desktop.screen",
+    window: str = "",
+    now: float | None = None,
+) -> dict:
+    """When capture is email-class: mint contacts + works_at from headers.
+
+    Capture-first CRM slice — no OAuth/IMAP. User-asserted quality gates still
+    apply via name_quality / People v2 resolve.
+    """
+    if not enabled() or not (text or "").strip():
+        return {"ok": False, "reason": "disabled_or_empty", "parties": 0}
+    policy = sp.policy_for_event(
+        event_source=event_source, window=window, text=text)
+    if policy.source_class != "email":
+        return {"ok": False, "reason": f"source_class={policy.source_class}",
+                "parties": 0}
+    if not policy.extract_contacts and not policy.update_people:
+        return {"ok": False, "reason": "policy_deny", "parties": 0}
+    ts = now if now is not None else time.time()
+    parties = parse_email_parties(text)
+    written = 0
+    affiliations = 0
+    for party in parties:
+        name = party.get("name") or ""
+        email = party.get("email") or ""
+        if not email:
+            continue
+        pid = None
+        try:
+            pid = store.find_person_by_contact("email", email)
+        except Exception:
+            pid = None
+        if not pid and name and nq.is_plausible_person(name):
+            res = resolve_person_mention(
+                name, store=store, event_id=event_id,
+                event_source=event_source, window=window, text=text,
+                grammatical_role="email_" + party.get("role", "party"),
+                now=ts, relationship_boost=0.75)
+            pid = res.person_id
+        if not pid:
+            continue
+        if policy.extract_contacts:
+            try:
+                store.upsert_contact_point(
+                    person_id=int(pid), type_="email",
+                    value_display=email, value_normalized=email,
+                    confidence=0.9, attribution_method="email_header",
+                    verification_status="attributed",
+                    source_event_id=event_id,
+                    evidence_quote=(party.get("quote") or text)[:240],
+                    discourse_role="email_" + party.get("role", "party"),
+                    ts=ts, created_by="system",
+                    pipeline_version=PIPELINE_VERSION)
+                written += 1
+            except Exception:
+                pass
+        org_name = party.get("org") or org_from_email_domain(email)
+        if org_name and policy.update_people and policy.relationship_evidence:
+            try:
+                eid = store.resolve_entity(org_name, "org", ts=ts)
+                store.add_relation(
+                    "person", int(pid), "works_at", "entity", int(eid),
+                    origin="asserted", ts=ts,
+                    quote=f"{name} <{email}>", source_class="email")
+                from app.services import kg_beliefs
+                kg_beliefs.record_from_relation(
+                    store, subj_type="person", subj_id=int(pid),
+                    predicate="works_at", obj_type="entity", obj_id=int(eid),
+                    origin="asserted", source_event_id=event_id,
+                    confidence=0.7, ts=ts,
+                    quote=f"{name} <{email}>", source_class="email")
+                affiliations += 1
+            except Exception:
+                pass
+    return {"ok": True, "parties": len(parties), "contacts": written,
+            "affiliations": affiliations}
