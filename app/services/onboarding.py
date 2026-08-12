@@ -109,8 +109,25 @@ def _item_key(section: str, payload: Any) -> str:
 
 
 def _predicate(relationship: str) -> str:
-    """'Works with' -> 'works_with'; empty/junk -> generic 'knows'."""
-    words = [w for w in (relationship or "").lower().split() if w.isalpha()]
+    """Map free-text relationship to a graph predicate.
+
+    Recognizes reporting-line language so org-network edges are typed
+    (`reports_to` / `manages`) instead of collapsing to works_with/knows.
+    Empty/junk -> generic 'knows'."""
+    raw = (relationship or "").strip().lower()
+    if not raw:
+        return "knows"
+    # Explicit org-hierarchy aliases
+    if raw in ("reports_to", "reports to", "manager", "my manager",
+               "boss", "direct manager"):
+        return "reports_to"
+    if raw in ("manages", "direct report", "report", "direct reports"):
+        return "manages"
+    if "report" in raw and "to" in raw:
+        return "reports_to"
+    if raw.startswith("manage") or "direct report" in raw:
+        return "manages"
+    words = [w for w in raw.split() if w.isalpha()]
     return "_".join(words) if words else "knows"
 
 
@@ -294,6 +311,11 @@ class _Ingestor:
             if _clip(a):
                 self.store.touch_person(pid, ts=self.now, alias=_clip(a))
         if pid:
+            # User-asserted network members are not ambient candidates.
+            try:
+                self.store.set_person_promotion(pid, "recognized", ts=self.now)
+            except Exception:
+                pass
             self.counts["people"] += 1
         return pid
 
@@ -353,6 +375,11 @@ def ingest(profile: dict | None = None, store: Store | None = None) -> dict:
     user_pid = 0
     if user_name:
         user_pid = store.resolve_person(user_name, ts=ing.now)
+        if user_pid:
+            try:
+                store.set_person_promotion(user_pid, "active", ts=ing.now)
+            except Exception:
+                pass
     if isinstance(ident, dict):
         for field, phrase in (
             ("name", "The user's name is {}."),
@@ -385,8 +412,16 @@ def ingest(profile: dict | None = None, store: Store | None = None) -> dict:
             desc = f"{name}" + (f" — {rel}" if rel else "") + (f": {note}" if note else "")
             eid_ev = ing._provenance("people", desc)
         if rel and user_pid:
-            ing.relation(("person", user_pid), _predicate(rel), ("person", pid),
+            pred = _predicate(rel)
+            ing.relation(("person", user_pid), pred, ("person", pid),
                          source_event_id=eid_ev)
+            # Mirror reporting-line inverse so manager↔report walks both ways.
+            if pred == "reports_to":
+                ing.relation(("person", pid), "manages", ("person", user_pid),
+                             source_event_id=eid_ev)
+            elif pred == "manages":
+                ing.relation(("person", pid), "reports_to", ("person", user_pid),
+                             source_event_id=eid_ev)
         if note:
             ing.claim("people", f"About {name}: {note}")
 

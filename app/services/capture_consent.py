@@ -14,7 +14,9 @@ from pathlib import Path
 from typing import Any
 
 # Per-source keys the UI and start_all agree on.
-SOURCES = ("mic", "webcam", "screen", "system_audio", "save_audio")
+# "clicks" is a sub-switch of desktop capture (mouse events); independent of
+# screen frames so testers can watch the display without flooding click rows.
+SOURCES = ("mic", "webcam", "screen", "system_audio", "save_audio", "clicks")
 
 _lock = threading.RLock()
 _cached: dict[str, Any] | None = None
@@ -72,7 +74,8 @@ def any_recording_source() -> bool:
     if not state.get("consented"):
         return False
     src = state.get("sources") or {}
-    return any(bool(src.get(s)) for s in ("mic", "webcam", "screen", "system_audio"))
+    return any(bool(src.get(s))
+               for s in ("mic", "webcam", "screen", "system_audio", "clicks"))
 
 
 def save(sources: dict[str, bool] | None = None, *,
@@ -128,15 +131,26 @@ def _apply_capability_flags(sources: dict[str, bool]) -> None:
     import os
     try:
         from app.config import settings
+        desktop_on = bool(sources.get("screen") or sources.get("clicks"))
         pairs = (
             ("webcam", "QUILL_VISION", settings.vision, "enabled"),
-            ("screen", "QUILL_DESKTOP_CAPTURE", settings.desktop_capture, "enabled"),
             ("system_audio", "QUILL_SYSTEM_AUDIO", settings.system_audio, "enabled"),
         )
         for src, env, obj, attr in pairs:
             on = bool(sources.get(src))
             os.environ[env] = "1" if on else "0"
             object.__setattr__(obj, attr, on)
+        # Master desktop pipeline on when screen frames and/or clicks are allowed.
+        os.environ["QUILL_DESKTOP_CAPTURE"] = "1" if desktop_on else "0"
+        object.__setattr__(settings.desktop_capture, "enabled", desktop_on)
+        object.__setattr__(settings.desktop_capture, "screen",
+                           bool(sources.get("screen")))
+        clicks_on = bool(sources.get("clicks"))
+        os.environ["QUILL_DESKTOP_CAPTURE_CLICKS"] = "1" if clicks_on else "0"
+        object.__setattr__(settings.desktop_capture, "clicks", clicks_on)
+        # Keep screen sub-flag aligned when only clicks is consented.
+        os.environ["QUILL_DESKTOP_CAPTURE_SCREEN"] = (
+            "1" if sources.get("screen") else "0")
     except Exception as exc:
         print(f"[capture_consent] capability patch skipped ({exc}).")
 

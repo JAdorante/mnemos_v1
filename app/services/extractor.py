@@ -529,9 +529,10 @@ class Extractor:
                     event_id=event_id, now=now,
                     event_source=event_source or "audio.whisper",
                     window=window)
-            if res.person_id:
-                return res.person_id
-        # Bound store — Resolver() defaults to process-global get_store().
+            # People v2 is authoritative: reject / leave_open must NOT fall
+            # through to ungated store.resolve_person (that minted Speaker N).
+            return int(res.person_id) if res.person_id else None
+        # Legacy path only when People v2 is off.
         pid = store.resolve_person(name, ts=now)
         return int(pid) if pid else None
 
@@ -557,6 +558,10 @@ class Extractor:
             return self_profile.self_person_id(store)
         if not spk or spk.lower() == "unknown speaker":
             return None
+        # Diarization placeholders are not people — never mint "Speaker 6".
+        import re as _re
+        if _re.match(r"(?i)^speaker(\s*\d+)?$", spk):
+            return None
         # Other labeled speaker saying "I'll…" — ownership is theirs.
         if enabled():
             res = resolve_person_mention(
@@ -568,8 +573,8 @@ class Extractor:
             )
             if res.person_id:
                 return res.person_id
-        # Bound store (not the process-global Resolver default) so tests and
-        # multi-DB installs attribute ownership to the right people row.
+            return None
+        # Legacy path only when People v2 is off.
         pid = store.resolve_person(spk, ts=now)
         return int(pid) if pid else None
 
@@ -666,10 +671,13 @@ class Extractor:
         assertion = item.get("assertion")
         try:
             from app.services.fact_gate import gate_fact
+            ids = [int(i) for i in (turn.event_ids or []) if i is not None]
             return gate_fact(kind, item.get("text") or "",
                              item.get("confidence"),
                              item.get("source_span", ""), turn.text,
-                             assertion=assertion, payload=item)
+                             assertion=assertion, payload=item,
+                             event_range=((min(ids), max(ids)) if ids else None),
+                             store=self._ensure_store())
         except Exception:
             if assertion in ("quoted", "hypothetical"):
                 class _Review:  # duck-typed review verdict
@@ -780,6 +788,14 @@ class Extractor:
             # A 'supersede' verdict: the just-inserted fact replaces the old.
             for old in v.supersede_ids:
                 store.supersede_fact(old, fid, now)
+            # WS-F: stamp the window's upper event bound so overlap dedup can
+            # compare ranges (the anchor is the lower bound, already on the row).
+            _ev = [int(i) for i in (turn.event_ids or []) if i is not None]
+            if len(_ev) > 1:
+                try:
+                    store.set_fact_event_hi(fid, max(_ev))
+                except Exception:
+                    pass
 
         def _candidate(kind: str, item: dict) -> dict | None:
             try:

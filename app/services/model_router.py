@@ -62,6 +62,11 @@ MODELS: dict[str, str] = {
                                                  "claude-opus-4-8")),
     # Meeting Layer P3 — session enhance (quality over cost; Sonnet-class).
     "enhance": os.environ.get("QUILL_ENHANCE_MODEL", "claude-sonnet-4-6"),
+    # Org AI Network — Anthropic parent for rollups / escalation / cascade.
+    "org_digest": os.environ.get("QUILL_ORG_DIGEST_MODEL", "claude-sonnet-4-6"),
+    "org_rollup": os.environ.get("QUILL_ORG_ROLLUP_MODEL", "claude-sonnet-4-6"),
+    "org_escalate": os.environ.get("QUILL_ORG_ESCALATE_MODEL", "claude-opus-4-8"),
+    "org_cascade": os.environ.get("QUILL_ORG_CASCADE_MODEL", "claude-sonnet-4-6"),
 }
 
 # Distill rows are a training signal. `prompt_head` and browse fields stay

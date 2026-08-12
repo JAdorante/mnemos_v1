@@ -8,17 +8,23 @@ Every fact the extractor wants to persist passes through gate_fact() first:
                            verbatim quote of the speech it cites is treated as a
                            hallucination and dropped (the telemetry check from
                            cog_telemetry.span_is_faithful, promoted to a gate)
-  3. near-duplicate      — cosine >= auto_dup_sim vs an ACTIVE fact of the same
+  3. span overlap        — structural dedup (People v3 WS-F, flag
+                           QUILL_FACT_DEDUP_V2): a same-kind ACTIVE fact whose
+                           source event range overlaps this one's >= 50% and
+                           whose text shares tokens is the same fact
+                           re-extracted from an overlapping window — collapsed
+                           deterministically, before embeddings ever run
+  4. near-duplicate      — cosine >= auto_dup_sim vs an ACTIVE fact of the same
                            kind: refresh that fact (touch_fact) instead of
                            inserting a twin row
-  4. update/contradiction — cosine in [adjudicate_sim, auto_dup_sim): a small
+  5. update/contradiction — cosine in [adjudicate_sim, auto_dup_sim): a small
                            local-model call decides duplicate / update /
                            unrelated; 'update' inserts the new fact and marks
                            the old one superseded ("meeting moved to 3pm"
                            replaces "meeting at 2pm" instead of coexisting)
-  5. field validation     — a malformed email/phone/price/URL/due date is a
+  6. field validation     — a malformed email/phone/price/URL/due date is a
                            drop, deterministic and model-free (plan 1.4)
-  6. assertion class      — quoted/hypothetical speech is routed to `review`
+  7. assertion class      — quoted/hypothetical speech is routed to `review`
                            instead of auto-inserted (plan 1.3)
 
 Best-effort by design: when the vector index or the adjudicator model is
@@ -30,6 +36,7 @@ Generic code: thresholds are config; nothing user-specific lives here.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from app.config import settings
@@ -85,6 +92,59 @@ def _adjudicate(kind: str, old_text: str, new_text: str) -> str:
         return "unrelated"
 
 
+def _token_jaccard(a: str, b: str) -> float:
+    ta = set(re.findall(r"\w{3,}", (a or "").lower()))
+    tb = set(re.findall(r"\w{3,}", (b or "").lower()))
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / len(ta | tb)
+
+
+def _range_overlap_frac(a_lo: int, a_hi: int, b_lo: int, b_hi: int) -> float:
+    """Overlap of two inclusive event-id ranges as a fraction of the SHORTER
+    range — a window fully containing a one-event legacy row scores 1.0."""
+    inter = min(a_hi, b_hi) - max(a_lo, b_lo) + 1
+    if inter <= 0:
+        return 0.0
+    return inter / min(a_hi - a_lo + 1, b_hi - b_lo + 1)
+
+
+def _overlap_dup(kind: str, text: str, event_range: tuple[int, int],
+                 store) -> Verdict | None:
+    """People v3 WS-F: structural dedup across overlapping extraction windows.
+
+    Overlapping source-event ranges mean the two facts cite the same stretch
+    of speech (which also implies same session — event ids are shared). The
+    token-similarity guard keeps two DIFFERENT facts born from one turn
+    ("send the deck" / "book the room" — identical ranges) apart; range
+    overlap alone would collapse them. Best-effort: any failure returns None
+    and the gate falls through to the embedding check."""
+    cfg = settings.facts
+    try:
+        s = store
+        if s is None:
+            from app.storage import get_store
+            s = get_store()
+        lo, hi = int(event_range[0]), int(event_range[1])
+        if hi < lo:
+            lo, hi = hi, lo
+        min_frac = getattr(cfg, "overlap_frac", 0.5)
+        min_tok = getattr(cfg, "overlap_token_sim", 0.5)
+        for row in s.overlap_fact_candidates(kind, lo, hi):
+            frac = _range_overlap_frac(lo, hi, int(row["lo"]), int(row["hi"]))
+            if frac < min_frac:
+                continue
+            if _token_jaccard(text, row.get("text") or "") < min_tok:
+                continue
+            return Verdict(
+                "dedup",
+                f"event-range overlap {frac:.2f} vs fact {row['id']}",
+                dup_fact_id=int(row["id"]))
+    except Exception:
+        return None
+    return None
+
+
 def _similar_active(kind: str, text: str, k: int = 4) -> list[tuple[int, float, str]]:
     """Nearest ACTIVE same-kind facts by cosine: [(fact_id, score, text)],
     best first. Empty when the vector index is unavailable."""
@@ -111,9 +171,15 @@ _REVIEW_ASSERTIONS = ("quoted", "hypothetical")
 def gate_fact(kind: str, text: str, confidence: float | None,
               span: str, source_text: str, *,
               assertion: str | None = None,
-              payload: dict | None = None) -> Verdict:
+              payload: dict | None = None,
+              event_range: tuple[int, int] | None = None,
+              store=None) -> Verdict:
     """Decide what to do with one candidate fact BEFORE it is persisted.
-    Pure decision — the caller (extractor._persist) applies it."""
+    Pure decision — the caller (extractor._persist) applies it.
+
+    `event_range` is the (min, max) source event id of the extraction window
+    (People v3 WS-F); `store` is only consulted for that structural check and
+    falls back to the process store when omitted."""
     cfg = settings.facts
     text = (text or "").strip()
     if not text:
@@ -153,6 +219,15 @@ def gate_fact(kind: str, text: str, confidence: float | None,
         v = Verdict("review", f"assertion={assertion} requires human review")
         _telemetry(v.action, v.reason, kind, text)
         return v
+
+    # People v3 WS-F: structural overlap dedup runs before the embedding
+    # check, so the embedding check only sees genuinely distinct candidates.
+    # getattr: older test configs (SimpleNamespace) predate these fields.
+    if getattr(cfg, "dedup_overlap", False) and event_range is not None:
+        v = _overlap_dup(kind, text, event_range, store)
+        if v is not None:
+            _telemetry(v.action, v.reason, kind, text)
+            return v
 
     if not cfg.dedup:
         return Verdict("insert")

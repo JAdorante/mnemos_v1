@@ -1255,6 +1255,15 @@ class Store:
                 self._conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_facts_state ON facts(state)")
                 self._conn.commit()
+            # People v3 WS-F: facts carry the full source event range of their
+            # extraction window ([source_event_id .. source_event_hi]) so the
+            # structural overlap dedup can spot the same fact re-extracted
+            # across overlapping windows. NULL hi = legacy single-event
+            # provenance, treated as a one-event range.
+            if fcols and "source_event_hi" not in fcols:
+                self._conn.execute(
+                    "ALTER TABLE facts ADD COLUMN source_event_hi INTEGER")
+                self._conn.commit()
             # relations.origin: added after the table shipped, so a DB created with
             # the first `relations` schema needs the column back-filled ('derived').
             rcols = {r["name"] for r in
@@ -1538,6 +1547,32 @@ class Store:
                 )
                 """
             )
+            self._conn.commit()
+
+            # People v3 WS-D: explicit alias rules written by human merges and
+            # splits. Consulted BEFORE embedding/score resolution: a positive
+            # rule binds the alias conclusively to its person; a negative rule
+            # removes the person from that alias's candidate set. The reason
+            # the justin/Justin Adorante split can never happen twice.
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS alias_rules (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    person_id INTEGER NOT NULL,
+                    alias_norm TEXT NOT NULL,
+                    kind TEXT NOT NULL CHECK(kind IN ('positive','negative')),
+                    created_by TEXT,
+                    created_at REAL NOT NULL,
+                    FOREIGN KEY (person_id) REFERENCES people(id)
+                )
+                """
+            )
+            self._conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_alias_rules "
+                "ON alias_rules(person_id, alias_norm, kind)")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_alias_rules_norm "
+                "ON alias_rules(alias_norm)")
             self._conn.commit()
 
             # correlation_id (plan 1.5): a live DB created before this column
@@ -4564,6 +4599,57 @@ class Store:
                 "WHERE id = ?", (state, ts, person_id))
             self._conn.commit()
 
+    def add_alias_rule(self, person_id: int, alias: str, kind: str, *,
+                       created_by: str = "", ts: float | None = None) -> bool:
+        """Record one alias rule (People v3 WS-D). kind: 'positive' binds the
+        alias conclusively to person_id; 'negative' bans that pairing. Aliases
+        are stored lowercased; duplicates are no-ops."""
+        import time as _t
+        alias_norm = (alias or "").strip().lower()
+        if not alias_norm or kind not in ("positive", "negative"):
+            return False
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO alias_rules "
+                "(person_id, alias_norm, kind, created_by, created_at) "
+                "VALUES (?,?,?,?,?)",
+                (int(person_id), alias_norm, kind, created_by or None,
+                 ts if ts is not None else _t.time()))
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def alias_rules_for(self, alias: str) -> list[dict]:
+        """All rules matching this alias (lowercased): [{person_id, kind}]."""
+        alias_norm = (alias or "").strip().lower()
+        if not alias_norm:
+            return []
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT person_id, kind FROM alias_rules WHERE alias_norm = ?",
+                (alias_norm,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def follow_canonical_person(self, person_id: int,
+                                max_hops: int = 5) -> int | None:
+        """Chase canonical_person_id redirects (absorbed → survivor) to the
+        live row. Returns None when the chain dead-ends or cycles."""
+        pid = int(person_id)
+        seen: set[int] = set()
+        with self._lock:
+            for _ in range(max_hops):
+                if pid in seen:
+                    return None
+                seen.add(pid)
+                row = self._conn.execute(
+                    "SELECT id, canonical_person_id FROM people WHERE id = ?",
+                    (pid,)).fetchone()
+                if row is None:
+                    return None
+                if not row["canonical_person_id"]:
+                    return int(row["id"])
+                pid = int(row["canonical_person_id"])
+        return None
+
     def soft_merge_people(self, survivor_id: int, absorbed_id: int, *,
                           reason: str = "", confidence: float = 0.0,
                           actor: str = "user", ts: float | None = None) -> int:
@@ -4571,6 +4657,9 @@ class Store:
         import time as _t
         ts = ts if ts is not None else _t.time()
         with self._lock:
+            absorbed = self._conn.execute(
+                "SELECT canonical_name, aliases FROM people WHERE id = ?",
+                (absorbed_id,)).fetchone()
             self._conn.execute(
                 "UPDATE people SET canonical_person_id = ?, hide_from_people = 1, "
                 "promotion_state = 'archived' WHERE id = ?",
@@ -4583,6 +4672,22 @@ class Store:
                  "people_v2.1", actor, ts))
             self._conn.commit()
             op_id = int(cur.lastrowid)
+        # People v3 WS-D: every merge writes positive alias rules for the
+        # absorbed spellings, so the identical future mention auto-binds to
+        # the survivor instead of re-splitting.
+        try:
+            spellings = []
+            if absorbed is not None:
+                spellings.append(absorbed["canonical_name"] or "")
+                try:
+                    spellings.extend(json.loads(absorbed["aliases"] or "[]"))
+                except Exception:
+                    pass
+            for alias in spellings:
+                self.add_alias_rule(survivor_id, alias, "positive",
+                                    created_by=f"merge:{op_id}", ts=ts)
+        except Exception:
+            pass
         # Change 1: the winner inherits the loser's blocking keys (never deleted).
         self.copy_node_keys("person", absorbed_id, survivor_id)
         # Change 4: merges feed the weight-fitting flywheel.
@@ -5446,6 +5551,37 @@ class Store:
             self._conn.commit()
         return deleted
 
+    def set_fact_event_hi(self, fact_id: int, hi: int) -> None:
+        """Record the upper bound of the extraction window's event range
+        (People v3 WS-F). source_event_id stays the anchor (= lower bound)."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE facts SET source_event_hi = ? WHERE id = ?",
+                (int(hi), fact_id))
+            self._conn.commit()
+
+    def overlap_fact_candidates(self, kind: str, lo: int, hi: int,
+                                limit: int = 8) -> list[dict]:
+        """ACTIVE same-kind facts whose source event range intersects [lo, hi]
+        (People v3 WS-F structural dedup). A row without source_event_hi is a
+        one-event range at source_event_id. Pure SQL — no embeddings."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT f.id, f.confidence, "
+                "f.source_event_id AS lo, "
+                "COALESCE(f.source_event_hi, f.source_event_id) AS hi, "
+                "COALESCE(t.text, c.text, f.text, f.source_span) AS text "
+                "FROM facts f "
+                "LEFT JOIN tasks t ON t.fact_id = f.id "
+                "LEFT JOIN commitments c ON c.fact_id = f.id "
+                "WHERE f.kind = ? AND f.state = 'active' "
+                "AND f.source_event_id IS NOT NULL "
+                "AND COALESCE(f.source_event_hi, f.source_event_id) >= ? "
+                "AND f.source_event_id <= ? "
+                "ORDER BY f.id DESC LIMIT ?",
+                (kind, int(lo), int(hi), limit)).fetchall()
+        return [dict(r) for r in rows]
+
     def touch_fact(self, fact_id: int, ts: float,
                    confidence: float | None = None) -> bool:
         """Re-assertion of an existing ACTIVE fact (the dedup path): refresh
@@ -5464,6 +5600,59 @@ class Store:
             # (outside the lock — record_node_access takes it itself).
             self.record_node_access("fact", fact_id, ts)
         return touched
+
+    def ttl_archive_candidates(self, cutoff_ts: float, max_conf: float,
+                               source_prefixes: tuple[str, ...] = (
+                                   "desktop.screen", "documents."),
+                               limit: int = 500) -> list[int]:
+        """Facts eligible for the People v3 WS-E ambient TTL: ACTIVE,
+        unreviewed, screen/document-mined, below the confidence ceiling, not
+        (re)asserted since cutoff, and never referenced by any surface (no
+        attention_impressions row — grounding, field, offer, anything).
+        Speech-derived facts never match the source filter — they are exempt
+        by construction."""
+        if not source_prefixes:
+            return []
+        src = " OR ".join("e.source LIKE ?" for _ in source_prefixes)
+        params: list = [f"{p}%" for p in source_prefixes]
+        params += [max_conf, cutoff_ts, limit]
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT f.id FROM facts f "
+                "JOIN events e ON e.id = f.source_event_id "
+                f"WHERE f.state = 'active' AND f.review IS NULL AND ({src}) "
+                "AND COALESCE(f.confidence, 0) < ? "
+                "AND COALESCE(f.updated_at, f.extracted_at) < ? "
+                "AND NOT EXISTS (SELECT 1 FROM attention_impressions ai "
+                "WHERE ai.node_type = 'fact' AND ai.node_id = f.id) "
+                "ORDER BY f.id LIMIT ?",
+                params).fetchall()
+        return [int(r["id"]) for r in rows]
+
+    def unreviewed_queue_stats(self, now: float) -> dict:
+        """Depth + age percentiles of the unreviewed facts queue — the WS-E
+        Console SLO (target: depth < 25, age p50 < 48h). Counts ACTIVE facts
+        no human has approved/dismissed yet."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT COALESCE(updated_at, extracted_at) AS ts FROM facts "
+                "WHERE state = 'active' AND review IS NULL "
+                "ORDER BY ts").fetchall()
+        ages = sorted(max(0.0, now - float(r["ts"] or now)) for r in rows)
+        depth = len(ages)
+        p50 = ages[depth // 2] if depth else 0.0
+        p90 = ages[int(depth * 0.9)] if depth else 0.0
+        return {"depth": depth, "age_p50_s": p50, "age_p90_s": p90}
+
+    def sessions_in_range(self, t0: float, t1: float) -> list[dict]:
+        """Sessions whose [start, end] intersects [t0, t1] — used to group the
+        review queue by session (WS-E sweep)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, start, end, text FROM sessions "
+                "WHERE end >= ? AND start <= ? ORDER BY start",
+                (t0, t1)).fetchall()
+        return [dict(r) for r in rows]
 
     def archive_fact(self, fact_id: int, ts: float) -> bool:
         """Retire a fact without a replacement (hygiene sweep: junk, empties,

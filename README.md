@@ -66,6 +66,7 @@ before anything irreversible.
 - [Security model](#security-model)
 - [Design ethos](#design-ethos)
 - [Known gaps & roadmap](#known-gaps--roadmap)
+- [Org AI Network (experimental)](#org-ai-network-experimental)
 - [License & status](#license--status)
 
 ---
@@ -910,6 +911,7 @@ app/
   vectorstore.py         LanceDB semantic index
   api/routes.py          HTTP endpoints + Console HTML
   api/peer_page.py       Team pairing UI
+  api/org_network_page.py Org AI Network UI
   api/profile_page.py    Living user profile UI
   api/org_page.py        Org living brief UI
   services/
@@ -917,6 +919,10 @@ app/
     people_pipeline.py   People Intelligence v2
     graph.py             knowledge graph rebuild + context_for_person
     peer_channel.py      Mnemos↔Mnemos asks + disclosure policy
+    org_client.py        Org Coordinator HTTP client
+    org_digest.py        Upward redacted status digests
+    org_priority.py      Downward company priority guidance
+    org_escalate.py      Strategic people-escalation (not model distill)
     phone_channel.py     QR-paired phone channel
     meta_memory.py       at-risk / stale / forget audits
     audio.py · vision.py · desktop_capture.py · notifications.py
@@ -930,9 +936,10 @@ app/
 
 browser_agent/           Exec.AI web agent
 desktop_agent/           guarded OS control
+org_coordinator/         Hybrid Org AI Network coordinator (roles/goals/digests)
 tests/                   ~1,600 unit tests
 scripts/                 download_models · enroll_speaker · eval_* · distill_* ·
-                         train_lora · kg_cutover_soak · phone_link/ …
+                         train_lora · kg_cutover_soak · org_network_smoke · phone_link/ …
 ```
 
 ---
@@ -1015,10 +1022,66 @@ make eval-people-live                   # smoke against local quill.db (no LLM)
   enrich People v2 contacts + `works_at` via
   `people_pipeline.ingest_email_network`.
 - **Postgres / object storage** — deferred, gated on a second device.
+- **Org AI Network (experimental)** — hybrid Org Coordinator + local digests /
+  priority cascade / smart escalation. OFF by default (`QUILL_ORG_NETWORK=0`).
+  See [Org AI Network](#org-ai-network-experimental).
 
 Closed recently: local TTS (`voice.py`), Personal Agent Layer on by default,
 desktop-agent guard tests, verdict → few-shot/LoRA learning loop, idle LoRA
 scheduler.
+
+---
+
+## Org AI Network (experimental)
+
+Hybrid company intelligence on top of personal Mnemos — **does not replace**
+capture, memory, peer consent, or approval gates.
+
+```
+  Employee Mnemos (local)          Org Coordinator (:8100)
+  ───────────────────────          ───────────────────────
+  capture → memory → digest ──►    directory (roles, reports_to)
+  priority injection ◄──────────   goals + cascade
+  peer org_* kinds                 escalate router + rollups
+```
+
+| Flag / env | Purpose |
+|---|---|
+| `QUILL_ORG_NETWORK` | Master switch (default off) |
+| `QUILL_ORG_COORDINATOR_URL` | Coordinator base URL (default `http://127.0.0.1:8100`) |
+| `QUILL_ORG_ROLE` | `ic` / `manager` / `exec` / `ceo` |
+| `QUILL_ORG_REPORTS_TO` | Manager's `node_id` |
+| `QUILL_ORG_MANAGER_PEER_ID` | Paired peer id for digest/escalate delivery |
+| `QUILL_ORG_DIGEST_MODEL` etc. | Anthropic parent models for org tasks |
+
+**Run with Mnemos** (`QUILL_ORG_NETWORK=1` in `.env`):
+
+```powershell
+python run_all.py
+# auto-starts Org Coordinator on :8100 unless already running
+# --no-org-coordinator to skip
+```
+
+**Or coordinator alone:**
+
+```powershell
+python -m org_coordinator.main
+```
+
+**UI:** <http://127.0.0.1:8000/org-network> — register, run digests, pull
+priorities, create goals. Also linked from Today / Team nav as **Org**.
+
+**Smoke (in-process, no live server):**
+
+```powershell
+python scripts/org_network_smoke.py
+```
+
+Raw memory never leaves the laptop. Coordinator stores role-scoped summaries
+and goals only. Claude remains the high-stakes parent via ModelRouter tasks
+`org_digest` / `org_rollup` / `org_escalate` / `org_cascade`. People
+escalation is logged separately in `data/org_escalations.jsonl` (not
+`escalate_distill`).
 
 ---
 

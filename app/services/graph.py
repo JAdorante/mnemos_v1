@@ -34,6 +34,9 @@ _STOP_NAMES = {"she", "he", "me", "i", "we", "they", "you", "it", "them"}
 AFFILIATION_PREDS = frozenset(
     {"works_at", "part_of", "member_of", "affiliated_with", "founded"})
 
+# Org reporting-line predicates (asserted via onboarding / org-network UI).
+REPORTING_PREDS = frozenset({"reports_to", "manages"})
+
 
 def _affiliations_from_kg(store: Store, person_id: int,
                           emap: dict | None = None) -> dict[int, dict]:

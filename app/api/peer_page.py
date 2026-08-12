@@ -56,7 +56,8 @@ td{border-top:1px solid var(--line);padding:9px 8px;vertical-align:top}
   <span class="page-sub">Team</span><span class="spacer"></span>
   <nav class="nav"><a href="/today">Today</a><a href="/chat">Chat</a><a href="/memory">Memory</a>
   <a href="/profile">You</a>
-  <a href="/desktop-access">Desktop</a><a href="/phone">Phone</a><a class="on" href="/peer">Team</a></nav></div>
+  <a href="/desktop-access">Desktop</a><a href="/phone">Phone</a><a class="on" href="/peer">Team</a>
+  <a href="/org-network">Org</a></nav></div>
 <div class="wrap">
   <h1>Team</h1>
   <p class="lead">Pair with a teammate who also runs @@BRAND@@. Their assistant can then ask

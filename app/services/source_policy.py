@@ -165,6 +165,8 @@ def classify_source(
         return "notification"
     if src.startswith("peer"):
         return "peer_answer"   # a teammate's Mnemos answered over the peer channel
+    if src.startswith("org"):
+        return "org_coordinator"
     if "chat" in src:
         return "direct_message"
 

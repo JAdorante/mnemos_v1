@@ -482,6 +482,22 @@ class FactHygieneConfig:
     # Cosine in [adjudicate_sim, auto_dup_sim): a small local-model call decides
     # duplicate / update / unrelated ("meeting moved to 3pm" supersedes "at 2pm").
     adjudicate_sim: float = float(_get("QUILL_FACT_ADJUDICATE_SIM", "0.72"))
+    # People v3 WS-F: structural span-overlap dedup. Two same-kind facts whose
+    # source event ranges overlap >= overlap_frac AND whose texts share tokens
+    # are one fact re-extracted across overlapping windows — collapsed before
+    # the embedding check ever runs. Off until the noise-eval gate passes (P1).
+    dedup_overlap: bool = _get("QUILL_FACT_DEDUP_V2", "0") not in ("0", "false", "False")
+    overlap_frac: float = float(_get("QUILL_FACT_OVERLAP_FRAC", "0.5"))
+    # Token-Jaccard floor for the structural check: distinct facts born from
+    # the SAME turn share an identical event range — range overlap alone must
+    # never collapse "send the deck" with "book the room".
+    overlap_token_sim: float = float(_get("QUILL_FACT_OVERLAP_TOKEN_SIM", "0.5"))
+    # People v3 WS-E: review-queue TTL. Unreviewed ambient (screen/document)
+    # facts below ttl_max_conf that nothing referenced for ttl_days auto-archive
+    # (never deleted). Speech-derived facts are exempt — they are the product.
+    ttl_enabled: bool = _get("QUILL_QUEUE_TTL", "0") not in ("0", "false", "False")
+    ttl_days: float = float(_get("QUILL_QUEUE_TTL_DAYS", "14"))
+    ttl_max_conf: float = float(_get("QUILL_QUEUE_TTL_MAX_CONF", "0.7"))
     # Semantic-search recency blend: score += weight * 0.5^(age_days/half_life).
     # 0 weight disables — pure cosine, the pre-hygiene behavior.
     recency_weight: float = float(_get("QUILL_MEMORY_RECENCY_WEIGHT", "0.08"))
@@ -568,7 +584,9 @@ class DesktopCaptureConfig:
     """
     enabled: bool = _get("QUILL_DESKTOP_CAPTURE", "0") not in ("0", "false", "False")
     screen: bool = _get("QUILL_DESKTOP_CAPTURE_SCREEN", "1") not in ("0", "false", "False")
-    clicks: bool = _get("QUILL_DESKTOP_CAPTURE_CLICKS", "1") not in ("0", "false", "False")
+    # OFF by default — click floods dominate ambient noise; opt in via Privacy
+    # ("Mouse clicks") or QUILL_DESKTOP_CAPTURE_CLICKS=1.
+    clicks: bool = _get("QUILL_DESKTOP_CAPTURE_CLICKS", "0") not in ("0", "false", "False")
     # Click VLM is OFF by default — coords + window + crop are cheap; describing
     # every click timed out locally and fell back to Claude. Opt in only when you
     # need "what was under the cursor" (still local-only, never escalates).
@@ -786,6 +804,45 @@ class PeerChannelConfig:
 
 
 @dataclass(frozen=True)
+class OrgNodeConfig:
+    """Hybrid Org AI Network node (see org_coordinator/ + services/org_*.py).
+
+    OFF by default — existing personal capture/memory/peer behaviour is
+    unchanged until QUILL_ORG_NETWORK=1. When on, this Mnemos registers with
+    a lightweight Org Coordinator, ships redacted upward digests, receives
+    downward priority packets, and can escalate strategic blockers. Raw
+    memory never leaves the machine; Claude remains the parent model via
+    ModelRouter tasks org_digest / org_escalate / org_cascade."""
+    enabled: bool = _get("QUILL_ORG_NETWORK", "0") not in ("0", "false", "False")
+    coordinator_url: str = _get("QUILL_ORG_COORDINATOR_URL",
+                                "http://127.0.0.1:8100").rstrip("/")
+    node_id: str = _get("QUILL_ORG_NODE_ID", "")
+    node_token: str = _get("QUILL_ORG_NODE_TOKEN", "")
+    # ic | manager | exec | ceo
+    role: str = _get("QUILL_ORG_ROLE", "ic").strip().lower() or "ic"
+    display_name: str = _get("QUILL_ORG_DISPLAY_NAME", "")
+    reports_to: str = _get("QUILL_ORG_REPORTS_TO", "")  # manager node_id
+    manager_peer_id: str = _get("QUILL_ORG_MANAGER_PEER_ID", "")
+    digest_interval_h: float = float(_get("QUILL_ORG_DIGEST_INTERVAL_H", "4"))
+    http_timeout_s: float = float(_get("QUILL_ORG_TIMEOUT_S", "30"))
+
+    @property
+    def state_path(self) -> str:
+        return _get("QUILL_ORG_STATE",
+                    f"{_get('QUILL_DATA_DIR', 'data')}/org_node_state.json")
+
+    @property
+    def priorities_path(self) -> str:
+        return _get("QUILL_ORG_PRIORITIES",
+                    f"{_get('QUILL_DATA_DIR', 'data')}/org_priorities.json")
+
+    @property
+    def escalations_path(self) -> str:
+        return _get("QUILL_ORG_ESCALATIONS",
+                    f"{_get('QUILL_DATA_DIR', 'data')}/org_escalations.jsonl")
+
+
+@dataclass(frozen=True)
 class IcloudConfig:
     """Read-only iCloud calendar sync (see services/icloud_calendar.py).
 
@@ -995,6 +1052,7 @@ class Settings:
     documents: DocumentsConfig = DocumentsConfig()
     phone: PhoneChannelConfig = PhoneChannelConfig()
     peer: PeerChannelConfig = PeerChannelConfig()
+    org: OrgNodeConfig = OrgNodeConfig()
     icloud: IcloudConfig = IcloudConfig()
     voice: VoiceConfig = VoiceConfig()
     attention: AttentionConfig = AttentionConfig()

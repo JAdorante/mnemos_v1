@@ -207,6 +207,53 @@ class PeoplePipelineTests(unittest.TestCase):
         p = self.store.get_person(res.person_id)
         self.assertEqual(p.get("promotion_state"), "candidate")
 
+    def test_single_token_does_not_create_new(self):
+        before = {p["name"] for p in self.store.all_people()}
+        res = pp.resolve_person_mention(
+            "justin", store=self.store, event_id=71,
+            event_source="audio.whisper",
+            text="justin will own the launch",
+            now=NOW, relationship_boost=0.9)
+        self.assertEqual(res.decision, "leave_open")
+        self.assertIsNone(res.person_id)
+        after = {p["name"] for p in self.store.all_people()}
+        self.assertEqual(before, after)
+
+    def test_docs_and_notifications_do_not_mint_candidates(self):
+        sp._raw_policies.cache_clear()
+        try:
+            for cls in ("user_authored_document", "shared_document",
+                        "notification", "unknown"):
+                p = sp.policy_for(cls)
+                self.assertFalse(p.create_person_candidates, cls)
+            # Conversation classes still mint.
+            for cls in ("private_conversation", "meeting_transcript",
+                        "direct_message", "email"):
+                p = sp.policy_for(cls)
+                self.assertTrue(p.create_person_candidates, cls)
+        finally:
+            sp._raw_policies.cache_clear()
+
+    def test_document_binds_existing_but_does_not_mint(self):
+        pid = self.store.insert_person(
+            "Hugh Salva", ts=NOW, promotion_state="recognized")
+        hit = pp.resolve_person_mention(
+            "Hugh Salva", store=self.store, event_id=72,
+            event_source="documents.scan",
+            text="Hugh Salva is the cofounder",
+            now=NOW + 1)
+        self.assertEqual(hit.decision, "auto_resolve")
+        self.assertEqual(hit.person_id, pid)
+        miss = pp.resolve_person_mention(
+            "Marc Sullivan", store=self.store, event_id=73,
+            event_source="documents.scan",
+            text="Marc Sullivan wrote the architecture note",
+            now=NOW + 2)
+        self.assertEqual(miss.decision, "reject")
+        self.assertIsNone(miss.person_id)
+        names = {p["name"] for p in self.store.all_people()}
+        self.assertNotIn("Marc Sullivan", names)
+
     def test_soft_merge_hides_absorbed(self):
         a = self.store.insert_person("Alex One", ts=NOW, promotion_state="active")
         b = self.store.insert_person("Alex Two", ts=NOW, promotion_state="active")

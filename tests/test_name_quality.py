@@ -34,6 +34,12 @@ class PlausiblePersonTests(unittest.TestCase):
                   "vision classifies a page as todo_list"]:
             self.assertFalse(nq.is_plausible_person(n), n)
 
+    def test_diarization_placeholders_rejected(self):
+        for n in ["Speaker 6", "Speaker 12", "speaker 3", "Speaker6",
+                  "Unknown Speaker", "unknown speaker", "Speaker"]:
+            self.assertFalse(nq.is_plausible_person(n), n)
+        self.assertTrue(nq.is_plausible_person("Justin Adorante"))
+
     def test_edge_cases(self):
         self.assertFalse(nq.is_plausible_person(""))
         self.assertFalse(nq.is_plausible_person("a"))

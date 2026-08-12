@@ -114,6 +114,25 @@ class RelativeOwnershipTests(unittest.TestCase):
                 "Marc", self.now, turn_speaker="Hugh", text="tell Marc")
             self.assertEqual(pid, self.marc_id)
 
+    def test_speaker_label_does_not_mint_via_fallthrough(self):
+        """People v2 reject of 'Speaker 6' must not call store.resolve_person."""
+        with self._user("Hugh"), patch.dict(
+                "os.environ", {"QUILL_PEOPLE_V2": "1"}):
+            before = {p["name"] for p in self.store.all_people()}
+            pid = self.ex._resolve_person_id(
+                "Speaker 6", self.now, turn_speaker="Speaker 6",
+                event_source="audio.whisper",
+                text="Speaker 6 said hello")
+            self.assertIsNone(pid)
+            me_pid = self.ex._resolve_person_id(
+                "me", self.now, turn_speaker="Speaker 6",
+                event_source="audio.whisper",
+                text="I'll send it")
+            self.assertIsNone(me_pid)
+            after = {p["name"] for p in self.store.all_people()}
+            self.assertEqual(before, after)
+            self.assertNotIn("Speaker 6", after)
+
     def test_persist_ownership_two_speaker_fixture(self):
         """Same LLM 'me' commitment: Hugh→self, Marc→Marc — not swapped."""
         facts_me = {

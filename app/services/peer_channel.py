@@ -597,19 +597,41 @@ def handle_ask(peer: dict, payload: dict) -> dict:
                     "ask_id": ask_id})
 
     kind = str(payload.get("kind") or "question").strip().lower()
-    if kind not in ("question", "handoff"):
+    # Org network packets ride the peer transport as structured text; they are
+    # never raw memory. org_escalate always human-offers; org_digest/priority
+    # use work-class policy (default offer).
+    _ORG_KINDS = ("org_digest", "org_priority", "org_escalate")
+    if kind not in ("question", "handoff") + _ORG_KINDS:
         return {"ok": False, "error": f"unknown kind {kind!r}"}
 
     # A handoff is a request for THIS user to do something — action-adjacent,
     # so it ALWAYS waits for the human. No policy grant and no dev flag can
-    # auto-accept work on someone's behalf.
-    if kind == "handoff":
-        action, topic = "offer", None
+    # auto-accept work on someone's behalf. Org escalations are likewise
+    # always offer (Phase 1: exec must see them).
+    if kind in ("handoff", "org_escalate"):
+        action, topic = "offer", "work"
+    elif kind in ("org_digest", "org_priority"):
+        # Treat as work-class; respect per-peer policy for "work".
+        policy = peer.get("policy") or default_policy()
+        action = policy.get("work") or "offer"
+        if action == "auto" and kind == "org_priority":
+            # Still queue a soft ack path via auto ingest below
+            pass
+        topic = "work"
+        if settings.peer.auto_answer and action == "offer":
+            action = "auto"
     elif settings.peer.auto_answer:
         action, topic = "auto", None
     else:
         action, topic = _decide_action(peer, question)
 
+    if action == "auto" and kind in ("org_digest", "org_priority"):
+        _accept_org_packet(peer.get("name") or "a teammate", peer_id, ask_id,
+                           question, kind)
+        print(f"[peer] auto-accepted {kind} from {peer.get('name', '?')}")
+        return {"ok": True, "status": "answered", "ask_id": ask_id,
+                "topic": topic, "answer": f"accepted {kind}",
+                "redacted": []}
     if action == "auto":
         composed = compose_answer(question)
         print(f"[peer] auto-answered {peer.get('name', '?')} "
@@ -640,6 +662,12 @@ def handle_ask(peer: dict, payload: dict) -> dict:
     if kind == "handoff":
         _notify_chat(f"{who} wants to hand you a task: “{question[:200]}” — "
                      "accept or decline on the Team page (/peer).")
+    elif kind == "org_digest":
+        _notify_chat(f"{who} sent an org digest — review on Team (/peer).")
+    elif kind == "org_priority":
+        _notify_chat(f"{who} sent company priority guidance — review on Team (/peer).")
+    elif kind == "org_escalate":
+        _notify_chat(f"{who} escalated a strategic issue — review on Team (/peer).")
     else:
         _notify_chat(f"{who}'s Mnemos asks: “{question[:200]}” — approve or "
                      "decline on the Team page (/peer).")
@@ -651,6 +679,34 @@ def pending_asks() -> list[dict]:
     return [{k: a.get(k) for k in ("id", "peer_name", "question", "topic",
                                    "kind", "created_at")}
             for a in _load(_asks_path(), []) if a.get("status") == "pending"]
+
+
+def _accept_org_packet(name: str, peer_id: str, ask_id: str,
+                       text: str, kind: str) -> None:
+    """Ingest an org_digest / org_priority / org_escalate packet as observed
+    context. Priorities also land in org_priority store for grounding."""
+    try:
+        _publish_event(f"peer.{kind}", f"[{kind} from {name}] {text}",
+                       {"peer_id": peer_id, "peer": name, "ask_id": ask_id,
+                        "kind": kind})
+        if kind == "org_priority":
+            from app.services import org_priority
+            org_priority.ingest_packet({
+                "guidance": text,
+                "items": [],
+                "goals": [],
+                "target_role": None,
+            }, source=f"peer.{name}")
+        elif kind == "org_escalate":
+            from app.services import org_escalate
+            org_escalate.append_local({
+                "via": "peer",
+                "from": name,
+                "text": text[:2000],
+                "ask_id": ask_id,
+            })
+    except Exception as exc:
+        print(f"[peer] org packet ingest skipped ({exc}).")
 
 
 def _accept_handoff(name: str, peer_id: str, ask_id: str, task: str) -> None:
@@ -730,6 +786,18 @@ def decide_ask(local_id: str, approve: bool) -> dict:
         return {"ok": delivered, "status": "accepted" if delivered else
                 "delivery_failed", "answer": reply}
 
+    if item.get("kind") in ("org_digest", "org_priority", "org_escalate"):
+        _accept_org_packet(peer_rec.get("name") or "a teammate",
+                           item.get("peer_id", ""), item["ask_id"],
+                           item["question"], item["kind"])
+        reply = f"Accepted {item['kind']}."
+        delivered = _deliver(peer_rec, {"ask_id": item["ask_id"],
+                                        "answer": reply})
+        _finish_ask(local_id, "accepted" if delivered else "delivery_failed",
+                    reply)
+        return {"ok": delivered, "status": "accepted" if delivered else
+                "delivery_failed", "answer": reply}
+
     composed = compose_answer(item["question"])
     delivered = _deliver(peer_rec, {"ask_id": item["ask_id"],
                                     "answer": composed["text"]})
@@ -762,7 +830,8 @@ def ask(peer_id: str, question: str, kind: str = "question") -> dict:
     human); otherwise pending until they decide, delivered to /peer/answer."""
     if not settings.peer.enabled:
         return {"ok": False, "error": "peer channel disabled"}
-    if kind not in ("question", "handoff"):
+    if kind not in ("question", "handoff", "org_digest", "org_priority",
+                    "org_escalate"):
         return {"ok": False, "error": f"unknown kind {kind!r}"}
     question = (question or "").strip()[: settings.peer.max_text_chars]
     if not question:

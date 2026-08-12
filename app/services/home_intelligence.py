@@ -126,8 +126,12 @@ _SCORE_FLOOR = 1.0          # one stale mention never makes the board
 _RECENCY_HALF_LIFE_D = 30.0
 
 
-def person_score(out_edges: list[dict], last_seen: float | None,
-                 now: float) -> float:
+def person_score_terms(out_edges: list[dict], last_seen: float | None,
+                       now: float) -> dict:
+    """person_score decomposed per evidence term (People v3 WS-G): the noise
+    metrics ask what fraction of a rank came from mention evidence, and the
+    WS-B shadow report reuses the same decomposition. Same edge walk, same
+    numbers — person_score() is this dict's `score`."""
     fact_pred: dict = {}
     co = 0.0
     asserted_ent = 0
@@ -143,10 +147,19 @@ def person_score(out_edges: list[dict], last_seen: float | None,
             asserted_ent += 1
     typed = sum(1 for p in fact_pred.values() if p != "mentioned_in")
     mentions = len(fact_pred) - typed
-    base = 3.0 * typed + 1.0 * mentions + 0.5 * min(co, 10.0) + 2.0 * asserted_ent
+    terms = {"typed": 3.0 * typed, "mentions": 1.0 * mentions,
+             "cooccur": 0.5 * min(co, 10.0), "asserted": 2.0 * asserted_ent}
+    base = terms["typed"] + terms["mentions"] + terms["cooccur"] + terms["asserted"]
     age_d = (now - last_seen) / 86400.0 if last_seen else 90.0
-    rec = 0.5 ** (max(age_d, 0.0) / _RECENCY_HALF_LIFE_D)
-    return base * (0.35 + 0.65 * rec)
+    rec_w = 0.35 + 0.65 * (0.5 ** (max(age_d, 0.0) / _RECENCY_HALF_LIFE_D))
+    return {"terms": terms, "base": base, "recency_weight": rec_w,
+            "score": base * rec_w,
+            "mention_share": (terms["mentions"] / base) if base > 0 else 0.0}
+
+
+def person_score(out_edges: list[dict], last_seen: float | None,
+                 now: float) -> float:
+    return person_score_terms(out_edges, last_seen, now)["score"]
 
 
 def entity_score(in_edges: list[dict], last_seen: float | None,

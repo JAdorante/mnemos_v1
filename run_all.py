@@ -6,6 +6,7 @@ Starts the whole Mnemos system:
   * the Memory Engine (SQLite + semantic index),
   * the FastAPI server + API/docs at http://127.0.0.1:8000/docs,
   * the Exec.AI browser agent web UI at http://127.0.0.1:5000
+  * when QUILL_ORG_NETWORK=1: the Org Coordinator at :8100
 
 Capture (mic / webcam / screen / system-audio) stays OFF until the user
 opts in via the in-UI Privacy controls (see capture_consent). After consent,
@@ -21,6 +22,7 @@ Flags:
     --system-audio      request loopback transcription (still needs UI consent)
     --no-browser    don't start the Exec.AI browser agent
     --browser-headless   hide the agent's browser window
+    --no-org-coordinator  don't auto-start Org Coordinator (even if org network on)
     --port 8000     API server port
     --browser-port 5000  browser-agent UI port
     --host 127.0.0.1
@@ -32,6 +34,8 @@ import atexit
 import os
 import subprocess
 import sys
+import time
+from urllib import error, request
 
 # Load .env BEFORE argparse reads defaults: QUILL_HOST/QUILL_PORT set there must
 # shape the actual uvicorn binding, not just app.config's view of it (they
@@ -78,6 +82,57 @@ def _start_browser_agent(port: int, headless: bool) -> subprocess.Popen | None:
         return None
 
 
+def _org_network_on() -> bool:
+    return os.environ.get("QUILL_ORG_NETWORK", "0") not in ("0", "false", "False")
+
+
+def _coord_url() -> str:
+    return os.environ.get("QUILL_ORG_COORDINATOR_URL",
+                          "http://127.0.0.1:8100").rstrip("/")
+
+
+def _coord_already_up() -> bool:
+    try:
+        req = request.Request(f"{_coord_url()}/health", method="GET")
+        with request.urlopen(req, timeout=1.5) as resp:
+            return 200 <= getattr(resp, "status", 200) < 300
+    except Exception:
+        return False
+
+
+def _start_org_coordinator() -> subprocess.Popen | None:
+    """Launch Org Coordinator when org network is enabled (unless already up)."""
+    if not _org_network_on():
+        return None
+    if os.environ.get("QUILL_ORG_COORD_AUTOSTART", "1") in ("0", "false", "False"):
+        return None
+    if _coord_already_up():
+        print(f"[launch] Org Coordinator already running at {_coord_url()}")
+        return None
+    env = dict(os.environ)
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "org_coordinator.main"],
+            env=env,
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+        )
+    except Exception as exc:
+        print(f"[launch] Org Coordinator failed to start: {exc}")
+        return None
+    # Brief wait so /org-network register doesn't race startup.
+    for _ in range(20):
+        if proc.poll() is not None:
+            print("[launch] Org Coordinator exited early — check port 8100.")
+            return None
+        if _coord_already_up():
+            print(f"[launch] Org Coordinator -> {_coord_url()}")
+            return proc
+        time.sleep(0.15)
+    print(f"[launch] Org Coordinator starting (PID {proc.pid}); "
+          f"UI at {_coord_url()}/")
+    return proc
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Launch all of Mnemos at once")
     ap.add_argument("--no-audio", action="store_true",
@@ -94,6 +149,8 @@ def main() -> None:
                     help="don't start the Exec.AI browser agent")
     ap.add_argument("--browser-headless", action="store_true",
                     help="hide the agent's browser window")
+    ap.add_argument("--no-org-coordinator", action="store_true",
+                    help="don't auto-start Org Coordinator")
     ap.add_argument("--host", default=os.environ.get("QUILL_HOST", "127.0.0.1"))
     ap.add_argument("--port", type=int, default=int(os.environ.get("QUILL_PORT", "8000")))
     ap.add_argument("--browser-port", type=int,
@@ -114,17 +171,29 @@ def main() -> None:
     if args.system_audio:
         os.environ["QUILL_SYSTEM_AUDIO"] = "1"
 
+    children: list[subprocess.Popen] = []
+
+    if not args.no_org_coordinator:
+        org_proc = _start_org_coordinator()
+        if org_proc is not None:
+            atexit.register(_kill_tree, org_proc)
+            children.append(org_proc)
+
     browser_proc = None
     if not args.no_browser:
         browser_proc = _start_browser_agent(args.browser_port, args.browser_headless)
-        # Ensure the child (and its Chromium) dies with us, however we exit.
-        atexit.register(_kill_tree, browser_proc)
+        if browser_proc is not None:
+            atexit.register(_kill_tree, browser_proc)
+            children.append(browser_proc)
 
     print("=" * 62)
     print("  Mnemos — launching everything")
     print(f"  API + docs:      http://{args.host}:{args.port}/docs")
     if browser_proc:
         print(f"  Browser agent:   http://127.0.0.1:{args.browser_port}")
+    if _org_network_on():
+        print(f"  Org Network UI:  http://{args.host}:{args.port}/org-network")
+        print(f"  Org Coordinator: {_coord_url()}/")
     print("  Capture is off until Privacy consent in the UI.")
     print("  Ctrl+C to stop.")
     print("=" * 62)
@@ -135,9 +204,10 @@ def main() -> None:
         uvicorn.run("app.main:app", host=args.host, port=args.port,
                     log_level="warning", reload=False)
     finally:
-        if browser_proc and browser_proc.poll() is None:
-            print("\n[launch] stopping browser agent ...")
-            _kill_tree(browser_proc)
+        for proc in children:
+            if proc.poll() is None:
+                print(f"\n[launch] stopping PID {proc.pid} ...")
+                _kill_tree(proc)
 
 
 if __name__ == "__main__":

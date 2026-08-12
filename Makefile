@@ -2,7 +2,7 @@
 # Prefer the project venv when present.
 PYTHON ?= python
 
-.PHONY: eval eval-live eval-people eval-people-live eval-grounding eval-planner golden-commitments golden-entity-resolution golden-contact-attribution
+.PHONY: eval eval-live eval-people eval-people-live eval-grounding eval-planner eval-noise golden-commitments golden-entity-resolution golden-contact-attribution
 
 # Plan 2.2 + 2.3 + 2.4 + 3.3 + 5.2: golden thresholds (offline, no API key).
 eval: golden-commitments golden-entity-resolution golden-contact-attribution
@@ -11,6 +11,12 @@ eval: golden-commitments golden-entity-resolution golden-contact-attribution
 	$(PYTHON) scripts/eval_contact_attribution.py
 	$(PYTHON) scripts/eval_grounding.py
 	$(PYTHON) scripts/eval_planner_routing.py
+	$(PYTHON) scripts/eval_people_noise.py
+
+# People v3 WS-G — noise metrics on the noisy corpus. Report-only in `eval`
+# (P0: numbers before knobs); run with --gate once P3/P4 flags are on.
+eval-noise:
+	$(PYTHON) scripts/eval_people_noise.py --gate
 
 # Optional live LLM pass for commitments/ownership (needs API key).
 # Not the People-v2 gate — use eval-people / eval-people-live for that.

@@ -1,5 +1,5 @@
 {
-  "version": "1.2",
+  "version": "1.3",
   "classes": {
     "private_conversation": {
       "extract_mentions": true,
@@ -58,7 +58,7 @@
     },
     "user_authored_document": {
       "extract_mentions": true,
-      "create_person_candidates": true,
+      "create_person_candidates": false,
       "relationship_evidence": true,
       "extract_contacts": true,
       "create_commitments": true,
@@ -69,7 +69,7 @@
     },
     "shared_document": {
       "extract_mentions": true,
-      "create_person_candidates": true,
+      "create_person_candidates": false,
       "relationship_evidence": false,
       "extract_contacts": false,
       "create_commitments": true,
@@ -199,9 +199,20 @@
       "identity_evidence": false,
       "knowledge_entities": true
     },
+    "org_coordinator": {
+      "extract_mentions": false,
+      "create_person_candidates": false,
+      "relationship_evidence": false,
+      "extract_contacts": false,
+      "create_commitments": false,
+      "create_claims": true,
+      "update_people": false,
+      "identity_evidence": false,
+      "knowledge_entities": true
+    },
     "notification": {
       "extract_mentions": true,
-      "create_person_candidates": true,
+      "create_person_candidates": false,
       "relationship_evidence": false,
       "extract_contacts": false,
       "create_commitments": true,
@@ -212,7 +223,7 @@
     },
     "unknown": {
       "extract_mentions": true,
-      "create_person_candidates": true,
+      "create_person_candidates": false,
       "relationship_evidence": false,
       "extract_contacts": false,
       "create_commitments": true,

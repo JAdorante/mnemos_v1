@@ -192,6 +192,13 @@ async def _startup() -> None:
         worker.register("kg_parity_diff",
                         lambda _p: kg_parity.run(memory._ensure_store()))
 
+        # People v3 WS-E: daily ambient-TTL sweep over the review queue
+        # (archive-only, flag QUILL_QUEUE_TTL, default off).
+        from app.services import queue_hygiene
+
+        worker.register("queue_ttl", queue_hygiene.run_job)
+        queue_hygiene.attach()
+
         # KG v2 M1 backfill: legacy asserted/user relations -> belief store.
         # One-shot + idempotent; enqueued via POST /kg/backfill, chased by a
         # parity run so the report reflects the new state.
@@ -292,6 +299,24 @@ async def _startup() -> None:
 
                 worker.register("screen_extract", _screen_extract_job)
 
+        # Org AI Network (feature-flagged): upward digests + priority pull.
+        # Independent of extraction — digests read whatever facts already exist.
+        from app.services import org_client as _org_client
+        if _org_client.enabled():
+            from app.services import org_digest, org_priority
+            worker.register("org_digest", org_digest.run_digest_job)
+            worker.register("org_priorities", org_priority.run_priority_job)
+            print("[worker] org-network jobs registered "
+                  "(digest + priorities).")
+            if not _org_client.coordinator_reachable():
+                print("[org-network] coordinator not reachable at "
+                      f"{_org_client.status().get('coordinator_url')} — "
+                      "start it via run_all.py or "
+                      "`python -m org_coordinator.main`.")
+            else:
+                print(f"[org-network] UI http://{settings.host}:{settings.port}"
+                      f"/org-network · coordinator OK")
+
         # Phase D: L3 semantics — mutually exclusive with screen_extract.
         if _l3_plan["register_l3"]:
             try:
@@ -360,9 +385,15 @@ async def _startup() -> None:
         # queue one. unique_pending coalesces, so this never stacks up.
         if reflect_on and reflector.due_for("daily"):
             worker.enqueue("reflect_daily", unique=True)
+        if _org_client.enabled():
+            from app.services import org_digest as _org_digest
+            if _org_digest.due_for_digest():
+                worker.enqueue("org_digest", unique=True)
+            worker.enqueue("org_priorities", unique=True)
         print(f"[worker] started; queued initial consolidation"
               f"{' + extraction' if extract_on else ''}"
               f"{' + reflection' if reflect_on else ''}"
+              f"{' + org-network' if _org_client.enabled() else ''}"
               f" + traces/replay/a4.")
     # iCloud calendar sync: periodic, read-only, only when the guided connect
     # flow has stored credentials. Best-effort — failure never blocks startup.
@@ -421,14 +452,15 @@ async def _startup() -> None:
             consent = {"consented": False, "sources": {}}
         src = consent.get("sources") or {}
         if consent.get("consented") and any(
-                src.get(k) for k in ("mic", "webcam", "screen", "system_audio")):
+                src.get(k) for k in (
+                    "mic", "webcam", "screen", "system_audio", "clicks")):
             force_no_audio = os.environ.get("QUILL_AUTOSTART_AUDIO") == "0"
             force_no_vision = os.environ.get("QUILL_AUTOSTART_VISION") == "0"
             state = start_all(
                 audio=bool(src.get("mic")) and not force_no_audio,
                 vision=bool(src.get("webcam")) and not force_no_vision,
                 notifications=os.environ.get("QUILL_AUTOSTART_NOTIFICATIONS") != "0",
-                desktop_capture=bool(src.get("screen")),
+                desktop_capture=bool(src.get("screen") or src.get("clicks")),
                 system_audio=bool(src.get("system_audio")) and not force_no_audio,
             )
             print(f"[launch] capture resumed from consent: {state}")

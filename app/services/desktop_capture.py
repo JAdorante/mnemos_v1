@@ -324,6 +324,22 @@ class DesktopCapturePipeline:
             self._last_click = (ts, x, y, btn)
 
         win = _foreground_window()
+        window_title = str(win.get("window") or "")
+        # Same intake filters as screen frames — don't flood memory with
+        # clicks on the Mnemos console / credential surfaces.
+        from app.services.surface_filters import is_console_window
+        if is_console_window(window_title):
+            print(f"[desktop_capture] skip console click: {window_title[:80]!r}")
+            return
+        from app.perception.privacy_gate import gate as privacy_gate
+        rule = privacy_gate.check(window_title)
+        if rule:
+            print(f"[desktop_capture] privacy gate blocked click ({rule}).")
+            privacy_gate.record_exclusion(
+                rule, window_id=str(win.get("hwnd") or ""),
+                ts_ms=int(ts * 1000))
+            return
+
         meta: dict = {
             "kind": "click",
             "x": x, "y": y,
@@ -399,6 +415,9 @@ class DesktopCapturePipeline:
 
     # ---------------------------- lifecycle ------------------------------
     def start(self) -> None:
+        # Refresh from live settings so consent hot-patches (clicks on/off)
+        # take effect without process restart.
+        self.cfg = settings.desktop_capture
         if not self.cfg.enabled:
             raise RuntimeError(
                 "desktop capture disabled (set QUILL_DESKTOP_CAPTURE=1 to enable)")

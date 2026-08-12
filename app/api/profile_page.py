@@ -148,10 +148,15 @@ body{margin:0;min-height:100vh;font:15px/1.55 var(--font);color:var(--text);
   <div id="tabPeople" hidden>
     <section class="section">
       <h2>People you know</h2>
-      <p class="lead">Everyone in memory, strongest connections first. Click a person to
-      correct their name, add aliases and notes, review their facts — or remove
-      noise the ears misheard.</p>
-      <input class="psearch" id="pSearch" placeholder="filter by name…">
+      <p class="lead">Your network — people you've named or that have enough
+      evidence to matter. Click a person to correct their name, add aliases and
+      notes, review their facts — or remove noise the ears misheard.</p>
+      <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+        <input class="psearch" id="pSearch" placeholder="filter by name…" style="flex:1;min-width:180px;margin:0">
+        <label style="font-size:12.5px;color:var(--mut);display:flex;gap:6px;align-items:center;white-space:nowrap">
+          <input type="checkbox" id="pShowCandidates"> Show candidates
+        </label>
+      </div>
       <div id="peopleList"><div class="empty">Loading…</div></div>
     </section>
   </div>
@@ -325,11 +330,15 @@ function peopleBusy(){
 }
 let peopleSig='';
 async function loadPeople(force){
-  const d=await (await fetch('/people/list')).json();
-  const sig=JSON.stringify(d.people||[]);
+  const showCand=!!(document.getElementById('pShowCandidates')||{}).checked;
+  const d=await (await fetch('/people/list?include_candidates='+(showCand?'1':'0'))).json();
+  let rows=d.people||[];
+  // Main network view: hide zero-evidence rows (same floor as home).
+  if(!showCand) rows=rows.filter(p=>(p.weight||0)>=1.0 || p.is_self);
+  const sig=JSON.stringify({c:showCand,p:rows});
   if(!force && sig===peopleSig) return;   // no visible change — don't touch the DOM
   peopleSig=sig;
-  peopleCache=d.people||[];
+  peopleCache=rows;
   renderPeopleList();
 }
 
@@ -337,11 +346,12 @@ function renderPeopleList(){
   const q=(document.getElementById('pSearch').value||'').toLowerCase();
   const el=document.getElementById('peopleList');
   const rows=peopleCache.filter(p=>!q||p.name.toLowerCase().includes(q));
-  if(!rows.length){el.innerHTML='<div class="empty">No one yet — mention people in chat or speech and they\'ll appear.</div>';return;}
+  if(!rows.length){el.innerHTML='<div class="empty">No one in your network yet — name people in setup, chat, or speech and they\'ll appear. Turn on “Show candidates” to review unresolved mentions.</div>';return;}
   el.innerHTML=rows.map(p=>{
     const row='<div class="prow" data-pid="'+p.id+'">'
       +'<div style="flex:1"><span class="nm">'+MnemosEsc(p.name)+'</span>'
       +(p.is_self?' <span class="chip">you</span>':'')
+      +(p.promotion_state==='candidate'?' <span class="chip">candidate</span>':'')
       +'<div class="meta">connection '+p.weight.toFixed(1)+' · '+fmtSeen(p.last_seen)+'</div></div>'
       +'<span class="meta">'+(openPersonId===p.id?'▾':'▸')+'</span></div>';
     return row+(openPersonId===p.id?'<div class="pdetail" id="pDetail"><div class="lead">Loading…</div></div>':'');
@@ -350,6 +360,7 @@ function renderPeopleList(){
 }
 
 document.getElementById('pSearch').addEventListener('input', renderPeopleList);
+document.getElementById('pShowCandidates').addEventListener('change', ()=>loadPeople(true));
 
 document.addEventListener('click', e=>{
   if(e.target.closest('button')) return;

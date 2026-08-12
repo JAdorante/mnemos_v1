@@ -1,0 +1,17 @@
+{"type": "meta", "audio_hours": 2.0, "note": "People v3 WS-G noisy corpus — noisy by construction: one-hit audio names, a names-heavy document, a mumbled low-confidence session, and score profiles where volume buys rank. Gates are expected to FAIL against the v1 pipeline (P0 = numbers before knobs)."}
+{"type": "person", "name": "Sarah Chen", "aliases": ["sarah"]}
+{"type": "person", "name": "Justin Adorante", "aliases": []}
+{"type": "person", "name": "Marcus Webb", "aliases": []}
+{"type": "mention", "case": "doc_marc", "name": "Marc Rivera", "event_source": "documents.scan", "window": "", "text": "In this whitepaper, Marc Rivera argues pricing should be usage-based from day one.", "boost": 0.85, "golden": {"junk": true, "surface": "document"}}
+{"type": "mention", "case": "audio_onehit_vendor", "name": "Kevin Doyle", "event_source": "audio.whisper", "window": "", "text": "Kevin Doyle from the vendor call might follow up about the renewal.", "boost": 0.85, "golden": {"junk": true, "surface": "audio"}}
+{"type": "mention", "case": "audio_onehit_mumble", "name": "Paula Reyes", "event_source": "audio.whisper", "window": "", "text": "and uh, Paula Reyes I think, said the numbers were, mm, off somehow.", "boost": 0.85, "golden": {"junk": true, "surface": "audio"}}
+{"type": "mention", "case": "single_token_justin", "name": "justin", "event_source": "audio.whisper", "window": "", "text": "justin should review the deck before Friday.", "boost": 0.85, "golden": {"junk": true, "surface": "audio", "expect_person": "Justin Adorante"}}
+{"type": "owner", "case": "owner_sarah_alias", "name": "Sarah", "golden_person": "Sarah Chen", "event_source": "audio.whisper", "window": "", "text": "Sarah will send the revised quote on Monday.", "boost": 0.85}
+{"type": "owner", "case": "owner_marcus_typo", "name": "Markus", "golden_person": "Marcus Webb", "event_source": "audio.whisper", "window": "", "text": "Markus takes the follow-up with legal.", "boost": 0.85}
+{"type": "owner", "case": "owner_justin_full", "name": "Justin Adorante", "golden_person": "Justin Adorante", "event_source": "audio.whisper", "window": "", "text": "Justin Adorante owns the launch checklist.", "boost": 0.85}
+{"type": "score_profile", "name": "Justin Adorante", "typed": 9, "mentions": 4, "cooccur": 8, "asserted": 3, "last_seen_days": 0}
+{"type": "score_profile", "name": "Sarah Chen", "typed": 6, "mentions": 8, "cooccur": 6, "asserted": 2, "last_seen_days": 2}
+{"type": "score_profile", "name": "Podcast Pete", "typed": 0, "mentions": 25, "cooccur": 4, "asserted": 0, "last_seen_days": 1}
+{"type": "score_profile", "name": "Doc Marc", "typed": 0, "mentions": 12, "cooccur": 0, "asserted": 0, "last_seen_days": 5}
+{"type": "score_profile", "name": "Marcus Webb", "typed": 4, "mentions": 6, "cooccur": 3, "asserted": 1, "last_seen_days": 4}
+{"type": "score_profile", "name": "Officemate Ana", "typed": 2, "mentions": 3, "cooccur": 9, "asserted": 1, "last_seen_days": 1}

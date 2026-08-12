@@ -42,7 +42,8 @@ EXTRACTOR_VERSION = "owner_party_v1"
 _AUTO_RESOLVE = 0.92
 _AUTO_MARGIN = 0.15
 _CREATE_NEW = 0.85
-_CREATE_RELEVANCE = 0.55
+# Higher bar: ambient first-name mentions should leave_open, not mint.
+_CREATE_RELEVANCE = 0.70
 _ATTR_MIN = ATTR_MIN  # plan 2.4 — auto-write floor; below → review
 
 
@@ -346,6 +347,23 @@ def resolve_person_mention(
               if not p.get("canonical_person_id")
               and not p.get("hide_from_people")]
 
+    # People v3 WS-D: explicit alias rules from human merges/splits are
+    # consulted before any scoring. A negative rule removes the person from
+    # this alias's candidate set; a positive rule is a conclusive bind — the
+    # same justin / Justin Adorante split can never happen twice.
+    alias_pos: int | None = None
+    alias_neg: set[int] = set()
+    try:
+        for r in store.alias_rules_for(display):
+            if r["kind"] == "negative":
+                alias_neg.add(int(r["person_id"]))
+            elif alias_pos is None:
+                alias_pos = store.follow_canonical_person(int(r["person_id"]))
+    except Exception:
+        alias_pos, alias_neg = None, set()
+    if alias_neg:
+        people = [p for p in people if int(p["id"]) not in alias_neg]
+
     scored = score_person_candidates(display, people)
     if attendee_priors:
         scored = apply_attendee_boosts(
@@ -361,14 +379,28 @@ def resolve_person_mention(
     if any((feats or {}).get("attendee") for _, _, feats in scored):
         margin_t = min(margin_t, 0.08)
         auto_t = min(auto_t, 0.90)
-    decision, chosen_row, conf = decide_from_scores(
-        scored,
-        relationship_boost=relationship_boost,
-        create_person_candidates=policy.create_person_candidates,
-        auto_resolve=auto_t,
-        auto_margin=margin_t,
-        create_new=_thr_create_new(),
-    )
+    row_by_id = {int(p["id"]): p for p in people}
+    if alias_pos is not None and alias_pos in row_by_id and (
+            alias_pos not in alias_neg):
+        # Positive alias rule: conclusive bind, no threshold policy involved.
+        decision, chosen_row, conf = "auto_resolve", row_by_id[alias_pos], 0.99
+    else:
+        decision, chosen_row, conf = decide_from_scores(
+            scored,
+            relationship_boost=relationship_boost,
+            create_person_candidates=policy.create_person_candidates,
+            auto_resolve=auto_t,
+            auto_margin=margin_t,
+            create_new=_thr_create_new(),
+        )
+
+    # Single-token names ("justin", "Marc") may bind / leave_open, but must
+    # not mint a new network node unless an invite email anchors identity.
+    if decision == "create_new":
+        tokens = nq._tokens(display)
+        has_invite = bool(matching_attendees(display, attendee_priors))
+        if len(tokens) < 2 and not has_invite:
+            decision, chosen_row, conf = "leave_open", None, float(conf)
 
     chosen: int | None = None
     relevance = float(relationship_boost)
@@ -388,14 +420,20 @@ def resolve_person_mention(
             if cn:
                 mint_name = cn
             mint_email = (matched[0].get("email") or "").strip().lower()
-        chosen = store.insert_person(
-            mint_name, ts=ts,
-            actor_type="human_person",
-            promotion_state="candidate",
-        )
-        if mint_name.lower() != display.lower():
+        try:
+            chosen = store.insert_person(
+                mint_name, ts=ts,
+                actor_type="human_person",
+                promotion_state="candidate",
+            )
+        except Exception:
+            # The canonical name already exists on a row this resolution was
+            # not allowed to bind (hidden / absorbed / negative alias rule).
+            # Never mint a twin canonical name — leave the mention open.
+            decision, chosen = "leave_open", None
+        if chosen is not None and mint_name.lower() != display.lower():
             store.touch_person(chosen, ts, alias=display)
-        if mint_email:
+        if chosen is not None and mint_email:
             try:
                 store.upsert_contact_point(
                     person_id=chosen, type_="email",

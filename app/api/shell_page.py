@@ -196,6 +196,8 @@ body{
     <a href="/memory">Memory</a>
     <a href="/profile">You</a>
     <a href="/desktop-access">Desktop</a>
+    <a href="/peer">Team</a>
+    <a href="/org-network">Org</a>
   </nav>
   <span class="spacer"></span>
   <button class="btn" id="spotOpen" type="button">Ask <span class="kbd">⌘K</span></button>

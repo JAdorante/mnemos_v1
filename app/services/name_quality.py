@@ -29,7 +29,12 @@ _GENERIC = frozenset({
     "user", "users", "new user", "the user", "curator", "founder", "board",
     "member", "not specified", "unspecified", "unknown", "n/a", "na", "none",
     "admin", "agent", "assistant", "team", "everyone else",
+    # Diarization placeholders (audio pipeline labels, not real names).
+    "speaker", "unknown speaker",
 })
+
+# "Speaker 6", "Speaker12", etc. — diarization cluster labels.
+_SPEAKER_LABEL = re.compile(r"(?i)^speaker\s*\d+$")
 
 # Product/system self-tokens — the assistant/product must never become a node.
 # Includes the app's OWN UI surface names (page titles): screen capture reading
@@ -144,6 +149,8 @@ def is_plausible_person(name: str) -> bool:
     if len(n) < 2:
         return False
     if n.lower() in _GENERIC or _shared_reject(n) or _SNAKE.search(n):
+        return False
+    if _SPEAKER_LABEL.match(n):
         return False
     if n.lower() in _os_account_names():
         return False

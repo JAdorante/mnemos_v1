@@ -258,6 +258,7 @@ def _resume_source(source: str) -> dict:
 
 def _apply_consent_runtime(sources: dict) -> dict:
     """Start consented sources / stop ones turned off after a consent save."""
+    global _desktop_capture_running
     # Mic
     if sources.get("mic"):
         if not _audio_running:
@@ -285,13 +286,21 @@ def _apply_consent_runtime(sources: dict) -> dict:
                 print(f"[capture] webcam start failed: {exc}")
     else:
         _pause_source("webcam")
-    # Screen
-    if sources.get("screen"):
-        if not _desktop_capture_running:
+    # Screen frames and/or mouse clicks share the desktop capture pipeline.
+    want_desktop = bool(sources.get("screen") or sources.get("clicks"))
+    if want_desktop:
+        # Restart so screen/clicks sub-flags from consent take effect.
+        if _desktop_capture_running:
             try:
-                _resume_source("screen")
-            except Exception as exc:
-                print(f"[capture] screen start failed: {exc}")
+                _desktop_capture.stop()
+            except Exception:
+                pass
+            _desktop_capture_running = False
+        try:
+            _desktop_capture.start()
+            _desktop_capture_running = True
+        except Exception as exc:
+            print(f"[capture] desktop start failed: {exc}")
     else:
         _pause_source("screen")
     return _running_map()
@@ -322,6 +331,7 @@ class CaptureConsentBody(BaseModel):
     mic: bool | None = None
     webcam: bool | None = None
     screen: bool | None = None
+    clicks: bool | None = None
     system_audio: bool | None = None
     save_audio: bool | None = None
     # True = stamp consent (default when any source is set). False = revoke all.
@@ -3501,6 +3511,81 @@ def fact_dismiss(fact_id: int) -> dict:
             "commitment_state": refreshed.get("commitment_state")}
 
 
+class BatchReviewBody(BaseModel):
+    fact_ids: list[int]
+    verb: str  # approve | dismiss
+
+
+@router.post("/facts/batch_review")
+def facts_batch_review(body: BatchReviewBody) -> dict:
+    """People v3 WS-E session sweep: one gesture reviews a whole group of
+    facts. Reuses the single-fact handlers so the distill labeling and
+    commitment side effects stay identical to a one-by-one review."""
+    if body.verb not in ("approve", "dismiss"):
+        raise HTTPException(400, detail="verb must be approve|dismiss")
+    reviewed, missing = [], []
+    for fid in body.fact_ids[:500]:
+        try:
+            if body.verb == "approve":
+                fact_approve(int(fid))
+            else:
+                fact_dismiss(int(fid))
+            reviewed.append(int(fid))
+        except HTTPException:
+            missing.append(int(fid))
+    return {"ok": True, "verb": body.verb,
+            "reviewed": len(reviewed), "missing": missing}
+
+
+@router.get("/facts/review_queue")
+def facts_review_queue(limit: int = 300) -> dict:
+    """Unreviewed ACTIVE facts grouped by session (WS-E sweep view): one bad
+    meeting is one group with its fact ids, not thirty loose rows."""
+    store = memory._ensure_store()
+    rows = store.list_facts(review="none", limit=limit)
+    views = [_fact_view(r) for r in rows]
+    ev_ids = [v["source_event_id"] for v in views if v.get("source_event_id")]
+    emap = store.by_ids_map(ev_ids) if ev_ids else {}
+    times = {eid: (e.get("time") or 0.0) for eid, e in emap.items()}
+    stamps = [t for t in times.values() if t]
+    sessions = (store.sessions_in_range(min(stamps), max(stamps))
+                if stamps else [])
+
+    def _session_for(t: float | None):
+        if not t:
+            return None
+        for s in sessions:
+            if s["start"] <= t <= s["end"]:
+                return s
+        return None
+
+    groups: dict = {}
+    for v in views:
+        s = _session_for(times.get(v.get("source_event_id")))
+        key = s["id"] if s else 0
+        g = groups.get(key)
+        if g is None:
+            label = ((s.get("text") or "")[:120] if s else "(no session)")
+            g = groups[key] = {"session_id": key or None,
+                               "start": s["start"] if s else None,
+                               "end": s["end"] if s else None,
+                               "label": label, "fact_ids": [], "facts": []}
+        g["fact_ids"].append(v["id"])
+        g["facts"].append(v)
+    ordered = sorted(groups.values(),
+                     key=lambda g: -(g["start"] or 0.0))
+    return {"count": len(views), "groups": ordered}
+
+
+@router.get("/console/queue_slo")
+def console_queue_slo() -> dict:
+    """WS-E queue SLO: unreviewed depth + age vs targets (depth < 25,
+    age p50 < 48h). Over target = extraction is too chatty — a signal,
+    not a UI problem."""
+    from app.services import queue_hygiene
+    return queue_hygiene.queue_slo(memory._ensure_store())
+
+
 @router.post("/facts/{fact_id}/done")
 def fact_done(fact_id: int) -> dict:
     fact = _get_or_404(fact_id)
@@ -4785,6 +4870,117 @@ def peer_unlink(body: PeerUnlinkIn) -> dict:
     if not res.get("ok"):
         raise HTTPException(status_code=404, detail=res.get("error") or "unknown peer")
     return res
+
+
+# --- Org AI Network (hybrid coordinator + local digests/priorities) ----------
+class OrgRegisterIn(BaseModel):
+    node_id: str = ""
+    display_name: str = ""
+    role: str = "ic"
+    reports_to: str = ""
+    manager_peer_id: str = ""
+    coordinator_url: str = ""
+    base_url: str = ""
+
+
+class OrgGoalIn(BaseModel):
+    title: str
+    detail: str = ""
+    horizon: str = ""
+    priority: float = 0.8
+    owner_role: str = "ceo"
+
+
+@router.get("/org-network", response_class=HTMLResponse)
+def org_network_ui() -> HTMLResponse:
+    from app.api.org_network_page import ORG_NETWORK_PAGE
+    return HTMLResponse(ORG_NETWORK_PAGE)
+
+
+@router.get("/org-network/status")
+def org_network_status() -> dict:
+    from app.services import org_client, org_priority
+    st = org_client.status()
+    st["priorities"] = org_priority.latest(3)
+    return st
+
+
+@router.post("/org-network/register")
+def org_network_register(body: OrgRegisterIn) -> dict:
+    """Register this Mnemos with the Org Coordinator. Persists node token locally."""
+    from app.services import org_client
+
+    res = org_client.register(
+        base_url=body.base_url,
+        peer_id=body.manager_peer_id,
+        display_name=body.display_name,
+        role=body.role or "ic",
+        reports_to=body.reports_to,
+        node_id_override=body.node_id or None,
+        coordinator_url=body.coordinator_url or None,
+    )
+    if not res.get("ok"):
+        raise HTTPException(status_code=400,
+                            detail=res.get("error") or res.get("detail")
+                            or "register failed")
+    return res
+
+
+@router.post("/org-network/digest")
+def org_network_digest() -> dict:
+    from app.services import org_client, org_digest
+    if not org_client.enabled():
+        raise HTTPException(status_code=400,
+                            detail="QUILL_ORG_NETWORK is off")
+    if not org_client.node_token():
+        raise HTTPException(status_code=400,
+                            detail="Register this node first (POST /org-network/register)")
+    if not org_client.coordinator_reachable():
+        raise HTTPException(
+            status_code=503,
+            detail="Org Coordinator not reachable — start with run_all.py "
+                   "or python -m org_coordinator.main")
+    return org_digest.ship_digest()
+
+
+@router.post("/org-network/priorities")
+def org_network_priorities() -> dict:
+    from app.services import org_client, org_priority
+    if not org_client.enabled():
+        raise HTTPException(status_code=400,
+                            detail="QUILL_ORG_NETWORK is off")
+    if not org_client.node_token():
+        raise HTTPException(status_code=400,
+                            detail="Register this node first")
+    return org_priority.pull_from_coordinator()
+
+
+@router.post("/org-network/goals")
+def org_network_goals(body: OrgGoalIn) -> dict:
+    from app.services import org_client
+    res = org_client.create_goal(
+        body.title, detail=body.detail, horizon=body.horizon,
+        priority=body.priority, owner_role=body.owner_role)
+    if not res.get("ok"):
+        raise HTTPException(status_code=400,
+                            detail=res.get("error") or res.get("detail")
+                            or "goal failed")
+    return res
+
+
+@router.post("/org-network/cascade")
+def org_network_cascade() -> dict:
+    from app.services import org_client, org_priority
+    res = org_client.cascade()
+    # Also pull our own packet
+    local = org_priority.pull_from_coordinator()
+    return {"ok": True, "cascade": res, "local": local}
+
+
+@router.post("/org-network/escalate")
+def org_network_escalate(body: dict) -> dict:
+    from app.services import org_escalate
+    return org_escalate.record_and_notify(body or {})
 
 
 # --- iCloud account connection (guided; public-product onboarding) ----------

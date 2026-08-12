@@ -56,6 +56,21 @@ class CaptureConsentTests(unittest.TestCase):
         self.assertFalse(st["consented"])
         self.assertFalse(cc.allows("mic"))
 
+    def test_clicks_source_and_default_off(self):
+        from app.services import capture_consent as cc
+        from app.config import settings
+        self.assertIn("clicks", cc.SOURCES)
+        # Config default is off (env may override in live .env — assert blank).
+        self.assertFalse(cc.load(force=True)["sources"].get("clicks"))
+        st = cc.save({"screen": True, "clicks": False})
+        self.assertTrue(st["sources"]["screen"])
+        self.assertFalse(st["sources"]["clicks"])
+        # Capability patch: screen alone enables desktop, clicks stays off.
+        cc.apply_saved_to_runtime()
+        self.assertTrue(settings.desktop_capture.enabled)
+        self.assertTrue(settings.desktop_capture.screen)
+        self.assertFalse(settings.desktop_capture.clicks)
+
 
 class KillSwitchToggleTests(unittest.TestCase):
     def setUp(self):

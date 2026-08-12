@@ -753,6 +753,17 @@ def compose(question: str, *, semantic_limit: int = 5, min_score: float = 0.15,
         except Exception as exc:
             print(f"[grounding] user profile layer skipped ({exc}).")
 
+    # Org AI Network — company priority guidance (advisory only).
+    try:
+        from app.services import org_client as _org_client
+        if _org_client.enabled():
+            from app.services import org_priority as _org_pri
+            sec = _org_pri.grounding_lines()
+            if sec:
+                _add("company priorities", sec)
+    except Exception as exc:
+        print(f"[grounding] org priorities skipped ({exc}).")
+
     # Meeting Layer P4 — meeting note / attendees / cited facts before global.
     if meeting_scope is not None:
         try:

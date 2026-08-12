@@ -1895,7 +1895,10 @@ window.MnemosCapture = {
   _SOURCES: [
     {key:'mic', label:'Mic', warn:''},
     {key:'webcam', label:'Camera', warn:''},
-    {key:'screen', label:'Screen', warn:'Captures whatever is on your display.'},
+    {key:'screen', label:'Screen',
+     warn:'Periodic screenshots of whatever is on your display (not mouse clicks).'},
+    {key:'clicks', label:'Mouse clicks',
+     warn:'Logs click coordinates + a small crop. Off by default — noisy.'},
     {key:'system_audio', label:'System audio',
      warn:'Transcribes what the computer plays — including meeting participants.'},
     {key:'save_audio', label:'Save audio clips',
