@@ -11,6 +11,7 @@ __pycache__/
 /data/*
 !/data/model_prices.json
 !/data/source_policies.json
+!/data/score_config.json
 # Local snapshot from a manual fresh-slate reset (not the live data dir).
 /data_noisy_backup/
 sessions/

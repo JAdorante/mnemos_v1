@@ -199,6 +199,14 @@ async def _startup() -> None:
         worker.register("queue_ttl", queue_hygiene.run_job)
         queue_hygiene.attach()
 
+        # People v3 WS-B: nightly v1-vs-v2 connection-score shadow diff
+        # (report-only, flag QUILL_SCORE_SHADOW, default off). The
+        # QUILL_SCORE_V2 read cutover stays gated on 7 clean nightlies.
+        from app.services import score_v2
+
+        worker.register("score_shadow", score_v2.run_job)
+        score_v2.attach()
+
         # KG v2 M1 backfill: legacy asserted/user relations -> belief store.
         # One-shot + idempotent; enqueued via POST /kg/backfill, chased by a
         # parity run so the report reflects the new state.

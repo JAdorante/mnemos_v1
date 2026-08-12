@@ -309,6 +309,7 @@ def _apply_consent_runtime(sources: dict) -> dict:
 @router.get("/health")
 def health() -> dict:
     from app.services import capture_consent
+    from app.services import score_v2
     from app.services import source_policy
     return {
         "status": "ok",
@@ -316,6 +317,7 @@ def health() -> dict:
             "loaded": source_policy.policies_loaded(),
             "version": source_policy.policy_version(),
         },
+        "score_v2": score_v2.health(),
         "audio_running": _audio_running,
         "system_audio_running": _system_audio_running,
         "vision_running": _vision_running,
@@ -2775,11 +2777,15 @@ def people_list(include_hidden: bool = False, include_candidates: bool = True) -
     """
     import time as _time
     from app.services.home_intelligence import person_score
+    from app.services import score_v2
     from app.services import self_profile
 
     store = memory._ensure_store()
     now = _time.time()
     self_pid = self_profile.self_person_id(store)
+    # WS-B: v2 ranks only when QUILL_SCORE_V2 is on AND the shadow soak
+    # passed (7 clean nightlies). None -> v1, the shipped default.
+    v2_scores = score_v2.live_scores(store, now)
     out = []
     for p in store.all_people():
         if not include_hidden and (
@@ -2787,8 +2793,11 @@ def people_list(include_hidden: bool = False, include_candidates: bool = True) -
             continue
         if not include_candidates and (p.get("promotion_state") or "") == "candidate":
             continue
-        rel = store.relations_of("person", p["id"])
-        score = person_score(rel.get("out") or [], p.get("last_seen"), now)
+        if v2_scores is not None:
+            score = v2_scores.get(p["id"], 0.0)
+        else:
+            rel = store.relations_of("person", p["id"])
+            score = person_score(rel.get("out") or [], p.get("last_seen"), now)
         out.append({"id": p["id"], "name": p["name"],
                     "weight": round(score, 1),
                     "last_seen": p.get("last_seen"),

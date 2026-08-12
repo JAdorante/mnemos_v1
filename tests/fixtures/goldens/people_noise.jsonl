@@ -9,9 +9,9 @@
 {"type": "owner", "case": "owner_sarah_alias", "name": "Sarah", "golden_person": "Sarah Chen", "event_source": "audio.whisper", "window": "", "text": "Sarah will send the revised quote on Monday.", "boost": 0.85}
 {"type": "owner", "case": "owner_marcus_typo", "name": "Markus", "golden_person": "Marcus Webb", "event_source": "audio.whisper", "window": "", "text": "Markus takes the follow-up with legal.", "boost": 0.85}
 {"type": "owner", "case": "owner_justin_full", "name": "Justin Adorante", "golden_person": "Justin Adorante", "event_source": "audio.whisper", "window": "", "text": "Justin Adorante owns the launch checklist.", "boost": 0.85}
-{"type": "score_profile", "name": "Justin Adorante", "typed": 9, "mentions": 4, "cooccur": 8, "asserted": 3, "last_seen_days": 0}
-{"type": "score_profile", "name": "Sarah Chen", "typed": 6, "mentions": 8, "cooccur": 6, "asserted": 2, "last_seen_days": 2}
-{"type": "score_profile", "name": "Podcast Pete", "typed": 0, "mentions": 25, "cooccur": 4, "asserted": 0, "last_seen_days": 1}
-{"type": "score_profile", "name": "Doc Marc", "typed": 0, "mentions": 12, "cooccur": 0, "asserted": 0, "last_seen_days": 5}
-{"type": "score_profile", "name": "Marcus Webb", "typed": 4, "mentions": 6, "cooccur": 3, "asserted": 1, "last_seen_days": 4}
-{"type": "score_profile", "name": "Officemate Ana", "typed": 2, "mentions": 3, "cooccur": 9, "asserted": 1, "last_seen_days": 1}
+{"type": "score_profile", "name": "Justin Adorante", "typed": 9, "mentions": 4, "cooccur": 8, "asserted": 3, "last_seen_days": 0, "dialogue_turns": 20, "mention_source": "audio.whisper"}
+{"type": "score_profile", "name": "Sarah Chen", "typed": 6, "mentions": 8, "cooccur": 6, "asserted": 2, "last_seen_days": 2, "dialogue_turns": 14, "mention_source": "audio.whisper"}
+{"type": "score_profile", "name": "Podcast Pete", "typed": 0, "mentions": 25, "cooccur": 4, "asserted": 0, "last_seen_days": 1, "dialogue_turns": 0, "mention_source": "audio.whisper"}
+{"type": "score_profile", "name": "Doc Marc", "typed": 0, "mentions": 12, "cooccur": 0, "asserted": 0, "last_seen_days": 5, "dialogue_turns": 0, "mention_source": "documents.scan"}
+{"type": "score_profile", "name": "Marcus Webb", "typed": 4, "mentions": 6, "cooccur": 3, "asserted": 1, "last_seen_days": 4, "dialogue_turns": 6, "mention_source": "audio.whisper"}
+{"type": "score_profile", "name": "Officemate Ana", "typed": 2, "mentions": 3, "cooccur": 9, "asserted": 1, "last_seen_days": 1, "dialogue_turns": 10, "mention_source": "audio.whisper"}

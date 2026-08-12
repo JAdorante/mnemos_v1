@@ -116,15 +116,20 @@ def run(rows: list[dict]) -> dict:
 
     # --- mention share over the constructed graph profiles ---------------
     people = []
+    people_v2 = []
     for r in rows:
         if r.get("type") != "score_profile":
             continue
+        # WS-B: profiles carry provenance (mention_source) + dialogue turns;
+        # v1 scoring ignores both, so the v1 numbers are byte-identical.
+        src = r.get("mention_source") or "audio.whisper"
         edges = []
         for i in range(int(r.get("typed") or 0)):
-            edges.append({"obj_type": "fact", "obj_id": i, "predicate": "owns"})
+            edges.append({"obj_type": "fact", "obj_id": i, "predicate": "owns",
+                          "source": src})
         for i in range(int(r.get("mentions") or 0)):
             edges.append({"obj_type": "fact", "obj_id": 10_000 + i,
-                          "predicate": "mentioned_in"})
+                          "predicate": "mentioned_in", "source": src})
         if r.get("cooccur"):
             edges.append({"obj_type": "person", "obj_id": 1,
                           "predicate": "co_occurs",
@@ -132,9 +137,19 @@ def run(rows: list[dict]) -> dict:
         for i in range(int(r.get("asserted") or 0)):
             edges.append({"obj_type": "entity", "obj_id": 20_000 + i,
                           "origin": "asserted"})
-        people.append((r["name"], edges,
-                       now - float(r.get("last_seen_days") or 0) * 86400.0))
+        last_seen = now - float(r.get("last_seen_days") or 0) * 86400.0
+        people.append((r["name"], edges, last_seen))
+        people_v2.append((r["name"], edges, last_seen,
+                          float(r.get("dialogue_turns") or 0)))
     shares = nm.top10_mention_shares(people, now)
+
+    # v2 shares (WS-B, report-only — never part of the gate verdict).
+    shares_v2 = None
+    v2_error = None
+    try:
+        shares_v2 = nm.topn_mention_shares_v2(people_v2, now)
+    except Exception as exc:
+        v2_error = str(exc)
 
     junk_rate = nm.junk_mint_rate(junk_minted, audio_hours)
     wrong_rate = nm.wrong_owner_rate(assignments)
@@ -151,6 +166,10 @@ def run(rows: list[dict]) -> dict:
         "top10_mention_share": [
             {"name": n, "score": round(s, 2), "mention_share": round(m, 3)}
             for n, s, m in shares],
+        "top10_mention_share_v2": (None if shares_v2 is None else [
+            {"name": n, "score": round(s, 2), "mention_share": round(m, 3)}
+            for n, s, m in shares_v2]),
+        "v2_error": v2_error,
         "gates": gates,
     }
 
@@ -184,6 +203,19 @@ def main() -> int:
             flag = "  <-- over" if s["mention_share"] > 0.30 else ""
             print(f"    {s['name']:<18} score {s['score']:>6}  "
                   f"mention {s['mention_share']:.1%}{flag}")
+        v2 = report.get("top10_mention_share_v2")
+        if v2 is None:
+            print(f"  score v2 (WS-B): NOT READY "
+                  f"({report.get('v2_error')})")
+        else:
+            worst2 = max((s["mention_share"] for s in v2), default=0.0)
+            print(f"  score v2 (WS-B, report-only): worst mention share "
+                  f"{worst2:.1%} (v1 was {worst:.1%})  "
+                  f"{'PASS' if worst2 <= 0.30 else 'FAIL'}")
+            for s in v2:
+                flag = "  <-- over" if s["mention_share"] > 0.30 else ""
+                print(f"    {s['name']:<18} score {s['score']:>6}  "
+                      f"mention {s['mention_share']:.1%}{flag}")
         mode = "GATED" if args.gate else "report-only (P0 baseline)"
         print(f"  overall: {'PASS' if g['ok'] else 'FAIL'}  [{mode}]")
     if args.gate and not report["gates"]["ok"]:

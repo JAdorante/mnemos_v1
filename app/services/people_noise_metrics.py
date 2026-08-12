@@ -61,6 +61,30 @@ def top10_mention_shares(
     return scored[:10]
 
 
+def topn_mention_shares_v2(
+        people: list[tuple[str, list[dict], float | None, float]],
+        now: float, *, limit: int = 10) -> list[tuple[str, float, float]]:
+    """WS-B report-only twin of top10_mention_shares under score v2.
+    `people` is [(name, out_edges, last_seen, dialogue_turns), ...]; edges may
+    carry a `source` annotation for provenance. People below v2's board floor
+    are excluded — a person who no longer makes the board cannot dominate it.
+    Raises ScoreV2NotReady when data/score_config.json failed to load (the
+    metric must never be computed on junk weights)."""
+    from app.services import score_v2
+    cfg = score_v2._raw_config()
+    if not cfg:
+        raise score_v2.ScoreV2NotReady("data/score_config.json not loaded")
+    floor = float(cfg.get("score_floor", 1.0))
+    scored = []
+    for name, edges, last_seen, dialogue in people:
+        t = score_v2.person_score_v2_terms(
+            edges, last_seen, now, dialogue_turns=dialogue, cfg=cfg)
+        if t["score"] >= floor:
+            scored.append((name, t["score"], t["mention_share"]))
+    scored.sort(key=lambda x: -x[1])
+    return scored[:limit]
+
+
 def gate_report(*, junk_rate: float, doc_mints: int, wrong_rate: float,
                 shares: list[tuple[str, float, float]]) -> dict:
     """Evaluate all three gates. `ok` is the CI verdict; per-gate booleans

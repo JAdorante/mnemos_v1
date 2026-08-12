@@ -1141,6 +1141,23 @@ class Store:
                 "CREATE INDEX IF NOT EXISTS idx_kg_parity_ts "
                 "ON kg_parity_reports(ts)")
 
+            # People v3 WS-B: nightly v1-vs-v2 connection-score comparison
+            # rows (services/score_v2.py). Report-only; the QUILL_SCORE_V2
+            # read cutover is gated on 7 consecutive clean nightlies.
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS score_shadow_reports (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts          REAL    NOT NULL,
+                    clean       INTEGER NOT NULL DEFAULT 0,
+                    report_json TEXT    NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_score_shadow_ts "
+                "ON score_shadow_reports(ts)")
+
             # KG v2 Change 4: versioned config (source weights etc.) so fitted
             # values can ship without a code change. version bumps on every set.
             self._conn.execute(

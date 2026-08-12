@@ -1,0 +1,22 @@
+{
+  "version": "1",
+  "comment": "People v3 WS-B connection-score v2 weights (services/score_v2.py). Damping is log1p normalized so ONE unit of evidence scores like v1; provenance multiplies each evidence item before damping (user-asserted > document > ASR). mention_cap_ratio bounds the mention term to a fraction of relationship evidence (typed + asserted + dialogue + co-occurrence): mentions corroborate, they never dominate a rank. 0.4 keeps mention share <= 28.6% of any score, under the 30% spec gate.",
+  "weights": {
+    "typed": 3.0,
+    "mention": 1.0,
+    "cooccur": 0.5,
+    "asserted": 2.0,
+    "dialogue": 2.5
+  },
+  "provenance": {
+    "asserted": 1.0,
+    "document": 0.7,
+    "asr": 0.5,
+    "unknown": 0.6
+  },
+  "mention_cap_ratio": 0.4,
+  "recency_half_life_days": 30.0,
+  "recency_floor": 0.35,
+  "score_floor": 1.0,
+  "top_n": 12
+}

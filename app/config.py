@@ -1027,6 +1027,19 @@ class PerceptionConfig:
 
 
 @dataclass(frozen=True)
+class ScoreConfig:
+    """People v3 WS-B — connection score v2 (see services/score_v2.py).
+
+    Weights live in data/score_config.json (fail-closed loader, surfaced in
+    /health); these flags only control rollout and both default OFF.
+    `shadow` runs the nightly v1-vs-v2 comparison job (report-only);
+    `live_v2` switches /people/list ranking to v2, and even then only after
+    cutover_ready() (7 consecutive clean nightlies)."""
+    shadow: bool = _get("QUILL_SCORE_SHADOW", "0") not in ("0", "false", "False")
+    live_v2: bool = _get("QUILL_SCORE_V2", "0") not in ("0", "false", "False")
+
+
+@dataclass(frozen=True)
 class Settings:
     audio: AudioConfig = AudioConfig()
     system_audio: SystemAudioConfig = SystemAudioConfig()
@@ -1059,6 +1072,7 @@ class Settings:
     economy: EconomyConfig = EconomyConfig()
     predictors: PredictorsConfig = PredictorsConfig()
     perception: PerceptionConfig = PerceptionConfig()
+    score: ScoreConfig = ScoreConfig()
     # Bind address. 127.0.0.1 keeps the unauthenticated local trust model.
     # 0.0.0.0 (phone / Tailscale) enables LanApiAuthMiddleware — set
     # QUILL_API_TOKEN or let startup write data/.api_token, then unlock at /auth.
