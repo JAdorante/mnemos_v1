@@ -1054,6 +1054,42 @@ class PeopleEscrowConfig:
 
 
 @dataclass(frozen=True)
+class MintRecurrenceConfig:
+    """People v3 P4 (WS-C): recurrence-gated person minting.
+
+    When ON, an unmatched NAMED mention that would mint a new Person on first
+    sight parks in the pending pool instead (person_mentions rows with
+    resolution_status='pending_mint'); the Person is minted retroactively only
+    once the same identity has been seen in >= `min_sessions` distinct
+    sessions, adopting the pooled mentions so no signal is lost. Pending
+    mentions that never recur are archived (status='pending_expired', never
+    deleted) after `ttl_days`. Default OFF: behavior is byte-identical to the
+    first-sight-minting pipeline. Composes with QUILL_PEOPLE_ESCROW, which
+    handles UNNAMED speakers — this gate handles named-but-new mentions.
+    """
+    enabled: bool = _get("QUILL_MINT_RECURRENCE", "0") not in ("0", "false", "False")
+    min_sessions: int = int(_get("QUILL_MINT_RECURRENCE_SESSIONS", "2"))
+    ttl_days: float = float(_get("QUILL_MINT_RECURRENCE_TTL_DAYS", "30"))
+
+
+@dataclass(frozen=True)
+class ProvisionalBindConfig:
+    """People v3 WS-D part 2: provisional-bind band + merge-as-training.
+
+    When ON, a would-be create_new / leave_open / pending_mint whose best
+    EXISTING candidate scores in [score_lo, score_hi] binds provisionally
+    to that person instead of minting a twin or stalling. Mentions land as
+    resolution_status='provisional'; a later human soft_merge confirms them
+    into conclusive positive alias_rules (the training signal). Default OFF:
+    byte-identical to the pre-band pipeline.
+    """
+    enabled: bool = _get("QUILL_PROVISIONAL_BIND", "0") not in (
+        "0", "false", "False")
+    score_lo: float = float(_get("QUILL_PROVISIONAL_BIND_LO", "0.55"))
+    score_hi: float = float(_get("QUILL_PROVISIONAL_BIND_HI", "0.80"))
+
+
+@dataclass(frozen=True)
 class Settings:
     audio: AudioConfig = AudioConfig()
     system_audio: SystemAudioConfig = SystemAudioConfig()
@@ -1088,6 +1124,8 @@ class Settings:
     perception: PerceptionConfig = PerceptionConfig()
     score: ScoreConfig = ScoreConfig()
     people_escrow: PeopleEscrowConfig = PeopleEscrowConfig()
+    mint_recurrence: MintRecurrenceConfig = MintRecurrenceConfig()
+    provisional_bind: ProvisionalBindConfig = ProvisionalBindConfig()
     # Bind address. 127.0.0.1 keeps the unauthenticated local trust model.
     # 0.0.0.0 (phone / Tailscale) enables LanApiAuthMiddleware — set
     # QUILL_API_TOKEN or let startup write data/.api_token, then unlock at /auth.

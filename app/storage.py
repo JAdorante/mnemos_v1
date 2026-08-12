@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import threading
 import wave
@@ -1485,6 +1486,23 @@ class Store:
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_pm_person ON person_mentions(resolved_person_id)")
 
+            # People v3 WS-C (recurrence-gated minting): the pending pool
+            # REUSES this mention ledger — a would-be first-sight mint parks as
+            # resolution_status='pending_mint' (expiry archives to
+            # 'pending_expired'), no separate table. Guarded ALTER (escrow
+            # precedent): an optional context embedding for matching pending
+            # mentions to each other; unread while QUILL_MINT_RECURRENCE is
+            # off, and v1 matching keys on normalized_text anyway.
+            pmcols = {r["name"] for r in self._conn.execute(
+                "PRAGMA table_info(person_mentions)").fetchall()}
+            if pmcols and "context_embedding" not in pmcols:
+                self._conn.execute(
+                    "ALTER TABLE person_mentions "
+                    "ADD COLUMN context_embedding BLOB")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_pm_status "
+                "ON person_mentions(resolution_status, normalized_text)")
+
             self._conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS identity_candidates (
@@ -2704,6 +2722,141 @@ class Store:
                 "ORDER BY observed_at DESC LIMIT ?",
                 [*args, limit]).fetchall()
         return [dict(r) for r in rows]
+
+    # --------------- People v3 WS-C: recurrence-gated minting -------------
+    def pending_mint_mentions(self, normalized_text: str) -> list[dict]:
+        """The pending pool for one would-be identity: every 'pending_mint'
+        mention whose normalized name matches (case-insensitive). Oldest
+        first, so recurrence counting sees sightings in time order."""
+        key = (normalized_text or "").strip()
+        if not key:
+            return []
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM person_mentions "
+                "WHERE resolution_status = 'pending_mint' "
+                "AND normalized_text = ? COLLATE NOCASE "
+                "ORDER BY observed_at", (key,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def expire_pending_mint_mentions(self, cutoff_ts: float,
+                                     now: float) -> int:
+        """WS-C TTL: ARCHIVE (never delete) pending-pool rows that never
+        recurred — the mention evidence stays on the ledger, it just stops
+        counting toward (or blocking) a future recurrence window."""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE person_mentions SET "
+                "resolution_status = 'pending_expired', updated_at = ? "
+                "WHERE resolution_status = 'pending_mint' "
+                "AND observed_at < ?", (now, cutoff_ts))
+            self._conn.commit()
+            return int(cur.rowcount or 0)
+
+    def adopt_pending_mint_mentions(self, normalized_text: str,
+                                    person_id: int, *, ts: float,
+                                    confidence: float = 0.85) -> list[dict]:
+        """WS-C retroactive mint: bind every pooled mention for this identity
+        to the just-minted person. Returns the adopted rows so the caller can
+        rewrite typed task/commitment columns (P3 rebind idiom)."""
+        key = (normalized_text or "").strip()
+        if not key:
+            return []
+        with self._lock:
+            rows = [dict(r) for r in self._conn.execute(
+                "SELECT mention_id, event_id, raw_text, normalized_text, "
+                "grammatical_role, observed_at FROM person_mentions "
+                "WHERE resolution_status = 'pending_mint' "
+                "AND normalized_text = ? COLLATE NOCASE", (key,)).fetchall()]
+            if rows:
+                ids = [int(r["mention_id"]) for r in rows]
+                ph = ",".join("?" for _ in ids)
+                self._conn.execute(
+                    f"UPDATE person_mentions SET "
+                    f"resolution_status = 'resolved', resolved_person_id = ?, "
+                    f"resolution_confidence = ?, updated_at = ? "
+                    f"WHERE mention_id IN ({ph})",
+                    [int(person_id), float(confidence), ts, *ids])
+                self._conn.commit()
+        if rows:
+            # Adopted mentions change the person's neighborhood — outside the
+            # lock (mark_graph_dirty takes the same non-reentrant Lock).
+            self.mark_graph_dirty("person", int(person_id), ts=ts)
+        return rows
+
+    def promote_provisional_mentions(self, *, from_person_id: int,
+                                     to_person_id: int,
+                                     ts: float) -> list[dict]:
+        """WS-D part 2: re-point every provisional mention bound to
+        `from_person_id` onto `to_person_id` and flip status to resolved.
+        Returns the rows that were promoted (for alias-rule training).
+        Idempotent — already-resolved rows are untouched."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT mention_id, raw_text, normalized_text "
+                "FROM person_mentions "
+                "WHERE resolution_status = 'provisional' "
+                "AND resolved_person_id = ?",
+                (int(from_person_id),)).fetchall()
+            out = [dict(r) for r in rows]
+            if out:
+                self._conn.execute(
+                    "UPDATE person_mentions SET "
+                    "resolution_status = 'resolved', "
+                    "resolved_person_id = ?, updated_at = ? "
+                    "WHERE resolution_status = 'provisional' "
+                    "AND resolved_person_id = ?",
+                    (int(to_person_id), float(ts), int(from_person_id)))
+                self._conn.commit()
+        return out
+
+    def retro_link_person_rows(self, *, person_id: int, event_id: int,
+                               role: str, name: str, ts: float) -> dict:
+        """WS-C: attach the retro-minted person to typed rows born from a
+        pooled mention's event window. P3 rebind idiom: only fills columns
+        that are still NULL; additionally the fact's own span/text must
+        actually contain the mentioned name, so two different unresolved
+        names in one window can never claim each other's rows."""
+        col = {"owner": ("tasks", "owner_person_id"),
+               "from": ("commitments", "from_person_id"),
+               "to": ("commitments", "to_person_id")}.get(
+                   (role or "").strip().lower())
+        if col is None:
+            return {"linked": 0, "fact_ids": []}
+        table, column = col
+        tokens = [t for t in re.findall(r"\w+", (name or "").lower())
+                  if len(t) >= 2]
+        if not tokens:
+            return {"linked": 0, "fact_ids": []}
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT x.fact_id, x.text, f.source_span "
+                f"FROM {table} x JOIN facts f ON f.id = x.fact_id "
+                f"WHERE x.{column} IS NULL AND f.source_event_id IS NOT NULL "
+                f"AND f.source_event_id <= ? "
+                f"AND COALESCE(f.source_event_hi, f.source_event_id) >= ?",
+                (int(event_id), int(event_id))).fetchall()
+            linked: list[int] = []
+            for r in rows:
+                hay = " ".join(filter(None, (r["source_span"],
+                                             r["text"]))).lower()
+                if not any(re.search(rf"\b{re.escape(t)}\b", hay)
+                           for t in tokens):
+                    continue
+                cur = self._conn.execute(
+                    f"UPDATE {table} SET {column} = ? "
+                    f"WHERE fact_id = ? AND {column} IS NULL",
+                    (int(person_id), int(r["fact_id"])))
+                if cur.rowcount:
+                    linked.append(int(r["fact_id"]))
+            if linked:
+                self._conn.commit()
+        # Dirty marks outside the lock (non-reentrant Lock).
+        for fid in linked:
+            self.mark_graph_dirty("fact", fid, ts=ts)
+        if linked:
+            self.mark_graph_dirty("person", int(person_id), ts=ts)
+        return {"linked": len(linked), "fact_ids": linked}
 
     # ------------------------------ edge dynamics ------------------------
     def all_relations(self) -> list[dict]:
@@ -4784,6 +4937,16 @@ class Store:
                                     created_by=f"merge:{op_id}", ts=ts)
         except Exception:
             pass
+        # People v3 WS-D part 2: provisional mentions that bound to the
+        # absorbed person follow the survivor and become conclusive training.
+        # Registered unconditionally so a merge after a flag flip still
+        # confirms any leftover provisional rows.
+        try:
+            from app.services import provisional_bind
+            provisional_bind.on_person_merged(
+                self, survivor_id, absorbed_id, ts)
+        except Exception as exc:
+            print(f"[storage] provisional_bind merge hook skipped ({exc}).")
         # Change 1: the winner inherits the loser's blocking keys (never deleted).
         self.copy_node_keys("person", absorbed_id, survivor_id)
         # People v3 P3: bound voice tracks follow the merge (each re-pointed
