@@ -25,7 +25,9 @@ import re
 import time
 from dataclasses import dataclass
 
+from app.services import mint_recurrence
 from app.services import name_quality as nq
+from app.services import provisional_bind
 from app.services import self_profile
 from app.services import source_policy as sp
 from app.services.person_details import (
@@ -258,7 +260,13 @@ def decide_from_scores(
 @dataclass
 class ResolveResult:
     person_id: int | None
-    decision: str  # auto_resolve|create_new|leave_open|reject|self|legacy
+    # auto_resolve|create_new|leave_open|reject|self|legacy|pending_mint|
+    # provisional_bind
+    # (pending_mint: WS-C recurrence gate pooled a would-be first-sight
+    # mint; person_id is None, callers treat it exactly like leave_open)
+    # (provisional_bind: WS-D pt2 medium-confidence bind to an existing
+    # person; person_id set, mention status='provisional')
+    decision: str
     mention_id: int | None = None
     confidence: float = 0.0
 
@@ -342,6 +350,10 @@ def resolve_person_mention(
 
     # --- candidate generation (also used for knowledge-only exact bind) ---
     people = store.list_people_embed()
+    # Full roster BEFORE filtering: the WS-C recurrence gate needs to know
+    # whether a mint would collide with a hidden/absorbed/banned canonical
+    # name (those must leave_open, never pool toward a twin).
+    roster_all = people
     # Filter absorbed / hidden
     people = [p for p in people
               if not p.get("canonical_person_id")
@@ -402,13 +414,49 @@ def resolve_person_mention(
         if len(tokens) < 2 and not has_invite:
             decision, chosen_row, conf = "leave_open", None, float(conf)
 
+    # People v3 WS-C (QUILL_MINT_RECURRENCE, default OFF): people must recur
+    # before they exist. A would-be NEW mint parks in the pending pool
+    # (person_mentions status='pending_mint') until the same identity has
+    # been seen in >= 2 distinct sessions; the mint then happens on this
+    # sighting and retroactively adopts the pooled mentions. Every guard
+    # above already ran (junk/self/single-token/policy/alias rules), so the
+    # pool only ever holds plausible named mentions; binds to EXISTING
+    # people are untouched, and an email-anchored calendar invitee still
+    # mints on first sight (the invite is the identity evidence).
+    pending_pool = False
+    if decision == "create_new" and mint_recurrence.enabled() \
+            and not matching_attendees(display, attendee_priors):
+        _collides = any(
+            (p.get("name") or "").strip().lower() == display.lower()
+            for p in roster_all)
+        gate = mint_recurrence.evaluate_mint(
+            store, display=display, now=ts, mint_collides=_collides)
+        if gate.action == "leave_open":
+            decision, chosen_row = "leave_open", None
+        elif gate.action == "pool":
+            decision, pending_pool = "pending_mint", True
+
+    # People v3 WS-D part 2 (QUILL_PROVISIONAL_BIND, default OFF): the
+    # provisional-bind band (0.55–0.80). Slots between the recurrence gate
+    # and the hard mint — a medium-confidence EXISTING match binds
+    # provisionally instead of minting a twin, stalling as leave_open, or
+    # parking in the pending pool. Conclusive alias_rules still come from
+    # human merges (merge-as-training-data).
+    if provisional_bind.enabled():
+        hit = provisional_bind.maybe_bind(scored, decision)
+        if hit is not None:
+            decision, chosen_row, conf = hit
+            pending_pool = False
+
     chosen: int | None = None
     relevance = float(relationship_boost)
 
-    if decision == "auto_resolve" and chosen_row is not None:
+    if decision in ("auto_resolve", "provisional_bind") and chosen_row is not None:
         chosen = int(chosen_row["id"])
         store.touch_person(chosen, ts, alias=display)
-        if policy.create_person_candidates:
+        # Provisional evidence has not earned promotion — only conclusive
+        # auto_resolve bumps the candidate toward active.
+        if decision == "auto_resolve" and policy.create_person_candidates:
             _bump_promotion(store, chosen, relevance, ts)
     elif decision == "create_new":
         # Prefer the invite CN over a bare first-name mention when minting.
@@ -447,6 +495,15 @@ def resolve_person_mention(
                 )
             except Exception:
                 pass
+        # WS-C retroactive adoption: a mint that finally happened (recurrence
+        # met, or an invite anchored it) claims any pooled mentions of the
+        # same identity — their facts/events link to the new person.
+        if chosen is not None and mint_recurrence.enabled():
+            try:
+                mint_recurrence.adopt_pending(
+                    store, person_id=chosen, display=display, ts=ts)
+            except Exception as exc:
+                print(f"[mint_recurrence] adopt skipped ({exc}).")
 
     # Rebuild the ranked list with the new-person prior for decision logging
     # (mirrors decide_from_scores when create is allowed).
@@ -486,7 +543,10 @@ def resolve_person_mention(
             pipeline_version=PIPELINE_VERSION,
             person_probability=0.85, extraction_confidence=0.75,
             actor_types=[("human_person", 0.85)],
-            resolution_status=("resolved" if chosen else "unresolved"),
+            resolution_status=("provisional" if decision == "provisional_bind"
+                               else ("resolved" if chosen else
+                                     (mint_recurrence.PENDING_STATUS
+                                      if pending_pool else "unresolved"))),
             resolved_person_id=chosen,
             resolution_confidence=conf,
             relationship_relevance=relevance,

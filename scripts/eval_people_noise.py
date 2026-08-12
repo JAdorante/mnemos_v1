@@ -46,6 +46,98 @@ def load_golden() -> list[dict]:
     return rows
 
 
+def _run_recurrence(rows: list[dict], now: float) -> dict:
+    """WS-C (P4) report-only replay: the same mention corpus through the LIVE
+    pipeline with QUILL_MINT_RECURRENCE on, each sighting placed in its
+    fixture-declared session (`session` on mention rows; additive — the
+    baseline replay ignores it). `recurring_mention` rows (a type the
+    baseline also ignores) demonstrate that a real repeat visitor still
+    mints: pooled on sighting 1, minted retroactively in the second distinct
+    session. Never part of the gate verdict."""
+    import contextlib
+    import io
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from app.events import Event, Modality
+    from app.services import mint_recurrence
+    from app.services import people_pipeline as pp
+    from app.storage import Store
+
+    sightings: list[tuple[str, dict]] = []
+    for r in rows:
+        if r.get("type") == "mention":
+            sightings.append((str(r.get("session") or r["case"]), r))
+        elif r.get("type") == "recurring_mention":
+            for s in (r.get("sessions") or []):
+                sightings.append((str(s), r))
+
+    labels: list[str] = []
+    for lab, _ in sightings:
+        if lab not in labels:
+            labels.append(lab)
+    base = now - 30 * 86400.0
+    # 30-minute session windows, 4 h apart — unambiguously distinct sessions.
+    win = {lab: base + i * 4 * 3600.0 for i, lab in enumerate(labels)}
+
+    tmp = Path(tempfile.mkdtemp(prefix="quill_noise_rec_"))
+    store = Store(db_path=tmp / "noise.db", audio_dir=tmp / "audio")
+    flag = SimpleNamespace(mint_recurrence=SimpleNamespace(
+        enabled=True, min_sessions=2, ttl_days=30.0))
+    junk_minted = 0
+    doc_mints = 0
+    log: list[dict] = []
+    try:
+        for r in rows:
+            if r.get("type") != "person":
+                continue
+            pid = store.insert_person(r["name"], ts=base)
+            for alias in r.get("aliases") or []:
+                store.touch_person(pid, base, alias=alias)
+        store.replace_sessions([
+            SimpleNamespace(start=t0, end=t0 + 1800.0, speakers=[], text="",
+                            turn_ids=[], event_ids=[], n_turns=1,
+                            n_utterances=1)
+            for t0 in sorted(win.values())])
+        seen: dict[str, int] = {}
+        # Silence pipeline chatter (e.g. the retro-mint log line): --json
+        # must emit nothing but the report object on stdout.
+        with patch.object(mint_recurrence, "settings", flag), \
+                contextlib.redirect_stdout(io.StringIO()):
+            for lab, r in sightings:
+                n = seen.get(r["case"], 0) + 1
+                seen[r["case"]] = n
+                ts = win[lab] + 60.0 * n
+                src = r.get("event_source") or "audio.whisper"
+                eid = store.insert(Event(
+                    time=ts,
+                    modality=(Modality.AUDIO if src.startswith("audio")
+                              else Modality.VISION),
+                    raw=r.get("text") or "", source=src))
+                res = pp.resolve_person_mention(
+                    r["name"], store=store, event_id=eid,
+                    event_source=src, window=r.get("window") or "",
+                    text=r.get("text") or "", now=ts,
+                    relationship_boost=float(r.get("boost") or 0.6))
+                minted = res.decision == "create_new"
+                g = r.get("golden") or {}
+                if minted and g.get("junk"):
+                    junk_minted += 1
+                if minted and g.get("surface") == "document":
+                    doc_mints += 1
+                log.append({"case": r["case"], "sighting": n, "session": lab,
+                            "decision": res.decision, "minted": minted})
+    finally:
+        try:
+            store.close()
+        except Exception:
+            pass
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+    return {"junk_minted": junk_minted, "doc_mints": doc_mints,
+            "decisions": log}
+
+
 def run(rows: list[dict]) -> dict:
     from app.services import people_pipeline as pp
     from app.services import people_noise_metrics as nm
@@ -151,6 +243,15 @@ def run(rows: list[dict]) -> dict:
     except Exception as exc:
         v2_error = str(exc)
 
+    # WS-C recurrence-gated junk-mint (P4, report-only — never part of the
+    # gate verdict; the verdict flips only when the flag rollout does).
+    recurrence = None
+    rec_error = None
+    try:
+        recurrence = _run_recurrence(rows, now)
+    except Exception as exc:
+        rec_error = str(exc)
+
     junk_rate = nm.junk_mint_rate(junk_minted, audio_hours)
     wrong_rate = nm.wrong_owner_rate(assignments)
     gates = nm.gate_report(junk_rate=junk_rate, doc_mints=doc_mints,
@@ -170,6 +271,11 @@ def run(rows: list[dict]) -> dict:
             {"name": n, "score": round(s, 2), "mention_share": round(m, 3)}
             for n, s, m in shares_v2]),
         "v2_error": v2_error,
+        "junk_mint_per_audio_hour_recurrence": (
+            None if recurrence is None else round(
+                nm.junk_mint_rate(recurrence["junk_minted"], audio_hours), 3)),
+        "recurrence": recurrence,
+        "recurrence_error": rec_error,
         "gates": gates,
     }
 
@@ -216,6 +322,22 @@ def main() -> int:
                 flag = "  <-- over" if s["mention_share"] > 0.30 else ""
                 print(f"    {s['name']:<18} score {s['score']:>6}  "
                       f"mention {s['mention_share']:.1%}{flag}")
+        rec = report.get("recurrence")
+        if rec is None:
+            print(f"  mint recurrence (WS-C): NOT READY "
+                  f"({report.get('recurrence_error')})")
+        else:
+            rr = report["junk_mint_per_audio_hour_recurrence"]
+            print(f"  mint recurrence (WS-C, report-only): junk-mint "
+                  f"{rr:.2f}/audio-h (v-current "
+                  f"{report['junk_mint_per_audio_hour']:.2f})  "
+                  f"{'PASS' if rr <= 0.5 else 'FAIL'}")
+            print(f"    doc mints {rec['doc_mints']} "
+                  f"(v-current {report['doc_mints']})")
+            for d in rec["decisions"]:
+                print(f"    {d['case']:<22} sighting {d['sighting']} "
+                      f"[{d['session']}]  {d['decision']}"
+                      f"{'  <-- minted' if d['minted'] else ''}")
         mode = "GATED" if args.gate else "report-only (P0 baseline)"
         print(f"  overall: {'PASS' if g['ok'] else 'FAIL'}  [{mode}]")
     if args.gate and not report["gates"]["ok"]:
