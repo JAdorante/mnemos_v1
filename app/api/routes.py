@@ -7614,3 +7614,44 @@ load();
   },{passive:true});
 })();
 </script></body></html>""")
+
+
+# ---------------------------------------------------------------------------
+# People v3 P3 (WS-A): voice-track escrow — label a provisional speaker.
+# Appended at end of file on purpose (parallel-agent merge friendliness).
+
+
+class SpeakerLabelIn(BaseModel):
+    label: str   # provisional track label, e.g. "Speaker 3"
+    name: str    # the person this voice belongs to
+
+
+@router.post("/speakers/label")
+def speakers_label(body: SpeakerLabelIn) -> dict:
+    """Bind an unbound voice track ("Speaker N") to a named person and queue
+    the durable rebind job that reactivates everything escrowed against it.
+    404 while QUILL_PEOPLE_ESCROW is off (feature dark by default)."""
+    from app.services import people_escrow
+    from app.storage import get_store
+
+    if not people_escrow.enabled():
+        raise HTTPException(
+            status_code=404,
+            detail="people escrow is disabled (set QUILL_PEOPLE_ESCROW=1)")
+    res = people_escrow.label_speaker(get_store(), body.label, body.name)
+    if not res.get("ok"):
+        raise HTTPException(status_code=409, detail=res.get("error") or "bind failed")
+    return res
+
+
+@router.get("/speakers/escrow")
+def speakers_escrow_status() -> dict:
+    """Escrow observability: per-track escrowed-row counts + bind state."""
+    from app.services import people_escrow
+    from app.storage import get_store
+
+    if not people_escrow.enabled():
+        raise HTTPException(
+            status_code=404,
+            detail="people escrow is disabled (set QUILL_PEOPLE_ESCROW=1)")
+    return people_escrow.escrow_status(get_store())

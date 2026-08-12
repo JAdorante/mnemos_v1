@@ -1040,6 +1040,20 @@ class ScoreConfig:
 
 
 @dataclass(frozen=True)
+class PeopleEscrowConfig:
+    """People v3 P3 (WS-A): voice-track escrow + retroactive rebind.
+
+    When ON, facts extracted from an unbound diarization track ("Speaker N")
+    are kept but escrowed against the track instead of being dropped (or
+    minting a junk "Speaker N" person). Escrowed rows stay out of grounding,
+    retrieval, people scoring and the constellation until the track is bound
+    to a named person, at which point a durable rebind job rewrites them.
+    Default OFF: behavior is byte-identical to the pre-escrow pipeline.
+    """
+    enabled: bool = _get("QUILL_PEOPLE_ESCROW", "0") not in ("0", "false", "False")
+
+
+@dataclass(frozen=True)
 class Settings:
     audio: AudioConfig = AudioConfig()
     system_audio: SystemAudioConfig = SystemAudioConfig()
@@ -1073,6 +1087,7 @@ class Settings:
     predictors: PredictorsConfig = PredictorsConfig()
     perception: PerceptionConfig = PerceptionConfig()
     score: ScoreConfig = ScoreConfig()
+    people_escrow: PeopleEscrowConfig = PeopleEscrowConfig()
     # Bind address. 127.0.0.1 keeps the unauthenticated local trust model.
     # 0.0.0.0 (phone / Tailscale) enables LanApiAuthMiddleware — set
     # QUILL_API_TOKEN or let startup write data/.api_token, then unlock at /auth.

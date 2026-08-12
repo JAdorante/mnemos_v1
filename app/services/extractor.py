@@ -512,6 +512,12 @@ class Extractor:
                 event_source=event_source, window=window, text=text,
                 grammatical_role=grammatical_role,
                 relationship_boost=relationship_boost)
+        # People v3 P3 (flag-gated): a provisional diarization label
+        # ("Speaker 3") used as a party name never resolves — and never
+        # mints — a person. The caller escrows the fact against the track.
+        from app.services import people_escrow
+        if people_escrow.enabled() and people_escrow.is_provisional_label(name):
+            return None
         if enabled():
             res = resolve_person_mention(
                 name, store=store, event_id=event_id,
@@ -557,6 +563,12 @@ class Extractor:
         if self_profile.speaker_is_enrolled_user(spk, store):
             return self_profile.self_person_id(store)
         if not spk or spk.lower() == "unknown speaker":
+            return None
+        # People v3 P3 (flag-gated): an unbound voice track's 'me' does not
+        # resolve to (or mint) a person — the caller escrows against the
+        # track instead, and the rebind job attributes it once labeled.
+        from app.services import people_escrow
+        if people_escrow.enabled() and people_escrow.is_provisional_label(spk):
             return None
         # Diarization placeholders are not people — never mint "Speaker 6".
         import re as _re
@@ -784,6 +796,27 @@ class Extractor:
                 turn_end=getattr(turn, "end", None),
                 attendee_priors=_priors)
 
+        # People v3 P3: this turn's durable voice-track id when the speaker is
+        # an unbound provisional label AND QUILL_PEOPLE_ESCROW is on, else None
+        # (flag off: no track is minted, nothing below changes behavior).
+        escrow_track_id: int | None = None
+        try:
+            from app.services import people_escrow
+            escrow_track_id = people_escrow.track_for_turn(store, turn, now)
+        except Exception as exc:
+            print(f"[extract] escrow track skipped ({exc}).")
+
+        def _escrows_to_track(party_name: str, pid: int | None) -> bool:
+            """Does this unresolved party mean the turn's unbound speaker?
+            ('me'/'I' relative to the track, or the label itself.)"""
+            if escrow_track_id is None or pid is not None:
+                return False
+            from app.services import self_profile as _sp
+            nm = (party_name or "").strip()
+            return bool(nm) and (
+                _sp.is_self_name(nm)
+                or nm.lower() == (turn.speaker or "").strip().lower())
+
         def _apply(v, fid: int) -> None:
             # A 'supersede' verdict: the just-inserted fact replaces the old.
             for old in v.supersede_ids:
@@ -825,13 +858,30 @@ class Extractor:
                 if cid:
                     store.set_fact_candidate_status(cid, "deduped", verdict_reason=reason)
                 continue
+            owner_name = t.get("owner", "")
+            owner_pid = _person(owner_name, role="owner", boost=0.85)
+            escrowed = _escrows_to_track(owner_name, owner_pid)
             fid = store.add_task(
                 t["text"], source_event_id=anchor,
                 source_span=t.get("source_span", ""),
                 confidence=t.get("confidence"),
-                owner_person_id=_person(t.get("owner", ""), role="owner", boost=0.85),
+                owner_person_id=owner_pid,
                 due=_coerce_due(t.get("due")), extracted_at=now,
             )
+            if escrowed:
+                # P3: the owner is this turn's unbound voice track — keep the
+                # extraction but park it (out of every surface) until the
+                # track is bound and the rebind job reactivates it. It must
+                # not retire active facts or trigger offers while escrowed.
+                store.escrow_fact(fid, escrow_track_id, task_owner=True)
+                if cid:
+                    store.set_fact_candidate_status(
+                        cid, "accepted",
+                        verdict_reason=(reason + " [escrowed to track "
+                                        f"{escrow_track_id}]").strip())
+                self._record_faithfulness(t, turn.text)
+                n += 1
+                continue
             _apply(v, fid)
             if cid:
                 store.set_fact_candidate_status(cid, "accepted", verdict_reason=reason)
@@ -864,14 +914,28 @@ class Extractor:
                 if cid:
                     store.set_fact_candidate_status(cid, "deduped", verdict_reason=reason)
                 continue
+            from_name = c.get("from_person", "")
+            from_pid = _person(from_name, role="from", boost=0.8)
+            escrowed = _escrows_to_track(from_name, from_pid)
             fid = store.add_commitment(
                 c["text"], source_event_id=anchor,
                 source_span=c.get("source_span", ""),
                 confidence=c.get("confidence"),
-                from_person_id=_person(c.get("from_person", ""), role="from", boost=0.8),
+                from_person_id=from_pid,
                 to_person_id=_person(c.get("to_person", ""), role="to", boost=0.75),
                 due=_coerce_due(c.get("due")), extracted_at=now,
             )
+            if escrowed:
+                # P3: committer is the unbound voice track — escrow (see tasks).
+                store.escrow_fact(fid, escrow_track_id, commitment_from=True)
+                if cid:
+                    store.set_fact_candidate_status(
+                        cid, "accepted",
+                        verdict_reason=(reason + " [escrowed to track "
+                                        f"{escrow_track_id}]").strip())
+                self._record_faithfulness(c, turn.text)
+                n += 1
+                continue
             _apply(v, fid)
             if cid:
                 store.set_fact_candidate_status(cid, "accepted", verdict_reason=reason)
@@ -905,6 +969,21 @@ class Extractor:
                 source_span=cl.get("source_span", ""),
                 confidence=cl.get("confidence"), extracted_at=now,
             )
+            # P3: a first-person claim from an unbound voice track is ABOUT a
+            # speaker who hasn't earned identity yet — escrow it against the
+            # track (no index / KG belief / offers until the rebind).
+            from app.services import self_profile
+            if (escrow_track_id is not None
+                    and self_profile.is_first_person(cl["text"])):
+                store.escrow_fact(fid, escrow_track_id)
+                if cid:
+                    store.set_fact_candidate_status(
+                        cid, "accepted",
+                        verdict_reason=(reason + " [escrowed to track "
+                                        f"{escrow_track_id}]").strip())
+                self._record_faithfulness(cl, turn.text)
+                n += 1
+                continue
             _apply(v, fid)
             if cid:
                 store.set_fact_candidate_status(cid, "accepted", verdict_reason=reason)

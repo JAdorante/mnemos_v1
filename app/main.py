@@ -341,6 +341,16 @@ async def _startup() -> None:
             worker.enqueue("perception_compact", unique=True)
         except Exception as exc:
             print(f"[worker] perception_compact register skipped ({exc}).")
+        # People v3 P3 (WS-A): retroactive rebind of escrowed voice-track rows
+        # (QUILL_PEOPLE_ESCROW). Registered unconditionally so a rebind queued
+        # while the flag was on still completes after a restart/flag flip —
+        # with the flag off no job of this kind is ever enqueued.
+        try:
+            from app.services import people_escrow
+            worker.register("people_escrow_rebind",
+                            people_escrow.run_rebind_job)
+        except Exception as exc:
+            print(f"[worker] people_escrow register skipped ({exc}).")
         worker.start()
 
         # New audio utterances re-consolidate the timeline; new desktop events

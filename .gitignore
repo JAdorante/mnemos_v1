@@ -20,3 +20,6 @@ sessions/
 .vscode/*.log
 debug-*.log
 test_full_suite_out.txt
+
+# Claude Code agent worktrees (local orchestration state)
+/.claude/
