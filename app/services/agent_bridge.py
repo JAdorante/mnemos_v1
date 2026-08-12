@@ -1788,10 +1788,18 @@ class AgentWorker:
             source_fact_ids=cmd.get("source_fact_ids"),
             study_mode=cmd.get("study_mode"))
         distill_id = getattr(self.agent, "last_distill_id", None)
-        sources, block, question = self._pop_grounding(self.agent)
+        sources, _block, question = self._pop_grounding(self.agent)
+        # Live hands results (browser/desktop/phone) are evidence from the
+        # world the agent just observed. Do NOT pass the memory retrieval
+        # block as answer_check context: that gate is for claims grounded in
+        # Mnemos memory, and would mark every live proper noun as "missing"
+        # then rewrite the answer into an unrelated memory dump. Memories
+        # still ground the *task* via memory_provider during the run; only
+        # the post-hoc token check is skipped. Sources stay attached for the
+        # optional grounding footer.
         self._emit("result", result or f"(no answer — {status})",
                    distill_id=distill_id,
-                   sources=sources, context=block, question=question)
+                   sources=sources, context=None, question=question)
         return result or "", status
 
     def recent_results(self, limit: int = 12) -> list[str]:
@@ -1982,10 +1990,10 @@ class AgentWorker:
                     source_fact_id=cmd.get("fact_id"),
                     source_fact_ids=seeded or None,
                     study_mode=cmd.get("study_mode"))
-                sources, block, question = self._pop_grounding(self.agent)
+                sources, _block, question = self._pop_grounding(self.agent)
                 self._emit("result", result or f"(no answer — {status})",
                            distill_id=getattr(self.agent, "last_distill_id", None),
-                           sources=sources, context=block, question=question)
+                           sources=sources, context=None, question=question)
                 last = (result or "", status)
         return last
 
@@ -2103,10 +2111,10 @@ class AgentWorker:
                         source_fact_id=cmd.get("fact_id"),
                         source_fact_ids=cmd.get("source_fact_ids"),
                         study_mode=cmd.get("study_mode"))
-                    sources, block, question = self._pop_grounding(agent)
+                    sources, _block, question = self._pop_grounding(agent)
                     self._emit("result", result or f"(no answer — {status})",
                                distill_id=getattr(agent, "last_distill_id", None),
-                               sources=sources, context=block, question=question)
+                               sources=sources, context=None, question=question)
                 elif typ == "new":
                     if self.fast_agent is not None:
                         self.fast_agent.transcript.clear()

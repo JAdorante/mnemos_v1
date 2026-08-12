@@ -96,6 +96,43 @@ class ChatOutcomeTests(unittest.TestCase):
                          "open tasks & commitments")
         self.assertNotIn("sources", w.events[1])
 
+    def test_live_browser_result_not_downgraded_against_memory(self) -> None:
+        # Live hands answers cite people/places from the page the agent just
+        # read. Those tokens are not expected to appear in Mnemos memory.
+        # Passing the retrieval block into answer_check would rewrite any
+        # such summary into Confirmed/Missing + unrelated memory evidence.
+        # Emit path must omit context so the done-result text stays intact.
+        from app.services.agent_bridge import AgentWorker
+        from app.services.answer_check import check_answer
+
+        live = (
+            "Recent posts on the page:\n"
+            "@alpha_news: Vendor shipped Model 9, near parity on benchmarks.\n"
+            "@market_wire: Regulator preparing continuous trading hours."
+        )
+        memory = (
+            "You are Mnemos, the user's personal AI memory assistant.\n"
+            "The user works on portfolio company tooling.\n"
+            "Open commitment: follow up with the vendor about the invoice."
+        )
+        destroyed = check_answer(live, memory, question="what's on that page")
+        self.assertEqual(destroyed.status, "downgraded")
+        self.assertTrue(
+            destroyed.text.startswith("Here's what I found, with the evidence:")
+        )
+
+        w = AgentWorker()
+        w._emit("result", live,
+                sources=[{"label": "timeline memories", "n": 3}],
+                context=None, question="what's on that page")
+        ev = w.events[0]
+        self.assertEqual(ev["text"], live)
+        self.assertNotIn("Here's what I found, with the evidence:", ev["text"])
+        sections = ((ev.get("compiled") or {}).get("sections") or [])
+        self.assertFalse(any(
+            s.get("type") in ("confirmed", "missing", "likely", "conflicting")
+            for s in sections))
+
     def test_pop_sources_reads_per_agent_sink(self) -> None:
         # Browser + fast lane each own a sink; overwriting worker.grounding_sink
         # must not steal the agent's sources (the live "Sources:" UI bug).
