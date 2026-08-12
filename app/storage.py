@@ -1603,6 +1603,74 @@ class Store:
                 "ON calendar_events(start, end)")
             self._conn.commit()
 
+            # --- People v3 P3 (WS-A): voice-track escrow ----------------------
+            # A durable identity for an anonymous diarization track ("Speaker 3")
+            # so evidence heard BEFORE the speaker is labeled can be escrowed
+            # against the track and rebound retroactively. status: open (still
+            # anonymous) | bound (a named person claimed it — bound_person_id).
+            # A label may recur across restarts (cluster ids reset), so lookups
+            # go through the newest OPEN track per label; binding closes it and
+            # a later "Speaker 3" mints a fresh track.
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS speaker_tracks (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    label           TEXT    NOT NULL,
+                    status          TEXT    NOT NULL DEFAULT 'open',
+                    bound_person_id INTEGER,            -- FK -> people.id
+                    created_at      REAL    NOT NULL,
+                    bound_at        REAL
+                )
+                """
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_spktrack_label "
+                "ON speaker_tracks(label, status)")
+            # Rebind audit (merge_operations idiom): one append-only row per
+            # rebind job run — what track, which person, how many rows moved.
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS escrow_rebind_log (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    track_id      INTEGER NOT NULL,
+                    person_id     INTEGER NOT NULL,
+                    n_facts       INTEGER NOT NULL DEFAULT 0,
+                    n_tasks       INTEGER NOT NULL DEFAULT 0,
+                    n_commitments INTEGER NOT NULL DEFAULT 0,
+                    actor         TEXT,
+                    reason        TEXT,
+                    created_at    REAL    NOT NULL
+                )
+                """
+            )
+            # Guarded ALTERs (entities.hidden precedent): escrow attribution
+            # columns on live DBs. Written/read ONLY by flag-gated escrow code —
+            # default queries keep excluding escrowed rows via facts.state.
+            fcols = {r["name"] for r in
+                     self._conn.execute("PRAGMA table_info(facts)").fetchall()}
+            if fcols and "speaker_track_id" not in fcols:
+                self._conn.execute(
+                    "ALTER TABLE facts ADD COLUMN speaker_track_id INTEGER")
+                self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_facts_spktrack "
+                    "ON facts(speaker_track_id)")
+            tucols = {r["name"] for r in
+                      self._conn.execute("PRAGMA table_info(turns)").fetchall()}
+            if tucols and "speaker_track_id" not in tucols:
+                self._conn.execute(
+                    "ALTER TABLE turns ADD COLUMN speaker_track_id INTEGER")
+            tkcols = {r["name"] for r in
+                      self._conn.execute("PRAGMA table_info(tasks)").fetchall()}
+            if tkcols and "owner_track_id" not in tkcols:
+                self._conn.execute(
+                    "ALTER TABLE tasks ADD COLUMN owner_track_id INTEGER")
+            ccols = {r["name"] for r in
+                     self._conn.execute("PRAGMA table_info(commitments)").fetchall()}
+            if ccols and "from_track_id" not in ccols:
+                self._conn.execute(
+                    "ALTER TABLE commitments ADD COLUMN from_track_id INTEGER")
+            self._conn.commit()
+
     def _migrate_commitment_state(self) -> None:
         """Add commitments.state + evidence columns and transitions log."""
         try:
@@ -3770,6 +3838,7 @@ class Store:
                 JOIN facts f ON f.id = t.fact_id
                 LEFT JOIN people p ON p.id = t.owner_person_id
                 WHERE t.status = 'open'
+                  AND COALESCE(f.state, 'active') != 'escrowed'
                 ORDER BY f.extracted_at DESC LIMIT ?
                 """,
                 (limit,),
@@ -3925,17 +3994,27 @@ class Store:
         return [{"name": r["canonical_name"], "kind": r["kind"]} for r in rows]
 
     def fact_person_links(self) -> list[tuple[int, int, str]]:
-        """(fact_id, person_id, role) from the typed task/commitment rows."""
+        """(fact_id, person_id, role) from the typed task/commitment rows.
+
+        Escrowed facts (People v3 P3) are excluded: even a NAMED counterparty
+        on an identity-less row must not feed person edges / people scoring
+        until the rebind reactivates the fact."""
         out: list[tuple[int, int, str]] = []
         with self._lock:
             for pid, role in (("owner_person_id", "responsible_for"),):
                 for r in self._conn.execute(
-                        f"SELECT fact_id, {pid} AS p FROM tasks WHERE {pid} IS NOT NULL"):
+                        f"SELECT t.fact_id, t.{pid} AS p FROM tasks t "
+                        f"JOIN facts f ON f.id = t.fact_id "
+                        f"WHERE t.{pid} IS NOT NULL "
+                        f"AND COALESCE(f.state, 'active') != 'escrowed'"):
                     out.append((int(r["fact_id"]), int(r["p"]), role))
             for pid, role in (("from_person_id", "committed"),
                               ("to_person_id", "owed")):
                 for r in self._conn.execute(
-                        f"SELECT fact_id, {pid} AS p FROM commitments WHERE {pid} IS NOT NULL"):
+                        f"SELECT c.fact_id, c.{pid} AS p FROM commitments c "
+                        f"JOIN facts f ON f.id = c.fact_id "
+                        f"WHERE c.{pid} IS NOT NULL "
+                        f"AND COALESCE(f.state, 'active') != 'escrowed'"):
                     out.append((int(r["fact_id"]), int(r["p"]), role))
         return out
 
@@ -4585,6 +4664,13 @@ class Store:
             op_id = int(cur.lastrowid)
         # Change 1: the winner inherits the loser's blocking keys (never deleted).
         self.copy_node_keys("person", absorbed_id, survivor_id)
+        # People v3 P3: bound voice tracks follow the merge (each re-pointed
+        # track enqueues a durable rebind job). No-op while escrow is off.
+        try:
+            from app.services import people_escrow
+            people_escrow.on_person_merged(self, survivor_id, absorbed_id, ts)
+        except Exception as exc:
+            print(f"[storage] escrow merge hook skipped ({exc}).")
         # Change 4: merges feed the weight-fitting flywheel.
         try:
             self.log_adjudication(
@@ -5236,7 +5322,8 @@ class Store:
 
     def list_facts(self, kind: str | None = None, status: str | None = None,
                    review: str | None = None, limit: int = 200,
-                   actionable: bool = False) -> list[dict]:
+                   actionable: bool = False,
+                   include_escrowed: bool = False) -> list[dict]:
         """Joined fact rows for the Console. `review` may be 'none' to select
         not-yet-reviewed facts. Status/review filtering is done in Python to keep
         the NULL semantics obvious.
@@ -5253,6 +5340,11 @@ class Store:
         out = []
         for r in rows:
             d = dict(r)
+            # Escrowed rows (People v3 P3) have not earned identity yet: they
+            # stay out of every list_facts consumer (grounding, boards, home
+            # scoring, review queues) until the rebind job reactivates them.
+            if not include_escrowed and (d.get("state") or "") == "escrowed":
+                continue
             if kind and d["kind"] != kind:
                 continue
             if status and (d["status"] or "") != status:
@@ -5916,7 +6008,42 @@ class Store:
 
     # ------------------------------ turns --------------------------------
     def replace_turns(self, turns: list) -> None:
-        """Atomically swap the whole turns table for a freshly-computed set."""
+        """Atomically swap the whole turns table for a freshly-computed set.
+
+        People v3 P3: with QUILL_PEOPLE_ESCROW on, turns whose speaker is a
+        provisional track label are stamped with the OPEN track id (lookup
+        only — tracks are minted by the extractor's escrow path). Flag off:
+        the new column is neither read nor written.
+        """
+        track_ids: dict[str, int] = {}
+        try:
+            from app.services import people_escrow
+            if people_escrow.enabled():
+                by_label = self.open_speaker_track_ids()
+                track_ids = {lb: tid for lb, tid in by_label.items()
+                             if people_escrow.is_provisional_label(lb)}
+        except Exception as exc:
+            print(f"[storage] turn track stamping skipped ({exc}).")
+        if track_ids:
+            payload_t = [
+                (t.start, t.end, t.speaker, t.text,
+                 json.dumps(t.event_ids), json.dumps(t.audio_paths),
+                 t.n_utterances, track_ids.get((t.speaker or "").strip()))
+                for t in turns
+            ]
+            with self._lock:
+                self._conn.execute("DELETE FROM turns")
+                self._conn.executemany(
+                    """
+                    INSERT INTO turns (start, end, speaker, text, event_ids,
+                                       audio_paths, n_utterances,
+                                       speaker_track_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    payload_t,
+                )
+                self._conn.commit()
+            return
         payload = [
             (t.start, t.end, t.speaker, t.text,
              json.dumps(t.event_ids), json.dumps(t.audio_paths), t.n_utterances)
@@ -6933,6 +7060,194 @@ class Store:
                 (json.dumps(stats), ts, trigger_id))
             self._conn.commit()
             return stats
+
+    # ------------------------------ speaker-track escrow (People v3 P3) ---
+    # All methods here are reached ONLY from flag-gated code
+    # (QUILL_PEOPLE_ESCROW via services/people_escrow.py) — with the flag off
+    # nothing reads or writes the escrow columns.
+
+    def get_or_create_speaker_track(self, label: str, *, ts: float) -> int:
+        """Durable id for a provisional diarization label. Reuses the newest
+        OPEN track for the label (stable across a session and until bound);
+        once a track is bound, the next occurrence of the label starts fresh."""
+        label = (label or "").strip()
+        if not label:
+            raise ValueError("empty speaker track label")
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id FROM speaker_tracks WHERE label = ? AND "
+                "status = 'open' ORDER BY id DESC LIMIT 1", (label,)).fetchone()
+            if row is not None:
+                return int(row["id"])
+            cur = self._conn.execute(
+                "INSERT INTO speaker_tracks (label, status, created_at) "
+                "VALUES (?, 'open', ?)", (label, ts))
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def get_speaker_track(self, track_id: int) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM speaker_tracks WHERE id = ?",
+                (track_id,)).fetchone()
+        return dict(row) if row else None
+
+    def open_speaker_track(self, label: str) -> dict | None:
+        """The newest OPEN track for a label (the one escrow writes against)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM speaker_tracks WHERE label = ? AND "
+                "status = 'open' ORDER BY id DESC LIMIT 1",
+                ((label or "").strip(),)).fetchone()
+        return dict(row) if row else None
+
+    def open_speaker_track_ids(self) -> dict[str, int]:
+        """{label: track_id} for every open track — replace_turns uses this to
+        stamp turns.speaker_track_id without creating tracks."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT label, MAX(id) AS id FROM speaker_tracks "
+                "WHERE status = 'open' GROUP BY label").fetchall()
+        return {r["label"]: int(r["id"]) for r in rows}
+
+    def bind_speaker_track(self, track_id: int, person_id: int, *,
+                           ts: float) -> bool:
+        """Close a track onto a named person. Idempotent: re-binding to the
+        SAME person succeeds; a different person is refused (that re-point
+        happens only through the merge hook, deliberately)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT status, bound_person_id FROM speaker_tracks "
+                "WHERE id = ?", (track_id,)).fetchone()
+            if row is None:
+                return False
+            if (row["status"] or "") == "bound":
+                return int(row["bound_person_id"] or 0) == int(person_id)
+            self._conn.execute(
+                "UPDATE speaker_tracks SET status = 'bound', "
+                "bound_person_id = ?, bound_at = ? WHERE id = ?",
+                (int(person_id), ts, track_id))
+            self._conn.commit()
+            return True
+
+    def repoint_speaker_tracks(self, old_person_id: int, new_person_id: int,
+                               *, ts: float) -> list[int]:
+        """Merge support: move every track bound to `old_person_id` onto
+        `new_person_id`. Returns the affected track ids (each needs a rebind
+        job so already-rebound rows follow the merge)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id FROM speaker_tracks WHERE status = 'bound' AND "
+                "bound_person_id = ?", (int(old_person_id),)).fetchall()
+            ids = [int(r["id"]) for r in rows]
+            if ids:
+                ph = ",".join("?" for _ in ids)
+                self._conn.execute(
+                    f"UPDATE speaker_tracks SET bound_person_id = ?, "
+                    f"bound_at = ? WHERE id IN ({ph})",
+                    [int(new_person_id), ts, *ids])
+                self._conn.commit()
+        return ids
+
+    def escrow_fact(self, fact_id: int, track_id: int, *,
+                    task_owner: bool = False,
+                    commitment_from: bool = False) -> None:
+        """Mark a just-inserted fact as escrowed against a voice track. The
+        state flip is what keeps the row out of every default surface
+        (grounding/retrieval/scoring/constellation all filter on state)."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE facts SET state = 'escrowed', speaker_track_id = ? "
+                "WHERE id = ?", (int(track_id), int(fact_id)))
+            if task_owner:
+                self._conn.execute(
+                    "UPDATE tasks SET owner_track_id = ? WHERE fact_id = ?",
+                    (int(track_id), int(fact_id)))
+            if commitment_from:
+                self._conn.execute(
+                    "UPDATE commitments SET from_track_id = ? WHERE fact_id = ?",
+                    (int(track_id), int(fact_id)))
+            self._conn.commit()
+
+    def escrowed_facts_for_track(self, track_id: int) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                self._FACT_SELECT
+                + " WHERE f.speaker_track_id = ? AND f.state = 'escrowed'"
+                  " ORDER BY f.extracted_at",
+                (int(track_id),)).fetchall()
+        return [dict(r) for r in rows]
+
+    def rebind_speaker_track_rows(self, track_id: int, person_id: int, *,
+                                  previous_person_id: int | None = None,
+                                  ts: float) -> dict:
+        """Rewrite escrowed rows for a track onto a person — the rebind job's
+        write step. Idempotent: person columns are only set where they are
+        NULL, already the target person, or the merge's previous person; the
+        state flip matches only rows still 'escrowed'. Review/confidence are
+        untouched — reactivated facts keep their normal ASR evidence tier and
+        re-enter the same review queue. Returns counts + the reactivated
+        facts (id, kind, text) so the caller can index them."""
+        prev = int(previous_person_id) if previous_person_id else int(person_id)
+        with self._lock:
+            activated = [
+                {"id": int(r["id"]), "kind": r["kind"],
+                 "text": r["text"] or r["source_span"] or ""}
+                for r in self._conn.execute(
+                    "SELECT f.id, f.kind, "
+                    "COALESCE(t.text, c.text, f.text) AS text, f.source_span "
+                    "FROM facts f "
+                    "LEFT JOIN tasks t ON t.fact_id = f.id "
+                    "LEFT JOIN commitments c ON c.fact_id = f.id "
+                    "WHERE f.speaker_track_id = ? AND f.state = 'escrowed'",
+                    (int(track_id),)).fetchall()]
+            n_tasks = self._conn.execute(
+                "UPDATE tasks SET owner_person_id = ? WHERE owner_track_id = ? "
+                "AND (owner_person_id IS NULL OR owner_person_id IN (?, ?))",
+                (int(person_id), int(track_id), int(person_id), prev)).rowcount
+            n_commitments = self._conn.execute(
+                "UPDATE commitments SET from_person_id = ? "
+                "WHERE from_track_id = ? "
+                "AND (from_person_id IS NULL OR from_person_id IN (?, ?))",
+                (int(person_id), int(track_id), int(person_id), prev)).rowcount
+            n_facts = self._conn.execute(
+                "UPDATE facts SET state = 'active', updated_at = ? "
+                "WHERE speaker_track_id = ? AND state = 'escrowed'",
+                (ts, int(track_id))).rowcount
+            self._conn.commit()
+        # Rebound rows change the person's neighborhood — outside the lock
+        # (mark_graph_dirty takes the same non-reentrant Lock).
+        self.mark_graph_dirty("person", int(person_id), ts=ts)
+        for f in activated:
+            self.mark_graph_dirty("fact", f["id"], ts=ts)
+        return {"facts": int(n_facts), "tasks": int(n_tasks),
+                "commitments": int(n_commitments), "activated": activated}
+
+    def log_escrow_rebind(self, *, track_id: int, person_id: int,
+                          n_facts: int, n_tasks: int, n_commitments: int,
+                          actor: str = "system", reason: str = "",
+                          created_at: float) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO escrow_rebind_log (track_id, person_id, n_facts, "
+                "n_tasks, n_commitments, actor, reason, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (int(track_id), int(person_id), int(n_facts), int(n_tasks),
+                 int(n_commitments), actor, reason, created_at))
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def speaker_track_status(self) -> dict:
+        """Escrow observability: per-track escrowed-row counts + bind state."""
+        with self._lock:
+            tracks = [dict(r) for r in self._conn.execute(
+                "SELECT * FROM speaker_tracks ORDER BY id").fetchall()]
+            for t in tracks:
+                t["escrowed_facts"] = int(self._conn.execute(
+                    "SELECT COUNT(*) AS n FROM facts WHERE "
+                    "speaker_track_id = ? AND state = 'escrowed'",
+                    (t["id"],)).fetchone()["n"])
+        return {"tracks": tracks}
 
     def trigger_pattern_exists(self, pattern_key: str) -> bool:
         """Has the miner already suggested this pattern (ANY status — a retired
