@@ -22,13 +22,18 @@ Config (app/config.py VoiceConfig):
   QUILL_TTS_MAX_CHARS      cap a single spoken utterance    (default 400)
   QUILL_TTS_SPEAK_REPLIES  1/0 auto-speak the agent's chat replies (default 1)
   QUILL_TTS_SPEAK_KINDS    which reply kinds to speak       (default result,ask)
+
+Runtime mute (UI Voice chip / Privacy) persists in data/voice_prefs.json and
+does not require a restart. QUILL_TTS=off remains the hard kill-switch.
 """
 from __future__ import annotations
 
+import json
 import os
 import queue
 import re
 import threading
+from pathlib import Path
 from typing import Callable
 
 from app.config import settings
@@ -166,10 +171,37 @@ def _rm(path: str) -> None:
         pass
 
 
-def _mci_play(path: str) -> None:
+def _prefs_path() -> Path:
+    return Path(settings.storage.data_dir) / "voice_prefs.json"
+
+
+def _load_muted() -> bool:
+    try:
+        p = _prefs_path()
+        if p.is_file():
+            raw = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                return bool(raw.get("muted"))
+    except Exception as exc:
+        print(f"[voice] mute prefs load skipped ({exc}).")
+    return False
+
+
+def _save_muted(muted: bool) -> None:
+    try:
+        p = _prefs_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"muted": bool(muted)}) + "\n", encoding="utf-8")
+    except Exception as exc:
+        print(f"[voice] mute prefs save skipped ({exc}).")
+
+
+def _mci_play(path: str, cancel: threading.Event | None = None) -> None:
     """Play an audio file (incl. MP3) via Windows MCI — no extra deps. Blocks
-    until playback finishes, so the serial speech thread stays in order."""
+    until playback finishes (or `cancel` is set), so the serial speech thread
+    stays in order."""
     import ctypes
+    import time as _time
 
     buf = ctypes.create_unicode_buffer(255)
 
@@ -178,11 +210,27 @@ def _mci_play(path: str) -> None:
 
     alias = "mnemos_tts"
     cmd(f"close {alias}")                       # clear any stale handle
+    if cancel is not None and cancel.is_set():
+        return
     if cmd(f'open "{path}" type mpegvideo alias {alias}') != 0:
         if cmd(f'open "{path}" alias {alias}') != 0:
             return
     try:
-        cmd(f"play {alias} wait")
+        if cancel is not None and cancel.is_set():
+            return
+        if cmd(f"play {alias}") != 0:
+            cmd(f"play {alias} wait")
+            return
+        while True:
+            if cancel is not None and cancel.is_set():
+                cmd(f"stop {alias}")
+                return
+            if cmd(f"status {alias} mode") != 0:
+                return
+            mode = (buf.value or "").strip().lower()
+            if mode not in ("playing", "seeking", "not ready"):
+                return
+            _time.sleep(0.05)
     finally:
         cmd(f"close {alias}")
 
@@ -195,8 +243,31 @@ class Speaker:
         self._lock = threading.Lock()
         self._broken = False
         self._backend_name: str | None = None
+        self._muted = _load_muted()
+        self._cancel = threading.Event()
 
     # --- public API --------------------------------------------------------
+    def status(self) -> dict:
+        """UI payload: whether TTS can speak, and whether the user muted it."""
+        return {
+            "enabled": bool(self.cfg.enabled),
+            "muted": bool(self._muted),
+            "speak_replies": bool(self.cfg.speak_replies),
+            "backend": self._backend_name or self.cfg.backend,
+        }
+
+    def set_muted(self, muted: bool) -> dict:
+        """Persist mute and, when turning off, drop queued speech + cut playback."""
+        muted = bool(muted)
+        self._muted = muted
+        _save_muted(muted)
+        if muted:
+            self._cancel.set()
+            self.stop()
+        else:
+            self._cancel.clear()
+        return self.status()
+
     def speak(self, text: str) -> dict:
         """Queue `text` to be spoken aloud. Non-blocking; returns immediately."""
         text = _clean(text)
@@ -204,6 +275,8 @@ class Speaker:
             return {"spoken": False, "reason": "empty text"}
         if not self.cfg.enabled:
             return {"spoken": False, "reason": "TTS disabled (QUILL_TTS=off)"}
+        if self._muted:
+            return {"spoken": False, "reason": "voice muted"}
         if self._broken:
             return {"spoken": False, "reason": "no speech engine available"}
         spoken = self._truncate(text)
@@ -218,6 +291,8 @@ class Speaker:
     def maybe_speak_reply(self, kind: str, text: str) -> None:
         """Hook for the agent's _emit: speak the assistant's replies aloud, if
         auto-speak is on and this is a kind we voice (default: result / ask)."""
+        if self._muted:
+            return
         if not (self.cfg.enabled and self.cfg.speak_replies):
             return
         if kind not in self.cfg.speak_kinds:
@@ -250,7 +325,7 @@ class Speaker:
         return names
 
     def stop(self) -> None:
-        """Drop anything queued (best-effort). The current utterance finishes."""
+        """Drop anything queued (best-effort). Current playback stops if muted."""
         try:
             while True:
                 self._q.get_nowait()
@@ -285,7 +360,10 @@ class Speaker:
               f"voice={self.cfg.voice or 'default'}).")
         while True:
             text = self._q.get()
-            if not text:
+            if not text or self._muted:
+                continue
+            self._cancel.clear()
+            if self._muted:
                 continue
             register_spoken(text)   # self-echo guard: audio ingest checks this
             try:
@@ -346,7 +424,7 @@ class Speaker:
                                 f"mnemos_tts_{uuid.uuid4().hex}.mp3")
             try:
                 self._edge_render(text, voice_id, rate, vol, path)
-                _mci_play(path)
+                _mci_play(path, cancel=self._cancel)
             finally:
                 _rm(path)
 
@@ -411,7 +489,23 @@ class Speaker:
             print(f"[voice] SAPI config skipped ({exc}).")
 
         def say(text: str) -> None:
-            spv.Speak(text)                      # synchronous on this thread
+            import time as _time
+            # Async so mute can purge mid-utterance (SVSFlagsAsync=1).
+            spv.Speak(text, 1)
+            while True:
+                if self._cancel.is_set():
+                    try:
+                        spv.Speak("", 2)         # SVSFPurgeBeforeSpeak
+                    except Exception:
+                        pass
+                    return
+                try:
+                    state = int(spv.Status.RunningState)
+                except Exception:
+                    return
+                if state != 2:                   # 2 = SRSEIsSpeaking
+                    return
+                _time.sleep(0.05)
         return say
 
     def _init_pyttsx3(self) -> Callable[[str], None] | None:
@@ -428,6 +522,8 @@ class Speaker:
         wpm = int(200 + self.cfg.rate * 12)      # map SAPI-ish rate -> words/min
 
         def say(text: str) -> None:
+            if self._cancel.is_set():
+                return
             import pyttsx3
             eng = pyttsx3.init()
             try:
@@ -467,3 +563,11 @@ def voices() -> list[str]:
 
 def stop() -> None:
     speaker.stop()
+
+
+def status() -> dict:
+    return speaker.status()
+
+
+def set_muted(muted: bool) -> dict:
+    return speaker.set_muted(muted)

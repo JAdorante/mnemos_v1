@@ -187,6 +187,23 @@ class ParseAttendeeTests(unittest.TestCase):
         emails = {a["email"] for a in ev["attendees"]}
         self.assertEqual(emails, {"sarah@acme.com", "bob@acme.com"})
 
+    def test_parse_vevent_zoom_url_in_description(self):
+        from app.services import icloud_calendar as cal
+        block = (
+            "BEGIN:VEVENT\n"
+            "UID:ZOOM-1\n"
+            "SUMMARY:Standup\n"
+            "DTSTART:20260721T140000Z\n"
+            "DTEND:20260721T150000Z\n"
+            "LOCATION:https://acme.zoom.us/j/123456789\n"
+            "DESCRIPTION:Join Zoom Meeting\\nhttps://acme.zoom.us/j/123456789\n"
+            "END:VEVENT"
+        )
+        ev = cal.parse_vevent(block)
+        self.assertIsNotNone(ev)
+        self.assertEqual(ev["provider"], "zoom")
+        self.assertIn("zoom.us", ev["join_url"])
+
 
 if __name__ == "__main__":
     unittest.main()

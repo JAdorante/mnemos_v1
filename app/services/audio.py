@@ -80,6 +80,22 @@ def _get_shared_session():
         return _shared_session
 
 
+def _ms_asr_terms() -> list[str]:
+    try:
+        from app.services import meeting_session as _ms
+        return _ms.asr_extra_terms()
+    except Exception:
+        return []
+
+
+def _ms_speaker_space(source: str) -> str:
+    try:
+        from app.services import meeting_session as _ms
+        return _ms.speaker_space(source)
+    except Exception:
+        return "default"
+
+
 class AudioPipeline:
     """One capture -> VAD -> Whisper pipeline instance.
 
@@ -184,6 +200,13 @@ class AudioPipeline:
             if audio is None or len(audio) < self.cfg.sample_rate * 0.2:
                 continue  # ignore < 200 ms blips
 
+            try:
+                from app.services import meeting_session as _ms
+                if not _ms.should_ingest(self.source):
+                    continue
+            except Exception:
+                pass
+
             # One telemetry row per utterance (kept or dropped) -> Audio Health.
             tele = {
                 "audio_duration_ms": round(
@@ -257,7 +280,8 @@ class AudioPipeline:
 
                     initial_prompt = vocabulary.whisper_prompt(
                         recent_texts=self._session.recent(
-                            settings.asr_bias.recent_turns)) or None
+                            settings.asr_bias.recent_turns),
+                        extra_terms=_ms_asr_terms()) or None
                 except Exception as exc:
                     print(f"[audio] asr-bias error: {exc}")
 
@@ -422,7 +446,8 @@ class AudioPipeline:
                 try:
                     from app.services.speakers import speakers as _spk
 
-                    res = _spk.identify(audio, self.cfg.sample_rate, aq=aq)
+                    res = _spk.identify(audio, self.cfg.sample_rate, aq=aq,
+                                        space=_ms_speaker_space(self.source))
                     speaker_label = res["label"]
                     meta["speaker"] = res
                     tele.update(speaker=res.get("label"),
@@ -442,6 +467,14 @@ class AudioPipeline:
                 people=people,
                 meta=meta,
             )
+            try:
+                from app.services import meeting_session as _ms
+                _ms.stamp_event(ev)
+                if ev.meta.get("audio_channel") == "mic" and speaker_label:
+                    ev.people = list(dict.fromkeys(
+                        [speaker_label] + list(ev.people or [])))
+            except Exception:
+                pass
             # Stamp the confidence contract (#3): a transcript is model-EXTRACTED
             # from observed audio — capture_quality from the waveform score,
             # model_confidence from the ASR certainty. Separating them lets a
@@ -482,11 +515,16 @@ class AudioPipeline:
                     audio, ts, self.cfg.sample_rate)
             except Exception as exc:
                 print(f"[audio] wav save error: {exc}")
-        print(f"[audio] audio-only event ({reason})")
-        self._sink(Event(
+        ev = Event(
             time=ts, modality=Modality.AUDIO, raw="", summary="",
             source=self.skip_source, confidence=None, meta=meta,
-        ))
+        )
+        try:
+            from app.services import meeting_session as _ms
+            _ms.stamp_event(ev)
+        except Exception:
+            pass
+        self._sink(ev)
 
     def _record_tele(self, tele: dict, outcome: str,
                      drop_reason: str | None = None) -> None:

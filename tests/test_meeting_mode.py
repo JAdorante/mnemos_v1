@@ -140,7 +140,9 @@ class ConsiderOfferTests(unittest.TestCase):
                     attendees=[], updated_at=NOW,
                 )
                 worker = MagicMock()
-                worker.propose_meeting_mode.return_value = True
+                worker.propose_meeting_record.return_value = True
+                from app.services import meeting_session as _ms
+                _ms.reset()
                 with patch.object(mm, "_prefs_path",
                                   lambda: Path(td) / "meeting_prefs.json"), \
                      patch("app.services.agent_bridge.worker", worker), \
@@ -148,9 +150,9 @@ class ConsiderOfferTests(unittest.TestCase):
                     # Ensure not already active
                     mm.exit_mode(reason="reset")
                     out = mm.consider_offer(store, now=NOW)
-                self.assertTrue(out.get("offered"))
-                worker.propose_meeting_mode.assert_called_once()
-                args = worker.propose_meeting_mode.call_args[0][0]
+                self.assertTrue(out.get("offered") or out.get("ok"))
+                worker.propose_meeting_record.assert_called_once()
+                args = worker.propose_meeting_record.call_args[0][0]
                 self.assertEqual(args["calendar_event_id"], "Work|meet1")
             finally:
                 store.close()
@@ -232,8 +234,9 @@ class ProposeMeetingModeTests(unittest.TestCase):
         })
         self.assertTrue(shown)
         pend = w.pending_todo
-        self.assertEqual(pend["kind"], "meeting_mode")
+        self.assertEqual(pend["kind"], "meeting_record")
         self.assertIn("Meeting starting", pend["message"])
+        self.assertTrue(pend.get("choices"))
 
 
 if __name__ == "__main__":

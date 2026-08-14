@@ -225,4 +225,6 @@ def _fallback_peek(worker) -> dict | None:
             "confidence": pend.get("confidence"),
             "why": list(pend.get("why") or []),
             "created_at": pend.get("created_at"),
+            "choices": list(pend.get("choices") or []),
+            "meeting_session_id": pend.get("meeting_session_id"),
         }

@@ -451,6 +451,11 @@ async def _startup() -> None:
     try:
         from app.services import context_feeder
         context_feeder.attach()
+        try:
+            from app.services import meeting_session as _msess
+            _msess.attach()
+        except Exception as exc:
+            print(f"[meeting_session] startup skipped ({exc}).")
     except Exception as exc:
         print(f"[context_feeder] startup skipped ({exc}).")
     # Re-apply persisted privacy / kill-switch overrides onto frozen settings.

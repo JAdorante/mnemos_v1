@@ -220,6 +220,8 @@ def normalize_from_memory_events(store: "Store | None" = None) -> int:
                 attendees=meta.get("attendees") or [],
                 source_event_id=ev.get("id"),
                 updated_at=ev.get("time"),
+                join_url=meta.get("join_url") or "",
+                provider=meta.get("provider") or "",
             )
             n += 1
         except Exception:
@@ -247,6 +249,8 @@ def upsert_from_sync_event(store: "Store", ev: dict, *,
         organizer=ev.get("organizer"),
         attendees=ev.get("attendees") or [],
         source_event_id=source_event_id,
+        join_url=ev.get("join_url") or "",
+        provider=ev.get("provider") or "",
     )
     return event_id
 
@@ -273,7 +277,18 @@ def link_sessions(store: "Store | None" = None, sessions: list | None = None) ->
 def attendees_for_time(
     store: "Store | None", start: float, end: float | None = None,
 ) -> list[dict]:
-    """Attendee priors for a turn/window inside a calendar-linked session."""
+    """Attendee priors for a turn/window inside a calendar-linked session.
+
+    Prefer the live MeetingSession roster (available from the first utterance)
+    then fall back to derived session join.
+    """
+    try:
+        from app.services import meeting_session as _ms
+        live = _ms.attendees_live(store)
+        if live:
+            return live
+    except Exception:
+        pass
     store = _store(store)
     end = float(end if end is not None else start)
     try:

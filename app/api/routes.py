@@ -14,7 +14,9 @@
     GET  /chat/sessions list archived chat conversations (newest first)
     GET  /chat/sessions/{id}  load one archived conversation
     POST /chat/outcome  label an escalated chat answer (👍/👎/✏️ → distill row)
-    POST /speak         TTS (stub)
+    POST /speak         TTS
+    GET  /speak/status  TTS mute / enabled
+    POST /speak/mute    mute or unmute AI voice
     GET  /vision, ...   (stubs)
 """
 from __future__ import annotations
@@ -349,17 +351,36 @@ def capture_status() -> dict:
     """Recording indicator payload: consent + live sources."""
     from app.services import capture_consent
     meeting = {}
+    meeting_session = {}
     try:
         from app.services import meeting_mode as _mm
         meeting = _mm.status()
     except Exception:
         meeting = {}
+    try:
+        from app.services import meeting_session as _ms
+        meeting_session = _ms.status()
+    except Exception:
+        meeting_session = {}
     return {
         "consent": capture_consent.status(),
         "running": _running_map(),
         "save_audio": bool(settings.storage.save_audio),
         "meeting_mode": meeting,
+        "meeting_session": meeting_session,
     }
+
+
+class MeetingSessionDecideBody(BaseModel):
+    choice: str  # skip | transcript_only | keep_receipts
+    session_id: int | None = None
+
+
+@router.post("/meeting/session/decide")
+def meeting_session_decide(body: MeetingSessionDecideBody) -> dict:
+    """Per-meeting consent without going through the yes/no offer queue."""
+    from app.services import meeting_session as _ms
+    return _ms.decide(body.choice, session_id=body.session_id)
 
 
 @router.get("/capture/consent")
@@ -2073,15 +2094,17 @@ def shell_state(limit: int = 28) -> dict:
 
 
 class ShellOfferIn(BaseModel):
-    accept: bool
+    accept: bool | None = None
+    choice: str | None = None
 
 
 def _today_offer(body: ShellOfferIn) -> dict:
-    """Forward yes/no to the existing agent_bridge offer resolver."""
+    """Forward yes/no (or a meeting-record choice) to agent_bridge."""
     if _agent_disabled():
         return {"ok": False, "error": "agent disabled (QUILL_AGENT=0)"}
     try:
-        return agent.worker.resolve_todo(bool(body.accept))
+        accept = True if body.accept is None and body.choice else bool(body.accept)
+        return agent.worker.resolve_todo(accept, choice=body.choice)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
@@ -5098,9 +5121,25 @@ class SpeakIn(BaseModel):
     text: str
 
 
+class SpeakMuteIn(BaseModel):
+    muted: bool
+
+
 @router.post("/speak")
 def speak(body: SpeakIn) -> dict:
     return voice.speak(body.text)
+
+
+@router.get("/speak/status")
+def speak_status() -> dict:
+    """Whether TTS is enabled and whether the user muted the AI voice."""
+    return voice.status()
+
+
+@router.post("/speak/mute")
+def speak_mute(body: SpeakMuteIn) -> dict:
+    """Mute or unmute spoken replies. Persists; no restart needed."""
+    return voice.set_muted(body.muted)
 
 
 @router.get("/speak/voices")
@@ -5605,6 +5644,7 @@ body.has-approval #mnemosApproval{position:relative;z-index:25}
 </div>
 <script>
 let since=0, awaiting=false, todo=false, polling=false, approvalMode=false;
+let lastErrShown=null; // dedup: state.error persists across polls — show once
 let liveMode=true;
 const log=document.getElementById('log'), box=document.getElementById('box');
 function fillDockDetail(s){
@@ -6003,6 +6043,7 @@ async function poll(){
   const r=await fetch('/chat/poll?since='+since); const j=await r.json();
   for(const e of (j.events||[])){
     since=e.id+1;
+    if(e.kind==='error') lastErrShown=e.text; // event already renders it
     if(liveMode) add(e.kind, e.text, e.distill_id, e.sources, e.packet, e.compiled);
   }
   const s=j.state||{};
@@ -6033,7 +6074,9 @@ async function poll(){
   }
   document.body.classList.toggle('has-approval', !!(approvalMode || todo));
   MnemosAmbient.render(document.getElementById('ambientChat'), notes);
-  if(liveMode && s.error) add('error', s.error);
+  if(liveMode && s.error && s.error!==lastErrShown){
+    lastErrShown=s.error; add('error', s.error);
+  }
  }catch(e){}
  finally{ polling=false; }
 }

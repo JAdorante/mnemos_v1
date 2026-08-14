@@ -264,6 +264,11 @@ class MemoryEngine:
             self._semantic = False
 
     def _on_event(self, event: Event) -> None:
+        try:
+            from app.services import meeting_session as _ms
+            _ms.stamp_event(event)
+        except Exception:
+            pass
         store = self._ensure_store()
         eid = store.insert(event)
         with self._lock:

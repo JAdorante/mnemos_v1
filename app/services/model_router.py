@@ -320,6 +320,12 @@ class ModelRouter:
         )
         return next((b.text for b in resp.content if b.type == "text"), "")
 
+    def local_available(self) -> bool:
+        """Availability of the local text tier (probe cached per process) —
+        lets the agent bridge decide whether local-only chat is viable when
+        no Anthropic credentials are configured."""
+        return bool(self._use_local())
+
     # --- local-first tier ----------------------------------------------------
     def _use_local(self) -> bool:
         if self._local_ok is None:              # probe once, cache

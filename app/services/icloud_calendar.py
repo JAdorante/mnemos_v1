@@ -221,7 +221,7 @@ def parse_vevent(block: str) -> dict | None:
         head, _, val = line.partition(":")
         name = head.split(";", 1)[0].upper()
         if name in ("UID", "SUMMARY", "LOCATION", "DTSTART", "DTEND",
-                    "RECURRENCE-ID", "STATUS"):
+                    "RECURRENCE-ID", "STATUS", "DESCRIPTION", "URL"):
             props[name] = (head, val)
         elif name == "ATTENDEE":
             a = _parse_cal_address(head, val)
@@ -237,10 +237,23 @@ def parse_vevent(block: str) -> dict | None:
     end, _ = _parse_dt(*props.get("DTEND", ("", "")))
     uid = props.get("UID", ("", ""))[1].strip()
     rec = props.get("RECURRENCE-ID", ("", ""))[1].strip()
+    location = props.get("LOCATION", ("", ""))[1].strip()
+    description = (props.get("DESCRIPTION", ("", ""))[1] or "").replace("\\n", "\n")
+    url_prop = props.get("URL", ("", ""))[1].strip()
+    join_url, provider = "", "unknown"
+    try:
+        from app.services.meeting_session import extract_conference_link
+        join_url, provider = extract_conference_link(url_prop, location, description)
+    except Exception:
+        pass
     return {
         "uid": uid + (f"#{rec}" if rec else ""),
         "summary": props.get("SUMMARY", ("", ""))[1].strip() or "(untitled)",
-        "location": props.get("LOCATION", ("", ""))[1].strip(),
+        "location": location,
+        "description": description,
+        "url": url_prop,
+        "join_url": join_url,
+        "provider": provider,
         "start": start, "end": end, "all_day": all_day,
         "organizer": organizer,
         "attendees": attendees,
@@ -266,6 +279,7 @@ def _fingerprint(ev: dict) -> tuple[str, str]:
         ev["summary"], str(ev["start"]), str(ev.get("end")),
         ev["location"], ev["all_day"],
         ev.get("organizer"), ev.get("attendees") or [],
+        ev.get("join_url") or "", ev.get("url") or "",
     ], sort_keys=True)
     return key, hashlib.sha1(blob.encode("utf-8")).hexdigest()
 
@@ -324,7 +338,11 @@ def sync(publish=None) -> dict:
                                   "summary": ev["summary"],
                                   "location": ev.get("location") or "",
                                   "organizer": ev.get("organizer"),
-                                  "attendees": ev.get("attendees") or []})
+                                  "attendees": ev.get("attendees") or [],
+                                  "join_url": ev.get("join_url") or "",
+                                  "provider": ev.get("provider") or "",
+                                  "description": (ev.get("description") or "")[:2000],
+                                  "url": ev.get("url") or ""})
                 _conf.attach(out, _conf.OBSERVED)
                 publish(out)
         if fresh:

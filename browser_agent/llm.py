@@ -38,6 +38,33 @@ except Exception:  # pragma: no cover - defensive
                 "org": "<org>", "project": "<project>"}
 
 
+class CloudModelUnavailable(RuntimeError):
+    """A Claude call was needed but no API credentials are configured."""
+
+
+_NO_CLOUD_MSG = (
+    "This needs the cloud model, which isn't configured — add "
+    "ANTHROPIC_API_KEY to .env to enable it. (Without a key, chat runs on "
+    "the local model only; web/desktop/phone agent tasks stay off.)")
+
+
+def _client_has_auth(client) -> bool:
+    return bool(getattr(client, "api_key", None)
+                or getattr(client, "auth_token", None)
+                or getattr(client, "credentials", None))
+
+
+def cloud_auth_available() -> bool:
+    """True when an Anthropic client can authenticate (env key/token or an
+    `ant auth login` credentials profile). Construction never raises on this
+    SDK — missing auth only surfaces at request time — so probe the resolved
+    client rather than just the environment."""
+    try:
+        return _client_has_auth(Anthropic())
+    except Exception:
+        return False
+
+
 def _sys(text):
     # cache_control on the (last) system block caches tools+system together (FR-CTX-1)
     return [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]
@@ -70,7 +97,17 @@ class LLM:
         # max_retries lifts the SDK's default (2) so a transient 529/overload is
         # ridden out with exponential backoff instead of raising in the user's face.
         self.client = Anthropic(max_retries=cfg.LLM_MAX_RETRIES)
+        # No credentials -> every cloud call would fail at request time with a
+        # raw TypeError. Flag it once so call sites raise CloudModelUnavailable
+        # instead (chat still works local-only through the ModelRouter).
+        self.cloud_ok = _client_has_auth(self.client)
         self.usage = {}  # model -> {in, out, cache_read, cache_write}
+
+    def _require_cloud(self):
+        # Default True: tests / callers that hand-build an LLM with a mock
+        # client never set cloud_ok and are assumed authenticated.
+        if not getattr(self, "cloud_ok", True):
+            raise CloudModelUnavailable(_NO_CLOUD_MSG)
 
     # --- usage / cost ------------------------------------------------------
     def _track(self, model, u):
@@ -94,6 +131,7 @@ class LLM:
 
     # --- structured JSON call with graceful fallback -----------------------
     def _json_call(self, model, system, user, schema, effort=None):
+        self._require_cloud()
         base = dict(
             model=model,
             max_tokens=2048,
@@ -126,8 +164,18 @@ class LLM:
     # --- tier 0: intent/action router (Sonnet 4.6, cheap) ------------------
     def route(self, user_request, context=""):
         user = (context + "\n\n" if context else "") + "User request: " + user_request
-        out = self._json_call(cfg.ROUTER_MODEL, ROUTER_SYSTEM, user, ROUTE_SCHEMA,
-                              effort=cfg.ROUTER_EFFORT)
+        try:
+            out = self._json_call(cfg.ROUTER_MODEL, ROUTER_SYSTEM, user,
+                                  ROUTE_SCHEMA, effort=cfg.ROUTER_EFFORT)
+        except CloudModelUnavailable:
+            # Local-only mode (no key): there is no cloud router to consult.
+            # Treat every goal as a direct-answer question — the one surface
+            # the local text tier can serve. A forced desktop/phone goal never
+            # reaches here (forced surfaces skip route()) and raises its own
+            # clear CloudModelUnavailable from the executor instead.
+            out = {"intent": "memory_query", "surface": "none",
+                   "requires_browser": False,
+                   "rationale": "local-only mode — no cloud credentials"}
         out.setdefault("intent", "unknown")
         # Reconcile surface <-> requires_browser (surface is authoritative; older
         # callers/prompts may still only set requires_browser).
@@ -221,6 +269,7 @@ class LLM:
             pass                       # standalone agent — no app package
         except Exception as exc:
             print(f"[llm] router answer failed ({exc}); using direct call.")
+        self._require_cloud()
         r = self.client.messages.create(
             model=cfg.ROUTER_MODEL, max_tokens=1024, system=_sys(system),
             messages=[{"role": "user", "content": msg}],
@@ -388,6 +437,7 @@ class LLM:
 
     # --- tier 2: executor (Sonnet 4.6, escalates to Opus) ------------------
     def choose_action(self, content, escalate=False, image=None):
+        self._require_cloud()
         model = cfg.ESCALATION_MODEL if escalate else cfg.EXECUTOR_MODEL
         effort = cfg.ESCALATION_EFFORT if escalate else cfg.EXECUTOR_EFFORT
         # When a screenshot is provided (DOM view is thin, or we're stuck), send
@@ -436,6 +486,7 @@ class LLM:
     def choose_desktop_action(self, content, escalate=False, image=None):
         """Pick one desktop action (make_dir/launch_app/run_command/...). Mirrors
         choose_action but over the desktop tool vocabulary."""
+        self._require_cloud()
         model = cfg.ESCALATION_MODEL if escalate else cfg.EXECUTOR_MODEL
         effort = cfg.ESCALATION_EFFORT if escalate else cfg.EXECUTOR_EFFORT
         if image:

@@ -617,7 +617,8 @@ class VoiceConfig:
     `auto` uses the most human voice available: a neural (online) Edge voice when
     reachable, else the offline OS voice (SAPI5 on Windows, pyttsx3 elsewhere).
     Force one with `edge` / `sapi` / `pyttsx3`; `off` mutes everything.
-    `speak_replies` controls whether the agent's chat replies are auto-spoken."""
+    `speak_replies` controls whether the agent's chat replies are auto-spoken.
+    The UI Voice chip can mute at runtime (data/voice_prefs.json) without restart."""
     backend: str = _get("QUILL_TTS", "auto").strip().lower()   # auto | edge | sapi | pyttsx3 | off
     # For edge: a name like Aria/Andrew/Ava/Guy. For SAPI: Zira/David. Substring match.
     voice: str = _get("QUILL_TTS_VOICE", "")

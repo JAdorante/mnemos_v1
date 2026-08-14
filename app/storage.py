@@ -1661,7 +1661,9 @@ class Store:
                     organizer_json  TEXT,
                     attendees_json  TEXT,
                     source_event_id INTEGER,
-                    updated_at      REAL    NOT NULL
+                    updated_at      REAL    NOT NULL,
+                    join_url        TEXT,
+                    provider        TEXT
                 )
                 """
             )
@@ -1671,6 +1673,49 @@ class Store:
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_cal_events_window "
                 "ON calendar_events(start, end)")
+            ccols = {r["name"] for r in
+                     self._conn.execute("PRAGMA table_info(calendar_events)").fetchall()}
+            if ccols:
+                for col, decl in (("join_url", "TEXT"), ("provider", "TEXT")):
+                    if col not in ccols:
+                        self._conn.execute(
+                            f"ALTER TABLE calendar_events ADD COLUMN {col} {decl}")
+            self._conn.commit()
+
+            # First-class MeetingSession (calendar-anchored capture owner).
+            # Distinct from derived `sessions` — replace_sessions must not
+            # wipe a row written at meeting start before any turns exist.
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS meeting_sessions (
+                    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                    calendar_event_id   TEXT,
+                    recurrence_uid      TEXT,
+                    title               TEXT,
+                    attendees_json      TEXT,
+                    organizer_json      TEXT,
+                    join_url            TEXT,
+                    provider            TEXT,
+                    source              TEXT    NOT NULL,
+                    consent             TEXT    NOT NULL DEFAULT 'pending',
+                    status              TEXT    NOT NULL DEFAULT 'offered',
+                    t_start             REAL,
+                    t_end               REAL,
+                    entered_at          REAL,
+                    ended_at            REAL,
+                    created_at          REAL    NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_msess_cal "
+                "ON meeting_sessions(calendar_event_id)")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_msess_series "
+                "ON meeting_sessions(recurrence_uid, created_at)")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_msess_status "
+                "ON meeting_sessions(status)")
             self._conn.commit()
 
             # --- People v3 P3 (WS-A): voice-track escrow ----------------------
@@ -6497,6 +6542,7 @@ class Store:
         location: str | None = None, organizer: dict | None = None,
         attendees: list | None = None, source_event_id: int | None = None,
         updated_at: float | None = None,
+        join_url: str | None = None, provider: str | None = None,
     ) -> None:
         """Insert or replace one normalized calendar event (Meeting Layer P1)."""
         import time as _time
@@ -6506,8 +6552,9 @@ class Store:
                 """
                 INSERT INTO calendar_events (
                     id, calendar, uid, title, start, end, all_day, location,
-                    organizer_json, attendees_json, source_event_id, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    organizer_json, attendees_json, source_event_id, updated_at,
+                    join_url, provider)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     calendar=excluded.calendar,
                     uid=excluded.uid,
@@ -6520,13 +6567,15 @@ class Store:
                     attendees_json=excluded.attendees_json,
                     source_event_id=COALESCE(excluded.source_event_id,
                                              calendar_events.source_event_id),
-                    updated_at=excluded.updated_at
+                    updated_at=excluded.updated_at,
+                    join_url=COALESCE(excluded.join_url, calendar_events.join_url),
+                    provider=COALESCE(excluded.provider, calendar_events.provider)
                 """,
                 (event_id, calendar, uid, title, float(start), float(end),
                  1 if all_day else 0, location,
                  json.dumps(organizer) if organizer is not None else None,
                  json.dumps(attendees or []),
-                 source_event_id, ts),
+                 source_event_id, ts, join_url, provider),
             )
             self._conn.commit()
 
@@ -6565,8 +6614,131 @@ class Store:
                 "organizer": organizer, "attendees": attendees,
                 "source_event_id": r["source_event_id"],
                 "updated_at": r["updated_at"],
+                "join_url": r["join_url"] if "join_url" in r.keys() else None,
+                "provider": r["provider"] if "provider" in r.keys() else None,
             })
         return out
+
+    def _meeting_session_from_row(self, r) -> dict:
+        try:
+            attendees = json.loads(r["attendees_json"] or "[]")
+        except Exception:
+            attendees = []
+        try:
+            organizer = json.loads(r["organizer_json"]) if r["organizer_json"] else None
+        except Exception:
+            organizer = None
+        return {
+            "id": int(r["id"]),
+            "calendar_event_id": r["calendar_event_id"],
+            "recurrence_uid": r["recurrence_uid"] or "",
+            "title": r["title"] or "",
+            "attendees": attendees,
+            "organizer": organizer,
+            "join_url": r["join_url"] or "",
+            "provider": r["provider"] or "unknown",
+            "source": r["source"],
+            "consent": r["consent"],
+            "status": r["status"],
+            "t_start": r["t_start"],
+            "t_end": r["t_end"],
+            "entered_at": r["entered_at"],
+            "ended_at": r["ended_at"],
+            "created_at": r["created_at"],
+        }
+
+    def insert_meeting_session(
+        self, *, calendar_event_id: str | None = None,
+        recurrence_uid: str | None = None, title: str | None = None,
+        attendees: list | None = None, organizer: dict | None = None,
+        join_url: str | None = None, provider: str | None = None,
+        source: str = "calendar", consent: str = "pending",
+        status: str = "offered", t_start: float | None = None,
+        t_end: float | None = None, entered_at: float | None = None,
+        ended_at: float | None = None, created_at: float | None = None,
+    ) -> dict:
+        import time as _time
+        ts = float(created_at if created_at is not None else _time.time())
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                INSERT INTO meeting_sessions (
+                    calendar_event_id, recurrence_uid, title, attendees_json,
+                    organizer_json, join_url, provider, source, consent, status,
+                    t_start, t_end, entered_at, ended_at, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (calendar_event_id, recurrence_uid or "", title or "",
+                 json.dumps(attendees or []),
+                 json.dumps(organizer) if organizer is not None else None,
+                 join_url or "", provider or "unknown", source, consent, status,
+                 t_start, t_end, entered_at, ended_at, ts),
+            )
+            sid = int(cur.lastrowid)
+            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT * FROM meeting_sessions WHERE id=?", (sid,)
+            ).fetchone()
+        return self._meeting_session_from_row(row)
+
+    def update_meeting_session(self, session_id: int, **fields) -> dict | None:
+        allowed = {
+            "calendar_event_id", "recurrence_uid", "title", "join_url",
+            "provider", "source", "consent", "status", "t_start", "t_end",
+            "entered_at", "ended_at",
+        }
+        json_fields = {"attendees": "attendees_json", "organizer": "organizer_json"}
+        sets: list[str] = []
+        args: list = []
+        for k, v in fields.items():
+            if k in json_fields:
+                sets.append(f"{json_fields[k]}=?")
+                args.append(json.dumps(v) if v is not None else None)
+            elif k in allowed:
+                sets.append(f"{k}=?")
+                args.append(v)
+        if not sets:
+            return self.get_meeting_session(session_id)
+        args.append(int(session_id))
+        with self._lock:
+            self._conn.execute(
+                f"UPDATE meeting_sessions SET {', '.join(sets)} WHERE id=?",
+                args,
+            )
+            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT * FROM meeting_sessions WHERE id=?", (int(session_id),)
+            ).fetchone()
+        return self._meeting_session_from_row(row) if row else None
+
+    def get_meeting_session(self, session_id: int) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM meeting_sessions WHERE id=?", (int(session_id),)
+            ).fetchone()
+        return self._meeting_session_from_row(row) if row else None
+
+    def list_meeting_sessions(
+        self, *, calendar_event_id: str | None = None,
+        recurrence_uid: str | None = None, status: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        sql = "SELECT * FROM meeting_sessions WHERE 1=1"
+        args: list = []
+        if calendar_event_id:
+            sql += " AND calendar_event_id=?"
+            args.append(calendar_event_id)
+        if recurrence_uid:
+            sql += " AND recurrence_uid=?"
+            args.append(recurrence_uid)
+        if status:
+            sql += " AND status=?"
+            args.append(status)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        args.append(int(limit))
+        with self._lock:
+            rows = self._conn.execute(sql, args).fetchall()
+        return [self._meeting_session_from_row(r) for r in rows]
 
     def find_person_by_contact(
         self, type_: str, value_normalized: str,

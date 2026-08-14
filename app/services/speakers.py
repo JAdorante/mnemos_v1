@@ -131,6 +131,9 @@ class SpeakerIdentifier:
         # anonymous clusters: label -> {"centroid": vec, "count": n}
         self._clusters: dict[str, dict] = {}
         self._next_id = 1
+        # Isolated remote-channel clusters (MeetingSession loopback).
+        self._remote_clusters: dict[str, dict] = {}
+        self._remote_next_id = 1
         # named voiceprints: name -> centroid vec
         self._voiceprints: dict[str, np.ndarray] = {}
         # per-profile learned state + running stats (observability + calibration)
@@ -281,15 +284,43 @@ class SpeakerIdentifier:
             return {p: dict(self._profiles.get(p, {})) for p in _ALL_PROFILES}
 
     # ------------------------------ identify -----------------------------
-    def identify(self, audio: np.ndarray, sample_rate: int, aq: dict | None = None) -> dict:
+    def identify(self, audio: np.ndarray, sample_rate: int, aq: dict | None = None,
+                 space: str = "default") -> dict:
         """Embed an utterance and classify the speaker with environment-adaptive
-        thresholds. `aq` is the audio_quality dict (#1) used to pick the profile."""
-        emb = self.embed(audio, sample_rate)
-        return self.identify_embedding(emb, aq)
+        thresholds. `aq` is the audio_quality dict (#1) used to pick the profile.
 
-    def identify_embedding(self, emb: np.ndarray, aq: dict | None = None) -> dict:
+        ``space``: default (ambient mix), ``self`` (mic during a MeetingSession —
+        skip clustering), ``remote`` (loopback — cluster only among remotes).
+        """
+        if space == "self":
+            return self._self_channel_result()
+        emb = self.embed(audio, sample_rate)
+        return self.identify_embedding(emb, aq, space=space)
+
+    def _self_channel_result(self) -> dict:
+        name = "You"
+        try:
+            from app.services.identity import user_identity
+            n = (user_identity().get("name") or "").strip()
+            if n:
+                name = n
+        except Exception:
+            pass
+        return {
+            "label": name, "name": name, "is_known": True,
+            "similarity": 1.0, "confidence": 1.0,
+            "decision": "self_channel", "margin": 1.0,
+            "second_best": None, "candidate": None,
+            "environment_profile": "close_mic",
+            "thresholds": {"id": 1.0, "cluster": 1.0, "margin": 0.0},
+        }
+
+    def identify_embedding(self, emb: np.ndarray, aq: dict | None = None,
+                           space: str = "default") -> dict:
         """Pure decision logic over a precomputed embedding (model-free -> testable).
         Mutates cluster state / profile stats; returns the rich result dict."""
+        if space == "self":
+            return self._self_channel_result()
         profile = classify_environment(aq)
         eff_id, eff_cluster, eff_margin = self._eff_thresholds(profile)
 
@@ -300,9 +331,13 @@ class SpeakerIdentifier:
             best_name, best_name_sim = (names[0] if names else (None, -1.0))
             second_name = (names[1] if len(names) > 1 else (None, -1.0))
 
+            clusters_map = (self._remote_clusters if space == "remote"
+                            else self._clusters)
+            next_attr = "_remote_next_id" if space == "remote" else "_next_id"
+
             # rank anonymous clusters
             clusters = sorted(((lb, _cos(emb, c["centroid"]))
-                               for lb, c in self._clusters.items()),
+                               for lb, c in clusters_map.items()),
                               key=lambda t: t[1], reverse=True)
             best_cl, best_cl_sim = (clusters[0] if clusters else (None, -1.0))
 
@@ -331,7 +366,7 @@ class SpeakerIdentifier:
                     candidate = {"name": best_name, "similarity": round(best_name_sim, 3)}
                 if best_cl is not None and best_cl_sim >= eff_cluster:
                     # re-match an existing cluster
-                    c = self._clusters[best_cl]
+                    c = clusters_map[best_cl]
                     n = c["count"]
                     merged = c["centroid"] * n + emb
                     c["centroid"] = merged / np.linalg.norm(merged)
@@ -341,9 +376,11 @@ class SpeakerIdentifier:
                     headroom = best_cl_sim - eff_cluster
                 else:
                     # brand-new anonymous speaker
-                    label = f"Speaker {self._next_id}"
-                    self._next_id += 1
-                    self._clusters[label] = {"centroid": emb, "count": 1}
+                    nid = getattr(self, next_attr)
+                    label = (f"Remote {nid}" if space == "remote"
+                             else f"Speaker {nid}")
+                    setattr(self, next_attr, nid + 1)
+                    clusters_map[label] = {"centroid": emb, "count": 1}
                     decision, name, is_known = "new", None, False
                     confidence = 1.0 if not clusters else round(max(best_cl_sim, 0.0), 3)
 

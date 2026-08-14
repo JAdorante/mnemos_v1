@@ -285,64 +285,10 @@ def exit_mode(*, reason: str = "manual") -> dict[str, Any]:
 def consider_offer(
     store: Store | None = None, *, now: float | None = None,
 ) -> dict[str, Any]:
-    """Suggest meeting mode when a calendar event is starting / in progress."""
-    if not enabled():
-        return {"ok": False, "skipped": "disabled"}
-    store = store or get_store()
-    now = float(now if now is not None else time.time())
-    with _lock:
-        if _runtime["active"]:
-            return {"ok": True, "skipped": "already_active"}
-    prefs = load_prefs()
-    offered = prefs.get("offered") or {}
-    declined = prefs.get("declined") or {}
-
-    # Prefer structured calendar_events index.
+    """Delegate to MeetingSession (calendar-first spawn + 3-way consent)."""
     try:
-        events = store.list_calendar_events(
-            start_min=now - 30 * 60, start_max=now + OFFER_LEAD_S, limit=40)
-    except Exception:
-        events = []
-    candidate = None
-    for ev in events:
-        eid = ev.get("id")
-        if not eid:
-            continue
-        start = float(ev.get("start") or 0)
-        end = float(ev.get("end") or start)
-        if end < now:
-            continue
-        if start - now > OFFER_LEAD_S:
-            continue
-        # Cooldown / prior decline.
-        last_off = float(offered.get(eid) or 0)
-        if last_off and (now - last_off) < OFFER_COOLDOWN_S:
-            continue
-        last_dec = float(declined.get(eid) or 0)
-        if last_dec and (now - last_dec) < OFFER_COOLDOWN_S:
-            continue
-        candidate = ev
-        break
-
-    if candidate is None:
-        return {"ok": True, "skipped": "no_event"}
-
-    title = (candidate.get("title") or "Meeting").strip()
-    try:
-        from app.services.agent_bridge import worker
-        shown = worker.propose_meeting_mode({
-            "title": title,
-            "calendar_event_id": candidate.get("id"),
-            "start": candidate.get("start"),
-            "end": candidate.get("end"),
-            "default_retention": default_retention(),
-        })
-        offered[str(candidate["id"])] = now
-        save_prefs({"offered": offered, "declined": declined,
-                    "sessions": prefs.get("sessions") or {},
-                    "default_retention": prefs.get("default_retention")})
-        return {"ok": True, "offered": True, "shown": shown,
-                "calendar_event_id": candidate.get("id"), "title": title}
+        from app.services import meeting_session as _ms
+        return _ms.consider(store, now=now)
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 

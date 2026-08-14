@@ -224,7 +224,7 @@ body{
           <div class="payload" id="propPayload" hidden></div>
         </div>
       </details>
-      <div class="actions">
+      <div class="actions" id="propActions">
         <form method="post" action="/approvals/resolve" class="approval-form" style="display:inline">
           <input type="hidden" name="accept" value="1">
           <input type="hidden" name="next" value="/today">
@@ -235,6 +235,7 @@ body{
           <input type="hidden" name="next" value="/today">
           <button type="submit" class="quiet" id="propNo">Not now</button>
         </form>
+        <div id="propChoices" hidden></div>
         <a class="btnish" href="/chat">Open chat</a>
       </div>
     </section>
@@ -487,6 +488,30 @@ function renderProposal(p, queued, waitingOn, packet) {
     document.getElementById('propMeta').innerHTML = '';
   }
   fillActionDetail(p, packet);
+  const yesForm = document.getElementById('propYes') && document.getElementById('propYes').closest('form');
+  const noForm = document.getElementById('propNo') && document.getElementById('propNo').closest('form');
+  const choiceBox = document.getElementById('propChoices');
+  const choices = (p && p.choices) || [];
+  if (choiceBox) {
+    if (choices.length) {
+      choiceBox.hidden = false;
+      choiceBox.innerHTML = choices.map((c, i) =>
+        '<button type="button" class="' + (c.id === 'skip' ? 'quiet' : 'go')
+        + '" data-choice="' + MnemosEsc(c.id) + '">'
+        + MnemosEsc(c.label || c.id) + '</button>'
+      ).join(' ');
+      choiceBox.querySelectorAll('button[data-choice]').forEach(btn => {
+        btn.onclick = () => answerOfferChoice(btn.getAttribute('data-choice'));
+      });
+      if (yesForm) yesForm.hidden = true;
+      if (noForm) noForm.hidden = true;
+    } else {
+      choiceBox.hidden = true;
+      choiceBox.innerHTML = '';
+      if (yesForm) yesForm.hidden = false;
+      if (noForm) noForm.hidden = false;
+    }
+  }
 }
 
 function renderWm(slots) {
@@ -605,6 +630,17 @@ async function answerOffer(accept) {
       method: 'POST',
       headers: {'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json'},
       body: 'accept=' + (accept ? '1' : '0') + '&as_json=1',
+    });
+  } catch (e) {}
+  loadShell();
+  if (window.MnemosApprovals) window.MnemosApprovals.refresh();
+}
+async function answerOfferChoice(choice) {
+  try {
+    await fetch('/today/offer', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({choice: choice}),
     });
   } catch (e) {}
   loadShell();

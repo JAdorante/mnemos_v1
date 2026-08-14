@@ -1892,6 +1892,7 @@ window.MnemosShell = {
 window.MnemosCapture = {
   _timer: null,
   _state: null,
+  _voice: null,
   _SOURCES: [
     {key:'mic', label:'Mic', warn:''},
     {key:'webcam', label:'Camera', warn:''},
@@ -1940,6 +1941,26 @@ window.MnemosCapture = {
     });
     return r.json();
   },
+  async voiceStatus() {
+    const r = await fetch('/speak/status');
+    return r.json();
+  },
+  async setMuted(muted) {
+    const r = await fetch('/speak/mute', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({muted: !!muted}),
+    });
+    return r.json();
+  },
+  async toggleVoice() {
+    const v = this._voice || {};
+    if (v.enabled === false) return;
+    try {
+      this._voice = await this.setMuted(!v.muted);
+      this.render();
+    } catch (e) {}
+  },
   openPrivacy() {
     const el = document.getElementById('mnemosPrivacy');
     if (!el) return;
@@ -1955,6 +1976,12 @@ window.MnemosCapture = {
     const r = document.getElementById('pv_ret_receipts');
     if (t) t.checked = ret !== 'keep_receipts';
     if (r) r.checked = ret === 'keep_receipts';
+    const voiceBox = document.getElementById('pv_voice');
+    if (voiceBox) {
+      const v = this._voice || {};
+      voiceBox.disabled = v.enabled === false;
+      voiceBox.checked = v.enabled !== false && !v.muted;
+    }
     el.classList.add('open');
   },
   closePrivacy() {
@@ -1978,6 +2005,10 @@ window.MnemosCapture = {
         });
       }
       this._state = await this.status();
+      const voiceBox = document.getElementById('pv_voice');
+      if (voiceBox && !voiceBox.disabled) {
+        this._voice = await this.setMuted(!voiceBox.checked);
+      }
       this.render();
       this.closePrivacy();
     } catch (e) {}
@@ -2031,6 +2062,13 @@ window.MnemosCapture = {
       + '<label class="pv-src"><input type="radio" name="pv_retention" id="pv_ret_receipts" value="keep_receipts">'
       + '<div><b>Keep receipts</b><span>Retain WAVs for “Play the moment”.</span></div></label>'
       + '</div>'
+      + '<div class="pv-ret" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line)">'
+      + '<b style="font-size:13px;color:var(--navy)">AI voice</b>'
+      + '<p style="font-size:12px;color:var(--mut);margin:6px 0 8px;line-height:1.45">'
+      + 'Spoken replies. Uncheck to keep answers on screen only — you can also mute from the Voice chip.</p>'
+      + '<label class="pv-src"><input type="checkbox" id="pv_voice">'
+      + '<div><b>Speak replies aloud</b><span>Turn off anytime; it stays off until you turn it back on.</span></div></label>'
+      + '</div>'
       + '<div class="pv-actions">'
       + '<button type="button" class="pv-btn quiet" id="pvRevoke">Turn all off</button>'
       + '<button type="button" class="pv-btn quiet" id="pvCancel">Not now</button>'
@@ -2057,20 +2095,36 @@ window.MnemosCapture = {
   },
   render() {
     const bar = document.getElementById('mnemosRecBar');
-    if (!bar || !this._state) return;
+    if (!bar) return;
+    if (!this._state) {
+      bar.innerHTML = this._voiceChipHtml();
+      const voiceBtn = document.getElementById('recVoice');
+      if (voiceBtn) voiceBtn.onclick = () => this.toggleVoice();
+      return;
+    }
     const consent = this._state.consent || {};
     const sources = consent.sources || {};
     const running = this._state.running || {};
     const mm = this._state.meeting_mode || {};
+    const ms = this._state.meeting_session || {};
     const liveKeys = ['mic', 'webcam', 'screen', 'system_audio'];
     const consented = !!consent.consented;
     let html = '';
-    if (mm.active) {
+    if (ms.pending) {
       html += '<div class="rec-row meeting">'
-        + '<span class="rec-chip meeting-on" title="Meeting mode — hotter capture">'
+        + '<span class="rec-chip meeting-on" title="Waiting on record / skip">'
+        + '<span class="dot" aria-hidden="true"></span>'
+        + '<span>Meeting · waiting'
+        + (ms.title ? (' · ' + String(ms.title).slice(0, 36)) : '')
+        + '</span></span></div>';
+    } else if (ms.active || mm.active) {
+      const title = ms.title || mm.title || '';
+      html += '<div class="rec-row meeting">'
+        + '<span class="rec-chip meeting-on" title="'
+        + (ms.channel_note || 'Meeting session capturing') + '">'
         + '<span class="dot" aria-hidden="true"></span>'
         + '<span>Meeting · capturing'
-        + (mm.title ? (' · ' + String(mm.title).slice(0, 40)) : '')
+        + (title ? (' · ' + String(title).slice(0, 40)) : '')
         + '</span></span></div>';
     }
     if (!consented) {
@@ -2094,16 +2148,47 @@ window.MnemosCapture = {
         + 'title="Privacy controls"><span class="act">privacy</span></button>';
       html += '</div>';
     }
+    html += this._voiceChipHtml();
     bar.innerHTML = html;
     const openBtn = document.getElementById('recOpenPrivacy');
     if (openBtn) openBtn.onclick = () => this.openPrivacy();
     bar.querySelectorAll('.rec-chip[data-src]').forEach((btn) => {
       btn.onclick = () => this.toggle(btn.getAttribute('data-src'));
     });
+    const voiceBtn = document.getElementById('recVoice');
+    if (voiceBtn) voiceBtn.onclick = () => this.toggleVoice();
+  },
+  _voiceChipHtml() {
+    const v = this._voice || {};
+    const enabled = v.enabled !== false;
+    const on = enabled && !v.muted;
+    let title = 'Mute AI voice';
+    let act = 'mute';
+    let cls = 'rec-chip voice-on';
+    if (!enabled) {
+      title = 'AI voice disabled (QUILL_TTS=off)';
+      act = 'off';
+      cls = 'rec-chip paused';
+    } else if (!on) {
+      title = 'Unmute AI voice';
+      act = 'unmute';
+      cls = 'rec-chip paused';
+    }
+    return '<div class="rec-row">'
+      + '<button type="button" class="' + cls + '" id="recVoice" title="' + title + '">'
+      + '<span class="dot" aria-hidden="true"></span>'
+      + '<span>Voice</span>'
+      + '<span class="act">' + act + '</span>'
+      + '</button></div>';
   },
   async tick() {
     try {
-      this._state = await this.status();
+      const [cap, voice] = await Promise.all([
+        this.status(),
+        this.voiceStatus().catch(() => null),
+      ]);
+      this._state = cap;
+      if (voice) this._voice = voice;
       this.render();
       // First visit: force the consent sheet when nothing is allowed yet.
       if (this._state && this._state.consent

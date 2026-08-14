@@ -376,6 +376,10 @@ def _friendly_error(e: Exception) -> str | None:
     """Map a transient LLM/API error to a calm, retryable message; return None
     for anything not recognized as transient (the caller shows the raw error for
     those — genuinely useful for real bugs)."""
+    # Not transient, but already user-facing prose: a goal that needs Claude
+    # while running key-less (local-only mode). Show it without the class name.
+    if type(e).__name__ == "CloudModelUnavailable":
+        return str(e)
     status = getattr(e, "status_code", None)
     name = type(e).__name__
     text = str(e).lower()
@@ -392,6 +396,32 @@ def _friendly_error(e: Exception) -> str | None:
                 "out requests if this keeps happening.")
     return ("The AI service had a brief network/server hiccup. Please try again "
             "in a moment.")
+
+
+def _cloud_auth_ok() -> bool:
+    """Anthropic credentials present? Env vars are the common case; the SDK
+    can also resolve an `ant auth login` credentials profile, which the
+    browser_agent probe detects."""
+    if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
+        return True
+    try:
+        from browser_agent.llm import cloud_auth_available
+        return cloud_auth_available()
+    except Exception:
+        return False
+
+
+def _local_chat_ready() -> bool:
+    """True when chat can be served with no cloud credentials: the local-first
+    text tier is enabled AND its Ollama model answers the availability probe."""
+    try:
+        from app.config import settings
+        if not settings.text_local.enabled:
+            return False
+        from app.services.model_router import router
+        return router.local_available()
+    except Exception:
+        return False
 
 
 class AgentWorker:
@@ -802,6 +832,8 @@ class AgentWorker:
                 "deliverable_only": bool(pend.get("deliverable_only")),
                 "created_at": pend.get("created_at"),
                 "queued_behind": len(self.offer_queue),
+                "choices": list(pend.get("choices") or []),
+                "meeting_session_id": pend.get("meeting_session_id"),
             }
 
     def offer_queue_len(self) -> int:
@@ -1086,37 +1118,39 @@ class AgentWorker:
             "deliverable_only": True,
         })
 
-    def propose_meeting_mode(self, event: dict) -> bool:
-        """Meeting Layer P5 — enter hotter capture for a starting calendar event.
-
-        Yes → meeting_mode.enter (side-effect, no agent goal). Retention default
-        is explained plainly so the user sees the transcript vs receipts tradeoff.
-        """
+    def propose_meeting_record(self, event: dict) -> bool:
+        """First-class MeetingSession consent: skip / transcript / receipts."""
         title = (event.get("title") or "Meeting").strip()
         ret = event.get("default_retention") or "transcript_only"
-        if ret == "keep_receipts":
-            trade = ("Default after the call: keep audio receipts for playback. "
-                     "You can switch to transcript-only (delete WAVs) on the note.")
-        else:
-            trade = ("Default after the call: transcript-only — WAVs deleted, "
-                     "note stays. Choose keep-receipts on the note for playback.")
         message = (
             f"Meeting starting: “{title}”\n\n"
-            "Enter meeting mode? I'll capture more aggressively for this window "
-            "and show a capturing indicator.\n\n"
-            f"{trade}\n\n"
-            "Reply 'yes' to enter meeting mode, or 'no' to skip."
+            "Record this meeting? Remote participants will be transcribed "
+            "on this machine. Skip leaves other capture as-is.\n\n"
+            "Transcript only — keep the note, delete WAV files after.\n"
+            "Audio + transcript — keep clips for playback.\n"
+            "Skip — do not record this meeting."
         )
         return self._add_offer({
             "items": [title],
-            "title": f"Meeting mode · {title}"[:80],
+            "title": f"Record meeting · {title}"[:80],
             "message": message,
-            "kind": "meeting_mode",
+            "kind": "meeting_record",
+            "choices": [
+                {"id": "transcript_only", "label": "Transcript only"},
+                {"id": "keep_receipts", "label": "Audio + transcript"},
+                {"id": "skip", "label": "Skip"},
+            ],
             "calendar_event_id": event.get("calendar_event_id"),
+            "meeting_session_id": event.get("meeting_session_id"),
             "start": event.get("start"),
             "end": event.get("end"),
+            "default_retention": ret,
             "deliverable_only": True,
         })
+
+    def propose_meeting_mode(self, event: dict) -> bool:
+        """Back-compat wrapper — MeetingSession 3-way prompt."""
+        return self.propose_meeting_record(event)
 
     def propose_reasoner(self, proposal) -> bool:
         """Track D: surface a reasoner proposal (commitment / relationship /
@@ -1244,8 +1278,40 @@ class AgentWorker:
             "draft": draft,
         })
 
+    def _resolve_meeting_record(self, pend: dict, choice: str) -> dict:
+        """Apply Skip / transcript_only / keep_receipts to the MeetingSession."""
+        from app.services import meeting_session as _ms
+        title = pend.get("title") or "Meeting"
+        sid = pend.get("meeting_session_id")
+        out = _ms.decide(choice, session_id=int(sid) if sid is not None else None)
+        if not out.get("ok"):
+            self._emit("error", f"Couldn't set meeting capture: {out.get('error') or 'unknown'}")
+            self._advance_offers()
+            return {"ok": False, **out}
+        if choice == "skip":
+            self._emit("system", f"Okay — not recording “{title}”.")
+        elif choice == "keep_receipts":
+            self._emit(
+                "result",
+                f"Recording “{title}” with audio receipts. "
+                "Remote audio is whole-device loopback (not Zoom-only).")
+        else:
+            self._emit(
+                "result",
+                f"Recording “{title}” (transcript only). "
+                "Remote audio is whole-device loopback (not Zoom-only).")
+        self._advance_offers()
+        return {"ok": True, "accepted": choice != "skip", "choice": choice,
+                **out}
+
     def _resolve_meeting_mode(self, pend: dict, accept: bool) -> dict:
-        """Meeting Layer P5 — enter/skip meeting mode (no agent goal)."""
+        """Back-compat: yes → default retention, no → skip."""
+        from app.services import meeting_session as _ms
+        if pend.get("kind") in ("meeting_mode", "meeting_record") or pend.get(
+                "meeting_session_id"):
+            choice = (_ms.CONSENT_SKIP if not accept
+                      else (pend.get("default_retention") or _ms.CONSENT_TRANSCRIPT))
+            return self._resolve_meeting_record(pend, choice)
         if not accept:
             try:
                 from app.services import meeting_mode as _mm
@@ -1271,8 +1337,7 @@ class AgentWorker:
                 "error",
                 f"Couldn't enter meeting mode: {out.get('error') or 'unknown'}")
         self._advance_offers()
-        return {"ok": bool(out.get("ok")), "accepted": True,
-                "meeting_mode": out}
+        return {"ok": True, "accepted": True, **out}
 
     def _resolve_calendar(self, pend: dict, accept: bool) -> dict:
         """Carry out (or skip) a pending calendar-add offer."""
@@ -1301,7 +1366,7 @@ class AgentWorker:
         self._advance_offers()
         return {"ok": True, "accepted": True, "created": bool(res.get("ok"))}
 
-    def resolve_todo(self, accept: bool) -> dict:
+    def resolve_todo(self, accept: bool, choice: str | None = None) -> dict:
         with self.lock:
             pend = self.pending_todo
             self.pending_todo = None
@@ -1309,7 +1374,15 @@ class AgentWorker:
             return {"ok": False, "error": "no pending offer"}
         if pend.get("kind") == "calendar":
             return self._resolve_calendar(pend, accept)
-        if pend.get("kind") == "meeting_mode":
+        if pend.get("kind") in ("meeting_record", "meeting_mode"):
+            if choice:
+                from app.services import meeting_session as _ms
+                parsed = _ms.parse_choice(choice) or choice
+                if parsed not in (_ms.CONSENT_SKIP, _ms.CONSENT_TRANSCRIPT,
+                                  _ms.CONSENT_RECEIPTS):
+                    parsed = _ms.CONSENT_SKIP if not accept else (
+                        pend.get("default_retention") or _ms.CONSENT_TRANSCRIPT)
+                return self._resolve_meeting_record(pend, parsed)
             return self._resolve_meeting_mode(pend, accept)
         if (pend.get("kind") or "").startswith("trigger"):
             # trigger | trigger_suggest | trigger_draft — outcome recording,
@@ -1603,6 +1676,17 @@ class AgentWorker:
                 return {"routed": "todo", **self.resolve_todo(True)}
             if verdict is False:
                 return {"routed": "todo", **self.resolve_todo(False)}
+            try:
+                from app.services import meeting_session as _ms
+                with self.lock:
+                    kind = (self.pending_todo or {}).get("kind")
+                if kind in ("meeting_record", "meeting_mode"):
+                    parsed = _ms.parse_choice(text)
+                    if parsed:
+                        return {"routed": "todo", **self.resolve_todo(
+                            parsed != _ms.CONSENT_SKIP, choice=parsed)}
+            except Exception:
+                pass
             self._dismiss_offer(reason="superseded")
             self.send(text)
             return {"ok": True, "routed": "goal", "superseded_offer": True}
@@ -2025,11 +2109,29 @@ class AgentWorker:
         agent.grounding_sink = sink
         return agent
 
+    def _reject_loop(self, q: queue.Queue, msg: str) -> None:
+        """A lane that cannot start keeps consuming its queue and answers every
+        goal with the startup error — a message sent here must be visibly
+        refused, never silently swallowed by a dead thread."""
+        while True:
+            cmd = q.get()
+            if cmd.get("type") != "goal":
+                continue
+            self._emit("user", cmd.get("display") or cmd["text"])
+            self._emit("error", msg)
+
     def _run(self) -> None:
-        if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
+        # No cloud credentials is fine as long as the local text tier can carry
+        # chat (local-only mode). With neither, the lane can't serve anything.
+        local_only = not _cloud_auth_ok()
+        if local_only and not _local_chat_ready():
             with self.lock:
-                self.error = "ANTHROPIC_API_KEY is not set — add it to .env to enable the agent."
+                self.error = (
+                    "ANTHROPIC_API_KEY is not set and the local model isn't "
+                    "reachable — add a key to .env, or start Ollama with "
+                    "QUILL_TEXT_LOCAL=1 for local-only chat.")
             self._emit("error", self.error)
+            self._reject_loop(self.cmd_q, self.error)
             return
         try:
             self.agent = self._build_agent(self._on_ask)
@@ -2037,14 +2139,21 @@ class AgentWorker:
             with self.lock:
                 self.error = f"browser agent unavailable: {type(exc).__name__}: {exc}"
             self._emit("error", self.error)
+            self._reject_loop(self.cmd_q, self.error)
             return
 
         with self.lock:
             self.url, self.ready = self.agent.current_url(), True
         # Browser is lazy-started on first web goal; desktop/phone use the fast lane.
-        self._emit("system",
-                   "Agent ready — browser starts when a web task needs it "
-                   f"({self.url or 'no page yet'}).")
+        if local_only:
+            self._emit("system",
+                       "Local-only mode — no ANTHROPIC_API_KEY, so chat runs on "
+                       "the local model and web/desktop/phone agent tasks stay "
+                       "off. Add a key to .env for full agent capability.")
+        else:
+            self._emit("system",
+                       "Agent ready — browser starts when a web task needs it "
+                       f"({self.url or 'no page yet'}).")
 
         while True:
             cmd = self.cmd_q.get()
@@ -2081,13 +2190,22 @@ class AgentWorker:
 
     def _run_fast(self) -> None:
         """Desktop/phone lane — never blocked by a long browser goal."""
-        if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
+        if not _cloud_auth_ok():
+            # Fast-lane goals (desktop/phone) are always agentic — the local
+            # text tier can't serve them. Refuse each one visibly (quietly at
+            # startup: the main lane already announced local-only mode).
+            self._reject_loop(self.fast_q, (
+                "Desktop and phone tasks need the cloud model — add "
+                "ANTHROPIC_API_KEY to .env to enable them."))
             return
         try:
             self.fast_agent = self._build_agent(self._on_ask_fast)
         except Exception as exc:
             self._emit("error",
                        f"fast lane unavailable: {type(exc).__name__}: {exc}")
+            self._reject_loop(
+                self.fast_q, "The desktop/phone lane failed to start — "
+                f"{type(exc).__name__}: {exc}")
             return
 
         with self.lock:

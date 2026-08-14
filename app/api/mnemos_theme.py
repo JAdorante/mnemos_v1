@@ -438,6 +438,9 @@ button:disabled,.btn:disabled{cursor:default}
   background:var(--mut);animation:none;box-shadow:none;
 }
 #mnemosRecBar .rec-chip.paused{color:var(--mut);font-weight:500}
+#mnemosRecBar .rec-chip.voice-on .dot{
+  background:var(--acc);animation:none;box-shadow:none;
+}
 #mnemosRecBar .rec-chip .act{font:10px/1 var(--mono);color:var(--mut);letter-spacing:.04em;text-transform:uppercase}
 #mnemosRecBar .rec-chip.meeting-on{
   background:rgba(11,19,32,.92);color:#F8F6F1;border-color:rgba(11,19,32,.5);
