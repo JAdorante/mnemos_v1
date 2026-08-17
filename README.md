@@ -518,7 +518,9 @@ yes/no in chat — nothing runs without your reply.
 - **Windows 11** primary (audio, vision, desktop capture, Phone Link).
   macOS/Linux run capture + memory + agents; Windows-only pieces degrade
   cleanly.
-- Microphone / webcam optional for live capture.
+- Microphone / webcam optional for live capture. On Linux you need
+  PortAudio (`sudo apt install libportaudio2`) for the mic and a V4L2
+  camera (`/dev/video*`) for the webcam pipeline.
 - **Anthropic API key** for Claude tiers (vision fallback, extraction,
   reflection, browser agent). Local pieces run without it.
 
@@ -716,6 +718,7 @@ loaded after `.env` with override, for secrets.
 | `QUILL_WHISPER_MODEL` | `small` | `base`, `medium`, `large-v3-turbo`, … |
 | `QUILL_WHISPER_COMPUTE` | `int8` | `int8`, `float16` (GPU), `float32` |
 | `QUILL_WHISPER_DEVICE` | `cpu` | `cuda` for a big speedup |
+| `QUILL_AUDIO_DEVICE` | (PortAudio default) | mic index or name substring |
 | `QUILL_ASR_LANGUAGE` | auto | e.g. `en` to skip detection |
 | `QUILL_VAD_THRESHOLD` | `0.5` | Silero speech-probability threshold |
 | `QUILL_MIN_SILENCE_MS` | `500` | silence to end an utterance |
@@ -735,8 +738,8 @@ loaded after `.env` with override, for secrets.
 |---|---|---|
 | `QUILL_VISION` | `1` | `0` disables the webcam pipeline |
 | `QUILL_CAMERA_INDEX` | `0` | pick a different webcam |
-| `QUILL_CAMERA_BACKEND` | `dshow` (Win) | DirectShow is the reliable Windows backend |
-| `QUILL_CAMERA_FOURCC` | `MJPG` (Win) | avoids green/noise frames |
+| `QUILL_CAMERA_BACKEND` | `dshow` (Win) / `v4l2` (Linux) | `gstreamer`/`any` also valid on Linux; Windows: `dshow`/`msmf`/`any` |
+| `QUILL_CAMERA_FOURCC` | `MJPG` (Win), empty (Linux) | Win: avoids green/noise frames; leave empty on Linux |
 | `QUILL_CAMERA_WIDTH` / `_HEIGHT` | `1280` / `720` | requested resolution (`0` = don't request) |
 | `QUILL_CAMERA_WARMUP` | `20` | frames discarded so the sensor auto-exposes |
 | `QUILL_VISION_MIN_BRIGHTNESS` | `8` | skip frames darker than this (0–255 mean) |

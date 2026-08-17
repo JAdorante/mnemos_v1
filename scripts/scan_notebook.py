@@ -3,10 +3,11 @@ pipeline (real VLM read -> structured, routed actions).
 
     python scripts/scan_notebook.py
 
-Captures one frame from camera index 0 (dshow + MJPG, matching the vision
-config), saves it to data/notebook_scan.jpg so you can see exactly what it read,
-then prints the structured actions + the chat offer it would surface. Nothing is
-executed or sent — this is read + decide only.
+Captures one frame from the configured webcam (V4L2 on Linux, DirectShow on
+Windows — same open path as the vision pipeline), saves it to
+data/notebook_scan.jpg so you can see exactly what it read, then prints the
+structured actions + the chat offer it would surface. Nothing is executed or
+sent — this is read + decide only.
 """
 from __future__ import annotations
 
@@ -25,6 +26,8 @@ except Exception:
 
 import cv2
 
+from app.config import settings
+from app.services.camera import open_camera
 from app.services.notebook import process_notebook, offer_text
 
 
@@ -41,17 +44,18 @@ def _page_score(gray) -> float:
 def _capture(seconds: float = 8.0) -> bytes | None:
     """Burst-capture for a few seconds and keep the best 'page of text' frame, so
     it doesn't depend on grabbing at exactly the right instant."""
-    cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
-    if not cap.isOpened():
-        cap.release()
-        cap = cv2.VideoCapture(0, cv2.CAP_ANY)
-    if not cap.isOpened():
+    cfg = settings.vision
+    cap = open_camera(cv2, cfg.camera_index, cfg.capture_backend)
+    if cap is None or not cap.isOpened():
         return None
     try:
         cap.set(cv2.CAP_PROP_CONVERT_RGB, 1.0)
-        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        fourcc = (cfg.capture_fourcc or "").strip()
+        if fourcc:
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc[:4]))
+        if cfg.capture_width and cfg.capture_height:
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, cfg.capture_width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, cfg.capture_height)
         for _ in range(15):          # warm up / auto-expose
             cap.read()
             time.sleep(0.03)

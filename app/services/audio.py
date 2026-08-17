@@ -31,6 +31,70 @@ from app.storage import get_store
 
 AudioCfg = settings.audio
 
+
+def _dev_get(dev, key: str, default=None):
+    if isinstance(dev, dict):
+        return dev.get(key, default)
+    return getattr(dev, key, default)
+
+
+def resolve_input_device(spec: str, devices=None) -> int | None:
+    """Map QUILL_AUDIO_DEVICE to a PortAudio index, or None for the default.
+
+    Empty → None. Digit string → that index. Otherwise a case-insensitive
+    substring match against input device names.
+    """
+    spec = (spec or "").strip()
+    if not spec:
+        return None
+    if spec.isdigit() or (spec.startswith("-") and spec[1:].isdigit()):
+        return int(spec)
+    if devices is None:
+        import sounddevice as sd
+        devices = sd.query_devices()
+    needle = spec.lower()
+    for i, d in enumerate(devices):
+        n_in = int(_dev_get(d, "max_input_channels", 0) or 0)
+        if n_in <= 0:
+            continue
+        name = str(_dev_get(d, "name", "") or "")
+        if needle in name.lower():
+            return i
+    raise ValueError(f"no input device matching {spec!r}")
+
+
+def first_input_index(devices) -> int | None:
+    """First PortAudio device that accepts capture, or None."""
+    for i, d in enumerate(devices):
+        if int(_dev_get(d, "max_input_channels", 0) or 0) > 0:
+            return i
+    return None
+
+
+def format_input_devices(devices) -> str:
+    lines = []
+    for i, d in enumerate(devices):
+        n_in = int(_dev_get(d, "max_input_channels", 0) or 0)
+        if n_in <= 0:
+            continue
+        name = str(_dev_get(d, "name", "") or "")
+        lines.append(f"  [{i}] {name} ({n_in} in)")
+    return "\n".join(lines) if lines else "  (no input devices)"
+
+
+def _log_mic_open_failure(exc: BaseException, devices=None) -> None:
+    print(f"[audio] mic open failed ({exc}).")
+    try:
+        if devices is None:
+            import sounddevice as sd
+            devices = sd.query_devices()
+        print("[audio] input devices:\n" + format_input_devices(devices))
+    except Exception:
+        print("[audio] could not list PortAudio devices.")
+    print("[audio] hint: install PortAudio (Debian/Ubuntu: libportaudio2), "
+          "set QUILL_AUDIO_DEVICE to an index or name, and check Privacy "
+          "mic consent.")
+
 # A callback that receives finalized transcript text. Defaults to bus publish.
 TranscriptSink = Callable[[Event], None]
 
@@ -551,18 +615,56 @@ class AudioPipeline:
             print(f"[audio] loopback capture starting @ {self.cfg.sample_rate} Hz "
                   f"({self.cfg.frame_ms} ms frames) -> source={self.source}")
         else:
-            import sounddevice as sd
+            self._open_mic()
 
-            self._stream = sd.InputStream(
+    def _open_mic(self) -> None:
+        """Open the PortAudio input stream with Linux-friendly fallback."""
+        import sounddevice as sd
+
+        def _stream(device):
+            return sd.InputStream(
                 samplerate=self.cfg.sample_rate,
                 channels=self.cfg.channels,
                 dtype="float32",
                 blocksize=self.cfg.frame_samples,
+                device=device,
                 callback=self._on_audio,
             )
+
+        spec = getattr(self.cfg, "input_device", "") or ""
+        try:
+            device = resolve_input_device(spec)
+        except ValueError as exc:
+            _log_mic_open_failure(exc)
+            raise
+
+        try:
+            self._stream = _stream(device)
             self._stream.start()
-            print(f"[audio] listening @ {self.cfg.sample_rate} Hz "
-                  f"({self.cfg.frame_ms} ms frames). Speak — Ctrl+C to stop.")
+        except Exception as first:
+            devices = None
+            try:
+                devices = sd.query_devices()
+            except Exception:
+                pass
+            _log_mic_open_failure(first, devices)
+            if device is None and devices is not None:
+                fallback = first_input_index(devices)
+                if fallback is not None:
+                    try:
+                        self._stream = _stream(fallback)
+                        self._stream.start()
+                        print(f"[audio] recovered on input device {fallback}.")
+                    except Exception as second:
+                        raise RuntimeError(
+                            f"could not open microphone ({second})"
+                        ) from second
+                    print(f"[audio] listening @ {self.cfg.sample_rate} Hz "
+                          f"({self.cfg.frame_ms} ms frames). Speak — Ctrl+C to stop.")
+                    return
+            raise RuntimeError(f"could not open microphone ({first})") from first
+        print(f"[audio] listening @ {self.cfg.sample_rate} Hz "
+              f"({self.cfg.frame_ms} ms frames). Speak — Ctrl+C to stop.")
 
     # ------------------------------ loopback capture ----------------------
     def _loopback_loop(self) -> None:

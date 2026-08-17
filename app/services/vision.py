@@ -23,6 +23,7 @@ from app.config import settings
 from app.events import Event, Modality, bus
 from app.services import confidence as _conf
 from app.services import frame_quality
+from app.services.camera import camera_backend_hint, open_camera
 
 VCfg = settings.vision
 
@@ -74,7 +75,9 @@ class VisionPipeline:
                     print("[vision] camera opened but not delivering frames; "
                           "retrying quietly. If it persists: close other apps "
                           "using the webcam, check camera privacy settings, or set "
-                          "QUILL_CAMERA_INDEX / QUILL_CAMERA_BACKEND (dshow|msmf).")
+                          f"QUILL_CAMERA_INDEX / QUILL_CAMERA_BACKEND "
+                          f"({camera_backend_hint()}). "
+                          "python scripts/diagnose_camera.py")
                 if fails % 50 == 0:                 # ~every 25s, try a fresh open
                     self._reopen(cv2)
                 time.sleep(0.5)
@@ -218,18 +221,10 @@ class VisionPipeline:
 
     # ------------------------------ lifecycle ----------------------------
     def _open_capture(self, cv2):
-        """Open the webcam with the configured backend, falling back to the
-        platform default. DirectShow (dshow) avoids the MSMF grab failures on
-        Windows."""
-        backends = {"dshow": getattr(cv2, "CAP_DSHOW", 0),
-                    "msmf": getattr(cv2, "CAP_MSMF", 0),
-                    "any": cv2.CAP_ANY}
-        chosen = backends.get((self.cfg.capture_backend or "any").lower(), cv2.CAP_ANY)
-        cap = cv2.VideoCapture(self.cfg.camera_index, chosen)
-        if not cap.isOpened() and chosen != cv2.CAP_ANY:
-            cap.release()
-            cap = cv2.VideoCapture(self.cfg.camera_index, cv2.CAP_ANY)  # fallback
-        if cap.isOpened():
+        """Open the webcam with the configured backend, then Linux V4L2, then
+        CAP_ANY. DirectShow (dshow) remains the reliable Windows default."""
+        cap = open_camera(cv2, self.cfg.camera_index, self.cfg.capture_backend)
+        if cap is not None and cap.isOpened():
             self._configure(cap, cv2)
         return cap
 
@@ -269,7 +264,7 @@ class VisionPipeline:
         except Exception:
             pass
         self._cap = self._open_capture(cv2)
-        if self._cap.isOpened():
+        if self._cap is not None and self._cap.isOpened():
             self._warmup(cv2)
 
     def start(self) -> None:
@@ -286,10 +281,11 @@ class VisionPipeline:
                 continue
 
         self._cap = self._open_capture(cv2)
-        if not self._cap.isOpened():
+        if self._cap is None or not self._cap.isOpened():
             raise RuntimeError(
                 f"could not open camera index {self.cfg.camera_index} "
-                f"(set QUILL_CAMERA_INDEX, or QUILL_CAMERA_BACKEND=dshow|msmf|any)"
+                f"(set QUILL_CAMERA_INDEX, or QUILL_CAMERA_BACKEND="
+                f"{camera_backend_hint()}; try python scripts/diagnose_camera.py)"
             )
         self._warmup(cv2)   # let auto-exposure settle before the first analysis
         self._stop.clear()
