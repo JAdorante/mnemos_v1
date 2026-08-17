@@ -1,0 +1,47 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: |
+          python -m pip install -U pip
+          pip install -r requirements.txt
+          pip install pyinstaller pytest
+      - name: Tester-profile smoke
+        env:
+          QUILL_PROFILE: tester
+        run: python -m pytest tests/test_first_run.py tests/test_trust_layer.py tests/test_mcp_tools.py tests/test_exhaust_ingest.py tests/test_external_capture.py tests/test_crash_report.py -q
+      - name: PyInstaller onedir
+        run: pyinstaller packaging/mnemos.spec
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mnemos-windows-onedir
+          path: dist/Mnemos
+
+  macos-meeting:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: |
+          python -m pip install -U pip
+          pip install -r requirements.txt
+          pip install pytest
+      - name: Meeting-path subset
+        env:
+          QUILL_FIRST_RUN_MODE: meeting
+        run: python -m pytest tests/test_first_run.py tests/test_meeting_session.py tests/test_mcp_tools.py tests/test_trust_layer.py -q
