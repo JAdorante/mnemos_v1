@@ -125,7 +125,9 @@ class TraceChainTests(unittest.TestCase):
             }],
             "commitments": [], "claims": [], "entities": [], "relations": [],
         }
-        with patch.object(self.ex, "_resolve_person_id", return_value=None), \
+        from app.services.people_pipeline import ResolveResult
+        with patch.object(self.ex, "_resolve_person_ref",
+                          return_value=ResolveResult(None, "leave_open")), \
              patch.object(self.ex, "_persist_entities", return_value=(0, 0)), \
              patch.object(self.ex, "_record_faithfulness", return_value=None), \
              patch("app.services.extractor._index_fact", lambda *a, **k: None), \

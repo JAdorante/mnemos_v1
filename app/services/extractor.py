@@ -484,23 +484,26 @@ class Extractor:
         except Exception:
             return []
 
-    def _resolve_person_id(self, name: str, now: float,
-                           *, event_id: int | None = None,
-                           event_source: str = "",
-                           window: str = "",
-                           text: str = "",
-                           grammatical_role: str = "unknown",
-                           relationship_boost: float = 0.6,
-                           turn_speaker: str | None = None,
-                           turn_start: float | None = None,
-                           turn_end: float | None = None,
-                           attendee_priors: list[dict] | None = None) -> int | None:
+    def _resolve_person_ref(self, name: str, now: float,
+                            *, event_id: int | None = None,
+                            event_source: str = "",
+                            window: str = "",
+                            text: str = "",
+                            grammatical_role: str = "unknown",
+                            relationship_boost: float = 0.6,
+                            turn_speaker: str | None = None,
+                            turn_start: float | None = None,
+                            turn_end: float | None = None,
+                            attendee_priors: list[dict] | None = None):
         # People v2: mention ledger + candidate resolution. Legacy path when
-        # QUILL_PEOPLE_V2=0.
+        # QUILL_PEOPLE_V2=0. Returns the full ResolveResult so callers that
+        # write typed rows can persist mention_id + resolver confidence
+        # (attribution provenance) instead of discarding them.
         # Plan 2.1: 'me' is relative to the labeled turn speaker — maps to the
         # enrolled user's self node ONLY when that speaker is the enrolled user.
         from app.services import self_profile
-        from app.services.people_pipeline import enabled, resolve_person_mention
+        from app.services.people_pipeline import (ResolveResult, enabled,
+                                                  resolve_person_mention)
         from app.services.resolution import resolver
         store = self._ensure_store()
         priors = attendee_priors
@@ -517,7 +520,7 @@ class Extractor:
         # mints — a person. The caller escrows the fact against the track.
         from app.services import people_escrow
         if people_escrow.enabled() and people_escrow.is_provisional_label(name):
-            return None
+            return ResolveResult(None, "escrow")
         if enabled():
             res = resolve_person_mention(
                 name, store=store, event_id=event_id,
@@ -537,58 +540,80 @@ class Extractor:
                     window=window)
             # People v2 is authoritative: reject / leave_open must NOT fall
             # through to ungated store.resolve_person (that minted Speaker N).
-            return int(res.person_id) if res.person_id else None
+            return res
         # Legacy path only when People v2 is off.
         pid = store.resolve_person(name, ts=now)
-        return int(pid) if pid else None
+        return ResolveResult(int(pid) if pid else None, "legacy",
+                             confidence=0.5)
+
+    def _resolve_person_id(self, name: str, now: float,
+                           *, event_id: int | None = None,
+                           event_source: str = "",
+                           window: str = "",
+                           text: str = "",
+                           grammatical_role: str = "unknown",
+                           relationship_boost: float = 0.6,
+                           turn_speaker: str | None = None,
+                           turn_start: float | None = None,
+                           turn_end: float | None = None,
+                           attendee_priors: list[dict] | None = None) -> int | None:
+        """Person id (or None) — thin wrapper for callers that don't persist
+        attribution provenance. Typed-row writers use _resolve_person_ref."""
+        res = self._resolve_person_ref(
+            name, now, event_id=event_id, event_source=event_source,
+            window=window, text=text, grammatical_role=grammatical_role,
+            relationship_boost=relationship_boost, turn_speaker=turn_speaker,
+            turn_start=turn_start, turn_end=turn_end,
+            attendee_priors=attendee_priors)
+        return int(res.person_id) if res.person_id else None
 
     def _resolve_me_relative_to_speaker(
             self, turn_speaker: str | None, now: float, *,
             event_id: int | None = None, event_source: str = "",
             window: str = "", text: str = "",
             grammatical_role: str = "unknown",
-            relationship_boost: float = 0.6) -> int | None:
-        """Map extractor 'me' to a person id relative to the labeled speaker.
+            relationship_boost: float = 0.6):
+        """Map extractor 'me' to a ResolveResult relative to the labeled speaker.
 
         - Speaker is enrolled user → self node
         - Speaker is another known label → that speaker's person id
         - Unknown / empty speaker → None (never park 'me' on the user)
         """
         from app.services import self_profile
-        from app.services.people_pipeline import enabled, resolve_person_mention
+        from app.services.people_pipeline import (ResolveResult, enabled,
+                                                  resolve_person_mention)
         from app.services.resolution import resolver
 
         store = self._ensure_store()
         spk = (turn_speaker or "").strip()
         if self_profile.speaker_is_enrolled_user(spk, store):
-            return self_profile.self_person_id(store)
+            pid = self_profile.self_person_id(store)
+            return ResolveResult(pid, "self", confidence=1.0 if pid else 0.0)
         if not spk or spk.lower() == "unknown speaker":
-            return None
+            return ResolveResult(None, "unknown_speaker")
         # People v3 P3 (flag-gated): an unbound voice track's 'me' does not
         # resolve to (or mint) a person — the caller escrows against the
         # track instead, and the rebind job attributes it once labeled.
         from app.services import people_escrow
         if people_escrow.enabled() and people_escrow.is_provisional_label(spk):
-            return None
+            return ResolveResult(None, "escrow")
         # Diarization placeholders are not people — never mint "Speaker 6".
         import re as _re
         if _re.match(r"(?i)^speaker(\s*\d+)?$", spk):
-            return None
+            return ResolveResult(None, "diarization_label")
         # Other labeled speaker saying "I'll…" — ownership is theirs.
         if enabled():
-            res = resolve_person_mention(
+            return resolve_person_mention(
                 spk, store=store, event_id=event_id,
                 event_source=event_source or "audio.whisper",
                 window=window, text=text or spk,
                 grammatical_role=grammatical_role or "speaker",
                 now=now, relationship_boost=max(relationship_boost, 0.85),
             )
-            if res.person_id:
-                return res.person_id
-            return None
         # Legacy path only when People v2 is off.
         pid = store.resolve_person(spk, ts=now)
-        return int(pid) if pid else None
+        return ResolveResult(int(pid) if pid else None, "legacy",
+                             confidence=0.5)
 
     def _persist_entities(self, facts: dict[str, Any], anchor: int | None,
                           now: float, *, event_source: str = "",
@@ -786,8 +811,10 @@ class Extractor:
         _priors = self._attendee_priors_for_turn(
             getattr(turn, "start", None), getattr(turn, "end", None))
 
-        def _person(name: str, *, role: str = "unknown", boost: float = 0.6) -> int | None:
-            return self._resolve_person_id(
+        def _person(name: str, *, role: str = "unknown", boost: float = 0.6):
+            """Full ResolveResult so typed rows persist attribution provenance
+            (mention_id + resolver confidence), not just the person id."""
+            return self._resolve_person_ref(
                 name, now, event_id=anchor,
                 event_source="audio.whisper", text=turn.text,
                 grammatical_role=role, relationship_boost=boost,
@@ -795,6 +822,11 @@ class Extractor:
                 turn_start=getattr(turn, "start", None),
                 turn_end=getattr(turn, "end", None),
                 attendee_priors=_priors)
+
+        def _attr_conf(name: str, ref) -> float | None:
+            # Resolver confidence is meaningful only when there was a name to
+            # resolve — a blank party stays NULL, not "confidently nobody".
+            return float(ref.confidence) if (name or "").strip() else None
 
         # People v3 P3: this turn's durable voice-track id when the speaker is
         # an unbound provisional label AND QUILL_PEOPLE_ESCROW is on, else None
@@ -816,6 +848,30 @@ class Extractor:
             return bool(nm) and (
                 _sp.is_self_name(nm)
                 or nm.lower() == (turn.speaker or "").strip().lower())
+
+        # Context attribution: entities named by the turn's ambient context
+        # (meeting-session / focused-window titles). Every fact materialized
+        # below inherits them as origin="context" `about` edges, so work done
+        # *inside* a project's room is attributed even when the sentence never
+        # names the project.
+        try:
+            from app.services import context_attribution as _ctx_attr
+            _ctx_entities = _ctx_attr.context_entities_for_turn(
+                store, turn_start=getattr(turn, "start", None),
+                turn_end=getattr(turn, "end", None), anchor_event_id=anchor)
+        except Exception as exc:
+            _ctx_entities = []
+            print(f"[extract] context attribution skipped ({exc}).")
+
+        def _stamp_context(fid: int) -> None:
+            if not _ctx_entities:
+                return
+            try:
+                from app.services import context_attribution as _ca
+                _ca.stamp_fact(store, fid, _ctx_entities,
+                               anchor_event_id=anchor, now=now)
+            except Exception as exc:
+                print(f"[extract] context stamp skipped ({exc}).")
 
         def _apply(v, fid: int) -> None:
             # A 'supersede' verdict: the just-inserted fact replaces the old.
@@ -859,13 +915,16 @@ class Extractor:
                     store.set_fact_candidate_status(cid, "deduped", verdict_reason=reason)
                 continue
             owner_name = t.get("owner", "")
-            owner_pid = _person(owner_name, role="owner", boost=0.85)
+            owner_ref = _person(owner_name, role="owner", boost=0.85)
+            owner_pid = owner_ref.person_id
             escrowed = _escrows_to_track(owner_name, owner_pid)
             fid = store.add_task(
                 t["text"], source_event_id=anchor,
                 source_span=t.get("source_span", ""),
                 confidence=t.get("confidence"),
                 owner_person_id=owner_pid,
+                owner_mention_id=owner_ref.mention_id,
+                owner_resolution_confidence=_attr_conf(owner_name, owner_ref),
                 due=_coerce_due(t.get("due")), extracted_at=now,
             )
             if escrowed:
@@ -886,6 +945,7 @@ class Extractor:
             if cid:
                 store.set_fact_candidate_status(cid, "accepted", verdict_reason=reason)
             _index_fact(store, fid, "task", t["text"], now)
+            _stamp_context(fid)
             self._record_faithfulness(t, turn.text)
             # Proactively ask if I should action this heard task (gated by
             # confidence + cooldown; no-op when the agent/offer is disabled).
@@ -915,14 +975,21 @@ class Extractor:
                     store.set_fact_candidate_status(cid, "deduped", verdict_reason=reason)
                 continue
             from_name = c.get("from_person", "")
-            from_pid = _person(from_name, role="from", boost=0.8)
+            from_ref = _person(from_name, role="from", boost=0.8)
+            from_pid = from_ref.person_id
+            to_name = c.get("to_person", "")
+            to_ref = _person(to_name, role="to", boost=0.75)
             escrowed = _escrows_to_track(from_name, from_pid)
             fid = store.add_commitment(
                 c["text"], source_event_id=anchor,
                 source_span=c.get("source_span", ""),
                 confidence=c.get("confidence"),
                 from_person_id=from_pid,
-                to_person_id=_person(c.get("to_person", ""), role="to", boost=0.75),
+                to_person_id=to_ref.person_id,
+                from_mention_id=from_ref.mention_id,
+                from_resolution_confidence=_attr_conf(from_name, from_ref),
+                to_mention_id=to_ref.mention_id,
+                to_resolution_confidence=_attr_conf(to_name, to_ref),
                 due=_coerce_due(c.get("due")), extracted_at=now,
             )
             if escrowed:
@@ -940,6 +1007,7 @@ class Extractor:
             if cid:
                 store.set_fact_candidate_status(cid, "accepted", verdict_reason=reason)
             _index_fact(store, fid, "commitment", c["text"], now)
+            _stamp_context(fid)
             self._record_faithfulness(c, turn.text)
             n += 1
         for cl in facts.get("claims", []):
@@ -988,6 +1056,7 @@ class Extractor:
             if cid:
                 store.set_fact_candidate_status(cid, "accepted", verdict_reason=reason)
             _index_fact(store, fid, "claim", cl["text"], now)
+            _stamp_context(fid)
             self._record_faithfulness(cl, turn.text)
             # Plan 2.5: parseable SPO claims dual-write into kg_beliefs;
             # unparseable stay flat facts only.
@@ -1046,6 +1115,7 @@ class Extractor:
                 store.set_fact_candidate_status(cid, "accepted",
                                                 verdict_reason=reason)
             _index_fact(store, fid, "question", q["text"], now)
+            _stamp_context(fid)
             self._record_faithfulness(q, turn.text)
             n += 1
 
