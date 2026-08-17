@@ -152,39 +152,39 @@
           ],
           "key": "due",
           "label": "Overdue or due very soon",
-          "value": 0.756685
+          "value": 0.757641
         },
         {
           "evidence": "none",
           "evidence_refs": [],
           "key": "recency",
           "label": "Seen this week",
-          "value": 0.077241
+          "value": 0.077108
         },
         {
           "evidence": "none",
           "evidence_refs": [],
           "key": "kind",
           "label": "Open task",
-          "value": 0.051382
+          "value": 0.051294
         },
         {
           "evidence": "none",
           "evidence_refs": [],
           "key": "confidence_gate",
           "label": "Trusted confidence",
-          "value": -0.021354
+          "value": -0.021317
         },
         {
           "evidence": "none",
           "evidence_refs": [],
           "key": "context",
           "label": "Ranking for: Planning",
-          "value": 0.172791
+          "value": 0.172945
         }
       ],
       "node_id": "fact:9",
-      "total": 1.0367
+      "total": 1.0377
     },
     "person:1": {
       "admitted_by": "score",

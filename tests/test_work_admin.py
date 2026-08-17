@@ -21,10 +21,18 @@ class SetDueTests(unittest.TestCase):
 
     def test_set_and_clear_due_bumps_updated_at(self):
         fid = self.store.add_task("ship it", extracted_at=100.0)
-        self.assertTrue(self.store.set_fact_due(fid, "Friday", 200.0))
+        self.assertTrue(self.store.set_fact_due(fid, "2026-08-21", 200.0))
         f = self.store.get_fact(fid)
-        self.assertEqual((f["due"], f["updated_at"]), ("Friday", 200.0))
+        self.assertEqual((f["due"], f["updated_at"]), ("2026-08-21", 200.0))
         self.assertTrue(self.store.set_fact_due(fid, "", 300.0))
+        self.assertIsNone(self.store.get_fact(fid)["due"])
+
+    def test_free_text_due_coerces_to_none(self):
+        # coerce_due design: opaque free text ("Friday") never lands as a
+        # due — ISO-only parsers downstream would silently ignore it.
+        fid = self.store.add_task("ship it", extracted_at=100.0)
+        self.assertTrue(self.store.set_fact_due(fid, "2026-08-21", 150.0))
+        self.assertTrue(self.store.set_fact_due(fid, "Friday", 200.0))
         self.assertIsNone(self.store.get_fact(fid)["due"])
 
     def test_claims_have_no_due(self):
@@ -62,13 +70,13 @@ class WorkEndpointTests(unittest.TestCase):
     def test_add_task_with_self_owner(self):
         r = self.client.post("/work/add", json={
             "kind": "task", "text": "send the term sheet",
-            "due": "Friday", "owner": "me"}).json()
+            "due": "2026-08-21", "owner": "me"}).json()
         self.assertTrue(r["ok"])
         d = self.client.get("/work/list").json()
         self.assertEqual(len(d["open"]), 1)
         item = d["open"][0]
         self.assertEqual(item["text"], "send the term sheet")
-        self.assertEqual(item["due"], "Friday")
+        self.assertEqual(item["due"], "2026-08-21")
         self.assertEqual(item["owner"], "Test Person")   # "me" -> self node
         self.assertEqual(item["review"], "approved")     # human add = gold
 
@@ -102,9 +110,10 @@ class WorkEndpointTests(unittest.TestCase):
     def test_due_endpoint_and_dismiss_leaves_board_entirely(self):
         fid = self.client.post("/work/add", json={
             "kind": "task", "text": "draft the memo"}).json()["fact_id"]
-        self.client.post(f"/facts/{fid}/due", json={"due": "Monday"})
+        self.client.post(f"/facts/{fid}/due", json={"due": "2026-08-24"})
         self.assertEqual(
-            self.client.get("/work/list").json()["open"][0]["due"], "Monday")
+            self.client.get("/work/list").json()["open"][0]["due"],
+            "2026-08-24")
         self.client.post(f"/facts/{fid}/dismiss")
         d = self.client.get("/work/list").json()
         self.assertEqual((d["open"], d["closed"]), ([], []))   # not even closed
@@ -138,12 +147,13 @@ class WorkEndpointTests(unittest.TestCase):
                          json={"ids": ids, "action": "edit",
                                "text": "shared rewrite"})
         self.client.post("/work/bulk",
-                         json={"ids": ids, "action": "due", "due": "Friday"})
+                         json={"ids": ids, "action": "due",
+                               "due": "2026-08-21"})
         open_items = self.client.get("/work/list").json()["open"]
         self.assertEqual(len(open_items), 2)
         for item in open_items:
             self.assertEqual(item["text"], "shared rewrite")
-            self.assertEqual(item["due"], "Friday")
+            self.assertEqual(item["due"], "2026-08-21")
 
 
 if __name__ == "__main__":

@@ -12,6 +12,12 @@ class AttentionCorpusTests(unittest.TestCase):
     def test_frozen_corpus_meets_p0_floors(self):
         from app.services import attention_corpus as corpus
 
+        # The corpus is user-annotated (never generated) and lives outside
+        # git — machines without it skip this gate instead of erroring.
+        if not corpus.CORPUS_PATH.is_file():
+            self.skipTest(
+                f"annotated corpus absent ({corpus.CORPUS_PATH}) — "
+                "P0 golden gate runs only where the user has annotated it")
         report = corpus.validate()
         self.assertTrue(report["ok"], report.get("errors"))
         self.assertGreaterEqual(report["n"], corpus.MIN_CASES)
