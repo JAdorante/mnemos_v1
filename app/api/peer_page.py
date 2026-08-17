@@ -64,6 +64,7 @@ td{border-top:1px solid var(--line);padding:9px 8px;vertical-align:top}
   yours questions — answered from <b>your</b> memory, by <b>your</b> models, only when
   <b>you</b> allow it. Raw memory never leaves your machine; by default every question
   waits for your approval below.</p>
+  <div class="note" id="tlsNote" hidden></div>
 
   <div class="panel">
     <h2>Pair with a teammate</h2>
@@ -93,12 +94,38 @@ td{border-top:1px solid var(--line);padding:9px 8px;vertical-align:top}
     <div id="asksBox" class="muted">Nothing waiting.</div>
   </div>
 
+  <div class="panel" id="offersPanel" hidden>
+    <h2>People from recent meetings</h2>
+    <p class="muted">Attendees who aren't paired yet. Pairing still needs a code — this
+    just names who to invite so work doesn't vanish after the call.</p>
+    <div id="offersBox" class="muted"></div>
+  </div>
+
   <div class="panel">
     <h2>Your team</h2>
     <p class="muted">What each teammate's assistant may ask without interrupting you.
+    Apply a <b>pack</b> (teammate / manager / company / vendor), then tweak one topic if needed.
     <b>Ask me</b> = you approve each one (the default). <b>Answer</b> = share automatically.
-    <b>Decline</b> = refuse automatically. Personal topics can never be shared automatically.</p>
+    <b>Decline</b> = refuse automatically. Personal topics can never be shared automatically.
+    Chat: <code>ask Name: …</code> or <code>ask #team: …</code>.</p>
     <div id="peersBox" class="muted">No teammates paired yet.</div>
+  </div>
+
+  <div class="panel">
+    <h2>Named teams</h2>
+    <p class="muted">Group paired peers so you can ask the whole squad. Each member
+    still answers from their own memory, under their own policy.</p>
+    <div class="row">
+      <input id="teamName" placeholder="Team name, e.g. Platform">
+      <button class="btn btn-ghost" id="teamCreateBtn" type="button">Create team</button>
+    </div>
+    <div id="teamsBox" class="muted">No named teams yet.</div>
+  </div>
+
+  <div class="panel">
+    <h2>Open loops</h2>
+    <p class="muted">Shared work from task handoffs — same id on both sides, evidence stays local.</p>
+    <div id="loopsBox" class="muted">No shared loops yet.</div>
   </div>
 
   <div class="panel">
@@ -118,9 +145,15 @@ async function refresh(){
   if(!PEOPLE.length)await loadPeople();
   const s=await fetch('/peer/status').then(r=>r.json());
   CLASSES=s.classes||[];ACTIONS=s.actions||[];
+  PACKS=s.packs||[];TEAMS=s.teams||[];PEERS=s.peers||[];
   $('myUrl').textContent=s.base_url||'';
+  const warn=(s.tls&&s.tls.warning)||'';
+  $('tlsNote').hidden=!warn;if(warn)$('tlsNote').textContent=warn;
   renderAsks(s.pending_asks||[]);renderPeers(s.peers||[]);renderSent(s.sent||[]);
+  renderTeams(s.teams||[],s.peers||[]);
+  renderLoops(s.loops||[]);renderOffers(s.pairing_offers||[]);
 }
+let PACKS=[],TEAMS=[],PEERS=[];
 function renderAsks(asks){
   if(!asks.length){$('asksBox').textContent='Nothing waiting.';return}
   $('asksBox').innerHTML=asks.map(a=>{
@@ -152,18 +185,77 @@ function personOpts(selected){
   opts.push('<option value="__create__">Create new person…</option>');
   return opts.join('');
 }
+function presenceDot(p){
+  const st=p.presence||'unknown';
+  const col=st==='online'?'var(--ok)':(st==='offline'?'#c78a2c':'var(--mut)');
+  return `<span style="display:inline-block;width:.6em;height:.6em;border-radius:50%;background:${col};margin-right:.35em" title="${esc(st)}"></span>${esc(st)}`;
+}
+function packOpts(selected){
+  const cur=selected||'custom';
+  const opts=PACKS.map(pk=>`<option value="${esc(pk.id)}" ${cur===pk.id?'selected':''}>${esc(pk.id)}</option>`);
+  opts.unshift(`<option value="custom" ${cur==='custom'?'selected':''}>custom</option>`);
+  return opts.join('');
+}
 function renderPeers(peers){
   if(!peers.length){$('peersBox').textContent='No teammates paired yet.';return}
-  $('peersBox').innerHTML='<table><tr><th>Teammate</th><th>Person in memory</th><th>Allowed without asking</th><th></th></tr>'+
-    peers.map(p=>`<tr><td><b>${esc(p.name)}</b><div class="muted" style="font-family:var(--mono);font-size:.78rem">${esc(p.base_url)}</div>
+  $('peersBox').innerHTML='<table><tr><th>Teammate</th><th>Person in memory</th><th>Pack</th><th>Allowed without asking</th><th></th></tr>'+
+    peers.map(p=>`<tr><td><b>${esc(p.name)}</b> <span class="muted" style="font-size:.8rem">${presenceDot(p)}</span>
+      <div class="muted" style="font-family:var(--mono);font-size:.78rem">${esc(p.base_url)}${p.tls?' · tls':''}</div>
       ${p.person_name?`<div class="muted" style="font-size:.82rem">Linked: ${esc(p.person_name)}</div>`:''}</td>
     <td><select data-link="${p.peer_id}" onchange="linkPerson('${p.peer_id}',this)">${personOpts(p.person_id)}</select></td>
+    <td><select onchange="applyPack('${p.peer_id}',this.value)">${packOpts(p.policy_pack)}</select></td>
     <td><div class="pol">${CLASSES.map(c=>`<label>${esc(TOPIC[c]||c)}
       <br><select data-peer="${p.peer_id}" data-cls="${c}" onchange="savePolicy('${p.peer_id}')"
         ${c==='personal'?'title="Personal topics can never be shared automatically"':''}>
       ${ACTIONS.map(a=>(c==='personal'&&a==='auto')?'':`<option value="${a}" ${((p.policy||{})[c]||'offer')===a?'selected':''}>${LABEL[a]}</option>`).join('')}
       </select></label>`).join('')}</div></td>
     <td><button class="linkish" onclick="revoke('${p.peer_id}')">unpair</button></td></tr>`).join('')+'</table>';
+}
+async function applyPack(pid,pack){
+  if(!pack||pack==='custom')return;
+  const r=await post('/peer/policy/pack',{peer_id:pid,pack});
+  if(r.detail||r.error)alert(r.detail||r.error);
+  refresh();
+}
+function renderTeams(teams,peers){
+  if(!teams.length){$('teamsBox').textContent='No named teams yet.';return}
+  $('teamsBox').innerHTML=teams.map(t=>{
+    const members=new Set(t.peer_ids||[]);
+    const checks=(peers||[]).map(p=>`<label style="margin-right:10px"><input type="checkbox" data-team="${esc(t.slug)}" value="${esc(p.peer_id)}" ${members.has(p.peer_id)?'checked':''} onchange="saveTeam('${esc(t.slug)}')"> ${esc(p.name)}</label>`).join('')
+      || '<span class="muted">Pair someone first.</span>';
+    return `<div class="ask"><div class="q"><b>#${esc(t.slug)}</b> ${esc(t.name)}
+      <div class="muted" style="margin-top:6px">${checks}</div>
+      <div class="muted" style="margin-top:4px">Chat: ask #${esc(t.slug)}: what's blocking us?</div></div>
+      <button class="linkish" onclick="delTeam('${esc(t.slug)}')">remove</button></div>`;
+  }).join('');
+}
+async function saveTeam(slug){
+  const ids=[...document.querySelectorAll(`input[data-team="${slug}"]:checked`)].map(i=>i.value);
+  await post('/peer/teams/members',{slug,peer_ids:ids});
+  refresh();
+}
+async function delTeam(slug){
+  if(!confirm('Remove this named team? Pairing is unchanged.'))return;
+  await post('/peer/teams/delete',{slug});refresh();
+}
+$('teamCreateBtn').onclick=async()=>{
+  const name=$('teamName').value.trim();if(!name)return;
+  const r=await post('/peer/teams',{name});
+  if(r.detail||r.error)alert(r.detail||r.error);
+  $('teamName').value='';refresh();
+};
+function renderLoops(rows){
+  if(!rows.length){$('loopsBox').textContent='No shared loops yet.';return}
+  $('loopsBox').innerHTML='<table><tr><th>With</th><th>Task</th><th>Status</th></tr>'+
+    rows.map(r=>`<tr><td>${esc(r.peer_name)}</td><td>${esc(r.task)}</td>
+    <td>${esc(r.status)}${r.loop_id?` <span class="muted" style="font-family:var(--mono);font-size:.75rem">${esc(r.loop_id)}</span>`:''}</td></tr>`).join('')+'</table>';
+}
+function renderOffers(rows){
+  if(!rows.length){$('offersPanel').hidden=true;return}
+  $('offersPanel').hidden=false;
+  $('offersBox').innerHTML='<ul style="margin:0;padding-left:1.2rem">'+rows.map(o=>
+    `<li><b>${esc(o.name||o.email)}</b>${o.email&&o.name?` <span class="muted">${esc(o.email)}</span>`:''}
+     — show a pairing code above and send it to them.</li>`).join('')+'</ul>';
 }
 async function linkPerson(pid,sel){
   const v=sel.value;
@@ -192,7 +284,8 @@ async function revoke(pid){
 function renderSent(rows){
   if(!rows.length){$('sentBox').textContent="You haven't asked a teammate anything yet.";return}
   $('sentBox').innerHTML='<table><tr><th>To</th><th>Question</th><th>Status</th><th>Answer</th></tr>'+
-    rows.slice().reverse().map(r=>`<tr><td>${esc(r.peer_name)}</td><td>${esc(r.question)}</td>
+    rows.slice().reverse().map(r=>`<tr><td>${esc(r.peer_name)}${r.team_slug?` <span class="tag">#${esc(r.team_slug)}</span>`:''}</td>
+    <td>${esc(r.question)}${r.loop_id?`<div class="muted" style="font-family:var(--mono);font-size:.75rem">loop ${esc(r.loop_id)}</div>`:''}</td>
     <td>${esc(r.status)}</td><td>${esc(r.answer||'')}</td></tr>`).join('')+'</table>';
 }
 $('startBtn').onclick=async()=>{

@@ -4016,6 +4016,33 @@ def chat(body: ChatIn) -> dict:
         team = peer_channel.parse_team_ask(display)
         if team:
             agent.worker._emit("user", display)
+            if team.get("fanout"):
+                from app.services import team_layer
+                if team.get("unknown"):
+                    agent.worker._emit(
+                        "result",
+                        f"No team named {team.get('team_name')!r} yet — "
+                        "create it on the Team page (/peer).")
+                    return {"ok": True, "routed": "peer_team_unknown",
+                            "since": since}
+                if not team.get("peer_ids"):
+                    agent.worker._emit(
+                        "result",
+                        f"The {team.get('team_name') or 'that'} team has no "
+                        "paired members yet — add them on /peer.")
+                    return {"ok": True, "routed": "peer_team_empty",
+                            "since": since}
+                team_layer.chat_team_ask_async(
+                    team["team_slug"], team["question"],
+                    team.get("kind", "question"))
+                n = len(team["peer_ids"])
+                verb = ("Handing off to" if team.get("kind") == "handoff"
+                        else "Asking")
+                agent.worker._emit(
+                    "result",
+                    f"{verb} the {team.get('team_name')} team "
+                    f"({n} teammate{'s' if n != 1 else ''})…")
+                return {"ok": True, "routed": "peer_team_ask", "since": since}
             peer_channel.chat_ask_async(team["peer_id"], team["question"],
                                         team.get("kind", "question"))
             verb = ("Handing off to" if team.get("kind") == "handoff"
@@ -4742,6 +4769,27 @@ class PeerUnlinkIn(BaseModel):
 class PeerPolicyIn(BaseModel):
     peer_id: str
     policy: dict   # {class: "auto"|"offer"|"deny"}; `personal` can never be auto
+    pack: str | None = None  # optional pack name stored alongside the map
+
+
+class PeerPackIn(BaseModel):
+    peer_id: str
+    pack: str   # teammate | manager | company | vendor
+
+
+class PeerTeamIn(BaseModel):
+    name: str
+    slug: str | None = None
+    peer_ids: list[str] | None = None
+
+
+class PeerTeamMembersIn(BaseModel):
+    slug: str
+    peer_ids: list[str]
+
+
+class PeerTeamDeleteIn(BaseModel):
+    slug: str
 
 
 @router.get("/peer", response_class=HTMLResponse)
@@ -4766,7 +4814,7 @@ def peer_policy(body: PeerPolicyIn) -> dict:
     `personal` -> auto is refused outright."""
     from app.services import peer_channel
 
-    res = peer_channel.set_policy(body.peer_id, body.policy)
+    res = peer_channel.set_policy(body.peer_id, body.policy, pack=body.pack)
     if not res.get("ok"):
         raise HTTPException(status_code=400, detail=res.get("error", "invalid policy"))
     return res
@@ -4809,6 +4857,18 @@ def peer_ask_inbound(body: dict, authorization: str | None = Header(None)) -> di
     if peer is None:
         raise HTTPException(status_code=401, detail="invalid or missing peer token")
     return peer_channel.handle_ask(peer, body)
+
+
+@router.post("/peer/ping")
+def peer_ping_inbound(authorization: str | None = Header(None)) -> dict:
+    """Authenticated liveness ping from a paired peer. Updates last_seen and
+    flushes any asks queued while we were offline."""
+    from app.services import peer_channel, team_layer
+
+    peer = peer_channel.authenticate(authorization)
+    if peer is None:
+        raise HTTPException(status_code=401, detail="invalid or missing peer token")
+    return team_layer.handle_ping(peer)
 
 
 @router.post("/peer/answer")
@@ -4901,6 +4961,47 @@ def peer_unlink(body: PeerUnlinkIn) -> dict:
     res = peer_channel.unlink_person(body.peer_id)
     if not res.get("ok"):
         raise HTTPException(status_code=404, detail=res.get("error") or "unknown peer")
+    return res
+
+
+@router.post("/peer/policy/pack")
+def peer_policy_pack(body: PeerPackIn) -> dict:
+    """Apply a relationship policy pack (teammate / manager / company / vendor)."""
+    from app.services import team_layer
+
+    res = team_layer.apply_pack(body.peer_id, body.pack)
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error") or "pack failed")
+    return res
+
+
+@router.post("/peer/teams")
+def peer_team_upsert(body: PeerTeamIn) -> dict:
+    from app.services import team_layer
+
+    res = team_layer.upsert_team(body.name, body.peer_ids, slug=body.slug)
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error") or "team failed")
+    return res
+
+
+@router.post("/peer/teams/members")
+def peer_team_members(body: PeerTeamMembersIn) -> dict:
+    from app.services import team_layer
+
+    res = team_layer.set_team_members(body.slug, body.peer_ids)
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error") or "team failed")
+    return res
+
+
+@router.post("/peer/teams/delete")
+def peer_team_delete(body: PeerTeamDeleteIn) -> dict:
+    from app.services import team_layer
+
+    res = team_layer.delete_team(body.slug)
+    if not res.get("ok"):
+        raise HTTPException(status_code=404, detail=res.get("error") or "unknown team")
     return res
 
 

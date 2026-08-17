@@ -62,6 +62,7 @@ _PREFIX_EXEMPT = (
     "/phone/sync",
     "/peer/ask",      # peer traffic uses per-peer Bearer tokens
     "/peer/answer",
+    "/peer/ping",
 )
 
 # GET-only prefixes: POST siblings (e.g. /phone/outbox/queue) need the LAN token.

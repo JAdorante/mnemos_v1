@@ -296,6 +296,11 @@ async def _startup() -> None:
             # event + queues this (peer_answer source class, hearsay tier).
             from app.services import peer_channel
             worker.register("peer_ingest", peer_channel.run_ingest_job)
+            try:
+                from app.services import team_layer
+                team_layer.attach()
+            except Exception as exc:
+                print(f"[peer] presence attach skipped ({exc}).")
 
             # Screen -> memory (legacy): only when L3 is off.
             if _l3_plan["register_screen_extract"]:

@@ -27,6 +27,7 @@ def _get(key: str, default: str) -> str:
 # precedence for a calibratable value is: explicit env var > calibration.json >
 # shipped literal — written as _get("QUILL_...", str(_cal("dotted.path", literal))).
 from app.services.calibration import cal as _cal  # noqa: E402
+from app.services.camera import default_capture_backend  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,9 @@ class AudioConfig:
     # CTranslate2 threading: one shared Whisper serves mic + loopback.
     cpu_threads: int = int(_get("QUILL_WHISPER_CPU_THREADS", "0"))  # 0 = library default
     num_workers: int = int(_get("QUILL_WHISPER_NUM_WORKERS", "1"))
+    # PortAudio input: empty = default device; integer index; or a case-insensitive
+    # name substring (e.g. "USB"). Used only for the mic pipeline, not loopback.
+    input_device: str = _get("QUILL_AUDIO_DEVICE", "")
     # Force-cut long meeting turns so Whisper sees bounded clips (better
     # accuracy + avoids multi-minute backlog). 0 = never force-cut.
     max_utterance_s: float = float(_get("QUILL_ASR_MAX_UTTERANCE_S", "0"))
@@ -165,10 +169,9 @@ class VisionConfig:
     # means "start on boot"; consent + start_all / /vision/start do.
     enabled: bool = _get("QUILL_VISION", "0") not in ("0", "false", "False")
     camera_index: int = int(_get("QUILL_CAMERA_INDEX", "0"))
-    # OpenCV capture backend. On Windows the default MSMF backend often fails to
-    # grab frames (E_UNEXPECTED / -2147418113); DirectShow is far more reliable.
-    capture_backend: str = _get("QUILL_CAMERA_BACKEND",
-                                "dshow" if os.name == "nt" else "any")
+    # OpenCV capture backend. Windows: DirectShow (MSMF often fails to grab).
+    # Linux: V4L2. Override with QUILL_CAMERA_BACKEND=v4l2|gstreamer|dshow|msmf|any.
+    capture_backend: str = _get("QUILL_CAMERA_BACKEND", default_capture_backend())
     # Discard this many frames after opening so the sensor auto-exposes (early
     # frames come back black). Skip analyzing frames darker than min_brightness
     # (0-255 mean) — a covered/cold lens shouldn't burn a VLM call.
@@ -780,13 +783,22 @@ class PeerChannelConfig:
     auto_answer: bool = _get("QUILL_PEER_AUTO_ANSWER", "0") in ("1", "true", "True")
     pair_ttl_s: int = int(_get("QUILL_PEER_PAIR_TTL_S", "600"))
     max_claim_attempts: int = int(_get("QUILL_PEER_PAIR_ATTEMPTS", "5"))
-    max_peers: int = int(_get("QUILL_PEER_MAX_PEERS", "16"))
+    max_peers: int = int(_get("QUILL_PEER_MAX_PEERS", "64"))
     max_text_chars: int = int(_get("QUILL_PEER_MAX_TEXT", "4000"))
     max_pending_asks: int = int(_get("QUILL_PEER_MAX_PENDING", "50"))
     history: int = int(_get("QUILL_PEER_HISTORY", "200"))
     # Synchronous auto-mode answers hold the connection while the remote's
     # local model composes — generous by design.
     http_timeout_s: float = float(_get("QUILL_PEER_TIMEOUT_S", "120"))
+    # Presence: last_seen younger than this is "online". Heartbeat pings
+    # all paired peers and flushes the offline mailbox.
+    presence_stale_s: int = int(_get("QUILL_PEER_PRESENCE_STALE_S", "90"))
+    ping_interval_s: float = float(_get("QUILL_PEER_PING_S", "30"))
+    ping_timeout_s: float = float(_get("QUILL_PEER_PING_TIMEOUT_S", "5"))
+    # Off by default so existing LAN http:// pairing still works; when on,
+    # join/claim refuse non-local HTTP. Localhost is always allowed.
+    require_tls: bool = _get("QUILL_PEER_REQUIRE_TLS", "0") in (
+        "1", "true", "True")
 
     @property
     def peers_path(self) -> str:
@@ -802,6 +814,21 @@ class PeerChannelConfig:
     def sent_path(self) -> str:
         return _get("QUILL_PEER_SENT",
                     f"{_get('QUILL_DATA_DIR', 'data')}/peer_sent.json")
+
+    @property
+    def mailbox_path(self) -> str:
+        return _get("QUILL_PEER_MAILBOX",
+                    f"{_get('QUILL_DATA_DIR', 'data')}/peer_mailbox.json")
+
+    @property
+    def teams_path(self) -> str:
+        return _get("QUILL_PEER_TEAMS",
+                    f"{_get('QUILL_DATA_DIR', 'data')}/peer_teams.json")
+
+    @property
+    def loops_path(self) -> str:
+        return _get("QUILL_PEER_LOOPS",
+                    f"{_get('QUILL_DATA_DIR', 'data')}/peer_loops.json")
 
 
 @dataclass(frozen=True)

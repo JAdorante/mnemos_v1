@@ -34,6 +34,9 @@ class PeerChannelBase(unittest.TestCase):
         os.environ["QUILL_PEER_REGISTRY"] = str(Path(self._tmp) / "peers.json")
         os.environ["QUILL_PEER_ASKS"] = str(Path(self._tmp) / "asks.json")
         os.environ["QUILL_PEER_SENT"] = str(Path(self._tmp) / "sent.json")
+        os.environ["QUILL_PEER_MAILBOX"] = str(Path(self._tmp) / "mailbox.json")
+        os.environ["QUILL_PEER_TEAMS"] = str(Path(self._tmp) / "teams.json")
+        os.environ["QUILL_PEER_LOOPS"] = str(Path(self._tmp) / "loops.json")
         # Keep answers as bus context events in these tests — the ingest path
         # (Phase 3) writes to the real store and is tested with mocks below.
         os.environ["QUILL_PEER_INGEST"] = "0"
@@ -43,7 +46,9 @@ class PeerChannelBase(unittest.TestCase):
 
     def tearDown(self) -> None:
         for key in ("QUILL_PEER_REGISTRY", "QUILL_PEER_ASKS",
-                    "QUILL_PEER_SENT", "QUILL_PEER_INGEST"):
+                    "QUILL_PEER_SENT", "QUILL_PEER_INGEST",
+                    "QUILL_PEER_MAILBOX", "QUILL_PEER_TEAMS",
+                    "QUILL_PEER_LOOPS", "QUILL_PEER_REQUIRE_TLS"):
             os.environ.pop(key, None)
         bus._subscribers.remove(self._collect)
         pch._pairing = None
@@ -334,13 +339,14 @@ class OutboundAskTests(PeerChannelBase):
         self.assertFalse(pch.handle_answer(other, {"ask_id": res["ask_id"],
                                                    "answer": "gotcha"})["ok"])
 
-    def test_unreachable_peer_marks_error(self) -> None:
+    def test_unreachable_peer_is_queued(self) -> None:
         pid = self._peer_id()
         with mock.patch.object(pch, "_post_json",
                                side_effect=OSError("connection refused")):
             res = pch.ask(pid, "when?")
-        self.assertFalse(res["ok"])
-        self.assertEqual(pch.answers(res["ask_id"])[0]["status"], "error")
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["status"], "queued")
+        self.assertEqual(pch.answers(res["ask_id"])[0]["status"], "queued")
 
 
 class ChatIntentTests(PeerChannelBase):

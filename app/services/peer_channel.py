@@ -50,7 +50,10 @@ class can never be set to auto (enforced at write AND at enforcement time).
 Phase 3 (partial): peer <-> Person linking is USER-ASSERTED only (no auto-mint
 on pair — junk-people risk). Disclosure stays keyed by peer_id. Chat "ask Name:"
 may match linked Person aliases only when that person maps to a still-paired peer.
-Further: presence / broader claim ingest.
+
+Team layer (services/team_layer.py): presence pings + offline mailbox, relationship
+policy packs, named peer groups (`ask #platform:`), shared loop IDs on handoffs,
+and meeting-attendee pairing offers. Still no shared memory.
 """
 from __future__ import annotations
 
@@ -154,7 +157,15 @@ def start_pairing() -> dict:
                     "attempts": 0}
     return {"ok": True, "code": code, "expires_at": _pairing["expires_at"],
             "ttl_s": settings.peer.pair_ttl_s, "base_url": my_base_url(),
-            "name": instance_name()}
+            "name": instance_name(), "tls": _start_tls_note()}
+
+
+def _start_tls_note() -> dict:
+    try:
+        from app.services.team_layer import my_transport
+        return my_transport()
+    except Exception:
+        return {"ok": True, "tls": False, "local": True, "warning": None}
 
 
 def pairing_active() -> bool:
@@ -179,6 +190,10 @@ def claim_pairing(code: str, name: str, base_url: str,
         return {"ok": False, "error": "base_url must be http(s)://host:port"}
     if len((token_for_caller or "").strip()) < 16:
         return {"ok": False, "error": "token_for_caller too short"}
+    from app.services.team_layer import url_transport
+    transport = url_transport(base_url)
+    if not transport.get("ok"):
+        return {"ok": False, "error": transport.get("error", "callback url refused")}
     with _lock:
         if _pairing is None or _pairing["expires_at"] <= time.time():
             _pairing = None
@@ -225,6 +240,10 @@ def join(url: str, code: str) -> dict:
     url = (url or "").strip().rstrip("/")
     if not url.startswith(("http://", "https://")):
         return {"ok": False, "error": "url must be http(s)://host:port"}
+    from app.services.team_layer import url_transport
+    transport = url_transport(url)
+    if not transport.get("ok"):
+        return {"ok": False, "error": transport.get("error", "url refused")}
     with _lock:
         peers = _load(_peers_path(), {})
         if len(peers) >= settings.peer.max_peers:
@@ -328,8 +347,23 @@ def peers() -> list[dict]:
                     "answers": int(rec.get("answers") or 0),
                     "person_id": pid,
                     "person_name": _person_display(pid),
-                    "policy": policy})
+                    "policy": policy,
+                    "policy_pack": rec.get("policy_pack") or "custom",
+                    "presence": _presence(rec.get("last_seen")),
+                    "tls": _url_tls_flag(rec.get("base_url") or "")})
     return out
+
+
+def _presence(last_seen) -> str:
+    try:
+        from app.services.team_layer import presence_of
+        return presence_of(last_seen)
+    except Exception:
+        return "unknown"
+
+
+def _url_tls_flag(url: str) -> bool:
+    return (url or "").lower().startswith("https://")
 
 
 def link_person(peer_id: str, person_id: int) -> dict:
@@ -407,27 +441,30 @@ def create_and_link_person(peer_id: str, name: str | None = None) -> dict:
     return link_person(peer_id, pid)
 
 
-def _touch(peer_id: str, counter: str) -> None:
+def _touch(peer_id: str, counter: str | None = None) -> None:
     try:
         with _lock:
             registry = _load(_peers_path(), {})
             rec = registry.get(peer_id)
             if rec is not None:
                 rec["last_seen"] = time.time()
-                rec[counter] = int(rec.get(counter) or 0) + 1
+                if counter:
+                    rec[counter] = int(rec.get(counter) or 0) + 1
                 _save(_peers_path(), registry)
     except OSError:
         pass  # bookkeeping only
 
 
 # --- transport ---------------------------------------------------------------
-def _post_json(url: str, payload: dict, token: str | None) -> dict:
+def _post_json(url: str, payload: dict, token: str | None,
+               timeout: float | None = None) -> dict:
     headers = {"Content-Type": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
                                  headers=headers)
-    with urllib.request.urlopen(req, timeout=settings.peer.http_timeout_s) as r:
+    wait = settings.peer.http_timeout_s if timeout is None else float(timeout)
+    with urllib.request.urlopen(req, timeout=wait) as r:
         return json.loads(r.read().decode("utf-8"))
 
 
@@ -499,7 +536,7 @@ def get_policy(peer_id: str) -> dict:
         return default_policy()   # a corrupt stored policy fails closed
 
 
-def set_policy(peer_id: str, policy: dict) -> dict:
+def set_policy(peer_id: str, policy: dict, pack: str | None = None) -> dict:
     try:
         clean = _sanitize_policy(policy)
     except ValueError as exc:
@@ -510,8 +547,10 @@ def set_policy(peer_id: str, policy: dict) -> dict:
         if rec is None:
             return {"ok": False, "error": "unknown peer"}
         rec["policy"] = clean
+        rec["policy_pack"] = (pack or "custom").strip().lower() or "custom"
         _save(_peers_path(), peers)
-    return {"ok": True, "peer_id": peer_id, "policy": clean}
+    return {"ok": True, "peer_id": peer_id, "policy": clean,
+            "policy_pack": rec["policy_pack"]}
 
 
 def classify_question(question: str) -> str | None:
@@ -653,6 +692,7 @@ def handle_ask(peer: dict, payload: dict) -> dict:
         item = {"id": uuid.uuid4().hex[:12], "peer_id": peer_id,
                 "peer_name": peer.get("name", "?"), "ask_id": ask_id,
                 "question": question, "topic": topic, "kind": kind,
+                "loop_id": str(payload.get("loop_id") or "").strip() or None,
                 "created_at": time.time(),
                 "status": "pending", "answer": None, "decided_at": None}
         asks.append(item)
@@ -677,7 +717,7 @@ def handle_ask(peer: dict, payload: dict) -> dict:
 def pending_asks() -> list[dict]:
     """Inbound asks awaiting the human's disclosure decision — for the UI."""
     return [{k: a.get(k) for k in ("id", "peer_name", "question", "topic",
-                                   "kind", "created_at")}
+                                   "kind", "loop_id", "created_at")}
             for a in _load(_asks_path(), []) if a.get("status") == "pending"]
 
 
@@ -709,15 +749,25 @@ def _accept_org_packet(name: str, peer_id: str, ask_id: str,
         print(f"[peer] org packet ingest skipped ({exc}).")
 
 
-def _accept_handoff(name: str, peer_id: str, ask_id: str, task: str) -> None:
+def _accept_handoff(name: str, peer_id: str, ask_id: str, task: str,
+                    loop_id: str | None = None) -> None:
     """One accepted handoff -> this user's memory as ACCEPTED-tier material,
     mined for commitments/tasks by the same extraction chain. Best-effort:
     a storage hiccup must not block telling the sender it was accepted."""
+    if loop_id:
+        try:
+            from app.services import team_layer
+            team_layer.upsert_loop(loop_id=loop_id, peer_id=peer_id,
+                                   peer_name=name, task=task, status="open",
+                                   ask_id=ask_id, side="receiver")
+        except Exception as exc:
+            print(f"[peer] loop persist skipped ({exc}).")
     try:
         if not ingest_enabled():
             _publish_event("peer.handoff", f"[handoff from {name}] {task}",
                            {"peer_id": peer_id, "peer": name,
-                            "ask_id": ask_id}, tier=_conf.ACCEPTED)
+                            "ask_id": ask_id, "loop_id": loop_id},
+                           tier=_conf.ACCEPTED)
             return
         from app.events import Event, Modality
         from app.services.attachments import _index_event
@@ -728,7 +778,7 @@ def _accept_handoff(name: str, peer_id: str, ask_id: str, task: str) -> None:
                    summary=f"[peer.handoff] {text[:120]}",
                    source="peer.handoff",
                    meta={"origin": "peer", "peer_id": peer_id, "peer": name,
-                         "ask_id": ask_id})
+                         "ask_id": ask_id, "loop_id": loop_id})
         _conf.attach(ev, _conf.ACCEPTED)
         anchor = get_store().insert(ev)
         _index_event(anchor, ev)
@@ -769,6 +819,12 @@ def decide_ask(local_id: str, approve: bool) -> dict:
         delivered = _deliver(peer_rec, {"ask_id": item["ask_id"],
                                         "declined": True})
         _finish_ask(local_id, "denied", None)
+        if item.get("loop_id"):
+            try:
+                from app.services import team_layer
+                team_layer.mark_loop(item["loop_id"], "declined")
+            except Exception:
+                pass
         return {"ok": True, "status": "denied", "delivered": delivered}
 
     if item.get("kind") == "handoff":
@@ -777,7 +833,7 @@ def decide_ask(local_id: str, approve: bool) -> dict:
         # extractor so it becomes a commitment/task in THIS user's memory.
         _accept_handoff(peer_rec.get("name") or "a teammate",
                         item.get("peer_id", ""), item["ask_id"],
-                        item["question"])
+                        item["question"], loop_id=item.get("loop_id"))
         reply = "Accepted — added to my list."
         delivered = _deliver(peer_rec, {"ask_id": item["ask_id"],
                                         "answer": reply})
@@ -824,10 +880,15 @@ def _finish_ask(local_id: str, status: str, answer: str | None) -> None:
 
 
 # --- asking side (outbound) --------------------------------------------------
-def ask(peer_id: str, question: str, kind: str = "question") -> dict:
+def ask(peer_id: str, question: str, kind: str = "question",
+        *, loop_id: str | None = None, team_slug: str | None = None,
+        team_ask_id: str | None = None) -> dict:
     """Send one question or task handoff to a paired peer. Synchronous when
     their side auto-answers (questions only — handoffs always wait for their
-    human); otherwise pending until they decide, delivered to /peer/answer."""
+    human); otherwise pending until they decide, delivered to /peer/answer.
+
+    Unreachable peers are queued (status=queued) and retried on presence ping.
+    """
     if not settings.peer.enabled:
         return {"ok": False, "error": "peer channel disabled"}
     if kind not in ("question", "handoff", "org_digest", "org_priority",
@@ -842,27 +903,66 @@ def ask(peer_id: str, question: str, kind: str = "question") -> dict:
     if peer_rec is None:
         return {"ok": False, "error": "unknown peer"}
     ask_id = uuid.uuid4().hex[:12]
+    if kind == "handoff" and not loop_id:
+        loop_id = uuid.uuid4().hex[:12]
+        try:
+            from app.services import team_layer
+            team_layer.upsert_loop(loop_id=loop_id, peer_id=peer_id,
+                                   peer_name=peer_rec.get("name") or "",
+                                   task=question, status="offered",
+                                   ask_id=ask_id, side="sender")
+        except Exception:
+            pass
     with _lock:
         sent = _load(_sent_path(), [])
         sent.append({"ask_id": ask_id, "peer_id": peer_id,
                      "peer_name": peer_rec.get("name", "?"),
                      "question": question, "kind": kind,
+                     "loop_id": loop_id, "team_slug": team_slug,
+                     "team_ask_id": team_ask_id,
                      "created_at": time.time(),
                      "status": "sent", "answer": None, "answered_at": None})
         _save(_sent_path(), sent)
+    return _dispatch_ask(peer_rec, peer_id, ask_id, question, kind, loop_id)
+
+
+def retry_queued(item: dict) -> dict:
+    """Re-send a mailbox row without minting a new ask_id/sent row."""
+    ask_id = str(item.get("ask_id") or "")
+    peer_id = str(item.get("peer_id") or "")
+    question = str(item.get("question") or "")
+    kind = str(item.get("kind") or "question")
+    loop_id = item.get("loop_id")
+    if not ask_id or not peer_id or not question:
+        return {"ok": False, "error": "bad mailbox row"}
+    with _lock:
+        registry = _load(_peers_path(), {})
+        peer_rec = registry.get(peer_id)
+    if peer_rec is None:
+        return {"ok": False, "error": "unknown peer"}
+    return _dispatch_ask(peer_rec, peer_id, ask_id, question, kind, loop_id,
+                         from_mailbox=True)
+
+
+def _dispatch_ask(peer_rec: dict, peer_id: str, ask_id: str, question: str,
+                  kind: str, loop_id: str | None,
+                  from_mailbox: bool = False) -> dict:
+    payload = {"ask_id": ask_id, "question": question, "kind": kind}
+    if loop_id:
+        payload["loop_id"] = loop_id
     try:
-        res = _post_json(f"{peer_rec['base_url']}/peer/ask",
-                         {"ask_id": ask_id, "question": question,
-                          "kind": kind},
+        res = _post_json(f"{peer_rec['base_url']}/peer/ask", payload,
                          token=peer_rec.get("outbound_token"))
     except Exception as exc:
-        _update_sent(ask_id, "error", None)
-        return {"ok": False, "ask_id": ask_id,
-                "error": f"could not reach {peer_rec.get('name', 'peer')} ({exc})"}
+        _queue_offline(peer_id, ask_id, question, kind, loop_id, exc)
+        return {"ok": True, "status": "queued", "ask_id": ask_id,
+                "peer": peer_rec.get("name", "?"),
+                "error": f"queued — {peer_rec.get('name', 'peer')} unreachable"}
     if not res.get("ok"):
         _update_sent(ask_id, "refused", None)
         return {"ok": False, "ask_id": ask_id,
-                "error": res.get("error", "peer refused")}
+                "error": res.get("error", "peer refused"),
+                "peer": peer_rec.get("name", "?")}
     if res.get("status") == "answered":
         answer_text = str(res.get("answer") or "")[: settings.peer.max_text_chars]
         _record_answer(peer_rec, peer_id, ask_id, answer_text)
@@ -875,6 +975,19 @@ def ask(peer_id: str, question: str, kind: str = "question") -> dict:
     _update_sent(ask_id, "pending", None)
     return {"ok": True, "status": "pending", "ask_id": ask_id,
             "peer": peer_rec.get("name", "?")}
+
+
+def _queue_offline(peer_id, ask_id, question, kind, loop_id, exc) -> None:
+    _update_sent(ask_id, "queued", None)
+    try:
+        from app.services import team_layer
+        team_layer.mailbox_enqueue({
+            "ask_id": ask_id, "peer_id": peer_id, "question": question,
+            "kind": kind, "loop_id": loop_id,
+        })
+    except Exception:
+        pass
+    print(f"[peer] queued ask {ask_id} for {peer_id} ({exc}).")
 
 
 def _update_sent(ask_id: str, status: str, answer: str | None) -> None:
@@ -925,6 +1038,7 @@ def handle_answer(peer: dict, payload: dict) -> dict:
         _record_answer(peer, peer["peer_id"], ask_id, None, declined=True)
         _notify_chat(f"{peer.get('name', 'A teammate')}'s Mnemos declined "
                      f"to answer: “{item.get('question', '')[:120]}”")
+        _after_answer(item, declined=True)
         return {"ok": True, "status": "declined"}
     answer_text = str(payload.get("answer") or "").strip()
     if not answer_text:
@@ -934,7 +1048,21 @@ def handle_answer(peer: dict, payload: dict) -> dict:
     print(f"[peer] answer from {peer.get('name', '?')}: {answer_text[:80]}")
     _notify_chat(f"{peer.get('name', 'A teammate')}'s Mnemos answered: "
                  f"“{answer_text[:400]}”")
+    _after_answer(item, declined=False)
     return {"ok": True, "status": "recorded"}
+
+
+def _after_answer(item: dict, declined: bool) -> None:
+    try:
+        from app.services import team_layer
+        if item.get("kind") == "handoff" and item.get("loop_id"):
+            team_layer.mark_loop(item["loop_id"],
+                                 "declined" if declined else "open")
+        rollup = team_layer.maybe_rollup(item.get("team_ask_id"))
+        if rollup:
+            _notify_chat(rollup)
+    except Exception:
+        pass
 
 
 # --- claims with provenance (Phase 3) ---------------------------------------
@@ -1066,7 +1194,18 @@ def _resolve_peer_name(who: str) -> dict | None:
 
 def parse_team_ask(text: str) -> dict | None:
     """{"peer_id", "peer_name", "question"} when `text` is a chat request to
-    ask a paired teammate's instance, else None (never guesses)."""
+    ask a paired teammate's instance, else None (never guesses).
+
+    Group form (`ask #platform: …` / `ask the platform team: …`) returns
+    fanout=True even when the team is unknown, so chat does not fall through.
+    """
+    try:
+        from app.services.team_layer import parse_group_ask
+        group = parse_group_ask(text)
+        if group is not None:
+            return group
+    except Exception:
+        pass
     for pat in (_ASK_COLON_RE, _ASK_PLAIN_RE):
         m = pat.match(text or "")
         if not m:
@@ -1102,6 +1241,9 @@ def _chat_ask_run(peer_id: str, question: str, kind: str = "question") -> None:
     elif status == "pending":
         _notify_chat(f"Asked {name}'s Mnemos — it's waiting for their "
                      "approval; I'll surface the answer when it arrives.")
+    elif status == "queued":
+        _notify_chat(f"{name}'s Mnemos isn't reachable — queued until "
+                     "they're online.")
     elif status == "declined":
         _notify_chat(f"{name}'s Mnemos declined to answer that.")
     else:
@@ -1121,13 +1263,14 @@ def answers(ask_id: str | None = None) -> list[dict]:
     if ask_id:
         rows = [r for r in rows if r.get("ask_id") == ask_id]
     return [{k: r.get(k) for k in ("ask_id", "peer_name", "question", "status",
-                                   "answer", "created_at", "answered_at")}
+                                   "answer", "created_at", "answered_at",
+                                   "kind", "loop_id", "team_slug", "team_ask_id")}
             for r in rows]
 
 
 def status() -> dict:
     """One snapshot for pages: peers + pairing + queues."""
-    return {"enabled": settings.peer.enabled,
+    out = {"enabled": settings.peer.enabled,
             "auto_answer": settings.peer.auto_answer,
             "name": instance_name(),
             "base_url": my_base_url(),
@@ -1137,3 +1280,9 @@ def status() -> dict:
             "pairing_active": pairing_active(),
             "pending_asks": pending_asks(),
             "sent": answers()[-20:]}
+    try:
+        from app.services import team_layer
+        out.update(team_layer.status_bits())
+    except Exception:
+        pass
+    return out
