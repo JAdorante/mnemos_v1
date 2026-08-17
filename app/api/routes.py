@@ -2211,6 +2211,15 @@ def meetings_list(limit: int = 40) -> dict:
     return {"meetings": out}
 
 
+@router.get("/meetings/{session_id}", response_class=RedirectResponse)
+def meeting_by_session(session_id: int) -> RedirectResponse:
+    """First-win toast deep-link. Session id → enhanced note, never a JSON 404."""
+    from app.services import meeting_enhance
+    store = memory._ensure_store()
+    href = meeting_enhance.note_href_for_session(store, session_id)
+    return RedirectResponse(url=href, status_code=303)
+
+
 @router.get("/meeting/note/latest")
 def meeting_note_latest(format: str = "html"):
     """Latest meeting note — `?format=json` for the hydrated payload."""
@@ -2525,11 +2534,68 @@ def _policy_preflight_banner() -> str:
         '</div>')
 
 
+def _adoption_console_chrome() -> str:
+    """First-win toast, ambient unlock card, Report-a-problem (Workstreams 1+4)."""
+    return r"""
+<div id="mnemosToast" hidden style="position:fixed;right:18px;bottom:18px;z-index:40;
+  max-width:340px;padding:14px 16px;border-radius:14px;background:#0b1320;color:#f8f6f1;
+  box-shadow:0 12px 40px rgba(11,19,32,.28);font:14px/1.45 system-ui"></div>
+<script>
+(function(){
+  const toast=document.getElementById('mnemosToast');
+  function show(html){ if(!toast) return; toast.innerHTML=html; toast.hidden=false; }
+  async function pollNudge(){
+    try{
+      const d=await (await fetch('/first-run/nudge')).json();
+      if(d.first_win && d.first_win.href){
+        const href=d.first_win.href;
+        const copy=d.first_win.has_facts
+          ? 'Your meeting brief is ready — commitments have play buttons.'
+          : 'Meeting closed. Open the transcript timeline (nothing extracted yet).';
+        show('<strong>First brief</strong><p style="margin:6px 0 10px">'+copy+'</p>'
+          +'<a href="'+href+'" style="color:#c9a227">Open meeting</a>'
+          +' · <button type="button" id="toastAck" style="background:none;border:0;color:#bbb;cursor:pointer">dismiss</button>');
+        const ack=document.getElementById('toastAck');
+        if(ack) ack.onclick=async()=>{ await fetch('/first-run/nudge/ack',{method:'POST'}); toast.hidden=true; };
+        return;
+      }
+      if(d.unlock && d.unlock.show){
+        show('<strong>Between meetings</strong><p style="margin:6px 0 10px">'
+          +(d.unlock.copy||'Optional always-on capture. Nothing is enabled by this card.')
+          +'</p><a href="/onboarding" style="color:#c9a227">Review capture options</a>'
+          +' · <button type="button" id="unlockAck" style="background:none;border:0;color:#bbb;cursor:pointer">not now</button>');
+        const u=document.getElementById('unlockAck');
+        if(u) u.onclick=async()=>{ await fetch('/first-run/unlock/ack',{method:'POST'}); toast.hidden=true; };
+      }
+    }catch(e){}
+  }
+  pollNudge();
+  setInterval(pollNudge, 20000);
+  const btn=document.getElementById('reportBtn');
+  if(btn) btn.onclick=async()=>{
+    const note=prompt('What went wrong? (saved locally — nothing is sent)')||'';
+    const r=await fetch('/console/report',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({note})});
+    const j=await r.json();
+    alert(j.ok ? ('Saved zip:\\n'+j.path) : (j.detail||'report failed'));
+  };
+})();
+</script>
+"""
+
+
 @router.get("/memory", response_class=HTMLResponse)
 def memory_console_page() -> HTMLResponse:
     """The Memory Console — timeline, search, provenance, confidence."""
     page = _CONSOLE_PAGE.replace(
-        '<div class="layout">', _policy_preflight_banner() + '<div class="layout">', 1)
+        '<button class="btn" onclick="load()">Refresh</button>',
+        '<button class="btn" onclick="load()">Refresh</button>\n    '
+        '<button class="btn" id="reportBtn" type="button">Report a problem</button>',
+        1)
+    page = page.replace(
+        '<div class="layout">',
+        _policy_preflight_banner() + _adoption_console_chrome() + '<div class="layout">',
+        1)
     return _html_with_approval(page, next_url="/memory")
 
 
@@ -2826,8 +2892,23 @@ def people_list(include_hidden: bool = False, include_candidates: bool = True) -
                     "last_seen": p.get("last_seen"),
                     "is_self": p["id"] == self_pid,
                     "promotion_state": p.get("promotion_state") or "candidate",
-                    "actor_type": p.get("actor_type") or "human_person"})
-    out.sort(key=lambda x: (-x["weight"], x["name"].lower()))
+                    "actor_type": p.get("actor_type") or "human_person",
+                    "interaction_strength": p.get("interaction_strength") or 0,
+                    "from_calendar": False})
+    # Exhaust: calendar-derived people rank above header-only.
+    try:
+        for row in out:
+            attrs = store.person_attrs(int(row["id"]))
+            row["from_calendar"] = bool(
+                (attrs.get("exhaust_from_calendar") or {}).get("value"))
+    except Exception:
+        pass
+    out.sort(key=lambda x: (
+        -int(bool(x.get("from_calendar"))),
+        -(x.get("interaction_strength") or 0),
+        -x["weight"],
+        x["name"].lower(),
+    ))
     return {"people": out}
 
 
@@ -3149,6 +3230,13 @@ def people_soft_merge(person_id: int, body: SoftMergeBody) -> dict:
         raise HTTPException(status_code=400, detail="cannot merge a person into self")
     mid = store.soft_merge_people(
         person_id, body.absorbed_id, reason=body.reason, actor="user")
+    # The merge's alias rules may now bind mentions that were left open —
+    # sweep unowned tasks/commitments so the fix flows back onto facts.
+    try:
+        from app.services.worker import worker
+        worker.enqueue("people_reattribute", unique=True)
+    except Exception:
+        pass
     return {"ok": True, "merge_id": mid, "survivor": person_id,
             "absorbed": body.absorbed_id}
 
@@ -5646,14 +5734,7 @@ body.has-approval #mnemosApproval{position:relative;z-index:25}
 <header class="top">
   <a class="brand" href="/">@@MARK@@ @@BRAND@@</a>
   <span class="page-sub">Chat</span>
-  <nav class="nav">
-    <a href="/today">Today</a>
-    <a class="on" href="/chat">Chat</a>
-    <a href="/memory">Memory</a>
-    <a href="/profile">You</a>
-    <a href="/desktop-access">Desktop</a>
-    <a href="/onboarding">Setup</a>
-  </nav>
+  @@NAV@@
   <span class="spacer"></span>
   <div class="chat-tools">
     <button type="button" id="pastBtn" title="Browse saved conversations">Past</button>
@@ -6336,14 +6417,7 @@ h2 .caps{font-family:var(--font);font-size:12px;letter-spacing:0;text-transform:
 <header class="top">
   <a class="brand" href="/">@@MARK@@ @@BRAND@@</a>
   <span class="page-sub">Desktop</span>
-  <nav class="nav">
-    <a href="/today">Today</a>
-    <a href="/chat">Chat</a>
-    <a href="/memory">Memory</a>
-    <a href="/profile">You</a>
-    <a class="on" href="/desktop-access">Desktop</a>
-    <a href="/onboarding">Setup</a>
-  </nav>
+  @@NAV@@
   <span class="spacer"></span>
   <span id="msg"></span>
 </header>
@@ -6751,14 +6825,7 @@ img.thumb.big{max-height:none;max-width:100%}
   <div class="top">
     <a class="brand" href="/">@@MARK@@ @@BRAND@@</a>
     <span class="page-sub">Memory</span>
-    <nav class="nav">
-      <a href="/today">Today</a>
-      <a href="/chat">Chat</a>
-      <a class="on" href="/memory">Memory</a>
-      <a href="/profile">You</a>
-      <a href="/desktop-access">Desktop</a>
-      <a href="/onboarding">Setup</a>
-    </nav>
+    @@NAV@@
     <input id="q" placeholder="search memories by meaning…">
     <span class="spacer"></span>
     <div class="meta-bar">

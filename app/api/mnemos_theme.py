@@ -329,14 +329,34 @@ a{color:inherit;text-decoration:none}
 .brand:hover .mark{transform:rotate(-6deg) scale(1.05)}
 .brand .mark .mark-dot{fill:var(--acc)}
 .page-sub{color:var(--mut);font-size:13px;font-weight:500}
-.nav{display:flex;gap:2px;align-items:center}
-.nav a{
+.top{
+  display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+  padding:12px 20px 10px;
+}
+.nav{display:flex;gap:2px;align-items:center;flex-wrap:wrap}
+.nav a, .nav-more > summary{
   color:var(--mut);font-size:13px;font-weight:500;padding:7px 12px;
   border-radius:10px;position:relative;
   transition:color .28s var(--ease),background .28s var(--ease),
     transform .22s var(--ease),box-shadow .28s var(--ease);
 }
-.nav a:hover{
+.nav-more{position:relative}
+.nav-more > summary{
+  list-style:none;cursor:pointer;user-select:none;
+}
+.nav-more > summary::-webkit-details-marker{display:none}
+.nav-more[open] > summary, .nav-more.on > summary{
+  color:var(--navy);background:rgba(11,19,32,.06);
+}
+.nav-more-menu{
+  position:absolute;left:0;top:calc(100% + 6px);z-index:40;
+  min-width:176px;padding:6px;border-radius:12px;
+  background:var(--folio,#FFFEFB);border:1px solid var(--line);
+  box-shadow:var(--shadow-float,0 8px 24px rgba(11,19,32,.12));
+  display:flex;flex-direction:column;gap:2px;
+}
+.nav-more-menu a{display:block}
+.nav a:hover, .nav-more > summary:hover{
   color:var(--navy);background:var(--panel-2);
   transform:translateY(-1px);box-shadow:0 4px 12px rgba(11,19,32,.06);
 }
@@ -515,6 +535,65 @@ button:disabled,.btn:disabled{cursor:default}
 """
 
 
+def nav_markup() -> str:
+    """Shared chrome: daily work in the bar, connections/settings under More."""
+    import os
+    tester = os.environ.get("QUILL_PROFILE", "").strip().lower() == "tester"
+    hide = {"phone", "desktop", "org"} if tester else set()
+    primary = (
+        ('/today', 'Today', ''),
+        ('/meetings', 'Meetings', ''),
+        ('/chat', 'Chat', ' id="navChat"'),
+        ('/memory', 'Memory', ''),
+        ('/profile', 'You', ''),
+    )
+    more = (
+        ('/peer', 'Team', 'team'),
+        ('/phone', 'Phone', 'phone'),
+        ('/desktop-access', 'Desktop', 'desktop'),
+        ('/org-network', 'Org', 'org'),
+        ('/onboarding', 'Setup', 'setup'),
+    )
+    links = "".join(
+        f'<a href="{href}"{extra}>{label}</a>' for href, label, extra in primary)
+    extra_links = "".join(
+        f'<a href="{href}">{label}</a>'
+        for href, label, key in more if key not in hide)
+    return (
+        f'<nav class="nav" id="mnemosNav" aria-label="Primary">'
+        f'{links}'
+        f'<details class="nav-more">'
+        f'<summary>More</summary>'
+        f'<div class="nav-more-menu">{extra_links}</div>'
+        f'</details></nav>'
+        f'<script>(function(){{'
+        f'var n=document.getElementById("mnemosNav");if(!n)return;'
+        f'var p=(location.pathname||"/").replace(/\\/$/,"")||"/";'
+        f'function hit(h){{'
+        f'if(h==="/today")return p==="/today"||p==="/"||p==="/shell";'
+        f'if(h==="/meetings")return p==="/meetings"||p.indexOf("/meetings/")===0||p.indexOf("/meeting/")===0;'
+        f'if(h==="/chat")return p==="/chat"||p.indexOf("/chat/")===0;'
+        f'if(h==="/memory")return p==="/memory"||p==="/console";'
+        f'if(h==="/profile")return p==="/profile";'
+        f'if(h==="/peer")return p==="/peer"||p.indexOf("/peer/")===0;'
+        f'if(h==="/phone")return p.indexOf("/phone")===0;'
+        f'if(h==="/desktop-access")return p==="/desktop-access";'
+        f'if(h==="/org-network")return p==="/org-network"||p.indexOf("/org/")===0;'
+        f'if(h==="/onboarding")return p==="/onboarding";'
+        f'return p===h;}}'
+        f'var moreOn=false;'
+        f'n.querySelectorAll("a[href]").forEach(function(a){{'
+        f'if(hit(a.getAttribute("href")||"")){{a.classList.add("on");'
+        f'if(a.closest(".nav-more"))moreOn=true;}}'
+        f'}});'
+        f'var m=n.querySelector(".nav-more");'
+        f'if(moreOn&&m)m.classList.add("on");'
+        f'document.addEventListener("click",function(e){{'
+        f'if(m&&m.open&&!m.contains(e.target))m.removeAttribute("open");}});'
+        f'}})();</script>'
+    )
+
+
 def apply(page: str) -> str:
     """Inject shared fonts/tokens/ink/chrome/UI into a page with @@placeholders@@.
 
@@ -531,4 +610,5 @@ def apply(page: str) -> str:
         .replace("@@UI_JS@@", UI_JS + "\n" + APPROVAL_JS)
         .replace("@@MARK@@", BRAND_MARK)
         .replace("@@BRAND@@", BRAND)
+        .replace("@@NAV@@", nav_markup())
     )

@@ -45,10 +45,9 @@ td{border-top:1px solid var(--line);padding:9px 8px}
 </head>
 <body>
 <div class="top"><a class="brand" href="/">@@MARK@@ @@BRAND@@</a>
-  <span class="page-sub">Connect a phone</span><span class="spacer"></span>
-  <nav class="nav"><a href="/today">Today</a><a href="/chat">Chat</a><a href="/memory">Memory</a>
-  <a href="/profile">You</a>
-  <a href="/desktop-access">Desktop</a><a class="on" href="/phone">Phone</a></nav></div>
+  <span class="page-sub">Connect a phone</span>
+  @@NAV@@
+  <span class="spacer"></span></div>
 <div class="wrap">
   <h1>Connect a phone</h1>
   <p class="lead">Pair your iPhone or Android so it can send @@BRAND@@ notes, dictations,

@@ -1,5 +1,5 @@
 {
-  "version": "1.3",
+    "version": "1.4",
   "classes": {
     "private_conversation": {
       "extract_mentions": true,
@@ -41,6 +41,17 @@
       "extract_contacts": true,
       "create_commitments": true,
       "create_claims": true,
+      "update_people": true,
+      "identity_evidence": true,
+      "knowledge_entities": true
+    },
+    "exhaust": {
+      "extract_mentions": true,
+      "create_person_candidates": true,
+      "relationship_evidence": true,
+      "extract_contacts": true,
+      "create_commitments": false,
+      "create_claims": false,
       "update_people": true,
       "identity_evidence": true,
       "knowledge_entities": true

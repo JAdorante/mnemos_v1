@@ -190,15 +190,7 @@ body{
 <header class="top">
   <a class="brand" href="/">@@MARK@@ @@BRAND@@</a>
   <span class="page-sub">Today</span>
-  <nav class="nav">
-    <a class="on" href="/today">Today</a>
-    <a href="/chat" id="navChat">Chat</a>
-    <a href="/memory">Memory</a>
-    <a href="/profile">You</a>
-    <a href="/desktop-access">Desktop</a>
-    <a href="/peer">Team</a>
-    <a href="/org-network">Org</a>
-  </nav>
+  @@NAV@@
   <span class="spacer"></span>
   <button class="btn" id="spotOpen" type="button">Ask <span class="kbd">⌘K</span></button>
 </header>

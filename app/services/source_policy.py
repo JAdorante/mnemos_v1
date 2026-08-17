@@ -157,6 +157,8 @@ def classify_source(
     win = window or ""
     blob = f"{win}\n{(text or '')[:800]}"
 
+    if src.startswith("exhaust"):
+        return "exhaust"
     if src.startswith("audio"):
         return "meeting_transcript" if "system" in src else "private_conversation"
     if "calendar" in src:

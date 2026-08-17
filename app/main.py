@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from app.api.routes import router, start_all, stop_all
+from app.api.adoption import router as adoption_router
 from app.config import settings
 from app.events import bus
 from app.services.api_auth import (
@@ -25,6 +26,7 @@ app.add_middleware(LanApiAuthMiddleware)
 # Outer: CSRF runs first (plan 6.4) — cross-origin POSTs rejected.
 app.add_middleware(CsrfProtectMiddleware)
 app.include_router(router)
+app.include_router(adoption_router)
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 if _STATIC_DIR.is_dir():
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
@@ -207,6 +209,15 @@ async def _startup() -> None:
         worker.register("score_shadow", score_v2.run_job)
         score_v2.attach()
 
+        # Attribution provenance: late re-resolution of open person mentions
+        # still referenced by unowned tasks/commitments. Cheap no-op when
+        # nothing is open; re-enqueued after merges (see /people soft-merge).
+        try:
+            from app.services import people_pipeline as _pp
+            worker.register("people_reattribute", _pp.run_reresolve_job)
+        except Exception as exc:
+            print(f"[worker] people_reattribute register skipped ({exc}).")
+
         # KG v2 M1 backfill: legacy asserted/user relations -> belief store.
         # One-shot + idempotent; enqueued via POST /kg/backfill, chased by a
         # parity run so the report reflects the new state.
@@ -380,6 +391,8 @@ async def _startup() -> None:
         worker.enqueue("activity", unique=True)     # cheap no-op without desktop events
         # A1: backfill traces once on boot (idempotent), then replay if due.
         worker.enqueue("traces_backfill", unique=True)
+        # Attribution provenance: one re-resolve sweep per boot (idempotent).
+        worker.enqueue("people_reattribute", unique=True)
         if attention_replay.due_for():
             worker.enqueue("attention_replay", unique=True)
         # KG v2: clear any posterior_stale backlog on boot (coalesced);
@@ -461,6 +474,11 @@ async def _startup() -> None:
             _msess.attach()
         except Exception as exc:
             print(f"[meeting_session] startup skipped ({exc}).")
+        try:
+            from app.services import meeting_capture as _mc
+            _mc.attach()
+        except Exception as exc:
+            print(f"[meeting_capture] startup skipped ({exc}).")
     except Exception as exc:
         print(f"[context_feeder] startup skipped ({exc}).")
     # Re-apply persisted privacy / kill-switch overrides onto frozen settings.
@@ -472,14 +490,22 @@ async def _startup() -> None:
         print(f"[launch] consent/hardening load skipped ({exc}).")
     # QUILL_AUTOSTART=1 boots the server ready, but capture only re-arms when
     # the user has already consented in the UI (data/capture_consent.json).
+    # Meeting-first mode never resumes always-on mic/webcam/screen from boot.
     if os.environ.get("QUILL_AUTOSTART") == "1":
         try:
-            from app.services import capture_consent
+            from app.services import capture_consent, first_run
             consent = capture_consent.load()
         except Exception:
             consent = {"consented": False, "sources": {}}
+            first_run = None  # type: ignore
         src = consent.get("sources") or {}
-        if consent.get("consented") and any(
+        meeting_first = False
+        try:
+            from app.services import first_run as _fr
+            meeting_first = _fr.is_meeting_first() and not _fr.allows_continuous("mic")
+        except Exception:
+            meeting_first = False
+        if (not meeting_first) and consent.get("consented") and any(
                 src.get(k) for k in (
                     "mic", "webcam", "screen", "system_audio", "clicks")):
             force_no_audio = os.environ.get("QUILL_AUTOSTART_AUDIO") == "0"
@@ -497,7 +523,8 @@ async def _startup() -> None:
             if os.environ.get("QUILL_AUTOSTART_NOTIFICATIONS") != "0":
                 start_all(audio=False, vision=False, notifications=True,
                           desktop_capture=False, system_audio=False)
-            print("[launch] capture idle — open Privacy controls to opt in.")
+            why = "meeting-first" if meeting_first else "idle"
+            print(f"[launch] capture {why} — open Privacy / onboarding to opt in.")
 
 
 @app.on_event("shutdown")

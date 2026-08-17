@@ -40,9 +40,9 @@ pre{white-space:pre-wrap;font-family:var(--mono);font-size:.82rem;background:var
 </head>
 <body>
 <div class="top"><a class="brand" href="/">@@MARK@@ @@BRAND@@</a>
-  <span class="page-sub">Org Network</span><span class="spacer"></span>
-  <nav class="nav"><a href="/today">Today</a><a href="/chat">Chat</a><a href="/memory">Memory</a>
-  <a href="/peer">Team</a><a class="on" href="/org-network">Org</a></nav></div>
+  <span class="page-sub">Org Network</span>
+  @@NAV@@
+  <span class="spacer"></span></div>
 <div class="wrap">
   <h1>Org Network</h1>
   <p class="lead">Hybrid company intelligence: this machine keeps your full memory local.

@@ -53,11 +53,9 @@ td{border-top:1px solid var(--line);padding:9px 8px;vertical-align:top}
 </head>
 <body>
 <div class="top"><a class="brand" href="/">@@MARK@@ @@BRAND@@</a>
-  <span class="page-sub">Team</span><span class="spacer"></span>
-  <nav class="nav"><a href="/today">Today</a><a href="/chat">Chat</a><a href="/memory">Memory</a>
-  <a href="/profile">You</a>
-  <a href="/desktop-access">Desktop</a><a href="/phone">Phone</a><a class="on" href="/peer">Team</a>
-  <a href="/org-network">Org</a></nav></div>
+  <span class="page-sub">Team</span>
+  @@NAV@@
+  <span class="spacer"></span></div>
 <div class="wrap">
   <h1>Team</h1>
   <p class="lead">Pair with a teammate who also runs @@BRAND@@. Their assistant can then ask
@@ -201,7 +199,8 @@ function renderPeers(peers){
   $('peersBox').innerHTML='<table><tr><th>Teammate</th><th>Person in memory</th><th>Pack</th><th>Allowed without asking</th><th></th></tr>'+
     peers.map(p=>`<tr><td><b>${esc(p.name)}</b> <span class="muted" style="font-size:.8rem">${presenceDot(p)}</span>
       <div class="muted" style="font-family:var(--mono);font-size:.78rem">${esc(p.base_url)}${p.tls?' · tls':''}</div>
-      ${p.person_name?`<div class="muted" style="font-size:.82rem">Linked: ${esc(p.person_name)}</div>`:''}</td>
+      ${p.person_name?`<div class="muted" style="font-size:.82rem">Linked: ${esc(p.person_name)}</div>`:
+        `<div class="muted" style="font-size:.82rem">Not a person in memory yet — pick someone in the next column (or Create new person with their real name). Chat will keep treating this as a machine name until then.</div>`}</td>
     <td><select data-link="${p.peer_id}" onchange="linkPerson('${p.peer_id}',this)">${personOpts(p.person_id)}</select></td>
     <td><select onchange="applyPack('${p.peer_id}',this.value)">${packOpts(p.policy_pack)}</select></td>
     <td><div class="pol">${CLASSES.map(c=>`<label>${esc(TOPIC[c]||c)}

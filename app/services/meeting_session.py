@@ -279,8 +279,16 @@ def _channel_of(source: str) -> str:
 def should_ingest(source: str, *, now: float | None = None) -> bool:
     """Fail-closed remote ingest while a meeting is offered/skipped.
 
-    Ambient path (no live session) is unchanged. Screen / L0 are never gated.
+    Ambient path (no live session) is unchanged *except* in meeting-first
+    mode, where mic/loopback events outside the calendar window + pad are
+    dropped so the always-on mic never records between meetings.
     """
+    try:
+        from app.services import first_run
+        if not first_run.audio_event_allowed(source, now):
+            return False
+    except Exception:
+        pass
     st = current()
     if not st:
         return True
@@ -463,6 +471,11 @@ def decide(
             store=store, apply=False)
     except Exception:
         pass
+    try:
+        from app.services import meeting_capture as _mc
+        _mc.sync()
+    except Exception:
+        pass
     return {"ok": True, "consent": choice, "status": STATUS_ACTIVE, "session": row}
 
 
@@ -493,6 +506,11 @@ def end(*, reason: str = "manual", store: Store | None = None) -> dict[str, Any]
             except Exception:
                 pass
         mm.exit_mode(reason=reason)
+    except Exception:
+        pass
+    try:
+        from app.services import meeting_capture as _mc
+        _mc.sync()
     except Exception:
         pass
     return {"ok": True, "active": False, "reason": reason, "ended": st}

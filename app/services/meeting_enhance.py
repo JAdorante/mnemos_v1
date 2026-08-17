@@ -182,6 +182,26 @@ def already_enhanced(store: Store, session: dict) -> bool:
     return False
 
 
+def note_href_for_session(store: Store, session_id: int | None) -> str:
+    """HTML path for a session's enhanced note. Never 404s — falls back to list."""
+    sid = int(session_id or 0)
+    if sid:
+        try:
+            for r in store.list_reflections(scope="meeting", limit=80):
+                if (r.get("subject_type") == "session"
+                        and int(r.get("subject_id") or 0) == sid):
+                    return f"/meeting/note/{int(r['id'])}"
+        except Exception:
+            pass
+    try:
+        latest = store.latest_reflection("meeting")
+        if latest:
+            return f"/meeting/note/{int(latest['id'])}"
+    except Exception:
+        pass
+    return "/meetings"
+
+
 def _turns_for_session(store: Store, session: dict) -> list[dict]:
     start = float(session.get("start") or 0)
     end = float(session.get("end") or 0)
@@ -436,6 +456,22 @@ def enhance_session(
             _mm.exit_mode(reason="note_ready")
     except Exception as exc:
         print(f"[meeting_enhance] retention apply skipped ({exc}).")
+
+    try:
+        from app.services import first_run
+        n_facts = 0
+        try:
+            ids = [int(x) for x in (session.get("event_ids") or []) if x]
+            if ids:
+                n_facts = len(_facts_for_events(store, ids))
+        except Exception:
+            n_facts = int(n_items or 0)
+        sid = session.get("id")
+        first_run.note_brief_ready(
+            sid, has_facts=n_facts > 0 or n_items > 0,
+            href=f"/meeting/note/{int(rid)}")
+    except Exception as exc:
+        print(f"[meeting_enhance] first-win note skipped ({exc}).")
 
     return {
         "reflection_id": rid,

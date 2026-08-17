@@ -106,6 +106,12 @@ body{
 </style>
 </head>
 <body>
+<header class="top">
+  <a class="brand" href="/">@@MARK@@ @@BRAND@@</a>
+  <span class="page-sub">Meeting</span>
+  @@NAV@@
+  <span class="spacer"></span>
+</header>
 @@APPROVAL@@
 <div class="wrap">
   <header class="mast">
@@ -385,6 +391,12 @@ h1{font-family:var(--display);font-weight:400;font-size:1.8rem;color:var(--navy)
 </style>
 </head>
 <body>
+<header class="top">
+  <a class="brand" href="/">@@MARK@@ @@BRAND@@</a>
+  <span class="page-sub">Meetings</span>
+  @@NAV@@
+  <span class="spacer"></span>
+</header>
 @@APPROVAL@@
 <div class="wrap">
   <h1>Meeting notes</h1>

@@ -17,6 +17,42 @@ except Exception:  # dotenv is optional
     pass
 
 
+def _ollama_reachable() -> bool:
+    url = os.environ.get("QUILL_OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
+    try:
+        from urllib.request import urlopen
+        urlopen(f"{url}/api/tags", timeout=0.4).read(32)
+        return True
+    except Exception:
+        return False
+
+
+def apply_tester_profile() -> None:
+    """QUILL_PROFILE=tester pins the reliable 20% for the September cohort.
+
+    setdefault so a tester (or CI) can still override a single flag in .env.
+    Ollama stays optional: local vision is skipped unless a daemon is up.
+    """
+    if os.environ.get("QUILL_PROFILE", "").strip().lower() != "tester":
+        return
+    pins = {
+        "QUILL_FIRST_RUN_MODE": "meeting",
+        "QUILL_PHONE_LINK": "0",
+        "QUILL_ANTICIPATE": "0",
+        "QUILL_DESKTOP_CAPTURE": "0",
+        "QUILL_PHONE_WATCH": "0",
+        "QUILL_AUTOSTART_NOTIFICATIONS": "0",
+        "QUILL_TEXT_LOCAL": "0",
+    }
+    if not _ollama_reachable():
+        pins["QUILL_VISION_LOCAL"] = "0"
+    for key, val in pins.items():
+        os.environ.setdefault(key, val)
+
+
+apply_tester_profile()
+
+
 def _get(key: str, default: str) -> str:
     return os.environ.get(key, default)
 
@@ -641,6 +677,59 @@ class VoiceConfig:
 
 
 @dataclass(frozen=True)
+class FirstRunConfig:
+    """Meeting-first tester onboarding (see services/first_run.py).
+
+    meeting = calendar window capture only (QUILL_PROFILE=tester pins this).
+    ambient = consented always-on sources from Privacy.
+    full    = existing consent-resume behaviour (code default — invariant 4).
+    """
+    mode: str = _get("QUILL_FIRST_RUN_MODE", "full").strip().lower() or "full"
+    meeting_pad_min: float = float(_get("QUILL_MEETING_PAD_MIN", "5"))
+    unlock_after_briefs: int = int(_get("QUILL_UNLOCK_AFTER_BRIEFS", "3"))
+
+
+@dataclass(frozen=True)
+class ExhaustConfig:
+    """Gmail/Calendar metadata cold-start (see services/exhaust_ingest.py)."""
+    enabled: bool = _get("QUILL_EXHAUST_INGEST", "1") not in ("0", "false", "False")
+    days: int = int(_get("QUILL_EXHAUST_DAYS", "90"))
+    client_id: str = _get("GOOGLE_OAUTH_CLIENT_ID", "")
+    client_secret: str = _get("GOOGLE_OAUTH_CLIENT_SECRET", "")
+
+    @property
+    def token_path(self) -> str:
+        return _get(
+            "QUILL_EXHAUST_TOKEN",
+            f"{_get('QUILL_DATA_DIR', 'data')}/google_oauth_token.json")
+
+    @property
+    def ledger_path(self) -> str:
+        return _get(
+            "QUILL_EXHAUST_LEDGER",
+            f"{_get('QUILL_DATA_DIR', 'data')}/exhaust_ledger.json")
+
+
+@dataclass(frozen=True)
+class McpConfig:
+    """Read-only MCP memory server (mcp_server/). Off until QUILL_MCP=1."""
+    enabled: bool = _get("QUILL_MCP", "0") not in ("0", "false", "False")
+    bind: str = _get("QUILL_MCP_BIND", "127.0.0.1")
+
+    @property
+    def token_path(self) -> str:
+        return _get("QUILL_MCP_TOKEN",
+                    f"{_get('QUILL_DATA_DIR', 'data')}/mcp_token")
+
+
+@dataclass(frozen=True)
+class ExternalCaptureConfig:
+    """Omi / phone-as-mic ingest (see services/external_capture.py)."""
+    enabled: bool = _get("QUILL_EXTERNAL_CAPTURE", "0") not in (
+        "0", "false", "False")
+
+
+@dataclass(frozen=True)
 class OnboardingConfig:
     """One-time new-user profile sheet (see services/onboarding.py).
 
@@ -1139,6 +1228,10 @@ class Settings:
     anticipation: AnticipationConfig = AnticipationConfig()
     worker: WorkerConfig = WorkerConfig()
     memory: MemoryConfig = MemoryConfig()
+    first_run: FirstRunConfig = FirstRunConfig()
+    exhaust: ExhaustConfig = ExhaustConfig()
+    mcp: McpConfig = McpConfig()
+    external_capture: ExternalCaptureConfig = ExternalCaptureConfig()
     onboarding: OnboardingConfig = OnboardingConfig()
     documents: DocumentsConfig = DocumentsConfig()
     phone: PhoneChannelConfig = PhoneChannelConfig()

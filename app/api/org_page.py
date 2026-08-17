@@ -47,10 +47,9 @@ body{margin:0;min-height:100vh;font:15px/1.55 var(--font);color:var(--text);
 </head>
 <body>
 <div class="top"><a class="brand" href="/">@@MARK@@ @@BRAND@@</a>
-  <span class="page-sub">Org</span><span class="spacer"></span>
-  <nav class="nav"><a href="/today">Today</a><a href="/chat">Chat</a><a href="/memory">Memory</a>
-  <a href="/profile">You</a>
-  <a href="/desktop-access">Desktop</a><a href="/phone">Phone</a><a href="/peer">Team</a></nav></div>
+  <span class="page-sub">Org</span>
+  @@NAV@@
+  <span class="spacer"></span></div>
 <div class="wrap" id="root"><div class="muted">Loading…</div></div>
 <script>
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));

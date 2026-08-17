@@ -807,6 +807,15 @@ Off by default; enable with `QUILL_DESKTOP_CAPTURE=1` or
 | `QUILL_ONBOARDING` | `1` | the once-only profile flow |
 | `QUILL_ONBOARDING_PROFILE` | `data/onboarding_profile.json` | JSON backup of the profile |
 | `QUILL_ONBOARDING_STATE` | `data/onboarding_state.json` | asked-once / delta bookkeeping |
+| `QUILL_FIRST_RUN_MODE` | `full` | `meeting` = calendar-window capture only; `ambient` = consented always-on; `full` = existing consent-resume. Tester profile pins `meeting`. |
+| `QUILL_MEETING_PAD_MIN` | `5` | minutes of audio pad before/after a calendar meeting |
+| `QUILL_UNLOCK_AFTER_BRIEFS` | `3` | Console shows a one-time ambient-capture card after N briefs |
+| `QUILL_PROFILE` | — | `tester` pins meeting-first and hard-off for Phone Link / anticipate / desktop capture |
+| `QUILL_EXHAUST_INGEST` | `1` | Gmail/Calendar *metadata* cold-start (headers + attendees, never bodies) |
+| `QUILL_EXHAUST_DAYS` | `90` | lookback for exhaust ingest |
+| `GOOGLE_OAUTH_CLIENT_ID` / `_SECRET` | — | Desktop OAuth client for exhaust (loopback redirect) |
+| `QUILL_MCP` | `0` | read-only MCP memory server (`python -m mcp_server`) |
+| `QUILL_EXTERNAL_CAPTURE` | `0` | Omi / phone-as-mic ingest at `POST /capture/external` |
 
 ### Phone notifications & Phone Link (Windows)
 
@@ -885,6 +894,10 @@ planner/escalation = Opus, verifier = Haiku.
 | Model-call log | `data/model_calls.jsonl` |
 | Escalation distill trail | `data/escalate_distill.jsonl` |
 | Onboarding profile | `data/onboarding_profile.json` |
+| First-run / capture-opt-in state | `data/first_run.json` |
+| Exhaust ingest ledger | `data/exhaust_ledger.json` |
+| MCP bearer token | `data/mcp_token` |
+| Tester crash zips | `data/logs/mnemos-report-*.zip` |
 | Source policy table (checked in) | `data/source_policies.json` |
 | Peer / phone channel state | under `data/` (peer + phone registries) |
 | Browser-agent sessions & profiles | `./sessions/` |
@@ -931,6 +944,11 @@ app/
     audio.py · vision.py · desktop_capture.py · notifications.py
     consolidation.py · sessions.py · activity.py · worker.py
     extractor.py · resolution.py · reflector.py · onboarding.py
+    first_run.py · exhaust_ingest.py · mcp_tools.py · trust.py
+    external_capture.py · crash_report.py · meeting_capture.py
+mcp_server/              read-only stdio MCP adapter (HTTP to localhost)
+docs/mcp.md · trust-layer.md · macos-meeting.md
+packaging/               PyInstaller + Inno Setup for tester builds
     agent_planner.py · agent_bridge.py · readiness.py · multitask.py
     model_router.py · ollama_text.py · escalate_log.py · few_shot.py
     grounding.py · llm.py · voice.py

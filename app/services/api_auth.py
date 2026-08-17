@@ -63,6 +63,7 @@ _PREFIX_EXEMPT = (
     "/peer/ask",      # peer traffic uses per-peer Bearer tokens
     "/peer/answer",
     "/peer/ping",
+    "/capture/external",
 )
 
 # GET-only prefixes: POST siblings (e.g. /phone/outbox/queue) need the LAN token.
@@ -88,6 +89,10 @@ _HTML_EXEMPT = frozenset({
     "/onboarding",
     "/auth",
     "/desktop-access",
+    "/capture/pwa",
+    "/bootstrap",
+    "/help/mcp",
+    "/help/trust",
 })
 
 

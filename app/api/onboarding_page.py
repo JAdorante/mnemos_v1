@@ -185,8 +185,8 @@ textarea{min-height:96px;resize:vertical}
       <div class="brand">@@BRAND@@</div>
     </div>
     <div class="hero-rule" aria-hidden="true"></div>
-    <h1>Tell @@BRAND@@ who you are</h1>
-    <p>A short guided setup — name, people, work, rhythm. Everything is optional; you can skip or edit later.</p>
+    <h1>Your first meeting, remembered</h1>
+    <p>Connect a calendar. Mnemos listens to the next meeting and writes a brief you can play back. Always-on capture stays off until you turn it on.</p>
     <div class="cta-row">
       <button class="btn btn-primary" id="startBtn" type="button">Get started</button>
       <a class="skip" href="/today">Skip to Today</a>
@@ -195,9 +195,9 @@ textarea{min-height:96px;resize:vertical}
   </section>
 
   <section class="wizard" id="wizard">
-    <div class="top-mini"><span class="nm">@@MARK@@ @@BRAND@@</span><span id="stepLabel">Step 1 of 5</span></div>
+    <div class="top-mini"><span class="nm">@@MARK@@ @@BRAND@@</span><span id="stepLabel">Step 1 of 4</span></div>
     <div class="progress" id="progress" aria-hidden="true">
-      <i class="on"></i><i></i><i></i><i></i><i></i>
+      <i class="on"></i><i></i><i></i><i></i>
     </div>
 
     <!-- 0 You -->
@@ -238,6 +238,11 @@ textarea{min-height:96px;resize:vertical}
           <input id="description" placeholder="Short line about your day-to-day">
         </div>
       </div>
+      <label for="apikey" style="margin-top:18px">Anthropic API key</label>
+      <p class="lead" style="margin:4px 0 8px">Needed for briefs. Stored in <span style="font-family:var(--mono)">.credentials.env</span> on this machine — never sent anywhere except Anthropic.</p>
+      <input id="apikey" type="password" autocomplete="off" placeholder="sk-ant-…">
+      <button type="button" class="btn btn-ghost" id="keyBtn" style="margin-top:8px">Save &amp; test key</button>
+      <div class="muted" id="keyMsg"></div>
       <label for="primary_email" style="margin-top:18px">Primary email</label>
       <input id="primary_email" type="email" autocomplete="email" placeholder="you@example.com">
       <div class="row two">
@@ -252,16 +257,70 @@ textarea{min-height:96px;resize:vertical}
       </div>
     </div>
 
-    <!-- 1 People -->
+    <!-- 1 Calendar -->
     <div class="panel step" data-step="1" hidden>
+      <h2>Calendar</h2>
+      <p class="lead">Mnemos reads event titles, times, and attendees — never email bodies. This seeds who you work with before any audio exists.</p>
+      <div id="exStatus" class="muted">Checking Google connection…</div>
+      <button type="button" class="btn btn-primary" id="exBtn" style="margin-top:10px">Connect Google (Gmail + Calendar metadata)</button>
+      <div class="err" id="exMsg"></div>
+      <div id="exProg" class="muted" style="margin-top:8px"></div>
+      <label style="margin-top:26px">iCloud calendar (optional)</label>
+      <p class="lead" style="margin:4px 0 10px">App-specific password at
+      <a href="https://appleid.apple.com" target="_blank" rel="noopener">appleid.apple.com</a>
+      — never your real Apple password.</p>
+      <div id="icStatusOb" class="muted" style="margin:0 0 8px"></div>
+      <div id="icFormOb" class="row two">
+        <input id="icUserOb" placeholder="Apple ID email" autocomplete="username">
+        <input id="icPassOb" placeholder="xxxx-xxxx-xxxx-xxxx" type="password" autocomplete="off">
+      </div>
+      <button type="button" class="btn btn-ghost" id="icBtnOb" style="margin-top:10px">Connect iCloud</button>
+      <div class="err" id="icMsgOb"></div>
+    </div>
+
+    <!-- 2 Next meeting -->
+    <div class="panel step" data-step="2" hidden>
+      <h2>Your next meeting</h2>
+      <p class="lead" id="nextMeetLead">Once a calendar is connected, Mnemos will listen inside that window and write a brief with playable clips.</p>
+      <div id="nextMeetBox" class="ok-banner" hidden>
+        <h3 id="nextMeetTitle">Meeting</h3>
+        <p class="muted" id="nextMeetWhen"></p>
+        <p>@@BRAND@@ will listen and produce a brief. Always-on mic stays off.</p>
+      </div>
+      <label style="display:flex;gap:8px;align-items:flex-start;margin-top:16px;text-transform:none;letter-spacing:0;font-weight:400;font-size:.95rem;color:var(--text);cursor:pointer">
+        <input type="checkbox" id="meetListen" style="width:auto;margin-top:3px" checked>
+        <span>Listen during calendar meetings (audio is stored under <span style="font-family:var(--mono)">data/audio</span> on this laptop).</span>
+      </label>
+    </div>
+
+    <!-- 3 Capture opt-ins (default OFF) -->
+    <div class="panel step" data-step="3" hidden>
+      <h2>Always-on capture</h2>
+      <p class="lead">Optional. Each source stays off unless you check it. You can change this later in Privacy.</p>
+      <label style="display:flex;gap:8px;align-items:flex-start;text-transform:none;letter-spacing:0;font-weight:400;font-size:.95rem;color:var(--text);cursor:pointer">
+        <input type="checkbox" id="ambMic" style="width:auto;margin-top:3px">
+        <span><b>Microphone (always on)</b> — hears the room between meetings. WAV clips in <span style="font-family:var(--mono)">data/audio</span>.</span>
+      </label>
+      <label style="display:flex;gap:8px;align-items:flex-start;margin-top:12px;text-transform:none;letter-spacing:0;font-weight:400;font-size:.95rem;color:var(--text);cursor:pointer">
+        <input type="checkbox" id="ambCam" style="width:auto;margin-top:3px">
+        <span><b>Webcam</b> — occasional frames in <span style="font-family:var(--mono)">data/frames</span>. Off unless you want visual memory.</span>
+      </label>
+      <label style="display:flex;gap:8px;align-items:flex-start;margin-top:12px;text-transform:none;letter-spacing:0;font-weight:400;font-size:.95rem;color:var(--text);cursor:pointer">
+        <input type="checkbox" id="ambDesk" style="width:auto;margin-top:3px">
+        <span><b>Screen</b> — window titles and frames in <span style="font-family:var(--mono)">data/</span>. No keystrokes. Off by default.</span>
+      </label>
+    </div>
+
+    <!-- 10 People (optional, not in primary wizard) -->
+    <div class="panel step" data-step="10" hidden>
       <h2>People</h2>
       <p class="lead">Names @@BRAND@@ should get right — teammates, family, partners.</p>
       <div class="list" id="peopleList"></div>
       <button type="button" class="add" id="addPerson">+ Add person</button>
     </div>
 
-    <!-- 2 Work -->
-    <div class="panel step" data-step="2" hidden>
+    <!-- 11 Work (optional) -->
+    <div class="panel step" data-step="11" hidden>
       <h2>Work</h2>
       <p class="lead">Projects and tools you live in every day.</p>
       <div class="list" id="projectsList"></div>
@@ -274,8 +333,8 @@ textarea{min-height:96px;resize:vertical}
       <div class="chips" id="toolsChips"></div>
     </div>
 
-    <!-- 3 Rhythm -->
-    <div class="panel step" data-step="3" hidden>
+    <!-- 12 Rhythm (optional) -->
+    <div class="panel step" data-step="12" hidden>
       <h2>Rhythm</h2>
       <p class="lead">Routines and what matters right now — helps anticipation and chat.</p>
       <label>Schedule / routines</label>
@@ -295,7 +354,7 @@ textarea{min-height:96px;resize:vertical}
     </div>
 
     <!-- 4 Phone -->
-    <div class="panel step" data-step="4" hidden>
+    <div class="panel step" data-step="13" hidden>
       <h2>Your phone</h2>
       <p class="lead">Optional — pair your iPhone or Android so it can send @@BRAND@@
       notes, dictations, and shares directly. Skippable; you can pair anytime at
@@ -315,19 +374,7 @@ textarea{min-height:96px;resize:vertical}
         <p class="muted" id="phonePairStatus" style="margin-top:12px">Waiting for the phone…</p>
       </div>
 
-      <label style="margin-top:26px">iCloud calendar (optional)</label>
-      <p class="lead" style="margin:4px 0 10px">Let @@BRAND@@ read your calendar so it
-      knows your schedule. Create an <b>app-specific password</b> at
-      <a href="https://appleid.apple.com" target="_blank" rel="noopener">appleid.apple.com</a>
-      (Sign-In and Security → App-Specific Passwords) — never your real Apple
-      password. Tested with Apple before it's saved; revoke it there anytime.</p>
-      <div id="icStatusOb" class="muted" style="margin:0 0 8px"></div>
-      <div id="icFormOb" class="row two">
-        <input id="icUserOb" placeholder="Apple ID email" autocomplete="username">
-        <input id="icPassOb" placeholder="xxxx-xxxx-xxxx-xxxx" type="password" autocomplete="off">
-      </div>
-      <button type="button" class="btn btn-ghost" id="icBtnOb" style="margin-top:10px">Connect iCloud</button>
-      <div class="err" id="icMsgOb"></div>
+      <p class="muted">Pair anytime at <a href="/phone">the Phone page</a>. Calendar connect lives on the Calendar step.</p>
     </div>
 
     <div class="nav-btns">
@@ -352,7 +399,7 @@ const state = {
   notes: "",
 };
 
-const STEPS = ["You","People","Work","Rhythm","Phone"];
+const STEPS = ["You","Calendar","Next meeting","Capture"];
 
 function el(tag, attrs={}, kids=[]){
   const n=document.createElement(tag);
@@ -619,10 +666,12 @@ async function save(){
       <p class="muted">Saved ${j.claims||0} notes, ${j.people||0} people, ${j.entities||0} projects/tools
       ${j.skipped?` · ${j.skipped} already known`:""}.</p>
       <div class="done-links">
-        <a class="btn btn-primary" href="/today">Open Today</a>
-        <a class="btn btn-ghost" href="/chat">Chat</a>
+        <a class="btn btn-primary" href="/meetings">Open Meetings</a>
+        <a class="btn btn-ghost" href="/today">Today</a>
         <a class="btn btn-ghost" href="/memory">Memory</a>
       </div>
+      <p class="muted" style="margin-top:14px">Optional: point Claude Desktop at this machine as a read-only memory server.
+      Copy the config from <a href="/help/mcp">docs/mcp.md</a> after you enable <span style="font-family:var(--mono)">QUILL_MCP=1</span>.</p>
     </div>`;
     document.getElementById("backBtn").hidden=true;
     btn.hidden=true;
@@ -707,10 +756,91 @@ document.getElementById("toolInput").addEventListener("keydown",e=>{if(e.key==="
 document.getElementById("schedInput").addEventListener("keydown",e=>{if(e.key==="Enter"){e.preventDefault();addTag("schedInput",state.schedule,"schedChips");}});
 document.getElementById("prioInput").addEventListener("keydown",e=>{if(e.key==="Enter"){e.preventDefault();addTag("prioInput",state.priorities,"prioChips");}});
 document.getElementById("backBtn").onclick=()=>showStep(Math.max(0,state.step-1));
-document.getElementById("nextBtn").onclick=()=>{
+document.getElementById("nextBtn").onclick=async ()=>{
+  if(state.step===2){
+    try{
+      await fetch("/first-run/meeting-listen",{method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({consent:!!document.getElementById("meetListen").checked})});
+    }catch(e){}
+  }
+  if(state.step===3 || state.step===STEPS.length-1){
+    try{
+      await fetch("/first-run/ambient",{method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({
+          mic:!!document.getElementById("ambMic").checked,
+          webcam:!!document.getElementById("ambCam").checked,
+          desktop:!!document.getElementById("ambDesk").checked
+        })});
+    }catch(e){}
+  }
   if(state.step===STEPS.length-1) save();
   else showStep(state.step+1);
 };
+
+document.getElementById("keyBtn").onclick=async ()=>{
+  const msg=document.getElementById("keyMsg"), btn=document.getElementById("keyBtn");
+  msg.textContent="Testing key…"; btn.disabled=true;
+  try{
+    const r=await fetch("/onboarding/api-key",{method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({key:document.getElementById("apikey").value})});
+    const j=await r.json();
+    msg.textContent = r.ok ? "Key saved on this machine." : (j.detail||"Key rejected");
+  }catch(e){ msg.textContent="Could not reach @@BRAND@@."; }
+  btn.disabled=false;
+};
+
+async function refreshExhaust(){
+  try{
+    const s=await (await fetch("/exhaust/status")).json();
+    const el=document.getElementById("exStatus");
+    if(!s.oauth_configured){
+      el.textContent="Google OAuth client is not configured on this install — use iCloud below, or skip. People can still be added later.";
+      document.getElementById("exBtn").disabled=true;
+      return;
+    }
+    el.textContent = s.connected ? "Google connected. Click to import the last 90 days of headers + calendar attendees." : "Not connected yet.";
+    const p=s.progress||{};
+    if(p.running) document.getElementById("exProg").textContent=
+      "Scanning… "+(p.contacts||0)+" contacts, "+(p.events||0)+" events.";
+  }catch(e){}
+}
+document.getElementById("exBtn").onclick=async ()=>{
+  const msg=document.getElementById("exMsg"), btn=document.getElementById("exBtn");
+  msg.textContent="A browser window will open for Google consent (metadata only).";
+  btn.disabled=true;
+  try{
+    const st=await (await fetch("/exhaust/status")).json();
+    if(!st.connected){
+      const r=await (await fetch("/exhaust/connect",{method:"POST"})).json();
+      if(!r.ok){ msg.textContent=r.error||"Could not connect"; btn.disabled=false; return; }
+    }
+    await fetch("/exhaust/refresh",{method:"POST"});
+    const poll=setInterval(async ()=>{
+      const s=await (await fetch("/exhaust/status")).json();
+      const p=s.progress||{};
+      document.getElementById("exProg").textContent=
+        (p.running?"Scanning… ":"Done. ")+(p.contacts||0)+" contacts, "+(p.events||0)+" events.";
+      if(!p.running){ clearInterval(poll); btn.disabled=false; loadNextMeeting(); }
+    },1500);
+  }catch(e){ msg.textContent="Network error"; btn.disabled=false; }
+};
+
+async function loadNextMeeting(){
+  try{
+    const s=await (await fetch("/first-run/status")).json();
+    const n=s.next_meeting;
+    if(!n){ document.getElementById("nextMeetLead").textContent="No upcoming meeting yet — connect a calendar, or skip and add one later."; return; }
+    document.getElementById("nextMeetBox").hidden=false;
+    document.getElementById("nextMeetTitle").textContent=n.title||"Meeting";
+    const when=n.start ? new Date(n.start*1000).toLocaleString() : "";
+    document.getElementById("nextMeetWhen").textContent=when;
+  }catch(e){}
+}
+refreshExhaust();
+loadNextMeeting();
 boot().then(()=>{
   try{
     const qp=new URLSearchParams(location.search);

@@ -53,28 +53,17 @@ from app.services.agent_log import ActionPacket
 
 
 # ---------------------------------------------------------------------------
-# Risk classification (capability #3 in the Phase 5 doc). A precise, inspectable
-# table beats an LLM guess for the safety-critical decision. `blocked` never
-# reaches an execution surface; `high` always forces the approval gate.
+# Risk classification lives in app.services.trust (portable core, no capture
+# / memory imports). Re-exported here so existing `from agent_planner import
+# classify_risk` callers stay valid. See docs/trust-layer.md.
 # ---------------------------------------------------------------------------
-RISK_TABLE: dict[str, str] = {
-    "read":     "low",
-    "search":   "low",
-    "draft":    "low",       # preparing is safe; only committing is not
-    "summarize": "low",
-    "follow_through": "low",   # Track D: commitment brief (no send)
-    "check_in": "low",         # Track D: relationship brief / draft-only
-    "schedule": "medium",
-    "book":     "medium",
-    "post":     "medium",
-    "send":     "high",
-    "reply":    "high",
-    "buy":      "high",
-    "purchase": "high",
-    "pay":      "high",
-    "delete":   "blocked",
-    "remove":   "blocked",
-}
+from app.services.trust import (  # noqa: E402
+    RISK_TABLE,
+    approval_binding_is_enforce,
+    classify_risk,
+    source_can_authorize,
+)
+
 # Shell/OS realizations of blocked RISK_TABLE kinds. Desktop guards consult
 # this so delete/remove stay blocked in EVERY mode (incl. autonomous) from one
 # policy source (plan 0.7). Elevation/shell-escape verbs stay in desktop's
@@ -83,7 +72,6 @@ SHELL_KIND: dict[str, str] = {
     "rm": "delete", "rmdir": "delete", "rd": "delete",
     "del": "delete", "erase": "delete",
 }
-_SENSITIVE = ("medical", "health", "financial", "bank", "ssn", "password")
 # UI / free-text labels that mean a blocked RISK_TABLE kind. Autonomous mode
 # may skip the ask, never these.
 _BLOCKED_LABEL_RE = re.compile(
@@ -91,22 +79,6 @@ _BLOCKED_LABEL_RE = re.compile(
     r"permanently delete)\b",
     re.I,
 )
-
-
-def classify_risk(action_kind: str, *, goal: str = "") -> tuple[str, bool]:
-    """(risk_level, approval_required). approval_required is True for anything
-    at/above medium, or any brush with a sensitive domain.
-
-    `blocked` still reports approval_required=True for back-compat callers, but
-    execution surfaces must call `is_policy_blocked` / `execution_allowed` —
-    autonomous mode bypasses the ask, never a blocked class (plan 0.7).
-    """
-    kind = (action_kind or "").strip().lower()
-    risk = RISK_TABLE.get(kind, "medium")
-    if any(w in (goal or "").lower() for w in _SENSITIVE) and risk == "low":
-        risk = "medium"
-    approval = risk in ("medium", "high", "blocked")
-    return risk, approval
 
 
 def risk_of(goal: str) -> tuple[str, bool]:
@@ -980,18 +952,6 @@ def _enabled() -> bool:
     """Global planner gate (plan 5.2). Default ON once approval binding is
     enforce; set QUILL_PLANNER=0 to restore core-workflow-only gating."""
     return os.environ.get("QUILL_PLANNER", "1") not in ("0", "false", "False")
-
-
-def approval_binding_is_enforce() -> bool:
-    """True when plan 0.4 binding is default-on (enforce). Used by graduation
-    checks — planner code default assumes this posture."""
-    raw = os.environ.get("QUILL_APPROVAL_BIND")
-    if raw is None or not str(raw).strip():
-        return True  # code default
-    v = str(raw).strip().lower()
-    if v in ("0", "off", "false", "no", "shadow", "log"):
-        return False
-    return v in ("enforce", "on", "1", "true", "yes")
 
 
 # ---------------------------------------------------------------------------

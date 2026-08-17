@@ -1312,6 +1312,7 @@ class Store:
                 ("canonical_person_id", "INTEGER"),
                 ("public_figure", "INTEGER NOT NULL DEFAULT 0"),
                 ("hide_from_people", "INTEGER NOT NULL DEFAULT 0"),
+                ("interaction_strength", "REAL"),
             ):
                 if pcols and col not in pcols:
                     self._conn.execute(
@@ -1784,6 +1785,28 @@ class Store:
             if ccols and "from_track_id" not in ccols:
                 self._conn.execute(
                     "ALTER TABLE commitments ADD COLUMN from_track_id INTEGER")
+            # Attribution provenance: every typed row records WHICH mention
+            # resolution produced (or failed to produce) its person column and
+            # at what confidence — a NULL owner becomes "attribution attempted,
+            # left open" that the re-resolve job can later fill (alias rule /
+            # merge / new person), never a dead end.
+            if tkcols and "owner_mention_id" not in tkcols:
+                self._conn.execute(
+                    "ALTER TABLE tasks ADD COLUMN owner_mention_id INTEGER")
+                self._conn.execute(
+                    "ALTER TABLE tasks "
+                    "ADD COLUMN owner_resolution_confidence REAL")
+            if ccols and "from_mention_id" not in ccols:
+                self._conn.execute(
+                    "ALTER TABLE commitments ADD COLUMN from_mention_id INTEGER")
+                self._conn.execute(
+                    "ALTER TABLE commitments "
+                    "ADD COLUMN from_resolution_confidence REAL")
+                self._conn.execute(
+                    "ALTER TABLE commitments ADD COLUMN to_mention_id INTEGER")
+                self._conn.execute(
+                    "ALTER TABLE commitments "
+                    "ADD COLUMN to_resolution_confidence REAL")
             self._conn.commit()
 
     def _migrate_commitment_state(self) -> None:
@@ -2854,6 +2877,78 @@ class Store:
                     (int(to_person_id), float(ts), int(from_person_id)))
                 self._conn.commit()
         return out
+
+    # --------------- attribution provenance: late re-resolution -----------
+    def open_attribution_mentions(self, limit: int = 500) -> list[dict]:
+        """Mention rows whose resolution was left open but which some typed
+        row (task owner / commitment party) still points at with a NULL
+        person column — the re-resolve job's work list. Newest first so
+        recent meetings benefit before archival backlog."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT m.* FROM person_mentions m
+                WHERE m.resolved_person_id IS NULL
+                  AND m.resolution_status NOT IN ('rejected', 'pending_expired')
+                  AND (EXISTS (SELECT 1 FROM tasks t
+                               WHERE t.owner_mention_id = m.mention_id
+                                 AND t.owner_person_id IS NULL)
+                       OR EXISTS (SELECT 1 FROM commitments c
+                                  WHERE c.from_mention_id = m.mention_id
+                                    AND c.from_person_id IS NULL)
+                       OR EXISTS (SELECT 1 FROM commitments c
+                                  WHERE c.to_mention_id = m.mention_id
+                                    AND c.to_person_id IS NULL))
+                ORDER BY m.observed_at DESC LIMIT ?
+                """, (int(limit),)).fetchall()
+        return [dict(r) for r in rows]
+
+    def apply_mention_reresolution(self, mention_id: int, person_id: int, *,
+                                   confidence: float, ts: float,
+                                   status: str = "resolved") -> dict:
+        """Late bind: a previously-open mention finally resolved (new alias
+        rule, human merge, newly minted person). Flips the ledger row and
+        fills the person columns of typed rows that recorded this mention.
+        P3 rebind idiom: only NULL columns are filled — an owner set since
+        (by a human or the escrow rebind) is never overwritten."""
+        mid = int(mention_id)
+        with self._lock:
+            fact_ids = [int(r["fact_id"]) for r in self._conn.execute(
+                "SELECT fact_id FROM tasks "
+                "WHERE owner_mention_id=? AND owner_person_id IS NULL "
+                "UNION "
+                "SELECT fact_id FROM commitments "
+                "WHERE (from_mention_id=? AND from_person_id IS NULL) "
+                "   OR (to_mention_id=? AND to_person_id IS NULL)",
+                (mid, mid, mid)).fetchall()]
+            self._conn.execute(
+                "UPDATE person_mentions SET resolution_status=?, "
+                "resolved_person_id=?, resolution_confidence=?, updated_at=? "
+                "WHERE mention_id=?",
+                (status, int(person_id), float(confidence), ts, mid))
+            n_tasks = self._conn.execute(
+                "UPDATE tasks SET owner_person_id=?, "
+                "owner_resolution_confidence=? "
+                "WHERE owner_mention_id=? AND owner_person_id IS NULL",
+                (int(person_id), float(confidence), mid)).rowcount
+            n_from = self._conn.execute(
+                "UPDATE commitments SET from_person_id=?, "
+                "from_resolution_confidence=? "
+                "WHERE from_mention_id=? AND from_person_id IS NULL",
+                (int(person_id), float(confidence), mid)).rowcount
+            n_to = self._conn.execute(
+                "UPDATE commitments SET to_person_id=?, "
+                "to_resolution_confidence=? "
+                "WHERE to_mention_id=? AND to_person_id IS NULL",
+                (int(person_id), float(confidence), mid)).rowcount
+            self._conn.commit()
+        # Rebound rows change the person's neighborhood — outside the lock
+        # (mark_graph_dirty takes the same non-reentrant Lock).
+        self.mark_graph_dirty("person", int(person_id), ts=ts)
+        for fid in fact_ids:
+            self.mark_graph_dirty("fact", fid, ts=ts)
+        return {"tasks": int(n_tasks), "commitments": int(n_from + n_to),
+                "fact_ids": fact_ids}
 
     def retro_link_person_rows(self, *, person_id: int, event_id: int,
                                role: str, name: str, ts: float) -> dict:
@@ -3995,8 +4090,14 @@ class Store:
     def add_task(self, text: str, *, source_event_id: int | None = None,
                  source_span: str = "", confidence: float | None = None,
                  owner_person_id: int | None = None, due: str | None = None,
+                 owner_mention_id: int | None = None,
+                 owner_resolution_confidence: float | None = None,
                  extracted_at: float) -> int:
-        """Insert a `task` fact + its typed row. Returns the fact id."""
+        """Insert a `task` fact + its typed row. Returns the fact id.
+
+        `owner_mention_id` / `owner_resolution_confidence` record the person
+        resolution that produced (or left open) the owner column, so an
+        unowned task stays joined to its mention-ledger trail."""
         with self._lock:
             cur = self._conn.execute(
                 "INSERT INTO facts (kind, source_event_id, source_span, confidence, "
@@ -4005,9 +4106,11 @@ class Store:
             )
             fid = int(cur.lastrowid)
             self._conn.execute(
-                "INSERT INTO tasks (fact_id, text, owner_person_id, due, status) "
-                "VALUES (?, ?, ?, ?, 'open')",
-                (fid, text, owner_person_id, due),
+                "INSERT INTO tasks (fact_id, text, owner_person_id, due, status, "
+                "owner_mention_id, owner_resolution_confidence) "
+                "VALUES (?, ?, ?, ?, 'open', ?, ?)",
+                (fid, text, owner_person_id, due,
+                 owner_mention_id, owner_resolution_confidence),
             )
             self._conn.commit()
         # Creation is the first access on the fact's memory trace (A1).
@@ -4022,6 +4125,10 @@ class Store:
                        source_span: str = "", confidence: float | None = None,
                        from_person_id: int | None = None,
                        to_person_id: int | None = None, due: str | None = None,
+                       from_mention_id: int | None = None,
+                       from_resolution_confidence: float | None = None,
+                       to_mention_id: int | None = None,
+                       to_resolution_confidence: float | None = None,
                        extracted_at: float) -> int:
         with self._lock:
             cur = self._conn.execute(
@@ -4032,9 +4139,13 @@ class Store:
             fid = int(cur.lastrowid)
             self._conn.execute(
                 "INSERT INTO commitments (fact_id, text, from_person_id, to_person_id, "
-                "due, status, state, counterparty_expects) "
-                "VALUES (?, ?, ?, ?, ?, 'open', 'detected', 0)",
-                (fid, text, from_person_id, to_person_id, due),
+                "due, status, state, counterparty_expects, "
+                "from_mention_id, from_resolution_confidence, "
+                "to_mention_id, to_resolution_confidence) "
+                "VALUES (?, ?, ?, ?, ?, 'open', 'detected', 0, ?, ?, ?, ?)",
+                (fid, text, from_person_id, to_person_id, due,
+                 from_mention_id, from_resolution_confidence,
+                 to_mention_id, to_resolution_confidence),
             )
             self._conn.commit()
         self.record_node_access("fact", fid, extracted_at)
@@ -4126,6 +4237,8 @@ class Store:
             if "promotion_state" in cols:
                 extra = (", actor_type, promotion_state, canonical_person_id, "
                          "public_figure, hide_from_people")
+            if "interaction_strength" in cols:
+                extra += ", interaction_strength"
             rows = self._conn.execute(
                 f"SELECT id, canonical_name, aliases, last_seen{extra} "
                 "FROM people ORDER BY id").fetchall()
@@ -4144,8 +4257,21 @@ class Store:
                     "public_figure": bool(r["public_figure"] or 0),
                     "hide_from_people": bool(r["hide_from_people"] or 0),
                 })
+            if "interaction_strength" in r.keys():
+                d["interaction_strength"] = r["interaction_strength"]
             out.append(d)
         return out
+
+    def set_person_interaction_strength(self, person_id: int, value: float) -> None:
+        with self._lock:
+            cols = {r["name"] for r in
+                    self._conn.execute("PRAGMA table_info(people)").fetchall()}
+            if "interaction_strength" not in cols:
+                return
+            self._conn.execute(
+                "UPDATE people SET interaction_strength = ? WHERE id = ?",
+                (float(value), int(person_id)))
+            self._conn.commit()
 
     def all_entities(self, *, include_hidden: bool = False) -> list[dict]:
         with self._lock:
@@ -4289,7 +4415,10 @@ class Store:
                                        confidence, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(subj_type, subj_id, predicate, obj_type, obj_id)
-                DO UPDATE SET weight = weight + excluded.weight,
+                DO UPDATE SET weight = CASE
+                                  WHEN relations.origin = excluded.origin
+                                  THEN weight + excluded.weight
+                                  ELSE MAX(weight, excluded.weight) END,
                               source_event_id = COALESCE(relations.source_event_id,
                                                          excluded.source_event_id)
                 """,

@@ -285,6 +285,19 @@ class GroundingTests(unittest.TestCase):
         self.assertEqual(hit["route"], "speaker_beliefs")
         self.assertEqual(hit["via"], "llm")
 
+    def test_paired_peer_hostname_grounds_who_is(self) -> None:
+        roster = [{
+            "id": 1, "name": "User 2", "base_url": "http://192.168.86.42:8000",
+            "presence": "offline", "person_id": None, "person_name": None,
+        }]
+        with mock.patch("app.services.peer_channel.peers", return_value=roster):
+            out = gr.compose("Who is User 2?", store=_FakeStore())
+        blob = out["block"]
+        self.assertIn("PAIRED TEAMMATES", blob)
+        self.assertIn("User 2", blob)
+        self.assertIn("not linked", blob.lower())
+        self.assertIn("192.168.86.42", blob)
+
 
 if __name__ == "__main__":
     unittest.main()

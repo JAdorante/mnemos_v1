@@ -20,6 +20,7 @@ the golden gate.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
@@ -284,8 +285,13 @@ def resolve_person_mention(
     now: float | None = None,
     relationship_boost: float = 0.6,
     attendee_priors: list[dict] | None = None,
+    bind_only: bool = False,
 ) -> ResolveResult:
     """Resolve a name mention under People v2 policy.
+
+    `bind_only`: bind to EXISTING people only — a would-be create_new is
+    downgraded to leave_open. Used by the late re-resolution job, which must
+    never mint from stale names.
 
     Returns person_id or None (leave_open / reject / policy deny). Always
     persists a PersonMention when event_id is set and extract_mentions allows.
@@ -405,6 +411,9 @@ def resolve_person_mention(
             auto_margin=margin_t,
             create_new=_thr_create_new(),
         )
+
+    if bind_only and decision == "create_new":
+        decision, chosen_row = "leave_open", None
 
     # Single-token names ("justin", "Marc") may bind / leave_open, but must
     # not mint a new network node unless an invite email anchors identity.
@@ -922,7 +931,7 @@ def ingest_email_network(
         return {"ok": False, "reason": "disabled_or_empty", "parties": 0}
     policy = sp.policy_for_event(
         event_source=event_source, window=window, text=text)
-    if policy.source_class != "email":
+    if policy.source_class not in ("email", "exhaust"):
         return {"ok": False, "reason": f"source_class={policy.source_class}",
                 "parties": 0}
     if not policy.extract_contacts and not policy.update_people:
@@ -985,3 +994,77 @@ def ingest_email_network(
                 pass
     return {"ok": True, "parties": len(parties), "contacts": written,
             "affiliations": affiliations}
+
+
+# ---------------------------------------------------------------------------
+# Attribution provenance: late re-resolution of open mentions
+# ---------------------------------------------------------------------------
+def reresolve_open_mentions(store, *, now: float | None = None,
+                            limit: int = 500) -> dict:
+    """Re-run resolution for mentions left open but still referenced by an
+    unowned task / commitment (the typed row recorded their mention_id).
+    Alias rules, human merges, and people minted since the original sighting
+    can now bind them - the fix flows back onto the fact row.
+
+    Ledger-preserving and idempotent: re-resolution runs with event_id=None
+    (no new mention rows) and bind_only=True (never mints); on success the
+    ORIGINAL mention row flips to resolved and only still-NULL person
+    columns are filled.
+    """
+    if not enabled():
+        return {"ok": False, "reason": "people_v2_off", "checked": 0}
+    ts = now if now is not None else time.time()
+    checked = bound = tasks_fixed = commitments_fixed = 0
+    try:
+        mentions = store.open_attribution_mentions(limit=limit)
+    except Exception as exc:
+        print(f"[people] reresolve scan skipped ({exc}).")
+        return {"ok": False, "reason": str(exc), "checked": 0}
+    for m in mentions:
+        checked += 1
+        name = (m.get("normalized_text") or m.get("raw_text") or "").strip()
+        if not name:
+            continue
+        # Re-run under the ORIGINAL event's source policy so a name first
+        # seen on a news tab stays gated the same way on the re-run.
+        ev_source, window = "audio.whisper", ""
+        try:
+            ev = store.get_event(int(m["event_id"])) if m.get("event_id") else None
+            if ev:
+                ev_source = ev.get("source") or ev_source
+                meta = ev.get("meta")
+                if isinstance(meta, str):
+                    meta = json.loads(meta or "{}")
+                window = str((meta or {}).get("window") or "")
+        except Exception:
+            pass
+        res = resolve_person_mention(
+            name, store=store, event_id=None,
+            event_source=ev_source, window=window,
+            text=m.get("raw_text") or name,
+            grammatical_role=m.get("grammatical_role") or "unknown",
+            now=ts, bind_only=True)
+        if not res.person_id:
+            continue
+        out = store.apply_mention_reresolution(
+            int(m["mention_id"]), int(res.person_id),
+            confidence=float(res.confidence), ts=ts,
+            status=("provisional" if res.decision == "provisional_bind"
+                    else "resolved"))
+        bound += 1
+        tasks_fixed += int(out.get("tasks") or 0)
+        commitments_fixed += int(out.get("commitments") or 0)
+    if bound:
+        print(f"[people] reresolve: {bound}/{checked} open mentions bound "
+              f"({tasks_fixed} tasks, {commitments_fixed} commitments).")
+    return {"ok": True, "checked": checked, "bound": bound,
+            "tasks": tasks_fixed, "commitments": commitments_fixed}
+
+
+def run_reresolve_job(_payload=None) -> None:
+    """Worker job wrapper (registered as 'people_reattribute')."""
+    from app.storage import get_store
+    try:
+        reresolve_open_mentions(get_store())
+    except Exception as exc:
+        print(f"[people] reresolve job failed ({exc}).")

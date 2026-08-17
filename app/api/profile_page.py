@@ -102,13 +102,7 @@ body{margin:0;min-height:100vh;font:15px/1.55 var(--font);color:var(--text);
 <header class="top">
   <a class="brand" href="/">@@MARK@@ @@BRAND@@</a>
   <span class="page-sub">You</span>
-  <nav class="nav">
-    <a href="/today">Today</a>
-    <a href="/chat">Chat</a>
-    <a href="/memory">Memory</a>
-    <a class="on" href="/profile">You</a>
-    <a href="/onboarding">Setup</a>
-  </nav>
+  @@NAV@@
   <span class="spacer"></span>
 </header>
 
@@ -157,6 +151,7 @@ body{margin:0;min-height:100vh;font:15px/1.55 var(--font);color:var(--text);
           <input type="checkbox" id="pShowCandidates"> Show candidates
         </label>
       </div>
+      <div id="exhaustSeed" class="empty" hidden style="margin-top:8px"></div>
       <div id="peopleList"><div class="empty">Loading…</div></div>
     </section>
   </div>
@@ -345,13 +340,29 @@ async function loadPeople(force){
 function renderPeopleList(){
   const q=(document.getElementById('pSearch').value||'').toLowerCase();
   const el=document.getElementById('peopleList');
+  const seed=document.getElementById('exhaustSeed');
   const rows=peopleCache.filter(p=>!q||p.name.toLowerCase().includes(q));
+  const seeded=rows.filter(p=>p.from_calendar || (p.interaction_strength||0)>0);
+  if(seed){
+    seed.hidden=!seeded.length;
+    if(seeded.length){
+      seed.className='';
+      seed.style.cssText='margin-top:8px;border:1px dashed var(--line);border-radius:12px;padding:12px 14px';
+      seed.innerHTML='<div class="plabel" style="margin:0 0 6px">Seeded from your email/calendar</div>'
+        +'<p class="lead" style="margin:0 0 8px">Confirm people you know, merge duplicates, or forget noise. Nothing here authorizes an action.</p>'
+        +seeded.slice(0,12).map(p=>'<div class="prow" data-pid="'+p.id+'">'
+          +'<div style="flex:1"><span class="nm">'+MnemosEsc(p.name)+'</span>'
+          +(p.from_calendar?' <span class="chip">calendar</span>':' <span class="chip">email</span>')
+          +'</div></div>').join('');
+    }
+  }
   if(!rows.length){el.innerHTML='<div class="empty">No one in your network yet — name people in setup, chat, or speech and they\'ll appear. Turn on “Show candidates” to review unresolved mentions.</div>';return;}
   el.innerHTML=rows.map(p=>{
     const row='<div class="prow" data-pid="'+p.id+'">'
       +'<div style="flex:1"><span class="nm">'+MnemosEsc(p.name)+'</span>'
       +(p.is_self?' <span class="chip">you</span>':'')
       +(p.promotion_state==='candidate'?' <span class="chip">candidate</span>':'')
+      +(p.from_calendar?' <span class="chip">calendar</span>':'')
       +'<div class="meta">connection '+p.weight.toFixed(1)+' · '+fmtSeen(p.last_seen)+'</div></div>'
       +'<span class="meta">'+(openPersonId===p.id?'▾':'▸')+'</span></div>';
     return row+(openPersonId===p.id?'<div class="pdetail" id="pDetail"><div class="lead">Loading…</div></div>':'');
@@ -439,7 +450,13 @@ async function loadPersonDetail(pid){
   }else{
     h+='<div class="empty">No facts yet — the note box above is the fastest way to teach me.</div>';
   }
-  if(!p.is_self) h+='<button class="forget-person" data-pact="forget">Forget this person…</button>';
+  if(!p.is_self){
+    h+='<div class="pfield" style="margin-top:14px">'
+      +'<button data-pact="confirm">Confirm</button>'
+      +'<button data-pact="merge">Merge…</button>'
+      +'<button class="forget-person" data-pact="forget">Forget this person…</button>'
+      +'</div>';
+  }
   host.innerHTML=h;
   host.dataset.pid=pid;
 }
@@ -476,6 +493,16 @@ async function personAct(pid, act, key, ref, value){
     const text=document.getElementById('pNote').value.trim(); if(!text) return;
     await fetch('/people/'+pid+'/note',{method:'POST',
       headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});
+  }else if(act==='confirm'){
+    await fetch('/people/'+pid+'/confirm',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({state:'contact'})});
+  }else if(act==='merge'){
+    const other=prompt('Id of the person to merge INTO this one (absorbed id):');
+    if(!other) return;
+    const r=await fetch('/people/'+pid+'/soft-merge',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({absorbed_id:parseInt(other,10),reason:'exhaust merge'})});
+    if(!r.ok){alert((await r.json()).detail||'merge failed');return;}
   }else if(act==='forget'){
     const p=peopleCache.find(x=>x.id===pid);
     if(!confirm('Forget '+(p?p.name:'this person')+'? Their node and connections are removed; facts stay but are detached.')) return;
