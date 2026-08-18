@@ -860,6 +860,108 @@ def console_escalate(recent: int = 20) -> dict:
     return escalate_log.stats(recent=max(0, min(int(recent), 100)))
 
 
+# --- learning loop (Workstream A): the user-trust surface -------------------
+@router.get("/learning/pairs")
+def learning_pairs_list(task_type: str = "", limit: int = 200) -> dict:
+    """Recent learning pairs, newest first, optionally filtered by task_type.
+    This is the Learning tab's table — what Mnemos harvested and from where."""
+    store = memory._ensure_store()
+    rows = store.list_learning_pairs(
+        task_type=task_type or None, limit=max(1, min(int(limit), 500)))
+    return {"count": len(rows), "pairs": rows}
+
+
+@router.delete("/learning/pairs/{pair_id}")
+def learning_pair_delete(pair_id: str) -> dict:
+    """Hard delete one pair (cascades to its exemplar). Invariant 4 applied to
+    data: everything harvested is user-visible and user-deletable."""
+    from app.services import learning_store
+    ok = learning_store.delete(pair_id, store=memory._ensure_store())
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"no learning pair {pair_id}")
+    return {"ok": True, "pair_id": pair_id}
+
+
+@router.post("/learning/pairs/{pair_id}/confirm")
+def learning_pair_confirm(pair_id: str) -> dict:
+    """Promote a shadow-derived pair to human-confirmed (B.4 review card)."""
+    from app.services import learning_store
+    ok = learning_store.confirm(pair_id, store=memory._ensure_store())
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"no learning pair {pair_id}")
+    return {"ok": True, "pair_id": pair_id, "human_confirmed": True}
+
+
+@router.get("/learning/stats")
+def learning_stats() -> dict:
+    """Counter widget: pairs collected this week / total, by task_type."""
+    from app.services import learning_store
+    from app.config import settings as _settings
+    return {"enabled": bool(_settings.learning.enabled),
+            **learning_store.counts(store=memory._ensure_store())}
+
+
+@router.get("/learning/router")
+def learning_router_report() -> dict:
+    """Escalation-router weekly report (D.5): router vs heuristic — the
+    evidence shown before offering QUILL_ROUTER=active."""
+    from app.services.escalation_router import escalation_router
+    return escalation_router.report()
+
+
+@router.get("/learning/shadow")
+def learning_shadow(days: int = 7) -> dict:
+    """Shadow-eval weekly rollup (B.5): agreement rate by task, top reason
+    codes, budget spent — the measurement that justifies/kills per-type LoRA."""
+    from app.services import shadow_eval
+    return shadow_eval.report(days=max(1, min(int(days), 30)))
+
+
+@router.post("/learning/shadow/run")
+def learning_shadow_run() -> dict:
+    """Manual trigger (the nightly path is the idle scheduler)."""
+    from app.services import shadow_eval
+    if not shadow_eval.enabled():
+        raise HTTPException(status_code=404,
+                            detail="shadow eval is disabled (QUILL_SHADOW_EVAL=1)")
+    return shadow_eval.run_nightly()
+
+
+@router.get("/learning/exemplars")
+def learning_exemplars(task_type: str = "", limit: int = 200) -> dict:
+    """'What Mnemos has learned' — exemplars by type, with use counts (C.6)."""
+    from app.services.exemplar_store import exemplar_store
+    return {"stats": exemplar_store.stats(),
+            "rows": exemplar_store.list_rows(
+                task_type=task_type or None,
+                limit=max(1, min(int(limit), 500)))}
+
+
+@router.delete("/learning/exemplars/{exemplar_id}")
+def learning_exemplar_delete(exemplar_id: str) -> dict:
+    """Delete one exemplar (its learning pair stays; re-confirming re-mints)."""
+    from app.services.exemplar_store import exemplar_store
+    exemplar_store.delete(exemplar_id)
+    return {"ok": True, "exemplar_id": exemplar_id}
+
+
+class ExemplarGateBody(BaseModel):
+    task_type: str          # a task_type, or "_all" for the kill switch
+    off: bool
+
+
+@router.post("/learning/exemplars/gate")
+def learning_exemplar_gate(body: ExemplarGateBody) -> dict:
+    """Console gate: per-type off switch; task_type='_all' mirrors
+    QUILL_EXEMPLARS=0 at runtime without editing .env (invariant 4)."""
+    from app.services.exemplar_store import exemplar_store
+    if not (body.task_type or "").strip():
+        raise HTTPException(status_code=400, detail="task_type required")
+    gates = exemplar_store.set_gate(body.task_type.strip(), bool(body.off),
+                                    reason="console")
+    return {"ok": True, "gates": gates}
+
+
 @router.get("/console/readiness")
 def console_readiness(limit: int = 100) -> dict:
     """Unified action-readiness (#10) across the open-task board: each task's
@@ -1233,10 +1335,18 @@ def graph_org_people(name: str) -> dict:
 def kg_evidence_verdict(evidence_id: int, verdict: str) -> dict:
     """Change 4: evidence-drawer confirm/reject → kg_adjudications flywheel."""
     from app.services import kg_beliefs
-    out = kg_beliefs.evidence_verdict(
-        memory._ensure_store(), int(evidence_id), verdict)
+    store = memory._ensure_store()
+    out = kg_beliefs.evidence_verdict(store, int(evidence_id), verdict)
     if not out.get("ok"):
         raise HTTPException(status_code=400, detail=out.get("error") or "bad request")
+    # Workstream A: claim adjudications are learning pairs (best-effort).
+    try:
+        from app.services import learning_store
+        ev = store.get_kg_evidence(int(evidence_id)) or {}
+        pred = store.get_kg_predicate(int(ev.get("predicate_id") or 0)) or {}
+        learning_store.record_kg_evidence_verdict(ev, pred, verdict, store=store)
+    except Exception as exc:
+        print(f"[learning_store] kg harvest skipped ({exc}).")
     return out
 
 
@@ -2730,6 +2840,17 @@ def _label_distill_outcome(fact: dict, outcome: str,
         print(f"[escalate_log] fact outcome label skipped ({exc}).")
 
 
+def _harvest_fact_verdict(fact: dict, verdict: str,
+                          edited_text: str | None = None) -> None:
+    """Workstream A: every fact-review verdict is a learning pair (best-effort)."""
+    try:
+        from app.services import learning_store
+        learning_store.record_fact_verdict(fact, verdict,
+                                           edited_text=edited_text)
+    except Exception as exc:
+        print(f"[learning_store] fact harvest skipped ({exc}).")
+
+
 @router.get("/profile", response_class=HTMLResponse)
 def profile_ui() -> HTMLResponse:
     """You — the living user profile: see, correct, or forget what the system
@@ -3230,6 +3351,15 @@ def people_soft_merge(person_id: int, body: SoftMergeBody) -> dict:
         raise HTTPException(status_code=400, detail="cannot merge a person into self")
     mid = store.soft_merge_people(
         person_id, body.absorbed_id, reason=body.reason, actor="user")
+    # Workstream A: a human-approved merge is identity-resolution ground truth.
+    try:
+        from app.services import learning_store
+        learning_store.record_person_merge(
+            store.get_person(person_id) or {},
+            store.get_person(body.absorbed_id) or {},
+            merge_id=mid, store=store)
+    except Exception as exc:
+        print(f"[learning_store] merge harvest skipped ({exc}).")
     # The merge's alias rules may now bind mentions that were left open —
     # sweep unowned tasks/commitments so the fix flows back onto facts.
     try:
@@ -3560,6 +3690,7 @@ def work_bulk(body: WorkBulk) -> dict:
             elif action == "dismiss":
                 store.review_fact(fid, "dismissed")
                 _label_distill_outcome(fact, "rejected")
+                _harvest_fact_verdict(fact, "dismissed")
             elif action == "due":
                 if not store.set_fact_due(fid, body.due, now):
                     results.append({"fact_id": fid, "ok": False,
@@ -3582,6 +3713,7 @@ def work_bulk(body: WorkBulk) -> dict:
                 except Exception:
                     pass
                 _label_distill_outcome(fact, "edited", edited_text=text)
+                _harvest_fact_verdict(fact, "edited", edited_text=text)
             results.append({"fact_id": fid, "ok": True})
         except Exception as exc:
             results.append({"fact_id": fid, "ok": False, "error": str(exc)})
@@ -3614,6 +3746,7 @@ def fact_approve(fact_id: int) -> dict:
     fact = _get_or_404(fact_id)
     memory._ensure_store().review_fact(fact_id, "approved")
     _label_distill_outcome(fact, "accepted")
+    _harvest_fact_verdict(fact, "accepted")
     refreshed = memory._ensure_store().get_fact(fact_id) or fact
     return {"ok": True, "fact_id": fact_id, "review": "approved",
             "commitment_state": refreshed.get("commitment_state")}
@@ -3626,6 +3759,7 @@ def fact_dismiss(fact_id: int) -> dict:
     fact = _get_or_404(fact_id)
     memory._ensure_store().review_fact(fact_id, "dismissed")
     _label_distill_outcome(fact, "rejected")
+    _harvest_fact_verdict(fact, "dismissed")
     refreshed = memory._ensure_store().get_fact(fact_id) or fact
     return {"ok": True, "fact_id": fact_id, "review": "dismissed",
             "commitment_state": refreshed.get("commitment_state")}
@@ -3770,6 +3904,7 @@ def fact_edit(fact_id: int, body: FactEdit) -> dict:
     except Exception:
         pass
     _label_distill_outcome(fact, "edited", edited_text=body.text)
+    _harvest_fact_verdict(fact, "edited", edited_text=body.text)
     return {"ok": True, "fact_id": fact_id, "review": "edited", "text": body.text}
 
 
@@ -3846,26 +3981,40 @@ def _item_or_404(item_id: int) -> dict:
     return it
 
 
+def _harvest_reflection_verdict(item: dict, verdict: str,
+                                edited_text: str | None = None) -> None:
+    """Workstream A: audit/insight verdicts are learning pairs (best-effort)."""
+    try:
+        from app.services import learning_store
+        learning_store.record_reflection_verdict(item, verdict,
+                                                 edited_text=edited_text)
+    except Exception as exc:
+        print(f"[learning_store] reflection harvest skipped ({exc}).")
+
+
 @router.post("/reflection_items/{item_id}/approve")
 def reflection_item_approve(item_id: int) -> dict:
-    _item_or_404(item_id)
+    item = _item_or_404(item_id)
     memory._ensure_store().review_reflection_item(item_id, "approved")
+    _harvest_reflection_verdict(item, "accepted")
     return {"ok": True, "item_id": item_id, "review": "approved"}
 
 
 @router.post("/reflection_items/{item_id}/dismiss")
 def reflection_item_dismiss(item_id: int) -> dict:
-    _item_or_404(item_id)
+    item = _item_or_404(item_id)
     memory._ensure_store().review_reflection_item(item_id, "dismissed")
+    _harvest_reflection_verdict(item, "dismissed")
     return {"ok": True, "item_id": item_id, "review": "dismissed"}
 
 
 @router.post("/reflection_items/{item_id}/edit")
 def reflection_item_edit(item_id: int, body: FactEdit) -> dict:
-    _item_or_404(item_id)
+    item = _item_or_404(item_id)
     ok = memory._ensure_store().edit_reflection_item_text(item_id, body.text)
     if not ok:
         raise HTTPException(status_code=400, detail="empty or unapplied edit")
+    _harvest_reflection_verdict(item, "edited", edited_text=body.text)
     return {"ok": True, "item_id": item_id, "review": "edited", "text": body.text}
 
 
@@ -4407,6 +4556,18 @@ def chat_outcome(body: ChatOutcomeIn) -> dict:
                                                  store=memory._ensure_store())
     except Exception as exc:
         print(f"[chat_outcome] attention join skipped ({exc}).")
+    # Workstream A: the labeled row is also a canonical learning pair.
+    try:
+        from app.services import learning_store
+        from app.services.escalate_log import escalate_log as _elog
+        row = _elog.row_by_id(rid)
+        if row:
+            learning_store.record_from_distill(
+                row, outcome,
+                edited_text=(body.edited_text.strip()
+                             if body.edited_text else None))
+    except Exception as exc:
+        print(f"[learning_store] chat harvest skipped ({exc}).")
     return {"ok": True, "distill_id": rid, "outcome": outcome}
 
 
@@ -6859,6 +7020,7 @@ img.thumb.big{max-height:none;max-width:100%}
       <span class="chip" id="attnchip" onclick="pickAttention()">Attention</span>
       <span class="chip" id="egresschip" onclick="pickEgress()">Egress</span>
       <span class="chip" id="healthchip" onclick="pickHealth()">Audio Health</span>
+      <span class="chip" id="learnchip" onclick="pickLearning()">Learning</span>
       <span class="chip" id="lowchip" onclick="toggleLow()">Low-confidence</span>
     </div>
   </div>
@@ -7066,6 +7228,7 @@ function setViewUI(){
  document.getElementById('attnchip').classList.toggle('on',view==="attention");
  document.getElementById('egresschip').classList.toggle('on',view==="egress");
  document.getElementById('healthchip').classList.toggle('on',view==="health");
+ document.getElementById('learnchip').classList.toggle('on',view==="learning");
  const rb=document.getElementById('rebuild');
  rb.style.display=(view==="turns"||view==="activity"||view==="sessions")?'inline-block':'none';
  rb.textContent=view==="activity"?'Rebuild activity':view==="sessions"?'Rebuild sessions':'Rebuild turns';
@@ -7093,6 +7256,9 @@ function pickEgress(){view="egress";
 function pickHealth(){view="health";
  document.querySelectorAll('#archiveTabs .chip').forEach(c=>c.classList.remove('on'));
  document.getElementById('healthchip').classList.add('on');setViewUI();load();}
+function pickLearning(){view="learning";
+ document.querySelectorAll('#archiveTabs .chip').forEach(c=>c.classList.remove('on'));
+ document.getElementById('learnchip').classList.add('on');setViewUI();load();}
 function toggleLow(){low=!low;document.getElementById('lowchip').classList.toggle('on',low);
  if(view!=="raw"){view="raw";setViewUI();}load();}
 async function rebuild(){document.getElementById('stat').textContent='rebuilding…';
@@ -7339,6 +7505,95 @@ async function loadReflect(){
 }
 async function itemAction(id,verb){
  await fetch('/reflection_items/'+id+'/'+verb,{method:'POST'}); loadReflect();
+}
+// --- Learning tab: what Mnemos harvested from your verdicts (Workstream A) --
+function learnRow(p){
+ const bits=[fmtTime(p.created_at)];
+ bits.push('<span class="spk">'+esc(p.verdict)+'</span>');
+ bits.push(esc(p.verdict_source||''));
+ if(p.model_tag) bits.push(esc(p.model_tag));
+ if(!p.human_confirmed) bits.push('<span class="lowtag">unconfirmed (shadow)</span>');
+ if(!p.shadow_eligible) bits.push('<span class="pill" title="personal-classed — never sent to cloud shadow eval">local-only</span>');
+ const target=p.final_target?'<div class="detail">→ '+esc(p.final_target)+'</div>':'';
+ const confirm=(!p.human_confirmed)
+   ?'<button class="mini done" onclick="learnConfirm(\''+p.id+'\')">✓ Confirm</button>':'';
+ return '<div class="row"><span class="kind">'+esc(p.task_type)+'</span>'
+  +'<div class="body"><div class="text">'+esc(p.input_text||'(empty)')+'</div>'+target
+  +'<div class="meta">'+bits.join('<span>·</span>')+'</div>'
+  +'<div class="acts">'+confirm
+  +'<button class="mini drop" onclick="learnDelete(\''+p.id+'\')">✕ Delete</button>'
+  +'</div></div></div>';
+}
+function exemplarRow(x){
+ const bits=[fmtTime(x.created_at),'<span class="spk">'+esc(x.quality_tier||'')+'</span>',
+   'used '+(x.use_count||0)+'×'];
+ return '<div class="row"><span class="kind">'+esc(x.task_type)+'</span>'
+  +'<div class="body"><div class="text">'+esc((x.input_text||'').slice(0,240))+'</div>'
+  +'<div class="detail">→ '+esc((x.target_text||'').slice(0,240))+'</div>'
+  +'<div class="meta">'+bits.join('<span>·</span>')+'</div>'
+  +'<div class="acts"><button class="mini drop" onclick="exemplarDelete(\''+x.exemplar_id+'\')">✕ Delete</button></div>'
+  +'</div></div>';
+}
+async function loadLearning(){
+ try{
+  const [sj,pj,ej,shj]=await Promise.all([
+    (await fetch('/learning/stats')).json(),
+    (await fetch('/learning/pairs?limit=200')).json(),
+    (await fetch('/learning/exemplars?limit=100')).json(),
+    (await fetch('/learning/shadow')).json()]);
+  const wk=Object.values(sj.week||{}).reduce((a,t)=>a+(t.total||0),0);
+  const tot=Object.values(sj.total||{}).reduce((a,t)=>a+(t.total||0),0);
+  const es=ej.stats||{};
+  document.getElementById('stat').textContent=wk+' this week · '+tot+' total · '
+    +(es.count||0)+' exemplar'+((es.count||0)===1?'':'s');
+  const types={};
+  (pj.pairs||[]).forEach(p=>{(types[p.task_type]=types[p.task_type]||[]).push(p);});
+  const cards='<div class="hgrid">'+Object.entries(sj.total||{}).map(([k,v])=>
+    '<div class="hcard"><div class="hlabel">'+esc(k)+'</div><div class="hval">'+(v.total||0)
+    +'</div><div class="hsub">'+((sj.week||{})[k]?((sj.week[k].total||0)+' this week'):'quiet this week')
+    +'</div></div>').join('')+'</div>';
+  const allOff=!!((es.gates||{})._all||{}).off;
+  const killBtn='<div class="acts" style="margin:4px 0 8px">'
+    +'<button class="mini'+(allOff?' done':' drop')+'" onclick="exemplarKill('+(!allOff)+')">'
+    +(allOff?'▶ Re-enable exemplar injection':'⏸ Pause exemplar injection')+'</button>'
+    +(es.enabled?'':'<span class="lowtag" style="margin-left:8px">QUILL_EXEMPLARS=0 (store off)</span>')
+    +'</div>';
+  const exSec=(ej.rows&&ej.rows.length)
+    ?'<div class="sechead">What @@BRAND@@ has learned (exemplars)</div>'+killBtn
+      +ej.rows.map(exemplarRow).join('')
+    :(es.enabled?'<div class="sechead">Exemplars</div>'+killBtn
+      +'<div class="empty">No exemplars yet — 👍 or ✏️ verdicts mint them.</div>':'');
+  let shSec='';
+  if(shj&&shj.enabled){
+    const at=shj.agreement_by_task||{};
+    const cards2=Object.entries(at).map(([k,v])=>
+      '<div class="hcard"><div class="hlabel">shadow · '+esc(k)+'</div>'
+      +'<div class="hval">'+(v.agree_rate==null?'—':Math.round(v.agree_rate*100)+'%')+'</div>'
+      +'<div class="hsub">agree rate · '+v.graded+' graded</div></div>').join('');
+    const reasons=(shj.top_reason_codes||[]).map(r=>'<span class="pill">'+esc(r[0])+' ×'+r[1]+'</span>').join(' ');
+    shSec='<div class="sechead">Shadow evaluation (last '+shj.window_days+' day'+(shj.window_days===1?'':'s')+')</div>'
+      +(cards2?'<div class="hgrid">'+cards2+'</div>':'<div class="empty">No shadow grades yet — runs while the machine is idle.</div>')
+      +(reasons?'<div class="hsub" style="margin:8px 2px">'+reasons+' · '+(shj.tokens_spent||0)+' tokens spent</div>':'');
+  }
+  const rows=Object.entries(types).map(([k,arr])=>
+    '<div class="sechead">'+esc(k)+'</div>'+arr.map(learnRow).join('')).join('');
+  list.innerHTML=(tot?cards:'')+shSec+exSec+(rows||'<div class="empty">Nothing harvested yet — '
+    +'approve, edit, or dismiss anything (tasks, chat answers, insights) and it lands here. '
+    +'Every row is yours to delete.</div>');
+ }catch(e){ list.innerHTML='<div class="empty">error loading: '+e+'</div>'; }
+}
+async function exemplarDelete(id){
+ await fetch('/learning/exemplars/'+id,{method:'DELETE'}); loadLearning();
+}
+async function exemplarKill(off){
+ await fetch('/learning/exemplars/gate',{method:'POST',headers:{'Content-Type':'application/json'},
+   body:JSON.stringify({task_type:'_all',off:off})}); loadLearning();
+}
+async function learnDelete(id){
+ await fetch('/learning/pairs/'+id,{method:'DELETE'}); loadLearning();
+}
+async function learnConfirm(id){
+ await fetch('/learning/pairs/'+id+'/confirm',{method:'POST'}); loadLearning();
 }
 async function itemEdit(id,current){
  const t=prompt('Edit this insight:',current); if(t==null) return;
@@ -7744,6 +7999,7 @@ async function load(){
  if(view==="attention"){ return loadAttention(); }
  if(view==="egress"){ return loadEgress(); }
  if(view==="health"){ return loadHealth(); }
+ if(view==="learning"){ return loadLearning(); }
  if(view==="turns"){ return loadTurns(); }
  if(view==="activity"){ return loadActivity(); }
  if(view==="sessions"){ return loadSessions(); }

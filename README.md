@@ -454,26 +454,57 @@ Outbound SMS via Windows Phone Link UI automation after approval
 
 ---
 
-## The learning loop — from verdicts to weights
+## The learning loop — verdicts → exemplars → router → LoRA
 
-**Files:** [few_shot.py](app/services/few_shot.py) ·
-[grounding.py](app/services/grounding.py) ·
-[scripts/bench_text.py](scripts/bench_text.py) ·
-[scripts/distill_curate.py](scripts/distill_curate.py) ·
-[scripts/train_lora.py](scripts/train_lora.py)
+**Files:** [learning_store.py](app/services/learning_store.py) ·
+[exemplar_store.py](app/services/exemplar_store.py) ·
+[shadow_eval.py](app/services/shadow_eval.py) ·
+[escalation_router.py](app/services/escalation_router.py) ·
+[few_shot.py](app/services/few_shot.py) ·
+[scripts/eval_exemplars.py](scripts/eval_exemplars.py) ·
+[scripts/train_lora.py](scripts/train_lora.py) ·
+[scripts/demo_learning_loop.py](scripts/demo_learning_loop.py)
+
+Every verdict you give anywhere — approving or editing an extracted task,
+👍/👎/✏️ on a chat answer, confirming an audit item, merging two people,
+adjudicating a claim — becomes one canonical **learning pair**
+(`learning_pairs` in SQLite, visible and deletable in the Console's
+**Learning** tab). Four mechanisms consume them, in order of how fast they
+pay off:
 
 ```
-chat answer → 👍/👎/✏️ verdict → distill row
-  ├─ few-shot: verified answers retrieved into the LOCAL prompt
-  ├─ calibration: evidence floors miscalibrated confidence
-  ├─ bench: replay labeled rows vs human gold
-  └─ LoRA (periodic): curate → train → package → gate on holdout
+any human verdict ──► learning pair (redacted, provenance-linked)
+  ├─ 1. EXEMPLARS (same day)   confirmed pairs are embedded; the next similar
+  │      QUILL_EXEMPLARS=1     input retrieves your correction into the local
+  │                            prompt — no GPU, rollback = delete a row.
+  │                            A/B-measured per type; losing types auto-gate off.
+  ├─ 2. SHADOW EVAL (nightly)  while idle, Claude re-grades a small batch of
+  │      QUILL_SHADOW_EVAL=1   kept local answers (cost-capped, never
+  │                            personal-classed content); disagreements become
+  │                            pairs you confirm with one click.
+  ├─ 3. ROUTER (weekly-ish)    a small calibrated classifier learns "will the
+  │      QUILL_ROUTER=shadow   local model fail on this?" — first in shadow
+  │                            (logged next to the heuristic), activated only
+  │                            by your explicit flag flip.
+  └─ 4. LoRA (graduation)      when a task type saturates the exemplar store
+         QUILL_IDLE_TRAIN=1    (~300 confirmed pairs + plateaued A/B gains),
+                               the idle QLoRA pipeline fires — and promotes
+                               only if it beats the exemplar-augmented
+                               incumbent on the holdout bench.
 ```
+
+**What it is not:** nothing here changes what Mnemos is *allowed* to do —
+learning affects the quality of proposals, never the authority to act (risk
+stays a lookup table, enforced by tests). Nothing personal-classed leaves
+the machine through shadow eval. Promotion is always an offer with a
+rollback line, never a silent swap — for exemplars (delete the row), the
+router (flip back to `shadow`), and LoRA tags alike. New installs never
+ship user-specific weights — personalization accrues from natural verdicts
+(`tests/test_no_user_tailoring.py`).
 
 Answers show **Sources:** (person graph / open tasks / screen & camera /
-timeline / activity). New installs never ship user-specific weights —
-personalization accrues from natural verdicts
-(`tests/test_no_user_tailoring.py`).
+timeline / activity). See the whole loop run end-to-end on a fixture DB:
+`python scripts/demo_learning_loop.py`.
 
 ---
 
@@ -490,6 +521,7 @@ personalization accrues from natural verdicts
 | **Tasks** | Fact review: approve / done / edit / dismiss + source quote |
 | **Reflection** | Daily insights with convert-to-task |
 | **Audio Health / Low-confidence** | Capture quality and unsure items |
+| **Learning** | Every harvested verdict pair (deletable), exemplars ("what Mnemos has learned", with a pause switch), shadow-eval agreement rates, one-click confirm for shadow-found corrections |
 
 Related surfaces: `/today` · `/chat` · `/ui` · `/profile` · `/org/{id}` ·
 `/meetings` · `/triggers` · `/peer` · `/desktop-access` · `/onboarding` ·
@@ -766,6 +798,28 @@ loaded after `.env` with override, for secrets.
 | `QUILL_TEXT_LOCAL_TIMEOUT_S` | `45` | local text timeout |
 | `QUILL_TEXT_ESCALATE_MIN_CONF` | `0.6` | escalate below this self-reported confidence |
 | `QUILL_TEXT_HIGH_STAKES_TASKS` | `plan` | comma-separated tasks that always escalate |
+
+### Learning loop (verdict harvesting → exemplars → shadow eval → router → LoRA)
+
+| Var | Default | Notes |
+|---|---|---|
+| `QUILL_LEARNING` | `1` | harvest every human verdict into `learning_pairs` (local-only writes) |
+| `QUILL_LEGACY_DISTILL` | `1` | keep dual-writing `escalate_distill.jsonl` during the transition |
+| `QUILL_EXEMPLARS` | `0` | exemplar-store retrieval into the local prompt (few_shot stays the fallback) |
+| `QUILL_EXEMPLAR_K` | `3` | exemplars injected per call |
+| `QUILL_EXEMPLAR_MIN_SIM` | `0.75` | cosine floor per retrieved exemplar |
+| `QUILL_EXEMPLAR_TOKEN_BUDGET` | `1200` | total added tokens per call |
+| `QUILL_SHADOW_EVAL` | `0` | idle re-grading of kept local outputs by Claude |
+| `QUILL_SHADOW_BATCH` | `20` | outputs graded per night (stratified) |
+| `QUILL_SHADOW_BUDGET_TOKENS` | `250000` | hard daily token ceiling (≈$0.40–0.50/day at Haiku 4.5 list rates) |
+| `QUILL_SHADOW_MODEL` | `claude-haiku-4-5` | grader tier |
+| `QUILL_SHADOW_AUTOTRUST` | `0` | let UNCONFIRMED shadow pairs train (lowers label quality) |
+| `QUILL_ROUTER` | `off` | `off` \| `shadow` (log-only) \| `active` (explicit flip; rollback = `shadow`) |
+| `QUILL_ROUTER_T_LOW` / `_T_HIGH` | `0.25` / `0.6` | three-band thresholds on p(local fails) |
+| `QUILL_ROUTER_MIN_LABELS` | `50` | labels required before the first fit |
+| `QUILL_ROUTER_RETRAIN_LABELS` | `25` | new labels that trigger an idle retrain |
+| `QUILL_LORA_MIN_TYPE_PAIRS` | `300` | confirmed pairs per task type before LoRA saturation |
+| `QUILL_LORA_PLATEAU_EPS` | `0.01` | exemplar A/B delta change that counts as plateaued |
 
 ### Desktop capture (passive screen + clicks)
 

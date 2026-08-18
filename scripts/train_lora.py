@@ -249,11 +249,18 @@ def wsl_python(distro: str) -> str:
     return f"{WSL_VENV}/bin/python" if "yes" in have else "python3"
 
 
-def run_bench(model: str, *, pct: int) -> dict | None:
-    """bench_text --mode holdout --json for one model; parsed summary+rows."""
+def run_bench(model: str, *, pct: int, exemplars: bool = False) -> dict | None:
+    """bench_text --mode holdout --json for one model; parsed summary+rows.
+    `exemplars` runs the E.3 third arm (exemplar-augmented retrieval)."""
+    import os
+    cmd = [sys.executable, str(ROOT / "scripts" / "bench_text.py"),
+           "--model", model, "--mode", "holdout", "--pct", str(pct), "--json"]
+    env = dict(os.environ)
+    if exemplars:
+        cmd.append("--exemplars")
+        env["QUILL_EXEMPLARS"] = "1"
     r = subprocess.run(
-        [sys.executable, str(ROOT / "scripts" / "bench_text.py"),
-         "--model", model, "--mode", "holdout", "--pct", str(pct), "--json"],
+        cmd, env=env,
         capture_output=True, text=True, encoding="utf-8", errors="replace")
     if r.returncode != 0:
         print(r.stderr[-2000:] if r.stderr else "(no stderr)")
@@ -273,7 +280,10 @@ def run_bench(model: str, *, pct: int) -> dict | None:
 def stage_curate(args) -> int:
     import distill_curate as dc
     from app.config import settings
-    rows = dc.load_all_text(Path(settings.escalate_log.path))
+    # E.1: learning_pairs (human-confirmed) is the data source; the legacy
+    # JSONL remains the fallback while the store is empty (invariant 5).
+    rows, source = dc.load_training_rows(settings)
+    print(f"[curate] source: {source} ({len(rows)} rows)")
     stats = dc.curate(rows, holdout_pct=args.holdout_pct,
                       dedupe_sim=args.dedupe_sim,
                       upweight_edited=args.upweight_edited)
@@ -374,12 +384,28 @@ def stage_package(args, gguf: Path, tag: str) -> None:
 
 
 def stage_gate(args, tag: str) -> tuple[bool, list[str]]:
+    """E.3 three-arm gate: challenger vs incumbent vs incumbent+exemplars.
+    Promotion requires beating the EXEMPLAR-AUGMENTED incumbent — otherwise
+    the honest conclusion is that retrieval is still winning and the run's
+    compute was the tuition. (After promotion, exemplars stay active; they
+    compose with the new weights unless a later bench shows they hurt.)"""
     print(f"[gate] holdout bench: incumbent {args.base} vs challenger {tag}")
     champ = run_bench(args.base, pct=args.holdout_pct)
+    champ_ex = run_bench(args.base, pct=args.holdout_pct, exemplars=True)
     chall = run_bench(tag, pct=args.holdout_pct)
     if not champ or not chall:
         raise SystemExit("[gate] bench failed — challenger NOT promoted.")
-    promote, reasons = gate_decision(champ, chall)
+    bar = champ_ex or champ
+    promote, reasons = gate_decision(bar, chall)
+    if champ_ex:
+        reasons.insert(0, (
+            f"bar = incumbent+exemplars (pass "
+            f"{champ_ex['overall']['pass_rate']} / sim "
+            f"{champ_ex['overall']['mean_sim']}); plain incumbent pass "
+            f"{champ['overall']['pass_rate']} / sim "
+            f"{champ['overall']['mean_sim']}"))
+    else:
+        reasons.insert(0, "exemplar arm unavailable — bar = plain incumbent")
     print("\n[gate] " + ("PROMOTE" if promote else "KEEP INCUMBENT"))
     for line in reasons:
         print("  " + line)
@@ -413,10 +439,10 @@ def cmd_check(args) -> None:
           f"(hf: {args.base_hf or hf_base_for(base) or 'UNKNOWN — pass --base-hf'})")
     import distill_curate as dc
     from app.config import settings
-    rows = dc.load_all_text(Path(settings.escalate_log.path))
+    rows, source = dc.load_training_rows(settings)
     stats = dc.curate(rows, holdout_pct=args.holdout_pct,
                       dedupe_sim=1.0)          # exact dedupe: no embedder load
-    print(f"train pairs    : {stats['train_pairs']} "
+    print(f"train pairs    : {stats['train_pairs']} from {source} "
           f"(readiness: {stats['readiness']}, need >= {args.min_pairs})")
 
 

@@ -437,20 +437,31 @@ class ModelRouter:
         # Retrieval few-shot: show the local model similar past prompts it
         # needed rescuing on, with the human-verified answer. Local-only —
         # the parent prompt and the stored training input stay clean.
+        # Workstream C: the exemplar store (curated learning_pairs, LanceDB)
+        # is tried first; the legacy distill-trail recall remains the fallback
+        # so behavior is byte-identical until QUILL_EXEMPLARS=1.
         local_system = system
         examples: list[dict] = []
         try:
-            from app.services.few_shot import few_shot
-            examples = few_shot.examples(task, messages,
-                                         k=cfg.fewshot_k,
-                                         min_sim=cfg.fewshot_min_sim)
-            if examples:
-                fewshot_n = len(examples)
-                local_system = system + few_shot.render(
-                    examples, confidence_line=schema is None)
+            from app.services import exemplar_store
+            examples = exemplar_store.router_examples(task, messages, cfg)
         except Exception as exc:
             examples = []
-            print(f"[model_router] few-shot recall skipped ({exc}).")
+            print(f"[model_router] exemplar recall skipped ({exc}).")
+        if not examples:
+            try:
+                from app.services.few_shot import few_shot
+                examples = few_shot.examples(task, messages,
+                                             k=cfg.fewshot_k,
+                                             min_sim=cfg.fewshot_min_sim)
+            except Exception as exc:
+                examples = []
+                print(f"[model_router] few-shot recall skipped ({exc}).")
+        if examples:
+            from app.services.few_shot import few_shot
+            fewshot_n = len(examples)
+            local_system = system + few_shot.render(
+                examples, confidence_line=schema is None)
 
         try:
             res = self._ensure_local().complete(
@@ -475,27 +486,65 @@ class ModelRouter:
         unsure = eff is None or float(eff) < cfg.escalate_min_conf
         suspect = (None if schema is not None else
                    suspect_answer(res.get("text") or "", messages))
+        heuristic_escalates = bool(hard or parse_fail or unsure or suspect)
+        reason = ("high_stakes_task" if hard else
+                  "parse_failure" if parse_fail else
+                  suspect if (suspect and not unsure) else
+                  "low_confidence" if unsure else None)
+        # Workstream D: consult the trained escalation router. In shadow mode
+        # this only LOGS its decision next to the heuristic's; in active mode
+        # it augments the CONFIDENCE gate only — the hard safety gates
+        # (high-stakes task, parse failure, suspect answer) always escalate.
+        should_escalate = heuristic_escalates
+        shadow_priority = False
+        try:
+            from app.services.escalation_router import escalation_router
+            from app.services.escalation_router import mode as _router_mode
+            if _router_mode() != "off":
+                d = escalation_router.decide(
+                    task, messages,
+                    (float(eff) if eff is not None else conf),
+                    heuristic_escalates=heuristic_escalates,
+                    heuristic_reason=reason)
+                if _router_mode() == "active":
+                    soft_only = (not heuristic_escalates
+                                 or reason == "low_confidence")
+                    if soft_only:
+                        should_escalate = bool(d["escalate"])
+                        shadow_priority = bool(d.get("shadow_priority"))
+                        if should_escalate and not heuristic_escalates:
+                            reason = "router_predicted_failure"
+        except Exception as exc:  # pragma: no cover
+            print(f"[model_router] router consult skipped ({exc}).")
         keep_reason = "local_kept"
-        if hard or parse_fail or unsure or suspect:
-            reason = ("high_stakes_task" if hard else
-                      "parse_failure" if parse_fail else
-                      suspect if (suspect and not unsure) else "low_confidence")
+        if should_escalate:
             local_payload = {
                 "text": _clip(res.get("text"), out_cap),
                 "json": res.get("json"),
                 "confidence": conf,
             }
             try:
-                return _parent(reason, local=local_payload,
+                return _parent(reason or "low_confidence", local=local_payload,
                                fewshot_top_sim=top_sim, conf_effective=eff)
             except Exception as exc:
                 print(f"[model_router] escalation to Claude failed ({exc}); "
                       "keeping local.")
                 keep_reason = "parent_failed"
-        # The local answer stands. Verdict-able tasks still get a distill row
-        # (no parent side) so the UI can put 👍/👎/✏️ on EVERY answer, not just
-        # escalated ones. Full-fidelity like any other row — replayable by the
-        # bench and trainable once a human verdict lands.
+        # The local answer stands. Workstream B: log the kept output to the
+        # shadow-eval sample pool — the confident-but-wrong quadrant never
+        # escalates, so this log is the only place it can be re-graded from.
+        try:
+            from app.services import shadow_eval
+            shadow_eval.log_local_output(
+                task, messages=messages, text=res.get("text"),
+                confidence=(float(eff) if eff is not None else conf),
+                model_tag=cfg.local_model, shadow_priority=shadow_priority)
+        except Exception as exc:  # pragma: no cover
+            print(f"[model_router] shadow log skipped ({exc}).")
+        # Verdict-able tasks still get a distill row (no parent side) so the
+        # UI can put 👍/👎/✏️ on EVERY answer, not just escalated ones.
+        # Full-fidelity like any other row — replayable by the bench and
+        # trainable once a human verdict lands.
         rid = None
         if task in _VERDICT_TASKS and schema is None:
             rid = self._distill(

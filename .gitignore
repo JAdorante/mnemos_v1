@@ -16,6 +16,10 @@ __pycache__/
 /data_noisy_backup/
 sessions/
 
+# Installer build artifacts (PyInstaller / packaging output)
+/build/
+/dist/
+
 .DS_Store
 .vscode/*.log
 debug-*.log

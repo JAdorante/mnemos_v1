@@ -92,6 +92,13 @@ def should_run(state: dict, probes: dict) -> tuple[bool, str]:
     min_free = float(probes.get("min_free_gb", 25))
     if free < min_free:
         return False, f"only {free:.0f} GB free disk (need {min_free:.0f})"
+    # E.2: LoRA is the graduation path — it fires when a task_type has
+    # saturated the exemplar store, not on raw pair count alone. Probes that
+    # don't supply the fact (older callers/tests) default to permissive.
+    if not probes.get("lora_saturated", True):
+        return False, ("no task type at LoRA saturation "
+                       "(exemplar retrieval still improving — see "
+                       "data/exemplar_ab_report.json)")
     return True, f"{new_pairs} new pairs; idle, AC power, {free:.0f} GB free"
 
 
@@ -144,15 +151,75 @@ def free_gb() -> float:
 
 
 def pair_count() -> int:
-    """Current curated train-pair count (exact dedupe — no embedder load)."""
+    """Current curated train-pair count (exact dedupe — no embedder load).
+    E.1: counts the new learning_pairs source, JSONL fallback included."""
     try:
         sys.path.insert(0, str(_ROOT / "scripts"))
         import distill_curate as dc
         from app.config import settings
-        rows = dc.load_all_text(Path(settings.escalate_log.path))
+        rows, _source = dc.load_training_rows(settings)
         return int(dc.curate(rows, holdout_pct=34, dedupe_sim=1.0)["train_pairs"])
     except Exception:
         return 0
+
+
+def lora_saturation(type_counts: dict, ab_history: list[dict], *,
+                    min_type_pairs: int, plateau_eps: float,
+                    truncating: bool = False) -> tuple[bool, str]:
+    """E.2 saturation predicate, pure. A task_type is saturated when it has
+    >= min_type_pairs confirmed positive pairs AND either the exemplar A/B
+    gains for it have plateaued (delta between the last two evals < eps) or
+    the exemplar token budget is the binding constraint (`truncating`).
+
+    `type_counts`: {task_type: {"accepted": n, "edited": n, ...}} — the
+    learning store's counter shape. `ab_history`: eval_exemplars report
+    history, oldest→newest, each {"by_type": {type: {"delta": ...}}}."""
+    for task_type, verdicts in (type_counts or {}).items():
+        confirmed = int(verdicts.get("accepted", 0)) + \
+            int(verdicts.get("edited", 0))
+        if confirmed < int(min_type_pairs):
+            continue
+        if truncating:
+            return True, (f"{task_type}: {confirmed} pairs + exemplar "
+                          "budget binding")
+        deltas = [
+            (h.get("by_type") or {}).get(task_type, {}).get("delta")
+            for h in (ab_history or [])
+        ]
+        deltas = [d for d in deltas if d is not None]
+        if len(deltas) >= 2 and abs(deltas[-1] - deltas[-2]) < plateau_eps:
+            return True, (f"{task_type}: {confirmed} pairs, exemplar gains "
+                          f"plateaued ({deltas[-2]}→{deltas[-1]})")
+    return False, "no task type at saturation (exemplars still improving)"
+
+
+def lora_saturated_probe() -> bool:
+    """Environmental probe for _probes(): counts from the learning store +
+    the exemplar A/B history file. True (permissive) only when the learning
+    loop isn't deployed at all — then the legacy pair-count gate governs."""
+    try:
+        from app.config import settings
+        from app.storage import get_store
+        counts = get_store().learning_pair_counts()
+        if not counts:
+            return True          # pre-Workstream-A install: legacy behavior
+        history = []
+        try:
+            p = Path("data/exemplar_ab_report.json")
+            if p.is_file():
+                data = json.loads(p.read_text(encoding="utf-8"))
+                history = data.get("history") or ([data] if data else [])
+        except Exception:
+            history = []
+        ok, reason = lora_saturation(
+            counts, history,
+            min_type_pairs=int(_env("QUILL_LORA_MIN_TYPE_PAIRS", "300")),
+            plateau_eps=float(_env("QUILL_LORA_PLATEAU_EPS", "0.01")))
+        if not ok:
+            pass
+        return ok
+    except Exception:
+        return True              # probe failure → legacy gates only
 
 
 def _notify_chat(msg: str) -> None:
@@ -181,13 +248,33 @@ class IdleTrainer:
             "min_free_gb": float(_env("QUILL_IDLE_TRAIN_MIN_FREE_GB", "25")),
             "min_days": float(_env("QUILL_IDLE_TRAIN_MIN_DAYS", "7")),
             "max_fails": int(_env("QUILL_IDLE_TRAIN_MAX_FAILS", "3")),
+            "lora_saturated": lora_saturated_probe(),
         }
 
     def tick(self) -> str:
         """One scheduling decision (+ training run when green). Returns the
         reason string — the loop and tests share this path."""
         state = load_state()
-        go, reason = should_run(state, self._probes())
+        probes = self._probes()
+        # Workstream B: shadow eval rides the same idle window and runs BEFORE
+        # the training-eligibility check — it feeds the store training reads.
+        # Its own flag/day/budget gates live in shadow_eval; this is just the
+        # idle+AC gate shared with training.
+        try:
+            from app.services import shadow_eval
+            shadow_eval.maybe_run_idle(idle_s=float(probes["idle_s"]),
+                                       on_ac=bool(probes["on_ac"]))
+        except Exception as exc:
+            print(f"[idle_trainer] shadow eval skipped ({exc}).")
+        # Workstream D.5: the escalation router retrains on the same idle
+        # window (cheap LR fit; its own ≥N-new-labels gate lives inside).
+        try:
+            if probes["idle_s"] >= probes["min_idle_s"] and probes["on_ac"]:
+                from app.services.escalation_router import escalation_router
+                escalation_router.maybe_retrain()
+        except Exception as exc:
+            print(f"[idle_trainer] router retrain skipped ({exc}).")
+        go, reason = should_run(state, probes)
         if reason != self._last_reason:
             print(f"[idle_trainer] {reason}")
             self._last_reason = reason

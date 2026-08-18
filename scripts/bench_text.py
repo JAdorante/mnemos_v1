@@ -98,10 +98,13 @@ def replay_messages(row: dict) -> list[dict]:
 
 def run_row(row: dict, local, *, fewshot: bool, exclude_ids: frozenset,
             fewshot_k: int, fewshot_min_sim: float,
-            escalate_min_conf: float, conf_weight: float = 0.0) -> dict:
+            escalate_min_conf: float, conf_weight: float = 0.0,
+            exemplars: bool = False) -> dict:
     """Replay one labeled call against the local model; score vs the gold.
     The escalate decision uses the ROUTER's own calibrated-confidence policy
-    (model_router.effective_confidence), so bench numbers match production."""
+    (model_router.effective_confidence), so bench numbers match production.
+    `exemplars` mirrors production's QUILL_EXEMPLARS=1 path (exemplar store
+    first, legacy few-shot fallback) — the third arm of the E.3 gate."""
     meta = row.get("meta") or {}
     system = meta["system"]
     messages = replay_messages(row)
@@ -109,9 +112,23 @@ def run_row(row: dict, local, *, fewshot: bool, exclude_ids: frozenset,
     ex: list[dict] = []
     if fewshot:
         from app.services.few_shot import few_shot
-        ex = few_shot.examples(row["task"], messages, k=fewshot_k,
-                               min_sim=fewshot_min_sim,
-                               exclude_ids=exclude_ids | {row.get("id")})
+        if exemplars:
+            try:
+                from app.services.exemplar_store import (ROUTER_TASK_TYPES,
+                                                         exemplar_store)
+                from app.services.few_shot import query_focus, query_text
+                types = ROUTER_TASK_TYPES.get(row["task"], ())
+                q = query_focus(query_text(messages))
+                if types and q:
+                    ex = exemplar_store.examples(
+                        types, q, k=fewshot_k,
+                        exclude_pair_ids=frozenset({str(row.get("id"))}))
+            except Exception as exc:
+                print(f"  exemplar arm skipped ({exc})", file=sys.stderr)
+        if not ex:
+            ex = few_shot.examples(row["task"], messages, k=fewshot_k,
+                                   min_sim=fewshot_min_sim,
+                                   exclude_ids=exclude_ids | {row.get("id")})
         if ex:
             system = system + few_shot.render(ex, confidence_line=schema is None)
     t0 = time.time()
@@ -167,6 +184,9 @@ def main() -> None:
                     help="holdout mode: percent of rows held out")
     ap.add_argument("--no-fewshot", action="store_true",
                     help="raw model, no retrieved examples")
+    ap.add_argument("--exemplars", action="store_true",
+                    help="exemplar-store retrieval first (production "
+                         "QUILL_EXEMPLARS=1 behavior) — the E.3 third arm")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     args = ap.parse_args()
 
@@ -205,7 +225,8 @@ def main() -> None:
             s = run_row(row, local, fewshot=fewshot, exclude_ids=exclude,
                         fewshot_k=cfg.fewshot_k, fewshot_min_sim=cfg.fewshot_min_sim,
                         escalate_min_conf=cfg.escalate_min_conf,
-                        conf_weight=cfg.fewshot_conf_weight)
+                        conf_weight=cfg.fewshot_conf_weight,
+                        exemplars=args.exemplars)
         except Exception as exc:
             print(f"  row {row.get('id', '?')[:8]} error: {exc}", file=sys.stderr)
             continue

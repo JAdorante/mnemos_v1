@@ -339,6 +339,138 @@ class EscalateLogConfig:
 
 
 @dataclass(frozen=True)
+class LearningConfig:
+    """Unified verdict harvesting (services/learning_store.py, Workstream A).
+
+    Every human verdict anywhere in the product (fact review, chat 👍/👎/✏️,
+    reflection audit, person merges, claim adjudications) becomes one canonical
+    `learning_pairs` row in SQLite — the substrate the exemplar store, shadow
+    eval, escalation router, and LoRA curation all read. Local-only writes;
+    disabling stops harvesting but never breaks the verdict surfaces.
+    """
+    enabled: bool = _get("QUILL_LEARNING", "1") not in ("0", "false", "False")
+    # Dual-write transition (A.3): the legacy escalate_distill.jsonl writer
+    # keeps running alongside learning_pairs for one release so few_shot/bench
+    # stay on their current source. Flip to 0 once downstream readers migrate.
+    legacy_distill: bool = _get("QUILL_LEGACY_DISTILL", "1") not in ("0", "false", "False")
+
+
+@dataclass(frozen=True)
+class ExemplarConfig:
+    """Retrieval-first learning (services/exemplar_store.py, Workstream C).
+
+    Curated (input → verified answer) exemplars in LanceDB, injected as
+    few-shot demonstrations at local-inference time. Below ~1K examples this
+    beats a LoRA on the same data, adapts the moment a verdict lands, and
+    rolls back by deleting a row. OFF by default until its A/B report earns
+    the flip; the legacy few_shot distill retrieval remains the fallback.
+    """
+    enabled: bool = _get("QUILL_EXEMPLARS", "0") not in ("0", "false", "False")
+    k: int = int(_get("QUILL_EXEMPLAR_K", "3"))
+    # Cosine floor per retrieved exemplar (tune per type; 0.75 start).
+    min_sim: float = float(_get("QUILL_EXEMPLAR_MIN_SIM", "0.75"))
+    # Total added-token budget per call (~4 chars/token heuristic).
+    token_budget: int = int(_get("QUILL_EXEMPLAR_TOKEN_BUDGET", "1200"))
+
+    @property
+    def gates_path(self) -> str:
+        """Per-task-type auto-disable file (written by scripts/eval_exemplars.py
+        when a type's A/B delta goes negative; also the Console kill switch)."""
+        return _get("QUILL_EXEMPLAR_GATES_PATH",
+                    f"{_get('QUILL_DATA_DIR', 'data')}/exemplar_type_gates.json")
+
+    @property
+    def uses_path(self) -> str:
+        """Append-only log of which exemplars each call injected (C.5 feed)."""
+        return _get("QUILL_EXEMPLAR_USES_PATH",
+                    f"{_get('QUILL_DATA_DIR', 'data')}/exemplar_uses.jsonl")
+
+
+@dataclass(frozen=True)
+class ShadowEvalConfig:
+    """Idle shadow evaluation (services/shadow_eval.py, Workstream B).
+
+    While the machine is idle, Claude re-grades a small nightly batch of the
+    day's NON-escalated local outputs; disagreements become unconfirmed
+    learning pairs — labels for exactly the failure class the escalation
+    trigger cannot see (confident-but-wrong). OFF by default until the
+    Learning tab ships the review surface. Personal/sensitive-classed rows
+    are never sampled (shadow_eligible=0 at log time, fail-closed).
+    """
+    enabled: bool = _get("QUILL_SHADOW_EVAL", "0") not in ("0", "false", "False")
+    # Outputs re-graded per night (stratified across task types).
+    batch: int = int(_get("QUILL_SHADOW_BATCH", "20"))
+    # Hard DAILY token ceiling (input+output) for grading calls. 250K tokens
+    # at claude-haiku-4-5 list rates ($1/MTok in, $5/MTok out) is ≈$0.21 in +
+    # ≈$0.19 out at the observed ~85/15 split — ≈$0.40/day, ≈$0.50 worst-case.
+    # The job stops mid-batch when the ceiling is hit and logs the cutoff.
+    budget_tokens: int = int(_get("QUILL_SHADOW_BUDGET_TOKENS", "250000"))
+    # Grader tier: haiku is the bulk tier (same convention as vision
+    # fallback_model) — grading 20 short outputs needs volume, not depth.
+    model: str = _get("QUILL_SHADOW_MODEL", "claude-haiku-4-5")
+    # Cap per grading call (verdict JSON + a corrected output).
+    max_grade_tokens: int = int(_get("QUILL_SHADOW_GRADE_MAX_TOKENS", "600"))
+    # Idle gate (minutes) — same default as the idle trainer.
+    min_idle_s: float = float(_get("QUILL_SHADOW_IDLE_MIN", "20")) * 60
+    # Explicitly documented as LOWERING label quality: unconfirmed shadow
+    # pairs become exemplar/router training data without human review.
+    autotrust: bool = _get("QUILL_SHADOW_AUTOTRUST", "0") not in ("0", "false", "False")
+
+    @property
+    def local_outputs_path(self) -> str:
+        """Append log of kept (non-escalated) local outputs — the sample pool."""
+        return _get("QUILL_SHADOW_LOCAL_OUTPUTS_PATH",
+                    f"{_get('QUILL_DATA_DIR', 'data')}/local_outputs.jsonl")
+
+    @property
+    def state_path(self) -> str:
+        return _get("QUILL_SHADOW_STATE_PATH",
+                    f"{_get('QUILL_DATA_DIR', 'data')}/shadow_eval_state.json")
+
+    @property
+    def grades_path(self) -> str:
+        """Per-row grade log (agrees included) — the router's free labels (D.1)."""
+        return _get("QUILL_SHADOW_GRADES_PATH",
+                    f"{_get('QUILL_DATA_DIR', 'data')}/shadow_grades.jsonl")
+
+    @property
+    def report_path(self) -> str:
+        return _get("QUILL_SHADOW_REPORT_PATH",
+                    f"{_get('QUILL_DATA_DIR', 'data')}/shadow_eval_report.json")
+
+
+@dataclass(frozen=True)
+class RouterConfig:
+    """Trained escalation router (services/escalation_router.py, Workstream D).
+
+    A small calibrated classifier predicting "will the local model fail on
+    this input?" — trained from the verdict labels the other workstreams
+    collect for free. Modes: off (default) | shadow (logs its decision next
+    to the heuristic's; the heuristic still routes) | active (three-band
+    routing; hard safety gates — high-stakes, parse failures, suspect
+    answers — always escalate regardless). Activation is an explicit user
+    choice with a rollback line, same UX contract as LoRA promotion.
+    HARD RULE (invariant 3): the router influences the local-vs-parent
+    choice ONLY — it has no code path into approval/risk classification.
+    """
+    mode: str = _get("QUILL_ROUTER", "off")
+    # Three bands: p < t_low → local; t_low <= p < t_high → local, but
+    # flagged for shadow-eval priority sampling; p >= t_high → escalate.
+    t_low: float = float(_get("QUILL_ROUTER_T_LOW", "0.25"))
+    t_high: float = float(_get("QUILL_ROUTER_T_HIGH", "0.6"))
+    # Minimum labels before the first fit is offered at all.
+    min_labels: int = int(_get("QUILL_ROUTER_MIN_LABELS", "50"))
+    # Retrain when this many NEW labels accrued since the last fit.
+    retrain_new_labels: int = int(_get("QUILL_ROUTER_RETRAIN_LABELS", "25"))
+
+    @property
+    def dir(self) -> str:
+        """Versioned model + calibration files live here (D.2)."""
+        return _get("QUILL_ROUTER_DIR",
+                    f"{_get('QUILL_DATA_DIR', 'data')}/router")
+
+
+@dataclass(frozen=True)
 class IngestConfig:
     """Thresholds for the ASR hygiene filter (see services/ingest_filter.py).
 
@@ -1216,6 +1348,10 @@ class Settings:
     vision: VisionConfig = VisionConfig()
     text_local: TextLocalConfig = TextLocalConfig()
     escalate_log: EscalateLogConfig = EscalateLogConfig()
+    learning: LearningConfig = LearningConfig()
+    exemplars: ExemplarConfig = ExemplarConfig()
+    shadow: ShadowEvalConfig = ShadowEvalConfig()
+    router: RouterConfig = RouterConfig()
     notifications: NotificationConfig = NotificationConfig()
     desktop_capture: DesktopCaptureConfig = DesktopCaptureConfig()
     ingest: IngestConfig = IngestConfig()

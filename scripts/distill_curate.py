@@ -53,6 +53,124 @@ _PERISHABLE_MARKERS = (
 )
 
 
+# Workstream E.1: synthesized system prompts for pairs whose surface never
+# stored one (fact review, reflection audit …). Fixed per task_type so the
+# training input is byte-reproducible from the pair alone.
+_SYNTH_SYSTEM = {
+    "extraction.task": ("You extract actionable tasks from conversation and "
+                        "activity text. Reply with the task statement only."),
+    "extraction.commitment": ("You extract commitments (who promised what) "
+                              "from conversation text. Reply with the "
+                              "commitment only."),
+    "extraction.claim": ("You extract factual claims from text. Reply with "
+                         "the claim only."),
+    "brief.section": ("You write short, accurate insight statements grounded "
+                      "in the provided facts."),
+    "audit.stale_fact": ("You judge whether a remembered fact is still "
+                         "current, given the evidence."),
+    "audit.forget": ("You judge whether a remembered fact should be "
+                     "retired, given the evidence."),
+    "escalation.text": "You are a helpful personal-memory assistant.",
+}
+
+
+def pair_to_distill_row(pair: dict, *, distill_index: dict | None = None,
+                        include_unconfirmed_shadow: bool = False) -> dict | None:
+    """One confirmed LearningPair → the distill-row shape curate() speaks.
+
+    Escalation pairs re-join their full-fidelity distill row (real system +
+    messages) via source_refs.distill_id while the dual-write keeps the JSONL
+    alive; every other surface gets the fixed per-type template above. The
+    human verdict on the PAIR wins over whatever the old row carried."""
+    v = str(pair.get("verdict") or "")
+    if v not in ("accepted", "edited", "shadow_disagree"):
+        return None
+    if v == "shadow_disagree" and not (pair.get("human_confirmed")
+                                       or include_unconfirmed_shadow):
+        return None
+    if not pair.get("human_confirmed") and v != "shadow_disagree":
+        return None
+    target = str(pair.get("final_target") or "").strip()
+    input_text = str(pair.get("input_text") or "").strip()
+    if not target or not input_text:
+        return None
+    refs = pair.get("source_refs") or {}
+    outcome = "edited" if v == "edited" else "accepted"
+    row = None
+    if distill_index and refs.get("distill_id") in distill_index:
+        row = dict(distill_index[str(refs["distill_id"])])
+        row["user_outcome"] = outcome
+        if v == "edited":
+            row["edited"] = target
+        return row
+    task_type = str(pair.get("task_type") or "escalation.text")
+    task = str(refs.get("task") or
+               ("chat" if task_type.startswith("escalation") else "extract"))
+    parent_text = str(pair.get("parent_output") or "")
+    row = {
+        "id": str(pair.get("id")),
+        "time": float(pair.get("created_at") or 0),
+        "task": task,
+        "reason": str(pair.get("verdict_source") or "learning_pair"),
+        "modality": "text",
+        "user_outcome": outcome,
+        "local": {"text": str(pair.get("local_output") or "")},
+        # gold_answer(): edited > parent.text > local (on accepted) — arrange
+        # the sides so the pair's final_target is always the gold.
+        "parent": {"text": parent_text if parent_text else
+                   ("" if v == "edited" else target)},
+        "meta": {
+            "system": _SYNTH_SYSTEM.get(task_type,
+                                        _SYNTH_SYSTEM["escalation.text"]),
+            "messages": [{"role": "user", "text": input_text}],
+        },
+    }
+    if v == "edited":
+        row["edited"] = target
+    if not row["parent"]["text"] and outcome == "accepted":
+        row["local"] = {"text": target}
+    return row
+
+
+def load_from_learning_pairs(store=None, *, distill_path: Path | None = None,
+                             include_unconfirmed_shadow: bool = False
+                             ) -> list[dict]:
+    """E.1 data source: confirmed learning_pairs → distill-row shapes.
+    Returns [] when the store is empty/unavailable so callers can fall back
+    to the legacy JSONL (invariant 5)."""
+    try:
+        if store is None:
+            from app.storage import get_store
+            store = get_store()
+        pairs = store.list_learning_pairs(limit=20000)
+    except Exception as exc:
+        print(f"[curate] learning store unavailable ({exc}).", file=sys.stderr)
+        return []
+    index: dict[str, dict] = {}
+    if distill_path is not None:
+        for r in load_all_text(distill_path):
+            if r.get("id"):
+                index[str(r["id"])] = r
+    out = []
+    for p in pairs:
+        row = pair_to_distill_row(
+            p, distill_index=index,
+            include_unconfirmed_shadow=include_unconfirmed_shadow)
+        if row is not None:
+            out.append(row)
+    return out
+
+
+def load_training_rows(settings, store=None) -> tuple[list[dict], str]:
+    """The one loader train_lora/idle_trainer call: learning_pairs when they
+    hold anything, else the legacy distill JSONL. Returns (rows, source)."""
+    distill_path = Path(settings.escalate_log.path)
+    rows = load_from_learning_pairs(store=store, distill_path=distill_path)
+    if rows:
+        return rows, "learning_pairs"
+    return load_all_text(distill_path), "escalate_distill.jsonl"
+
+
 def load_all_text(path: Path) -> list[dict]:
     if not path.is_file():
         return []

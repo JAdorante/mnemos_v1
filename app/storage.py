@@ -1807,6 +1807,38 @@ class Store:
                 self._conn.execute(
                     "ALTER TABLE commitments "
                     "ADD COLUMN to_resolution_confidence REAL")
+            # Learning loop (Workstream A): one canonical row per human verdict,
+            # additive. Dedupe is enforced by the DB (unique task_type+hash),
+            # not read-then-write. `source_refs` is JSON — provenance pointers
+            # (fact/event/distill ids) so no training pair is ever an orphan.
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS learning_pairs (
+                    id              TEXT PRIMARY KEY,
+                    created_at      REAL NOT NULL,
+                    task_type       TEXT NOT NULL,
+                    input_text      TEXT NOT NULL,
+                    local_output    TEXT,
+                    parent_output   TEXT,
+                    final_target    TEXT,
+                    verdict         TEXT NOT NULL,
+                    verdict_source  TEXT NOT NULL,
+                    source_refs     TEXT,
+                    model_tag       TEXT,
+                    embedding_id    TEXT,
+                    content_hash    TEXT NOT NULL,
+                    shadow_eligible INTEGER NOT NULL DEFAULT 1,
+                    human_confirmed INTEGER NOT NULL DEFAULT 1,
+                    privacy_class   TEXT
+                )
+                """
+            )
+            self._conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_learning_dedupe "
+                "ON learning_pairs(task_type, content_hash)")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_learning_type_time "
+                "ON learning_pairs(task_type, created_at)")
             self._conn.commit()
 
     def _migrate_commitment_state(self) -> None:
@@ -1867,6 +1899,133 @@ class Store:
             "CREATE INDEX IF NOT EXISTS idx_cmt_tx_fact "
             "ON commitment_transitions(fact_id, created_at)")
         self._conn.commit()
+
+    # --------------------------- learning pairs ---------------------------
+    def add_learning_pair(self, row: dict) -> str | None:
+        """Insert one canonical LearningPair (learning_store.record builds and
+        validates it). Returns the pair id, or None when an identical
+        (task_type, content_hash) row already exists — dedupe rides the UNIQUE
+        index, so concurrent writers can't race a read-then-write check."""
+        with self._lock:
+            try:
+                self._conn.execute(
+                    """
+                    INSERT INTO learning_pairs
+                        (id, created_at, task_type, input_text, local_output,
+                         parent_output, final_target, verdict, verdict_source,
+                         source_refs, model_tag, embedding_id, content_hash,
+                         shadow_eligible, human_confirmed, privacy_class)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (row["id"], row["created_at"], row["task_type"],
+                     row["input_text"], row.get("local_output"),
+                     row.get("parent_output"), row.get("final_target"),
+                     row["verdict"], row["verdict_source"],
+                     json.dumps(row.get("source_refs") or {},
+                                ensure_ascii=False),
+                     row.get("model_tag"), row.get("embedding_id"),
+                     row["content_hash"],
+                     1 if row.get("shadow_eligible", True) else 0,
+                     1 if row.get("human_confirmed", True) else 0,
+                     row.get("privacy_class")),
+                )
+                self._conn.commit()
+            except sqlite3.IntegrityError:
+                return None
+        return str(row["id"])
+
+    @staticmethod
+    def _learning_row(r) -> dict:
+        d = dict(r)
+        try:
+            d["source_refs"] = json.loads(d.get("source_refs") or "{}")
+        except Exception:
+            d["source_refs"] = {}
+        d["shadow_eligible"] = bool(d.get("shadow_eligible"))
+        d["human_confirmed"] = bool(d.get("human_confirmed"))
+        return d
+
+    def get_learning_pair(self, pair_id: str) -> dict | None:
+        with self._lock:
+            r = self._conn.execute(
+                "SELECT * FROM learning_pairs WHERE id = ?",
+                (str(pair_id),)).fetchone()
+        return self._learning_row(r) if r else None
+
+    def list_learning_pairs(self, *, task_type: str | None = None,
+                            verdict: str | None = None,
+                            human_confirmed: bool | None = None,
+                            shadow_eligible: bool | None = None,
+                            since: float | None = None,
+                            limit: int = 200) -> list[dict]:
+        """Newest-first slice, filterable the way each reader needs: the
+        exemplar store wants confirmed positives, the router trainer wants
+        everything labeled, shadow eval wants eligible rows only."""
+        q = "SELECT * FROM learning_pairs WHERE 1=1"
+        args: list = []
+        if task_type:
+            q += " AND task_type = ?"
+            args.append(task_type)
+        if verdict:
+            q += " AND verdict = ?"
+            args.append(verdict)
+        if human_confirmed is not None:
+            q += " AND human_confirmed = ?"
+            args.append(1 if human_confirmed else 0)
+        if shadow_eligible is not None:
+            q += " AND shadow_eligible = ?"
+            args.append(1 if shadow_eligible else 0)
+        if since is not None:
+            q += " AND created_at >= ?"
+            args.append(float(since))
+        q += " ORDER BY created_at DESC LIMIT ?"
+        args.append(max(1, int(limit)))
+        with self._lock:
+            rows = self._conn.execute(q, args).fetchall()
+        return [self._learning_row(r) for r in rows]
+
+    def delete_learning_pair(self, pair_id: str) -> bool:
+        """Hard delete (Console per-row Delete — invariant 4 applied to data).
+        The exemplar cascade lives in learning_store.delete, not here."""
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM learning_pairs WHERE id = ?", (str(pair_id),))
+            self._conn.commit()
+        return cur.rowcount > 0
+
+    def confirm_learning_pair(self, pair_id: str) -> bool:
+        """Promote a shadow-derived pair to human-confirmed (B.4 review card)."""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE learning_pairs SET human_confirmed = 1 WHERE id = ?",
+                (str(pair_id),))
+            self._conn.commit()
+        return cur.rowcount > 0
+
+    def set_learning_embedding(self, pair_id: str, embedding_id: str) -> None:
+        """Backlink a pair to its exemplar-store row (filled by Workstream C)."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE learning_pairs SET embedding_id = ? WHERE id = ?",
+                (str(embedding_id), str(pair_id)))
+            self._conn.commit()
+
+    def learning_pair_counts(self, *, since: float | None = None) -> dict:
+        """Per-task_type verdict counts (the Learning tab's counter widget)."""
+        q = ("SELECT task_type, verdict, COUNT(*) AS n FROM learning_pairs")
+        args: list = []
+        if since is not None:
+            q += " WHERE created_at >= ?"
+            args.append(float(since))
+        q += " GROUP BY task_type, verdict"
+        with self._lock:
+            rows = self._conn.execute(q, args).fetchall()
+        out: dict[str, dict] = {}
+        for r in rows:
+            t = out.setdefault(str(r["task_type"]), {"total": 0})
+            t[str(r["verdict"])] = int(r["n"])
+            t["total"] += int(r["n"])
+        return out
 
     # ------------------------------ audio clips --------------------------
     def save_wav(self, audio: np.ndarray, ts: float, sample_rate: int,
