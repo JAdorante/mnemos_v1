@@ -542,21 +542,48 @@ async function loadEntities(force){
   renderEntityList();
 }
 
+function entityRowHtml(x){
+  const brief=(x.kind==='org'||x.kind==='company'||x.kind==='organization')
+    ?' <a class="chip" href="/org/'+x.id+'" onclick="event.stopPropagation()">brief</a>':'';
+  const row='<div class="prow" data-eid="'+x.id+'">'
+    +'<div style="flex:1"><span class="nm">'+MnemosEsc(x.name)+'</span>'
+    +' <span class="chip">'+MnemosEsc(x.kind)+'</span>'+brief
+    +'<div class="meta">connection '+x.weight.toFixed(1)+' · '+fmtSeen(x.last_seen)+'</div></div>'
+    +'<span class="meta">'+(openEntityId===x.id?'▾':'▸')+'</span></div>';
+  return row+(openEntityId===x.id?'<div class="pdetail" id="eDetail"><div class="lead">Loading…</div></div>':'');
+}
+
 function renderEntityList(){
   const q=(document.getElementById('eSearch').value||'').toLowerCase();
   const el=document.getElementById('entityList');
   const rows=entityCache.filter(x=>!q||x.name.toLowerCase().includes(q));
   if(!rows.length){el.innerHTML='<div class="empty">Nothing yet — mention orgs, projects, and tools in chat or speech.</div>';return;}
-  el.innerHTML=rows.map(x=>{
-    const brief=(x.kind==='org'||x.kind==='company'||x.kind==='organization')
-      ?' <a class="chip" href="/org/'+x.id+'" onclick="event.stopPropagation()">brief</a>':'';
-    const row='<div class="prow" data-eid="'+x.id+'">'
-      +'<div style="flex:1"><span class="nm">'+MnemosEsc(x.name)+'</span>'
-      +' <span class="chip">'+MnemosEsc(x.kind)+'</span>'+brief
-      +'<div class="meta">connection '+x.weight.toFixed(1)+' · '+fmtSeen(x.last_seen)+'</div></div>'
-      +'<span class="meta">'+(openEntityId===x.id?'▾':'▸')+'</span></div>';
-    return row+(openEntityId===x.id?'<div class="pdetail" id="eDetail"><div class="lead">Loading…</div></div>':'');
-  }).join('');
+  // Group by home project (the rollup's associated_project edge). A project's
+  // own row leads its section; entities with no dominant project land in
+  // "Everything else" at the bottom.
+  const groups=new Map(), loose=[];
+  rows.forEach(x=>{
+    const p=x.project&&x.project.name;
+    if(p){ if(!groups.has(p)) groups.set(p,{rows:[],w:0});
+      const g=groups.get(p); g.rows.push(x); g.w+=x.weight; }
+    else loose.push(x);
+  });
+  // Pull each section's project row out of the loose list so it heads its group.
+  const looseRest=[];
+  loose.forEach(x=>{
+    const g=groups.get(x.name);
+    if(g){ g.rows.unshift(x); g.w+=x.weight; } else looseRest.push(x);
+  });
+  const names=[...groups.keys()].sort((a,b)=>groups.get(b).w-groups.get(a).w);
+  let h='';
+  names.forEach(n=>{
+    h+='<div class="plabel">'+MnemosEsc(n)+'</div>'
+      +groups.get(n).rows.map(entityRowHtml).join('');
+  });
+  if(looseRest.length)
+    h+=(names.length?'<div class="plabel">Everything else</div>':'')
+      +looseRest.map(entityRowHtml).join('');
+  el.innerHTML=h;
   if(openEntityId!==null) loadEntityDetail(openEntityId);
 }
 

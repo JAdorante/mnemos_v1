@@ -299,7 +299,19 @@ async def _startup() -> None:
                     _schedule_extract_nudge(delay + 0.5)
 
             worker.register("extract", _extract_job)
-            worker.register("graph", lambda _payload: graph.rebuild())
+
+            def _graph_job(_payload) -> None:
+                graph.rebuild()
+                # Fresh about-edges -> refresh each entity's home project.
+                # Best-effort: a rollup failure must never fail the rebuild.
+                try:
+                    from app.services import project_rollup
+                    if project_rollup.enabled():
+                        project_rollup.run()
+                except Exception as exc:
+                    print(f"[project_rollup] skipped ({exc}).")
+
+            worker.register("graph", _graph_job)
             # Typed chat -> memory: /chat stores a TEXT event + queues this.
             from app.services import chat_ingest
             worker.register("chat_ingest", chat_ingest.run_job)

@@ -187,7 +187,7 @@ def _looks_like_entity_junk(name: str, kind: str | None) -> bool:
         }:
             return True
     low = n.lower()
-    if low in {"unknown", "not specified", "contacts", "mom", "justin",
+    if low in {"unknown", "not specified", "contacts", "mom",
                "environment", "readable", "login", "messages", "flight",
                "renewal", "beachhead", "shadowing", "unknown organization",
                "extraction", "consolidation", "capture", "prompt", "crm"}:
@@ -214,14 +214,35 @@ def _looks_like_entity_junk(name: str, kind: str | None) -> bool:
     return False
 
 
+def _known_person_names(store) -> set[str]:
+    """Lowercased, space-stripped canonical names + aliases of everyone in the
+    people table, hidden/merged rows included (a merged-away alias is still a
+    person). Space-stripped so an OCR/ASR spacing glitch ("Hugh Salv a") still
+    matches its person. Short tokens (<3 chars after stripping) are dropped so
+    a junk 2-letter alias can't match a real project label."""
+    names: set[str] = set()
+    try:
+        people = store.all_people()
+    except Exception:
+        return names
+    for p in people:
+        for n in [p.get("name") or ""] + list(p.get("aliases") or []):
+            n = "".join((n or "").lower().split())
+            if len(n) >= 3:
+                names.add(n)
+    return names
+
+
 def plan_entities(store, *, limit: int = 500) -> list[dict]:
     """Plan entity hygiene actions: reclassify, hide+person, or soft-hide.
 
     Each row includes `action`:
       - reclassify — set kind to `to_kind` (product→tool, …)
       - hide_person — soft-hide entity and mint/resolve a person with same name
-      - hide — soft-hide only (orphan junk / news-social-only)
+      - hide — soft-hide only (orphan junk / news-social-only / person-name
+        collision)
     """
+    person_names = _known_person_names(store)
     out: list[dict] = []
     for e in store.all_entities(include_hidden=False):
         if len(out) >= limit:
@@ -231,13 +252,43 @@ def plan_entities(store, *, limit: int = 500) -> list[dict]:
         kind = e.get("kind")
         kind_l = (kind or "").strip().lower()
 
-        # 0) Person-shaped FIRST — even when mislabeled as product/other.
-        #    (Otherwise "Russell Fry" product→tool and "Abby Nengel" other→idea.)
-        if is_person_shaped_entity_name(name):
+        # 0) Person-shaped FIRST — but only for kinds where a two-token
+        #    Title-Case name signals a misfiled human ("Abby Nengel"[other],
+        #    "Bill Clinton"[project]). Tools/orgs/places are full of real
+        #    two-token brands ("Hugging Face", "Y Combinator", "Boston
+        #    Dynamics") — shape alone must never hide those.
+        if kind_l in ("project", "idea", "other", "") \
+                and is_person_shaped_entity_name(name):
             out.append({
                 "id": eid, "name": name, "kind": kind,
                 "action": "hide_person",
                 "reason": "person_shaped",
+            })
+            continue
+
+        # 0.5) A project/idea wearing a KNOWN person's name ("Justin"[project],
+        #      "Marc"[project]) — single tokens the shape check can't judge,
+        #      but the people table can. Orgs/tools/places stay: a company may
+        #      share its founder's name. The person already exists, so plain
+        #      hide (no re-mint).
+        if kind_l in ("project", "idea", "other", "") \
+                and "".join(name.lower().split()) in person_names:
+            out.append({
+                "id": eid, "name": name, "kind": kind,
+                "action": "hide",
+                "reason": "known_person_name",
+            })
+            continue
+
+        # 0.75) Names today's write-gate would refuse to mint (self tokens
+        #       like the product's own name, paths, env vars) — legacy rows
+        #       that predate the gate. Junk regardless of how many edges it
+        #       accumulated; edges are how junk does damage.
+        if not is_plausible_entity(name):
+            out.append({
+                "id": eid, "name": name, "kind": kind,
+                "action": "hide",
+                "reason": "implausible_name",
             })
             continue
 

@@ -4619,6 +4619,41 @@ class Store:
             out.setdefault(int(r["fact_id"]), []).append(r["name"])
         return out
 
+    def entity_about_edges(self) -> list[dict]:
+        """Every fact→entity `about` edge with its origin/weight, restricted to
+        facts that still speak for themselves — the project-rollup input.
+        evidence_removed rows COUNT (the fact is real; only its source event
+        was purged); superseded rows don't (their successor votes instead),
+        nor do human-dismissed ones. One query, not per-entity walks."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT r.subj_id AS fact_id, r.obj_id AS entity_id,
+                       r.origin AS origin, r.weight AS weight
+                FROM relations r
+                JOIN facts f ON f.id = r.subj_id
+                WHERE r.subj_type = 'fact' AND r.predicate = 'about'
+                  AND r.obj_type = 'entity'
+                  AND COALESCE(f.state, 'active') != 'superseded'
+                  AND COALESCE(f.review, '') != 'dismissed'
+                """).fetchall()
+        return [dict(r) for r in rows]
+
+    def relations_by_predicate(self, predicate: str, *,
+                               origin: str | None = None) -> list[dict]:
+        """All edges of one predicate (optionally one origin) — batch read for
+        surfaces that need a whole edge class, not one node's neighbours."""
+        with self._lock:
+            if origin is None:
+                rows = self._conn.execute(
+                    "SELECT * FROM relations WHERE predicate = ? "
+                    "ORDER BY weight DESC", (predicate,)).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT * FROM relations WHERE predicate = ? AND origin = ? "
+                    "ORDER BY weight DESC", (predicate, origin)).fetchall()
+        return [dict(r) for r in rows]
+
     def clear_relations(self, origin: str | None = None,
                         incident_to: set[tuple[str, int]] | None = None) -> int:
         """Delete edges. With `origin`, only that class (so a graph rebuild wipes

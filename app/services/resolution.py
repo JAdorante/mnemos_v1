@@ -40,6 +40,21 @@ def _cos(a, b) -> float:
     return float(np.dot(a, b) / denom)
 
 
+def _is_known_person_name(store: Store, name: str) -> bool:
+    """True when `name` is already a person's canonical name or alias —
+    hidden/merged rows count, since a merged-away alias ("justin") is still a
+    person, not a mintable project."""
+    key = (name or "").strip().lower()
+    if not key:
+        return False
+    for p in store.all_people():
+        if (p.get("name") or "").strip().lower() == key:
+            return True
+        if any((a or "").strip().lower() == key for a in p.get("aliases") or []):
+            return True
+    return False
+
+
 def _prefix_match(a: str, b: str) -> bool:
     """Nickname ↔ full-name only — never string-prefix merges.
 
@@ -182,6 +197,13 @@ class Resolver:
             if m is not None:
                 store.touch_entity(int(m.ref), ts=ts, alias=key)
                 return int(m.ref)
+            # A name already living in the people table (canonical OR alias,
+            # hidden/merged rows included) must not fork into a project/idea
+            # node — that's how "Justin"[project] and "Marc"[project] happened.
+            # Orgs/tools/places stay allowed: a company can share a founder's
+            # name; a second project named "Marc" cannot.
+            if kind_n in ("project", "idea") and _is_known_person_name(store, key):
+                return 0
             return store.resolve_entity(key, kind_n, ts=ts)
 
 

@@ -3389,16 +3389,22 @@ def entities_list() -> dict:
     including noise rows, since this surface is where the user prunes them."""
     import time as _time
     from app.services.home_intelligence import entity_score
+    from app.services import project_rollup
 
     store = memory._ensure_store()
     now = _time.time()
+    try:
+        homes = project_rollup.current(store)
+    except Exception:
+        homes = {}
     out = []
     for e in store.all_entities():
         rel = store.relations_of("entity", e["id"])
         score = entity_score(rel.get("in") or [], e.get("last_seen"), now)
         out.append({"id": e["id"], "name": e["name"],
                     "kind": e.get("kind") or "idea",
-                    "weight": round(score, 1), "last_seen": e.get("last_seen")})
+                    "weight": round(score, 1), "last_seen": e.get("last_seen"),
+                    "project": homes.get(int(e["id"]))})
     out.sort(key=lambda x: (-x["weight"], x["name"].lower()))
     return {"entities": out}
 
