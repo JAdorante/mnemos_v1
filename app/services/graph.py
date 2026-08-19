@@ -118,8 +118,14 @@ def _person_patterns(p: dict) -> list:
 
 
 def _real_people(store: Store) -> list[dict]:
+    """Living person nodes only: plausible name, not soft-hidden, not merged
+    away. Absorbed rows (canonical_person_id set) redirect to a survivor that
+    already carries their aliases — rendering or edge-deriving BOTH halves is
+    how "Hugh Saiva" and "Hugh Salva" end up as twin stars."""
     return [p for p in store.all_people()
-            if len(p["name"]) >= 3 and p["name"].lower() not in _STOP_NAMES]
+            if len(p["name"]) >= 3 and p["name"].lower() not in _STOP_NAMES
+            and not p.get("hide_from_people")
+            and not p.get("canonical_person_id")]
 
 
 def _real_entities(store: Store) -> list[dict]:
