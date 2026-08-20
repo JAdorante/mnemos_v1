@@ -2653,8 +2653,20 @@ def _adoption_console_chrome() -> str:
 <script>
 (function(){
   const toast=document.getElementById('mnemosToast');
-  function show(html){ if(!toast) return; toast.innerHTML=html; toast.hidden=false; }
+  function place(){
+    // The recording pill tray (#mnemosRecBar) owns the bottom-right corner and
+    // outranks the toast (z 70 vs 40) — lift the toast to sit above however
+    // many pill rows are showing, instead of letting them stamp over it.
+    if(!toast) return;
+    try{
+      const rb=document.getElementById('mnemosRecBar');
+      const h=(rb&&rb.offsetHeight)?(rb.offsetHeight+28):18;
+      toast.style.bottom=h+'px';
+    }catch(e){}
+  }
+  function show(html){ if(!toast) return; toast.innerHTML=html; toast.hidden=false; place(); }
   async function pollNudge(){
+    if(toast&&!toast.hidden) place();
     try{
       const d=await (await fetch('/first-run/nudge')).json();
       if(d.first_win && d.first_win.href){
@@ -6749,7 +6761,10 @@ body{
 .const-tip-kind{font:11px var(--mono);color:var(--mut);text-transform:uppercase;letter-spacing:.04em}
 .const-tip-why{margin-top:4px;color:var(--mut);font-style:italic}
 .const-insight{
-  position:absolute;left:10px;bottom:10px;z-index:2;max-width:min(320px,80%);
+  /* bottom:52px, not 10px — the const-tools row owns the frame's bottom strip;
+     insight cards stack in the clear band above it so neither covers the other
+     however narrow the frame gets. */
+  position:absolute;left:10px;bottom:52px;z-index:2;max-width:min(320px,80%);
   display:flex;flex-direction:column;gap:6px;
 }
 .const-insight-btn{
