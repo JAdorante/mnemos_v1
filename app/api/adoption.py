@@ -35,6 +35,7 @@ class McpToolIn(BaseModel):
 
 class ApiKeyIn(BaseModel):
     key: str
+    provider: str = "anthropic"
 
 
 class ReportIn(BaseModel):
@@ -156,32 +157,28 @@ def mcp_token_info() -> dict:
     return {"ok": True, "path": str(mcp_tools.token_path()), "configured": bool(p)}
 
 
+@router.get("/onboarding/parent-model")
+def onboarding_parent_model() -> dict:
+    """Provider roster for the setup picker + which one is connected."""
+    from app.services import parent_model
+    return parent_model.status()
+
+
 @router.post("/onboarding/api-key")
 def onboarding_api_key(body: ApiKeyIn) -> dict:
-    """Validate Anthropic key with a 1-token call and write .credentials.env."""
+    """Connect the parent model account: validate the key live against the
+    chosen provider (Anthropic/OpenAI/Gemini/Grok), then persist provider +
+    key to .credentials.env — never persist an unproven key."""
+    from app.services import parent_model
+    pid = (body.provider or "anthropic").strip().lower()
+    if pid not in parent_model.PROVIDERS:
+        raise HTTPException(400, f"unknown provider {pid!r}")
     key = (body.key or "").strip()
-    if not key.startswith("sk-"):
-        raise HTTPException(400, "that does not look like an Anthropic API key")
-    try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=key)
-        client.messages.create(
-            model="claude-haiku-4-5",
-            max_tokens=1,
-            messages=[{"role": "user", "content": "ping"}],
-        )
-    except Exception as exc:
-        raise HTTPException(400, f"key rejected: {exc}") from exc
-    from app.services.icloud_account import _cred_path
-    path = _cred_path()
-    existing = path.read_text(encoding="utf-8") if path.is_file() else ""
-    lines = [ln for ln in existing.splitlines() if not ln.startswith("ANTHROPIC_API_KEY=")]
-    lines.append(f"ANTHROPIC_API_KEY={key}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    import os
-    os.environ["ANTHROPIC_API_KEY"] = key
-    return {"ok": True, "path": str(path)}
+    err = parent_model.validate_key(pid, key)
+    if err:
+        raise HTTPException(400, err)
+    path = parent_model.save(pid, key)
+    return {"ok": True, "path": path, "provider": pid}
 
 
 @router.post("/console/report")

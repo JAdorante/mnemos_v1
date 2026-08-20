@@ -293,6 +293,36 @@ class ModelRouter:
             except Exception:
                 pass
         model = model or self.model_for(task)
+        # The parent is a configured account: with a non-Anthropic provider
+        # (OpenAI / Gemini / Grok, parent_model.py) the escalation detours to
+        # its OpenAI-compatible dialect — AFTER the privacy gate above, so
+        # every parent gets identical egress hygiene. Anthropic stays on this
+        # client, byte-for-byte.
+        from app.services import parent_model
+        pid = parent_model.provider()
+        if pid != "anthropic":
+            t0 = time.time()
+            try:
+                resp_p = parent_model.complete(
+                    model=model, system=system, messages=messages,
+                    max_tokens=max_tokens, schema=schema)
+            except Exception:
+                model_log.log_call(task=task, provider=pid, model=model,
+                                   latency_s=time.time() - t0, ok=False,
+                                   privacy_max=privacy_cls,
+                                   meta={"privacy_class": privacy_cls,
+                                         "privacy_action": privacy_action})
+                raise
+            model_log.log_call(
+                task=task, provider=pid, model=resp_p["model"],
+                latency_s=time.time() - t0, ok=True,
+                input_tokens=resp_p["input_tokens"],
+                output_tokens=resp_p["output_tokens"],
+                privacy_max=privacy_cls,
+                meta={"privacy_class": privacy_cls,
+                      "privacy_action": privacy_action},
+            )
+            return resp_p["text"]
         kwargs: dict[str, Any] = {"model": model, "max_tokens": max_tokens,
                                   "system": system, "messages": messages}
         if schema is not None:

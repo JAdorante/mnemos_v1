@@ -238,9 +238,23 @@ textarea{min-height:96px;resize:vertical}
           <input id="description" placeholder="Short line about your day-to-day">
         </div>
       </div>
-      <label for="apikey" style="margin-top:18px">Anthropic API key</label>
-      <p class="lead" style="margin:4px 0 8px">Needed for briefs. Stored in <span style="font-family:var(--mono)">.credentials.env</span> on this machine — never sent anywhere except Anthropic.</p>
-      <input id="apikey" type="password" autocomplete="off" placeholder="sk-ant-…">
+      <label style="margin-top:18px">AI model account</label>
+      <p class="lead" style="margin:4px 0 8px">@@BRAND@@ answers locally when it can and asks a bigger cloud model when it must. Connect whichever account you already have — the key is stored in <span style="font-family:var(--mono)">.credentials.env</span> on this machine and sent only to the provider you pick.</p>
+      <div class="row two">
+        <div>
+          <label for="provider">Provider</label>
+          <select id="provider" style="width:100%">
+            <option value="anthropic">Anthropic (Claude)</option>
+            <option value="openai">OpenAI (ChatGPT)</option>
+            <option value="google">Google (Gemini)</option>
+            <option value="xai">xAI (Grok)</option>
+          </select>
+        </div>
+        <div>
+          <label for="apikey">API key</label>
+          <input id="apikey" type="password" autocomplete="off" placeholder="sk-ant-…">
+        </div>
+      </div>
       <button type="button" class="btn btn-ghost" id="keyBtn" style="margin-top:8px">Save &amp; test key</button>
       <div class="muted" id="keyMsg"></div>
       <label for="primary_email" style="margin-top:18px">Primary email</label>
@@ -779,13 +793,29 @@ document.getElementById("nextBtn").onclick=async ()=>{
   else showStep(state.step+1);
 };
 
+const PROVIDER_HINTS={anthropic:"sk-ant-…",openai:"sk-…",google:"AIza…",xai:"xai-…"};
+document.getElementById("provider").onchange=()=>{
+  const p=document.getElementById("provider").value;
+  document.getElementById("apikey").placeholder=PROVIDER_HINTS[p]||"";
+};
+(async ()=>{ // reflect an already-connected provider when revisiting setup
+  try{
+    const s=await (await fetch("/onboarding/parent-model")).json();
+    const sel=document.getElementById("provider");
+    sel.value=s.active||"anthropic";
+    sel.onchange();
+    const on=(s.providers||[]).find(p=>p.id===s.active&&p.connected);
+    if(on) document.getElementById("keyMsg").textContent=on.label+" is connected.";
+  }catch(e){}
+})();
 document.getElementById("keyBtn").onclick=async ()=>{
   const msg=document.getElementById("keyMsg"), btn=document.getElementById("keyBtn");
   msg.textContent="Testing key…"; btn.disabled=true;
   try{
     const r=await fetch("/onboarding/api-key",{method:"POST",
       headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({key:document.getElementById("apikey").value})});
+      body:JSON.stringify({key:document.getElementById("apikey").value,
+        provider:document.getElementById("provider").value})});
     const j=await r.json();
     msg.textContent = r.ok ? "Key saved on this machine." : (j.detail||"Key rejected");
   }catch(e){ msg.textContent="Could not reach @@BRAND@@."; }

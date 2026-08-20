@@ -401,7 +401,13 @@ def _friendly_error(e: Exception) -> str | None:
 def _cloud_auth_ok() -> bool:
     """Anthropic credentials present? Env vars are the common case; the SDK
     can also resolve an `ant auth login` credentials profile, which the
-    browser_agent probe detects."""
+    browser_agent probe detects.
+
+    Deliberately Anthropic-specific: this gates the AGENT lanes (browser /
+    desktop / phone), whose executor ladder is Claude-internal. A
+    non-Anthropic parent model (parent_model.py) powers chat/extraction text
+    escalation but cannot drive the agent — the reject messages below say so
+    instead of demanding a key the user chose not to have."""
     if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
         return True
     try:
@@ -2127,8 +2133,9 @@ class AgentWorker:
         if local_only and not _local_chat_ready():
             with self.lock:
                 self.error = (
-                    "ANTHROPIC_API_KEY is not set and the local model isn't "
-                    "reachable — add a key to .env, or start Ollama with "
+                    "No Anthropic credentials and the local model isn't "
+                    "reachable — connect a model account in Setup (Anthropic "
+                    "enables agent tasks too), or start Ollama with "
                     "QUILL_TEXT_LOCAL=1 for local-only chat.")
             self._emit("error", self.error)
             self._reject_loop(self.cmd_q, self.error)
@@ -2195,8 +2202,9 @@ class AgentWorker:
             # text tier can't serve them. Refuse each one visibly (quietly at
             # startup: the main lane already announced local-only mode).
             self._reject_loop(self.fast_q, (
-                "Desktop and phone tasks need the cloud model — add "
-                "ANTHROPIC_API_KEY to .env to enable them."))
+                "Desktop and phone tasks run on the Anthropic agent model — "
+                "connect an Anthropic key in Setup to enable them (chat and "
+                "briefs work on any connected provider)."))
             return
         try:
             self.fast_agent = self._build_agent(self._on_ask_fast)
