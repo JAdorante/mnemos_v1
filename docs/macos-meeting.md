@@ -20,6 +20,27 @@ v1 does **not** ship a virtual loopback driver. Supported path: install [BlackHo
 
 **Mic-side capture still produces briefs** without BlackHole. Remote voices may be quiet; that is acceptable for the September cohort.
 
+## Tester path (WS-F — shipped)
+
+| piece | file |
+|---|---|
+| installer | `install.command` (bash peer of `scripts/install.ps1`) |
+| launcher | `start.command` (clears the Gatekeeper quarantine on the folder) |
+| tester doc | `TESTER_SETUP-macos.md` (Gatekeeper, TCC prompts, BlackHole) |
+| honest degradation | `app/services/capture_support.py` → `GET /capture/status` |
+| tests | `tests/test_macos_path.py` |
+
+`capture_support` is what stops the Privacy sheet offering a Screen toggle that
+only ever returns 503: unsupported sources render disabled with the reason, and
+macOS system audio is offered as "needs setup" with the BlackHole instructions
+rather than being silently broken. The 503 in `_resume_source` stays as the
+backstop — this is about telling the tester before they click.
+
+**Still manual:** a full dry run on a clean Mac (Gatekeeper prompt, microphone
+TCC grant, a real meeting with and without BlackHole). CI covers `bash -n` on
+both launchers and the capture-support map on `macos-latest`; it cannot cover
+the permission dialogs.
+
 ## Packaging
 
 ```bash

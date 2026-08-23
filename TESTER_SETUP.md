@@ -1,5 +1,8 @@
 # Mnemos — Tester Setup (Windows)
 
+> On a Mac? Use [TESTER_SETUP-macos.md](TESTER_SETUP-macos.md) — the
+> install steps and the capture scope are different.
+
 Mnemos is a local-first personal memory assistant. Everything it captures and
 remembers stays on **your** machine; it calls a frontier model (Claude by
 default) only when the local models aren't confident.

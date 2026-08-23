@@ -386,12 +386,17 @@ def capture_status() -> dict:
         meeting_session = _ms.status()
     except Exception:
         meeting_session = {}
+    from app.services import capture_support
     return {
         "consent": capture_consent.status(),
         "running": _running_map(),
         "save_audio": bool(settings.storage.save_audio),
         "meeting_mode": meeting,
         "meeting_session": meeting_session,
+        # WS-F: what this OS can actually do, so the Privacy sheet stops
+        # offering toggles that only ever return 503 (the 503 stays as the
+        # backstop — this is so the user is told before they click).
+        "support": capture_support.status(),
     }
 
 

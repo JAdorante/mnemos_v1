@@ -567,7 +567,7 @@ playwright install chromium                  # browser agent
 ```
 
 Testers can use **`install.bat`** / **`start.bat`** — see
-[TESTER_SETUP.md](TESTER_SETUP.md).
+[TESTER_SETUP.md](TESTER_SETUP.md) — macOS testers use [TESTER_SETUP-macos.md](TESTER_SETUP-macos.md).
 
 ### 3. Add your API key
 
@@ -1171,4 +1171,4 @@ MIT-licensed `phonelink-mcp-server` project and retain that attribution.
 
 **Deeper docs:** interactive API at <http://127.0.0.1:8000/docs> when the
 server is running; per-subsystem design notes live in module docstrings.
-Tester install: [TESTER_SETUP.md](TESTER_SETUP.md).
+Tester install: [TESTER_SETUP.md](TESTER_SETUP.md) (Windows) · [TESTER_SETUP-macos.md](TESTER_SETUP-macos.md) (macOS).

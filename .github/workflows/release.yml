@@ -41,7 +41,20 @@ jobs:
           python -m pip install -U pip
           pip install -r requirements.txt
           pip install pytest
+      - name: Launcher scripts parse on a real macOS bash
+        # `bash -n` here rather than only in the test suite: macOS ships bash
+        # 3.2, and syntax the Linux CI accepts can still strand the cohort on
+        # install. This is the cheapest part of the Mac dry run to automate.
+        run: |
+          bash -n install.command
+          bash -n start.command
+          test -x install.command
+          test -x start.command
       - name: Meeting-path subset
         env:
           QUILL_FIRST_RUN_MODE: meeting
         run: python -m pytest tests/test_first_run.py tests/test_meeting_session.py tests/test_mcp_tools.py tests/test_trust_layer.py -q
+      - name: macOS tester path + honest capture degradation
+        # Runs with sys.platform == "darwin" for real, so the capture-support
+        # map is exercised on the platform it describes.
+        run: python -m pytest tests/test_macos_path.py tests/test_capture_privacy.py -q

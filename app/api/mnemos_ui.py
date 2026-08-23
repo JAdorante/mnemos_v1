@@ -1966,9 +1966,21 @@ window.MnemosCapture = {
     if (!el) return;
     const src = ((this._state && this._state.consent && this._state.consent.sources)
       || {});
+    // WS-F: a source this OS cannot run is shown disabled with the reason,
+    // not hidden — a Mac tester comparing notes with a Windows colleague
+    // should be able to see the difference is expected, not a broken install.
+    const support = ((this._state && this._state.support) || {}).sources || {};
     this._SOURCES.forEach((s) => {
       const box = document.getElementById('pv_' + s.key);
-      if (box) box.checked = !!src[s.key];
+      if (!box) return;
+      const cap = support[s.key] || {};
+      const blocked = cap.available === false;
+      box.checked = !blocked && !!src[s.key];
+      box.disabled = blocked;
+      const row = box.closest('label.pv-src');
+      if (row) row.style.opacity = blocked ? '0.55' : '';
+      const note = row && row.querySelector('span');
+      if (note && cap.reason) note.textContent = cap.reason;
     });
     const ret = (this._state && this._state.meeting_mode
       && this._state.meeting_mode.default_retention) || 'transcript_only';
