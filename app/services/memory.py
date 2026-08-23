@@ -330,70 +330,135 @@ class MemoryEngine:
         with self._lock:
             return [e.to_dict() for e in self._events]
 
-    def search(self, query: str, limit: int = 20, modality: str | None = None) -> list[dict[str, Any]]:
+    # --- retrieval (WS-E: hybrid union) -----------------------------------
+    def _fact_view(self, f: dict) -> dict:
+        return {"modality": f"fact:{f['kind']}", "raw": f.get("text", ""),
+                "summary": f.get("text", ""), "kind": f["kind"],
+                "fact_id": f["fact_id"], "status": f.get("status"),
+                "source_span": f.get("source_span"), "is_fact": True}
+
+    def _vector_hits(self, query: str, limit: int,
+                     modality: str | None) -> list[tuple[tuple, float, float, dict]]:
+        """ANN hits as (key, score, ts, payload). Empty when the index is down.
+
+        Overfetch: lifecycle filtering drops superseded/dismissed facts after
+        the ANN query, and recency re-ranking needs a pool wider than the final
+        cut to actually change anything.
+        """
+        vectors = self._ensure_vectors()
+        if not vectors:
+            return []
+        try:
+            k = min(max(limit * 3, 12), 60)
+            hits = vectors.search(self._embed(query), k=k, modality=modality)
+            store = self._ensure_store()
+            ev_ids = [int(h["id"]) for h in hits if int(h["id"]) < FACT_ID_OFFSET]
+            fact_ids = [int(h["id"]) - FACT_ID_OFFSET for h in hits
+                        if int(h["id"]) >= FACT_ID_OFFSET]
+            emap = store.by_ids_map(ev_ids)
+            fmap = store.facts_by_ids(fact_ids) if fact_ids else {}
+            out = []
+            for h in hits:
+                hid = int(h["id"])
+                if hid >= FACT_ID_OFFSET:
+                    f = fmap.get(hid - FACT_ID_OFFSET)
+                    if not fact_is_retrievable(f):
+                        continue
+                    key = ("fact", int(f["fact_id"]))
+                    d = self._fact_view(f)
+                    ts = float(f.get("updated_at") or h.get("time") or 0)
+                else:
+                    ev = emap.get(hid)
+                    if ev is None:
+                        continue
+                    key = ("event", hid)
+                    d = ev.to_dict()
+                    ts = float(h.get("time") or 0)
+                out.append((key, float(h.get("score") or 0.0), ts, d))
+            return out
+        except Exception as exc:
+            print(f"[memory] semantic search error ({exc}); "
+                  "keyword results only for this query.")
+            return []
+
+    def _keyword_hits(self, query: str, limit: int,
+                      modality: str | None) -> list[tuple[tuple, float, float, dict]]:
+        """Exact-substring hits from SQLite, entered at the score floor.
+
+        Cheap and indexed, so it runs on every query rather than only when the
+        vector index errors — that is the whole point of WS-E. Contribution is
+        capped at `limit` rows per side so a pathological LIKE match ('a')
+        cannot flood the pool and starve the semantic side.
+        """
+        store = self._ensure_store()
+        floor = float(settings.memory.exact_floor)
+        out: list[tuple[tuple, float, float, dict]] = []
+        if modality is None or modality.startswith("fact"):
+            try:
+                for f in store.search_facts_like(query, limit=limit):
+                    out.append((("fact", int(f["fact_id"])), floor,
+                                float(f.get("updated_at")
+                                      or f.get("extracted_at") or 0.0),
+                                self._fact_view(f)))
+            except Exception as exc:
+                print(f"[memory] fact keyword search skipped ({exc}).")
+        if modality is None or not modality.startswith("fact"):
+            try:
+                for eid, ev in store.search_with_ids(query, limit=limit,
+                                                     modality=modality):
+                    out.append((("event", int(eid)), floor, float(ev.time),
+                                ev.to_dict()))
+            except Exception as exc:
+                print(f"[memory] event keyword search skipped ({exc}).")
+        return out
+
+    def search(self, query: str, limit: int = 20,
+               modality: str | None = None) -> list[dict[str, Any]]:
+        """Hybrid retrieval: ANN and exact-substring, unioned before ranking.
+
+        Vector-first alone loses exact identifiers — a product codename or an
+        unusual surname can be beaten by semantic neighbours and simply never
+        surface. So the cheap indexed LIKE query always runs alongside the ANN
+        query; hits are deduped by (kind, id) keeping the higher score, and the
+        existing lifecycle filter and `recency_adjusted` ranking then apply
+        unchanged. QUILL_SEARCH_HYBRID=0 restores vector-first-with-fallback.
+        """
         if not query.strip():
             with self._lock:
                 evs = self._events[-limit:]
             return [e.to_dict() for e in evs]
-        vectors = self._ensure_vectors()
-        if vectors:
-            try:
-                # Overfetch: lifecycle filtering drops superseded/dismissed
-                # facts after the ANN query, and recency re-ranking needs a
-                # pool wider than the final cut to actually change anything.
-                k = min(max(limit * 3, 12), 60)
-                hits = vectors.search(self._embed(query), k=k, modality=modality)
-                store = self._ensure_store()
-                # Split hits into episodic events and extracted facts (offset ids).
-                ev_ids = [int(h["id"]) for h in hits if int(h["id"]) < FACT_ID_OFFSET]
-                fact_ids = [int(h["id"]) - FACT_ID_OFFSET for h in hits
-                            if int(h["id"]) >= FACT_ID_OFFSET]
-                emap = store.by_ids_map(ev_ids)
-                fmap = store.facts_by_ids(fact_ids) if fact_ids else {}
-                now = time.time()
-                ranked: list[tuple[float, dict]] = []
-                for h in hits:
-                    hid = int(h["id"])
-                    if hid >= FACT_ID_OFFSET:
-                        f = fmap.get(hid - FACT_ID_OFFSET)
-                        if not fact_is_retrievable(f):
-                            continue
-                        d = {"modality": f"fact:{f['kind']}", "raw": f.get("text", ""),
-                             "summary": f.get("text", ""), "kind": f["kind"],
-                             "fact_id": f["fact_id"], "status": f.get("status"),
-                             "source_span": f.get("source_span"), "is_fact": True}
-                        ts = float(f.get("updated_at") or h.get("time") or 0)
-                    else:
-                        ev = emap.get(hid)
-                        if ev is None:
-                            continue
-                        d = ev.to_dict()
-                        ts = float(h.get("time") or 0)
-                    d["score"] = h.get("score")
-                    age_days = (now - ts) / 86400.0 if ts else 3650.0
-                    ranked.append(
-                        (recency_adjusted(float(h.get("score") or 0.0), age_days), d))
-                ranked.sort(key=lambda t: -t[0])
-                return [d for _, d in ranked[:limit]]
-            except Exception as exc:
-                print(f"[memory] semantic search error ({exc}); falling back to substring.")
-        # Substring fallback: distilled facts first (they used to vanish
-        # entirely on this path), then raw events, capped at `limit`.
-        store = self._ensure_store()
-        out: list[dict[str, Any]] = []
-        if modality is None or modality.startswith("fact"):
-            try:
-                for f in store.search_facts_like(query, limit=max(4, limit // 2)):
-                    out.append({"modality": f"fact:{f['kind']}",
-                                "raw": f.get("text", ""),
-                                "summary": f.get("text", ""), "kind": f["kind"],
-                                "fact_id": f["fact_id"], "status": f.get("status"),
-                                "source_span": f.get("source_span"),
-                                "is_fact": True})
-            except Exception:
-                pass
-        out.extend(e.to_dict() for e in store.search(query, limit))
-        return out[:limit]
+        # Pilot ledger: count that a search happened — after the empty-query
+        # early return, so a bare timeline load is not counted as a search. The
+        # query text never reaches the ledger, only the +1 (WS-A, rule 5).
+        from app.services.usage_ledger import usage
+        usage.bump("searches")
+
+        hits = self._vector_hits(query, limit, modality)
+        if settings.memory.hybrid or not hits:
+            # `not hits` keeps the old fallback contract: an unavailable or
+            # erroring index still returns substring results.
+            hits = hits + self._keyword_hits(query, limit, modality)
+
+        # Dedupe by (kind, id), keeping the max score: something found both
+        # ways is one result, ranked by its strongest evidence. The payload and
+        # timestamp come from the first sighting — both sides hydrate from the
+        # same store row, so they are the same view either way.
+        best: dict[tuple, tuple[float, float, dict]] = {}
+        for key, score, ts, payload in hits:
+            prev = best.get(key)
+            if prev is None:
+                best[key] = (score, ts, payload)
+            elif score > prev[0]:
+                best[key] = (score, prev[1], prev[2])
+
+        now = time.time()
+        ranked: list[tuple[float, dict]] = []
+        for (score, ts, payload) in best.values():
+            payload["score"] = score
+            age_days = (now - ts) / 86400.0 if ts else 3650.0
+            ranked.append((recency_adjusted(score, age_days), payload))
+        ranked.sort(key=lambda t: -t[0])
+        return [d for _, d in ranked[:limit]]
 
 
 memory = MemoryEngine()

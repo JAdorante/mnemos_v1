@@ -727,6 +727,16 @@ class MemoryConfig:
     # compacts fragments and drops old versions. 0 disables self-maintenance.
     lance_optimize_every: int = int(_get("QUILL_LANCE_OPTIMIZE_EVERY", "500"))
 
+    # WS-E hybrid search: the substring/facts-LIKE query runs *alongside* the
+    # ANN query instead of only when the index errors, so an exact identifier
+    # ("capital-connect", an unusual surname) cannot lose to a semantic
+    # neighbour and vanish. An exact-substring hit enters ranking at this fixed
+    # score floor — high enough to survive the cut, low enough that a strong
+    # semantic match still outranks it. QUILL_SEARCH_HYBRID=0 restores the old
+    # vector-first-with-fallback behavior.
+    hybrid: bool = _get("QUILL_SEARCH_HYBRID", "1") not in ("0", "false", "False")
+    exact_floor: float = float(_get("QUILL_SEARCH_EXACT_FLOOR", "0.55"))
+
     @property
     def lance_dir(self) -> str:
         return f"{_get('QUILL_DATA_DIR', 'data')}/lance"
@@ -1339,6 +1349,67 @@ class ProvisionalBindConfig:
 
 
 @dataclass(frozen=True)
+class UsageConfig:
+    """Pilot instrumentation — local usage ledger (WS-A).
+
+    Counts *numbers only* (see services/usage_ledger.py): how many searches,
+    chat turns, meetings, review verdicts — never a query, a fact, a name or a
+    window title. Rows live in `usage_daily` in the main store, keyed by UTC
+    day, so WAU / week-2 retention can be computed on the tester's own machine.
+
+    Nothing leaves the box on its own. `ping_url` alone does nothing: the
+    weekly POST additionally requires a consent flag the user stored through
+    the Privacy controls (persisted in data/usage_consent.json, never an env
+    var — consent is a user act, not a deployment setting).
+    """
+    enabled: bool = _get("QUILL_USAGE_LEDGER", "1") not in ("0", "false", "False")
+    # Accumulator -> SQLite cadence. A crash loses at most this much counting.
+    flush_s: float = float(_get("QUILL_USAGE_FLUSH_S", "60"))
+    # Operator endpoint for the opt-in weekly ping. Empty = manual sharing only.
+    ping_url: str = _get("QUILL_USAGE_PING_URL", "")
+    # Ping cadence + the floor on retry after a failure (never more than one
+    # attempt per day, and a failure is logged, never raised).
+    ping_every_days: float = float(_get("QUILL_USAGE_PING_DAYS", "7"))
+    ping_retry_days: float = float(_get("QUILL_USAGE_PING_RETRY_DAYS", "1"))
+    ping_timeout_s: float = float(_get("QUILL_USAGE_PING_TIMEOUT_S", "5"))
+
+
+@dataclass(frozen=True)
+class UpdateCheckConfig:
+    """Version manifest check (WS-C) — a notification, never an updater.
+
+    An unconditional GET of a static JSON the operator hosts: no query params,
+    no install id, no version header, so the only thing the operator learns is
+    that some IP asked for a file. No auto-download, no auto-update. Off with
+    QUILL_UPDATE_CHECK=0 (documented in TESTER_SETUP and toggleable in the
+    Privacy controls).
+    """
+    enabled: bool = _get("QUILL_UPDATE_CHECK", "1") not in ("0", "false", "False")
+    manifest_url: str = _get("QUILL_UPDATE_MANIFEST_URL", "")
+    # Re-check cadence; the cached answer is served in between.
+    every_hours: float = float(_get("QUILL_UPDATE_CHECK_HOURS", "24"))
+    timeout_s: float = float(_get("QUILL_UPDATE_TIMEOUT_S", "3"))
+
+
+@dataclass(frozen=True)
+class ExportConfig:
+    """Data export / backup (WS-B) — the "prove I can leave" path.
+
+    Backups are streamed, never buffered (the 107 GB incident): a data dir can
+    be far larger than RAM. `free_disk_fraction` is the size guard — refuse
+    when the projected zip would eat more than this share of free space.
+    """
+    # Refuse a backup projected to exceed free_disk * this fraction.
+    free_disk_fraction: float = float(_get("QUILL_EXPORT_DISK_FRACTION", "0.5"))
+    # Zip streaming chunk size (bytes).
+    chunk_bytes: int = int(_get("QUILL_EXPORT_CHUNK_BYTES", "1048576"))
+    # Directory names under data/ that are never exported (secrets).
+    #   .env lives at the repo root, .api_token/.mcp_token under data/.
+    excluded: tuple[str, ...] = (
+        ".env", ".credentials.env", ".api_token", ".mcp_token", "usage_consent.json")
+
+
+@dataclass(frozen=True)
 class Settings:
     audio: AudioConfig = AudioConfig()
     system_audio: SystemAudioConfig = SystemAudioConfig()
@@ -1383,6 +1454,9 @@ class Settings:
     people_escrow: PeopleEscrowConfig = PeopleEscrowConfig()
     mint_recurrence: MintRecurrenceConfig = MintRecurrenceConfig()
     provisional_bind: ProvisionalBindConfig = ProvisionalBindConfig()
+    usage: UsageConfig = UsageConfig()
+    update_check: UpdateCheckConfig = UpdateCheckConfig()
+    export: ExportConfig = ExportConfig()
     # Bind address. 127.0.0.1 keeps the unauthenticated local trust model.
     # 0.0.0.0 (phone / Tailscale) enables LanApiAuthMiddleware — set
     # QUILL_API_TOKEN or let startup write data/.api_token, then unlock at /auth.

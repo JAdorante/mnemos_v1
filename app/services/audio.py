@@ -606,6 +606,14 @@ class AudioPipeline:
     def start(self) -> None:
         if self._model is None:
             self._load()
+        # Pilot ledger (WS-A): accrue capture minutes while the pipeline runs.
+        # Start/stop only — the ledger's flush timer turns wall time into whole
+        # minutes, so there is no per-frame hook on the capture path (rule 3).
+        try:
+            from app.services.usage_ledger import usage
+            usage.capture_started("audio")
+        except Exception as exc:
+            print(f"[usage] audio capture start not counted ({exc}).")
         self._stop.clear()
         self._worker = threading.Thread(target=self._transcribe_loop, daemon=True)
         self._worker.start()
@@ -748,6 +756,11 @@ class AudioPipeline:
                 time.sleep(2.0)
 
     def stop(self) -> None:
+        try:
+            from app.services.usage_ledger import usage
+            usage.capture_stopped("audio")
+        except Exception as exc:
+            print(f"[usage] audio capture stop not counted ({exc}).")
         self._stop.set()
         if self._stream is not None:
             self._stream.stop()

@@ -471,6 +471,13 @@ class DesktopCapturePipeline:
             raise RuntimeError(
                 "desktop capture enabled but both screen and clicks are off "
                 "(QUILL_DESKTOP_CAPTURE_SCREEN / _CLICKS)")
+        # Pilot ledger (WS-A): accrue desktop capture minutes while running.
+        # Counted only past the guards above, so a refused start counts zero.
+        try:
+            from app.services.usage_ledger import usage
+            usage.capture_started("desktop")
+        except Exception as exc:
+            print(f"[usage] desktop capture start not counted ({exc}).")
         click_mode = ("click-vlm=local-only" if self.cfg.click_vlm
                       else "click-vlm=off (coords+crop)")
         print(f"[desktop_capture] watching {', '.join(started)} "
@@ -478,6 +485,11 @@ class DesktopCapturePipeline:
               f"{self.cfg.max_interval_s}s; {click_mode}). Opt-in capture active.")
 
     def stop(self) -> None:
+        try:
+            from app.services.usage_ledger import usage
+            usage.capture_stopped("desktop")
+        except Exception as exc:
+            print(f"[usage] desktop capture stop not counted ({exc}).")
         self._stop.set()
         self._stop_l1()
         if self._click_listener is not None:

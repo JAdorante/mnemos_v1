@@ -181,10 +181,208 @@ def onboarding_api_key(body: ApiKeyIn) -> dict:
     return {"ok": True, "path": path, "provider": pid}
 
 
+class InviteIn(BaseModel):
+    code: str
+
+
+@router.get("/onboarding/invite")
+def onboarding_invite_status() -> dict:
+    """Whether this build has an invite service, so the UI can offer the path."""
+    from app.services import invite
+    return {"ok": True, "configured": bool(invite.vending_url())}
+
+
+@router.post("/onboarding/invite")
+def onboarding_invite(body: InviteIn) -> dict:
+    """Redeem an invite code into this machine's .credentials.env (WS-D T1).
+
+    The vended key is written exactly where a pasted key goes and is used the
+    same way — the BYO path is untouched, and so is the local-first story.
+    """
+    from app.services.invite import InviteError, redeem_and_save
+    try:
+        return redeem_and_save(body.code)
+    except InviteError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 @router.post("/console/report")
 def console_report(body: ReportIn) -> dict:
     from app.services import crash_report
     return crash_report.write_report(note=body.note)
+
+
+# --- data export & backup (WS-B) -------------------------------------------
+# Both endpoints stream: a data directory can be far larger than RAM (the
+# 107 GB incident), so the zip is generated into the response and never held.
+
+@router.get("/export/status")
+def export_status() -> dict:
+    """Last-backup timestamp + whether a backup would fit on this disk."""
+    from app.services import export
+    return export.status()
+
+
+def _zip_response(chunks, filename: str):
+    from fastapi.responses import StreamingResponse
+    return StreamingResponse(
+        chunks, media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+def _stream_or_400(make_iter, filename: str):
+    """Pull the first chunk eagerly so a refused export is a clean 400.
+
+    Once a StreamingResponse has started there is no way back to an error
+    status — the user would get a truncated zip instead of "not enough disk".
+    """
+    from app.services.export import ExportError
+    try:
+        it = make_iter()
+        first = next(it, b"")
+    except ExportError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(500, f"export failed: {exc}") from exc
+
+    def chunks():
+        yield first
+        yield from it
+
+    return _zip_response(chunks(), filename)
+
+
+@router.api_route("/export/backup", methods=["GET", "POST"])
+def export_backup():
+    """Streamed zip of the data directory — restorable with restore_backup.py.
+
+    GET is allowed so the Privacy controls button can be a plain link (a
+    fetch() cannot save a multi-GB stream to disk); it reads and copies, and
+    changes nothing.
+    """
+    from app.services import export
+    name = export.suggested_name("backup")
+    # Stamped when the backup starts, not when the browser finishes saving it:
+    # the Privacy controls line is "last backup taken", and a stream we cannot
+    # observe to completion is not something to report as unfinished.
+    resp = _stream_or_400(lambda: export.backup_stream(), name)
+    export.record_backup(name)
+    return resp
+
+
+@router.api_route("/export/takeout", methods=["GET", "POST"])
+def export_takeout(redact: bool = False):
+    """Portable JSONL export a human can read without Mnemos installed.
+
+    `redact=true` runs text fields through the crash-report redactor for a
+    share-safe variant — take an unredacted one for yourself.
+    """
+    from app.services import export
+    name = export.suggested_name("takeout-redacted" if redact else "takeout")
+    return _stream_or_400(lambda: export.takeout_stream(redact=redact), name)
+
+
+# --- version check (WS-C) --------------------------------------------------
+# The manifest GET is an unconditional fetch of a static file: no query params,
+# no install id, no version header. Notification only — nothing downloads.
+
+class UpdateEnabledIn(BaseModel):
+    enabled: bool
+
+
+class UpdateDismissIn(BaseModel):
+    version: str | None = None
+
+
+@router.get("/update/status")
+def update_status() -> dict:
+    """Cached manifest verdict. `state` is 'unknown' when we never reached it."""
+    from app.services import update_check
+    return update_check.status()
+
+
+@router.post("/update/check")
+def update_check_now() -> dict:
+    """Force a re-check now (the Console's 'check again'). Never raises."""
+    from app.services import update_check
+    return update_check.check(force=True)
+
+
+@router.post("/update/enabled")
+def update_set_enabled(body: UpdateEnabledIn) -> dict:
+    """Privacy controls toggle. Off means the GET never happens."""
+    from app.services import update_check
+    return update_check.set_enabled(bool(body.enabled))
+
+
+@router.post("/update/dismiss")
+def update_dismiss(body: UpdateDismissIn) -> dict:
+    """Dismiss the banner for one version; a newer release shows it again."""
+    from app.services import update_check
+    return update_check.dismiss(body.version)
+
+
+# --- pilot usage ledger (WS-A) --------------------------------------------
+# Local-first by construction: /usage/stats and /usage/report only read and
+# write this machine. The one network path (/usage/ping/*) needs BOTH a
+# configured URL and a consent flag the user set here, and both default off.
+
+class UsageConsentIn(BaseModel):
+    consented: bool
+
+
+@router.get("/usage/stats")
+def usage_stats() -> dict:
+    """Local usage rows + derived WAU / retention metrics. Never leaves here."""
+    from app.services import usage_ledger
+    return {
+        "ok": True,
+        "enabled": usage_ledger.usage.enabled(),
+        "metrics": usage_ledger.metrics(),
+        "days": usage_ledger.report_payload()["days"],
+        "pending": usage_ledger.usage.pending(),
+        "ping": usage_ledger.ping_status(),
+    }
+
+
+@router.get("/usage/preview")
+def usage_preview() -> dict:
+    """The exact payload a share would send — shown BEFORE consent is asked.
+
+    Same bytes as /usage/report writes and as the weekly ping would POST;
+    there is no second, richer payload anywhere.
+    """
+    from app.services import usage_ledger
+    import json as _json
+    text = usage_ledger.redacted_report_json()
+    return {"ok": True, "payload": _json.loads(text), "text": text,
+            "bytes": len(text)}
+
+
+@router.post("/usage/report")
+def usage_report() -> dict:
+    """Write data/logs/usage-<install_id>-<day>.json for the tester to send.
+
+    Same interaction shape as the crash-report zip: the file lands on disk and
+    the human decides whether it goes anywhere.
+    """
+    from app.services import usage_ledger
+    usage_ledger.usage.flush()
+    return usage_ledger.write_report()
+
+
+@router.get("/usage/ping/status")
+def usage_ping_status() -> dict:
+    from app.services import usage_ledger
+    return {"ok": True, **usage_ledger.ping_status()}
+
+
+@router.post("/usage/ping/consent")
+def usage_ping_consent(body: UsageConsentIn) -> dict:
+    """Store (or withdraw) standing consent for the weekly stats ping."""
+    from app.services import usage_ledger
+    usage_ledger.set_ping_consent(bool(body.consented))
+    return {"ok": True, **usage_ledger.ping_status()}
 
 
 @router.post("/capture/external")

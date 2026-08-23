@@ -1982,11 +1982,43 @@ window.MnemosCapture = {
       voiceBox.disabled = v.enabled === false;
       voiceBox.checked = v.enabled !== false && !v.muted;
     }
+    this.loadSharing();
     el.classList.add('open');
   },
   closePrivacy() {
     const el = document.getElementById('mnemosPrivacy');
     if (el) el.classList.remove('open');
+  },
+  async loadSharing() {
+    // Reflect stored state, and say plainly when the weekly ping is impossible
+    // (no operator endpoint configured) rather than offering a dead checkbox.
+    try {
+      const d = await (await fetch('/usage/ping/status')).json();
+      const box = document.getElementById('pv_ping');
+      if (box) {
+        box.checked = !!d.consented;
+        box.disabled = !d.url_configured;
+      }
+      const hint = document.getElementById('pvPingHint');
+      if (hint && !d.url_configured) {
+        hint.textContent = 'No operator endpoint is configured on this install, '
+          + 'so nothing can be sent automatically. Use “Send my stats”.';
+      }
+    } catch (e) {}
+    try {
+      const u = await (await fetch('/update/status')).json();
+      const box = document.getElementById('pv_update');
+      if (box) box.checked = !!u.enabled;
+    } catch (e) {}
+    try {
+      const b = await (await fetch('/export/status')).json();
+      const note = document.getElementById('pvBackupNote');
+      if (note) {
+        note.textContent = b.last_backup_human
+          ? ('Last backup: ' + b.last_backup_human)
+          : 'No backup taken yet.';
+      }
+    } catch (e) {}
   },
   async applyPrivacy() {
     const sources = {};
@@ -2008,6 +2040,22 @@ window.MnemosCapture = {
       const voiceBox = document.getElementById('pv_voice');
       if (voiceBox && !voiceBox.disabled) {
         this._voice = await this.setMuted(!voiceBox.checked);
+      }
+      const pingBox = document.getElementById('pv_ping');
+      if (pingBox && !pingBox.disabled) {
+        await fetch('/usage/ping/consent', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({consented: !!pingBox.checked}),
+        });
+      }
+      const updBox = document.getElementById('pv_update');
+      if (updBox) {
+        await fetch('/update/enabled', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({enabled: !!updBox.checked}),
+        });
       }
       this.render();
       this.closePrivacy();
@@ -2069,6 +2117,35 @@ window.MnemosCapture = {
       + '<label class="pv-src"><input type="checkbox" id="pv_voice">'
       + '<div><b>Speak replies aloud</b><span>Turn off anytime; it stays off until you turn it back on.</span></div></label>'
       + '</div>'
+      + '<div class="pv-ret" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line)">'
+      + '<b style="font-size:13px;color:var(--navy)">Your data</b>'
+      + '<p style="font-size:12px;color:var(--mut);margin:6px 0 8px;line-height:1.45">'
+      + 'Everything Mnemos remembers lives in this folder. Take a copy whenever you like.</p>'
+      + '<div style="display:flex;gap:8px;flex-wrap:wrap">'
+      + '<button type="button" class="pv-btn" id="pvBackup">Back up my memory</button>'
+      + '<button type="button" class="pv-btn" id="pvTakeout">Export my data</button>'
+      + '</div>'
+      + '<div id="pvBackupNote" style="font-size:12px;color:var(--mut);margin-top:6px"></div>'
+      + '</div>'
+      + '<div class="pv-ret" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line)">'
+      + '<b style="font-size:13px;color:var(--navy)">Sharing &amp; updates</b>'
+      + '<p style="font-size:12px;color:var(--mut);margin:6px 0 8px;line-height:1.45">'
+      + 'Usage counting is local: how many searches, meetings and reviews — never '
+      + 'what was said, searched or seen. Nothing is sent unless you send it.</p>'
+      + '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">'
+      + '<button type="button" class="pv-btn" id="pvSendStats">Send my stats</button>'
+      + '<button type="button" class="pv-btn quiet" id="pvSeePayload">See exactly what would be sent</button>'
+      + '</div>'
+      + '<pre id="pvPayload" hidden style="max-height:180px;overflow:auto;font-size:11px;'
+      + 'background:rgba(11,19,32,.04);padding:8px;border-radius:8px;white-space:pre-wrap"></pre>'
+      + '<label class="pv-src"><input type="checkbox" id="pv_ping">'
+      + '<div><b>Send these stats weekly, automatically</b>'
+      + '<span id="pvPingHint">Off by default. Only the payload above, only to the '
+      + 'the endpoint your pilot operator configured.</span></div></label>'
+      + '<label class="pv-src"><input type="checkbox" id="pv_update">'
+      + '<div><b>Check for new versions</b><span>Downloads a small version file. '
+      + 'Sends nothing about you — not even which version you run.</span></div></label>'
+      + '</div>'
       + '<div class="pv-actions">'
       + '<button type="button" class="pv-btn quiet" id="pvRevoke">Turn all off</button>'
       + '<button type="button" class="pv-btn quiet" id="pvCancel">Not now</button>'
@@ -2085,6 +2162,32 @@ window.MnemosCapture = {
       MnemosMemory.set('capturePromptDismissed', true);
       this.closePrivacy();
     };    document.getElementById('pvSave').onclick = () => this.applyPrivacy();
+    const seeBtn = document.getElementById('pvSeePayload');
+    if (seeBtn) seeBtn.onclick = async () => {
+      const pre = document.getElementById('pvPayload');
+      if (!pre) return;
+      if (!pre.hidden) { pre.hidden = true; return; }
+      pre.textContent = 'loading…';
+      pre.hidden = false;
+      try {
+        const d = await (await fetch('/usage/preview')).json();
+        pre.textContent = d.text || JSON.stringify(d.payload, null, 2);
+      } catch (e) { pre.textContent = 'could not read the payload'; }
+    };
+    const statsBtn = document.getElementById('pvSendStats');
+    if (statsBtn) statsBtn.onclick = async () => {
+      try {
+        const d = await (await fetch('/usage/report', {method: 'POST'})).json();
+        // Same affordance as the crash-report zip: the file is on disk, the
+        // human decides whether it goes anywhere.
+        window.prompt('Saved. Copy this path and email it to the pilot operator:',
+                      d.path || '');
+      } catch (e) { alert('Could not write the stats file.'); }
+    };
+    const backupBtn = document.getElementById('pvBackup');
+    if (backupBtn) backupBtn.onclick = () => { window.location = '/export/backup'; };
+    const takeoutBtn = document.getElementById('pvTakeout');
+    if (takeoutBtn) takeoutBtn.onclick = () => { window.location = '/export/takeout'; };
     document.getElementById('pvRevoke').onclick = async () => {
       try {
         this._state = await this.revoke();

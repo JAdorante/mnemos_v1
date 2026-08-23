@@ -118,13 +118,63 @@ $envPath = Join-Path $root '.env'
 if (-not (Test-Path $envPath)) { Copy-Item (Join-Path $root '.env.example') $envPath }
 
 $keyCheck = "import sys, anthropic`ntry:`n    anthropic.Anthropic(api_key=sys.argv[1]).models.list()`n    print('    key OK')`nexcept Exception as e:`n    print('    key check failed: ' + type(e).__name__)`n    sys.exit(1)"
+
+# WS-D Tier 1: most testers are handed an invite code and never touch an
+# Anthropic console. The code is exchanged for a key the operator pre-created;
+# that key is written into THIS machine's .credentials.env and used directly,
+# so nothing routes through the operator after install. The bring-your-own-key
+# path below is unchanged for anyone who prefers it.
+$inviteRedeem = @'
+import sys
+sys.path.insert(0, sys.argv[2])
+from app.services.invite import InviteError, redeem_and_save
+try:
+    out = redeem_and_save(sys.argv[1])
+    print("    invite accepted" + (" for " + out["label"] if out.get("label") else ""))
+except InviteError as exc:
+    print("    " + str(exc))
+    sys.exit(1)
+'@
+
 $key = ''
-while ($true) {
-    $key = Read-Host "Paste YOUR Anthropic API key (sk-ant-..., from console.anthropic.com) or press Enter to add it to .env later"
-    if (-not $key) { Warn "Skipped - Mnemos needs ANTHROPIC_API_KEY in .env before chat works."; break }
-    & $venvPy -c $keyCheck $key.Trim()
-    if ($LASTEXITCODE -eq 0) { $key = $key.Trim(); break }
-    Warn "That key didn't validate. Try again, or press Enter to skip."
+$invited = $false
+# The operator ships the vending endpoint in .env.example, so a tester never
+# has to know it exists. An env var still wins for a one-off install.
+$inviteUrl = $env:QUILL_INVITE_URL
+if (-not $inviteUrl) {
+    $inviteLine = (Get-Content $envPath -ErrorAction SilentlyContinue |
+                   Where-Object { $_ -match '^QUILL_INVITE_URL=(.+)$' } |
+                   Select-Object -First 1)
+    if ($inviteLine) { $inviteUrl = $inviteLine -replace '^QUILL_INVITE_URL=', '' }
+}
+if ($inviteUrl) {
+    $env:QUILL_INVITE_URL = $inviteUrl.Trim()
+    Write-Host ""
+    Write-Host "  How do you want to connect Mnemos to Claude?"
+    Write-Host "    [1] I have an invite code  (recommended - nothing to sign up for)"
+    Write-Host "    [2] I have my own Anthropic API key"
+    Write-Host "    [3] Skip for now"
+    while ($true) {
+        $choice = (Read-Host "  Choose 1, 2 or 3").Trim()
+        if ($choice -eq '3' -or $choice -eq '') { break }
+        if ($choice -eq '2') { break }
+        if ($choice -ne '1') { continue }
+        $code = (Read-Host "  Invite code (like ABCD-EFGH-JKLM)").Trim()
+        if (-not $code) { continue }
+        & $venvPy -c $inviteRedeem $code $root
+        if ($LASTEXITCODE -eq 0) { $invited = $true; Ok "Connected with your invite code."; break }
+        Warn "Try again, or choose 2 to paste your own key."
+    }
+}
+
+if (-not $invited) {
+    while ($true) {
+        $key = Read-Host "Paste YOUR Anthropic API key (sk-ant-..., from console.anthropic.com) or press Enter to add it to .env later"
+        if (-not $key) { Warn "Skipped - Mnemos needs ANTHROPIC_API_KEY in .env before chat works."; break }
+        & $venvPy -c $keyCheck $key.Trim()
+        if ($LASTEXITCODE -eq 0) { $key = $key.Trim(); break }
+        Warn "That key didn't validate. Try again, or press Enter to skip."
+    }
 }
 
 $lines = Get-Content $envPath

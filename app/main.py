@@ -27,6 +27,29 @@ app.add_middleware(LanApiAuthMiddleware)
 app.add_middleware(CsrfProtectMiddleware)
 app.include_router(router)
 app.include_router(adoption_router)
+
+
+# --- active-minute marker (WS-A) --------------------------------------------
+# "Active" means the human was in front of Mnemos, not that a process was up.
+# A request to chat / search / the Console / an approval marks the current UTC
+# minute; the ledger dedupes minute-stamps, so a polling page still counts as
+# one minute. Nothing about the request is recorded — no path, no query, no
+# body — only that *some* interaction happened in that minute.
+_ACTIVE_PREFIXES = ("/chat", "/memory/search", "/console/", "/approvals",
+                    "/approval/", "/facts/", "/people/", "/today", "/meetings")
+
+
+@app.middleware("http")
+async def _mark_active_minute(request, call_next):
+    try:
+        path = request.url.path
+        if any(path == p.rstrip("/") or path.startswith(p)
+               for p in _ACTIVE_PREFIXES):
+            from app.services.usage_ledger import usage
+            usage.mark_active()
+    except Exception:
+        pass  # instrumentation must never fail a request (house rule 3)
+    return await call_next(request)
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 if _STATIC_DIR.is_dir():
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
@@ -72,6 +95,20 @@ async def _startup() -> None:
     ensure_api_token()
     bus.bind_loop(asyncio.get_running_loop())
     memory.attach()  # Memory Engine subscribes to every event
+    # Pilot usage ledger (WS-A): counts an app start and begins the 60 s flush
+    # timer. Numbers only, local only — see services/usage_ledger.py.
+    try:
+        from app.services.usage_ledger import usage
+        usage.start()
+    except Exception as exc:
+        print(f"[usage] startup hook skipped ({exc}).")
+    # Version manifest check (WS-C): one unconditional GET of a static file,
+    # off with QUILL_UPDATE_CHECK=0. Notification only — never downloads.
+    try:
+        from app.services import update_check
+        update_check.start_background()
+    except Exception as exc:
+        print(f"[update_check] startup hook skipped ({exc}).")
     # #B4: once this machine has enough of its OWN stored utterances, derive the
     # audio thresholds from them (idempotent, bounded, best-effort — no-op if a
     # calibration already exists, too few clips, or QUILL_AUTO_CALIBRATE=0).
@@ -542,6 +579,11 @@ async def _startup() -> None:
 @app.on_event("shutdown")
 async def _shutdown() -> None:
     stop_all()
+    try:
+        from app.services.usage_ledger import usage
+        usage.stop()  # final flush: a clean exit loses no counts
+    except Exception as exc:
+        print(f"[usage] shutdown flush skipped ({exc}).")
     global _extract_nudge_timer
     with _extract_nudge_lock:
         if _extract_nudge_timer is not None:

@@ -107,6 +107,14 @@ def _require_consent(source: str) -> None:
         )
 
 
+def _usage():
+    """The pilot usage ledger (WS-A). Imported lazily so routes.py keeps its
+    import graph shallow; `bump` swallows its own errors, so call sites are a
+    bare one-liner that can never fail a request."""
+    from app.services.usage_ledger import usage
+    return usage
+
+
 def _l0():
     """The perception L0 metadata monitor, or None when disabled/broken. L0
     rides the 'screen' consent + pause plumbing: it records window METADATA
@@ -234,27 +242,36 @@ def _pause_source(source: str) -> dict:
 
 
 def _resume_source(source: str) -> dict:
-    """Resume one source if consent still allows it."""
+    """Resume one source if consent still allows it.
+
+    Start failures (e.g. screen on Linux, missing PortAudio, no camera) become
+    HTTP 503 — never an unhandled ASGI exception from the Privacy toggles.
+    """
     _require_consent(source)
     global _audio_running, _system_audio_running, _vision_running, \
         _desktop_capture_running
-    if source == "mic":
-        if not _audio_running:
-            _audio.start(); _audio_running = True
-    elif source == "system_audio":
-        if not _system_audio_running:
-            _ensure_system_audio().start(); _system_audio_running = True
-    elif source == "webcam":
-        if not _vision_running:
-            _vision.start(); _vision_running = True
-    elif source == "screen":
-        if not _desktop_capture_running:
-            _desktop_capture.start(); _desktop_capture_running = True
-        mon = _l0()
-        if mon is not None and not mon.running():
-            mon.resume()          # closes the user_pause gap
-    else:
-        raise HTTPException(400, detail=f"unknown source: {source}")
+    try:
+        if source == "mic":
+            if not _audio_running:
+                _audio.start(); _audio_running = True
+        elif source == "system_audio":
+            if not _system_audio_running:
+                _ensure_system_audio().start(); _system_audio_running = True
+        elif source == "webcam":
+            if not _vision_running:
+                _vision.start(); _vision_running = True
+        elif source == "screen":
+            if not _desktop_capture_running:
+                _desktop_capture.start(); _desktop_capture_running = True
+            mon = _l0()
+            if mon is not None and not mon.running():
+                mon.resume()          # closes the user_pause gap
+        else:
+            raise HTTPException(400, detail=f"unknown source: {source}")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {"resumed": source, "running": _running_map()}
 
 
@@ -313,8 +330,15 @@ def health() -> dict:
     from app.services import capture_consent
     from app.services import score_v2
     from app.services import source_policy
+    from app.services import update_check
+    from app.version import __version__
+    upd = update_check.status()
     return {
         "status": "ok",
+        # WS-C: one version constant, surfaced everywhere. A tester bug report
+        # is unattributable without it.
+        "version": __version__,
+        "update": {"state": upd["state"], "latest": upd["latest"]},
         "source_policies": {
             "loaded": source_policy.policies_loaded(),
             "version": source_policy.policy_version(),
@@ -685,8 +709,11 @@ def desktop_capture_start() -> dict:
     _require_consent("screen")
     global _desktop_capture_running
     if not _desktop_capture_running:
-        _desktop_capture.start()
-        _desktop_capture_running = True
+        try:
+            _desktop_capture.start()
+            _desktop_capture_running = True
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {"desktop_capture_running": _desktop_capture_running,
             "desktop_capture": _desktop_capture.running()}
 
@@ -2496,6 +2523,7 @@ async def approvals_resolve(
     """
     from app.api.approval_partial import resolve as _resolve
 
+    _usage().bump("approvals")        # WS-A: a decision happened, not which
     yes = str(accept).strip().lower() in ("1", "true", "yes", "on")
     result = _resolve(_agent_worker(), yes)
     want_json = (
@@ -2522,6 +2550,8 @@ async def approval_decide(packet_id: int, request: Request) -> Response:
     """
     from app.api.approval_partial import decide as _decide
     from fastapi.responses import JSONResponse
+
+    _usage().bump("approvals")        # WS-A: a decision happened, not which
 
     ctype = (request.headers.get("content-type") or "").lower()
     fields = None
@@ -2647,6 +2677,9 @@ def _policy_preflight_banner() -> str:
 def _adoption_console_chrome() -> str:
     """First-win toast, ambient unlock card, Report-a-problem (Workstreams 1+4)."""
     return r"""
+<div id="mnemosUpdateBar" hidden style="padding:10px 16px;border-radius:12px;
+  margin:0 0 12px;font:14px/1.45 system-ui;display:flex;gap:12px;align-items:center;
+  flex-wrap:wrap"></div>
 <div id="mnemosToast" hidden style="position:fixed;right:18px;bottom:18px;z-index:40;
   max-width:340px;padding:14px 16px;border-radius:14px;background:#0b1320;color:#f8f6f1;
   box-shadow:0 12px 40px rgba(11,19,32,.28);font:14px/1.45 system-ui"></div>
@@ -2693,6 +2726,52 @@ def _adoption_console_chrome() -> str:
   }
   pollNudge();
   setInterval(pollNudge, 20000);
+  // "Send my stats" (WS-A): identical shape to the crash-report zip — write a
+  // redaction-clean JSON to data/logs/ and hand the tester the path. Nothing
+  // is transmitted; the human decides whether it goes anywhere.
+  const sbtn=document.getElementById('statsBtn');
+  if(sbtn) sbtn.onclick=async()=>{
+    const r=await fetch('/usage/report',{method:'POST'});
+    const j=await r.json();
+    if(!j.ok){ alert(j.detail||'stats report failed'); return; }
+    window.prompt('Usage stats saved (numbers only — no transcripts, names or '
+      +'queries).\nCopy this path and email it to the pilot operator:', j.path);
+  };
+  // Update banner (WS-C). Notification only — the link opens the download
+  // page in a browser; nothing is fetched or run by Mnemos.
+  const DISMISS_KEY='mnemosUpdateDismissed';
+  async function updateBanner(){
+    const bar=document.getElementById('mnemosUpdateBar');
+    if(!bar) return;
+    let d;
+    try{ d=await (await fetch('/update/status')).json(); }catch(e){ return; }
+    const foot=document.getElementById('mnemosVersion');
+    if(foot) foot.textContent='Mnemos '+(d.current||'?');
+    const b=d.banner;
+    if(!b){ bar.hidden=true; return; }
+    // Dismissal is per-version: a newer release shows the banner again, and a
+    // build below min_supported cannot be dismissed away.
+    let dismissed=null;
+    try{ dismissed=window.localStorage.getItem(DISMISS_KEY); }catch(e){}
+    if(!b.unsupported && dismissed===b.dismiss_key){ bar.hidden=true; return; }
+    const crit=b.level==='critical';
+    bar.style.background=crit?'#7a1420':'#0b1320';
+    bar.style.color='#f8f6f1';
+    bar.innerHTML='<strong>'+(crit?'Update required':'Update available')+'</strong>'
+      +'<span>'+b.message+'</span>'
+      +(b.url?(' <a href="'+b.url+'" target="_blank" rel="noopener" '
+        +'style="color:#c9a227">Download</a>'):'')
+      +(b.notes?(' <span style="opacity:.75">'+b.notes+'</span>'):'')
+      +(crit?'':' <button type="button" id="updDismiss" style="background:none;'
+        +'border:0;color:#bbb;cursor:pointer">dismiss</button>');
+    bar.hidden=false;
+    const dz=document.getElementById('updDismiss');
+    if(dz) dz.onclick=()=>{
+      try{ window.localStorage.setItem(DISMISS_KEY,b.dismiss_key); }catch(e){}
+      bar.hidden=true;
+    };
+  }
+  updateBanner();
   const btn=document.getElementById('reportBtn');
   if(btn) btn.onclick=async()=>{
     const note=prompt('What went wrong? (saved locally — nothing is sent)')||'';
@@ -2712,7 +2791,9 @@ def memory_console_page() -> HTMLResponse:
     page = _CONSOLE_PAGE.replace(
         '<button class="btn" onclick="load()">Refresh</button>',
         '<button class="btn" onclick="load()">Refresh</button>\n    '
-        '<button class="btn" id="reportBtn" type="button">Report a problem</button>',
+        '<button class="btn" id="reportBtn" type="button">Report a problem</button>\n    '
+        '<button class="btn" id="statsBtn" type="button">Send my stats</button>\n    '
+        '<span id="mnemosVersion" style="margin-left:10px;color:#888;font-size:12px"></span>',
         1)
     page = page.replace(
         '<div class="layout">',
@@ -3762,6 +3843,7 @@ def fact_reopen(fact_id: int) -> dict:
 @router.post("/facts/{fact_id}/approve")
 def fact_approve(fact_id: int) -> dict:
     fact = _get_or_404(fact_id)
+    _usage().bump("facts_reviewed")   # WS-A: verdict counted, never its text
     memory._ensure_store().review_fact(fact_id, "approved")
     _label_distill_outcome(fact, "accepted")
     _harvest_fact_verdict(fact, "accepted")
@@ -3775,6 +3857,7 @@ def fact_dismiss(fact_id: int) -> dict:
     """Kill a hallucinated/irrelevant fact — marks it dismissed and cancels its
     task/commitment. The human signal that keeps the timeline trustworthy."""
     fact = _get_or_404(fact_id)
+    _usage().bump("facts_reviewed")   # WS-A: verdict counted, never its text
     memory._ensure_store().review_fact(fact_id, "dismissed")
     _label_distill_outcome(fact, "rejected")
     _harvest_fact_verdict(fact, "dismissed")
@@ -4198,7 +4281,9 @@ def chat(body: ChatIn) -> dict:
     for this turn (lecture notes, homework, etc.).
     """
     from app.services import agent_chat_mode as _smode
+    from app.services.usage_ledger import usage
 
+    usage.bump("chat_turns")  # WS-A: the count only; the message is not read
     if body.mode is not None and str(body.mode).strip():
         try:
             _smode.set_manual(body.mode)

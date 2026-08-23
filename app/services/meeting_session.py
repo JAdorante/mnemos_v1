@@ -495,6 +495,14 @@ def end(*, reason: str = "manual", store: Store | None = None) -> dict[str, Any]
                 int(sid), status=STATUS_ENDED, ended_at=now)
         except Exception:
             pass
+    # Pilot ledger (WS-A): a meeting counts when it *ends*, not when it is
+    # offered — an offer the user skipped never entered_at, so it is not a
+    # captured meeting. Duration only; the title and attendees stay out.
+    from app.services.usage_ledger import usage
+    entered = st.get("entered_at")
+    if entered:
+        usage.bump("meetings_captured")
+        usage.bump("meeting_minutes", int(max(0.0, now - float(entered)) // 60))
     try:
         from app.services import meeting_mode as mm
         if st.get("consent") == CONSENT_TRANSCRIPT:

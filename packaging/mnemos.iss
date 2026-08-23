@@ -5,7 +5,10 @@
 ; Uninstall offers to delete data/ (default unchecked).
 
 #define MyAppName "Mnemos"
-#define MyAppVersion "0.1.0"
+; WS-C: the version comes from app/version.py via dist\VERSION.txt, which the
+; PyInstaller spec writes. Never edit a version literal here — the installer
+; and the app must not be able to drift.
+#define MyAppVersion Trim(FileRead(FileOpen("..\dist\VERSION.txt")))
 #define MyAppPublisher "Mnemos"
 #define MyAppExeName "Mnemos.exe"
 

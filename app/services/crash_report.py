@@ -6,6 +6,7 @@ to send. API keys and personal-class strings are redacted first.
 from __future__ import annotations
 
 import io
+import json
 import os
 import re
 import time
@@ -50,6 +51,14 @@ def write_report(*, note: str = "") -> dict[str, Any]:
     included: list[str] = []
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("note.txt", _redact(note or "(no note)"))
+        # WS-C: stamp the build so a tester report is attributable to one.
+        from app.version import __version__
+        import platform as _platform
+        zf.writestr("manifest.json", json.dumps({
+            "app_version": __version__,
+            "os": _platform.system(),
+            "created_at": time.time(),
+        }, indent=2))
         for name in ("model_calls.jsonl", "escalate_distill.jsonl",
                      "first_run.json", "capture_consent.json"):
             p = root / name

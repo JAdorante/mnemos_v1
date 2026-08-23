@@ -536,6 +536,10 @@ class PersonalAgentLayer:
     # -- the entry point ----------------------------------------------------
     def compile(self, goal: str, *, surface: str | None = None,
                 person: str | None = None) -> Plan:
+        # Pilot ledger (WS-A): one agent task = one compiled plan. The goal
+        # text stays here; only the +1 crosses into the ledger (rule 5).
+        from app.services.usage_ledger import usage
+        usage.bump("agent_tasks")
         person = person or self._detect_person(goal)
         ctx = self.select_context(goal, person=person)
         sub_goals = self.decompose(goal, ctx)

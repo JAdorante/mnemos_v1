@@ -240,6 +240,27 @@ textarea{min-height:96px;resize:vertical}
       </div>
       <label style="margin-top:18px">AI model account</label>
       <p class="lead" style="margin:4px 0 8px">@@BRAND@@ answers locally when it can and asks a bigger cloud model when it must. Connect whichever account you already have — the key is stored in <span style="font-family:var(--mono)">.credentials.env</span> on this machine and sent only to the provider you pick.</p>
+      <!-- Invite path (WS-D Tier 1). Hidden unless this build has an invite
+           service configured, so the BYO form is unchanged for everyone else.
+           Shown first because it is the path that needs no account at all. -->
+      <div id="inviteBox" hidden style="margin:0 0 14px;padding:12px 14px;border:1px solid var(--line);border-radius:10px">
+        <label for="invitecode">Invite code</label>
+        <p class="lead" style="margin:4px 0 8px">Were you given a code like
+          <span style="font-family:var(--mono)">ABCD-EFGH-JKLM</span>? Use it here —
+          nothing to sign up for. It is exchanged once for a key of your own,
+          stored on this machine.</p>
+        <div class="row two">
+          <div>
+            <input id="invitecode" autocomplete="off" placeholder="ABCD-EFGH-JKLM"
+                   spellcheck="false" style="text-transform:uppercase">
+          </div>
+          <div>
+            <button type="button" class="btn btn-ghost" id="inviteBtn">Use invite code</button>
+          </div>
+        </div>
+        <div class="muted" id="inviteMsg"></div>
+        <div class="muted" style="margin-top:8px">Or connect your own account below.</div>
+      </div>
       <div class="row two">
         <div>
           <label for="provider">Provider</label>
@@ -808,6 +829,37 @@ document.getElementById("provider").onchange=()=>{
     if(on) document.getElementById("keyMsg").textContent=on.label+" is connected.";
   }catch(e){}
 })();
+(async ()=>{ // offer the invite path only when this build has a service
+  try{
+    const s=await (await fetch("/onboarding/invite")).json();
+    if(s.configured) document.getElementById("inviteBox").hidden=false;
+  }catch(e){}
+})();
+const inviteBtn=document.getElementById("inviteBtn");
+if(inviteBtn) inviteBtn.onclick=async ()=>{
+  const msg=document.getElementById("inviteMsg"), el=document.getElementById("invitecode");
+  msg.textContent="Checking your code…"; inviteBtn.disabled=true;
+  try{
+    const r=await fetch("/onboarding/invite",{method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({code:el.value})});
+    const j=await r.json();
+    if(r.ok){
+      // Same end state as pasting a key: the connected-provider line below is
+      // what actually confirms it, so refresh that rather than claim success here.
+      msg.textContent="Connected"+(j.label?(" for "+j.label):"")+".";
+      el.value="";
+      try{
+        const s=await (await fetch("/onboarding/parent-model")).json();
+        const on=(s.providers||[]).find(p=>p.id===s.active&&p.connected);
+        if(on) document.getElementById("keyMsg").textContent=on.label+" is connected.";
+      }catch(e){}
+    } else {
+      msg.textContent=j.detail||"That code was not accepted.";
+    }
+  }catch(e){ msg.textContent="Could not reach @@BRAND@@."; }
+  inviteBtn.disabled=false;
+};
 document.getElementById("keyBtn").onclick=async ()=>{
   const msg=document.getElementById("keyMsg"), btn=document.getElementById("keyBtn");
   msg.textContent="Testing key…"; btn.disabled=true;

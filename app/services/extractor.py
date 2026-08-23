@@ -1133,6 +1133,11 @@ class Extractor:
 
         # Entity nodes + asserted relation edges (the graph's non-person side).
         self._persist_entities(facts, anchor, now)
+        # Pilot ledger (WS-A): how many facts this turn actually materialized —
+        # a count, never the facts. Placed here rather than in storage's
+        # add_task/add_claim so backfills and test seeding don't inflate it.
+        from app.services.usage_ledger import usage
+        usage.bump("facts_created", int(n))
         return n
 
     def _persist_claim_belief(

@@ -10,6 +10,23 @@ from PyInstaller.utils.hooks import collect_submodules
 
 ROOT = Path(SPECPATH).resolve().parent  # noqa: F821 — PyInstaller injects SPECPATH
 
+# WS-C: one version constant. Read app/version.py textually rather than
+# importing app (PyInstaller runs this spec before the app is importable), so
+# the installer and the running app can never drift.
+def _app_version() -> str:
+    import re as _re
+    text = (ROOT / "app" / "version.py").read_text(encoding="utf-8")
+    m = _re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', text)
+    if not m:
+        raise SystemExit("packaging: could not read __version__ from app/version.py")
+    return m.group(1)
+
+
+VERSION = _app_version()
+(ROOT / "dist").mkdir(exist_ok=True)
+# The Inno script reads this file so `iscc` needs no separate bump.
+(ROOT / "dist" / "VERSION.txt").write_text(VERSION, encoding="utf-8")
+
 hidden = []
 for pkg in ("app", "desktop_agent", "browser_agent", "mcp_server"):
     try:

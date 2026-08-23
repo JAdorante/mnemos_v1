@@ -25,6 +25,16 @@ from app.events import Event, Modality
 
 _JSON_FIELDS = ("people", "tasks", "entities", "meta")
 
+# usage_daily counter columns (WS-A). The single whitelist every writer checks
+# against: a bump for anything not in here is dropped, so the ledger's schema
+# cannot grow a free-text column by accident.
+USAGE_COUNTER_COLUMNS: tuple[str, ...] = (
+    "app_starts", "active_minutes", "searches", "chat_turns",
+    "meetings_captured", "meeting_minutes", "facts_reviewed", "facts_created",
+    "agent_tasks", "approvals",
+    "capture_audio_minutes", "capture_desktop_minutes",
+)
+
 # Approval-binding window: a packet's executable args are only valid this long
 # after minting (plan 0.3). Commit gates (0.4+) refuse once expires_at passes.
 _PACKET_TTL_S = 900.0
@@ -1201,6 +1211,36 @@ class Store:
                 "CREATE INDEX IF NOT EXISTS idx_triggers_status "
                 "ON triggers(status, signal)")
 
+            # --- pilot usage ledger (WS-A) -------------------------------------
+            # One row per UTC day. NUMBERS AND ENUM-ISH STRINGS ONLY: this
+            # table can never hold a query, a fact, a name or a window title —
+            # if a counter would need a transcript snippet, the counter is
+            # wrong. `os` is platform.system() alone (no build, no hostname);
+            # `install_id` is a random UUID minted at first run, never derived
+            # from hardware. See services/usage_ledger.py.
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS usage_daily (
+                    day        TEXT    PRIMARY KEY,   -- UTC YYYY-MM-DD
+                    install_id TEXT,
+                    app_starts INTEGER NOT NULL DEFAULT 0,
+                    active_minutes INTEGER NOT NULL DEFAULT 0,
+                    searches   INTEGER NOT NULL DEFAULT 0,
+                    chat_turns INTEGER NOT NULL DEFAULT 0,
+                    meetings_captured INTEGER NOT NULL DEFAULT 0,
+                    meeting_minutes   INTEGER NOT NULL DEFAULT 0,
+                    facts_reviewed    INTEGER NOT NULL DEFAULT 0,
+                    facts_created     INTEGER NOT NULL DEFAULT 0,
+                    agent_tasks       INTEGER NOT NULL DEFAULT 0,
+                    approvals         INTEGER NOT NULL DEFAULT 0,
+                    capture_audio_minutes   INTEGER NOT NULL DEFAULT 0,
+                    capture_desktop_minutes INTEGER NOT NULL DEFAULT 0,
+                    version    TEXT,
+                    os         TEXT
+                )
+                """
+            )
+
             self._conn.commit()
         self._migrate()
 
@@ -2214,6 +2254,25 @@ class Store:
                 (q, limit),
             ).fetchall()
         return [self._row_to_event(r) for r in rows][::-1]
+
+    def search_with_ids(self, query: str, limit: int = 20,
+                        modality: str | None = None) -> list[tuple[int, Event]]:
+        """Substring match over event text, WITH ids — the hybrid-search union
+        (services/memory.py) dedupes against ANN hits by id, so the id-less
+        :meth:`search` cannot be used there. Newest first."""
+        q = f"%{(query or '').strip()}%"
+        if q == "%%":
+            return []
+        sql = "SELECT * FROM events WHERE raw LIKE ?"
+        args: list[Any] = [q]
+        if modality:
+            sql += " AND modality = ?"
+            args.append(modality)
+        sql += " ORDER BY time DESC LIMIT ?"
+        args.append(int(limit))
+        with self._lock:
+            rows = self._conn.execute(sql, args).fetchall()
+        return [(int(r["id"]), self._row_to_event(r)) for r in rows]
 
     def count(self) -> int:
         with self._lock:
@@ -3801,6 +3860,60 @@ class Store:
             rows = self._conn.execute(
                 "SELECT * FROM storage_growth ORDER BY ts DESC LIMIT ?",
                 (int(limit),)).fetchall()
+        return [dict(r) for r in reversed(rows)]
+
+    # --- pilot usage ledger (WS-A) -----------------------------------------
+    # Additive upsert only: the ledger flushes deltas every ~60 s, so a day's
+    # row grows monotonically and a lost flush costs counts, never correctness.
+    def bump_usage_daily(self, day: str, deltas: dict[str, int], *,
+                         install_id: str | None = None,
+                         version: str | None = None,
+                         os_name: str | None = None) -> None:
+        """Add `deltas` onto the UTC `day` row, inserting it if absent.
+
+        Only whitelisted counter columns are accepted — the column name reaches
+        SQL by identity from USAGE_COUNTER_COLUMNS, never from caller text, so
+        a fuzzed field name can neither inject nor create a column.
+        """
+        cols = [c for c in USAGE_COUNTER_COLUMNS if int(deltas.get(c) or 0)]
+        vals = [int(deltas[c]) for c in cols]
+        if not cols and install_id is None and version is None and os_name is None:
+            return
+        names = ["day", "install_id", "version", "os"] + cols
+        placeholders = ", ".join("?" for _ in names)
+        sets = [f"{c} = {c} + excluded.{c}" for c in cols]
+        # Identity/version metadata is last-writer-wins, and only when supplied,
+        # so a flush that omits them can't blank a populated row.
+        for name, value in (("install_id", install_id), ("version", version),
+                            ("os", os_name)):
+            if value is not None:
+                sets.append(f"{name} = excluded.{name}")
+        sql = (f"INSERT INTO usage_daily ({', '.join(names)}) "
+               f"VALUES ({placeholders}) ON CONFLICT(day) DO UPDATE SET "
+               f"{', '.join(sets)}")
+        args = [str(day), install_id, version, os_name] + vals
+        with self._lock:
+            self._conn.execute(sql, args)
+            self._conn.commit()
+
+    def get_usage_day(self, day: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM usage_daily WHERE day = ?", (str(day),)).fetchone()
+        return dict(row) if row else None
+
+    def list_usage_daily(self, *, since_day: str | None = None,
+                         limit: int = 400) -> list[dict]:
+        """Usage rows oldest-first (the order metrics() and the report want)."""
+        sql = "SELECT * FROM usage_daily"
+        args: list[Any] = []
+        if since_day:
+            sql += " WHERE day >= ?"
+            args.append(str(since_day))
+        sql += " ORDER BY day DESC LIMIT ?"
+        args.append(int(limit))
+        with self._lock:
+            rows = self._conn.execute(sql, args).fetchall()
         return [dict(r) for r in reversed(rows)]
 
     def add_economy_run(self, result: dict) -> int:
