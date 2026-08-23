@@ -245,7 +245,18 @@ class ModelRouter:
         User-initiated tasks (chat, plan) are never capped here.
 
         Plan 6.1: privacy_class gate — never-send refuses; sensitive/personal
-        are redacted before Anthropic. Local Ollama path is unaffected."""
+        are redacted before Anthropic. Local Ollama path is unaffected.
+
+        Latency program, Phase 3.3: a call inside a speculative scope never
+        gets here. The check is on the paid call itself, not on the routing
+        logic above it, so a future code path that forgets the policy fails
+        loudly instead of quietly spending money on a guess."""
+        from app.services.model_log import (
+            SpeculativeCloudCall, in_speculative_scope)
+        if in_speculative_scope():
+            raise SpeculativeCloudCall(
+                f"speculative {task!r} call attempted to reach the paid parent; "
+                "speculative work is local-only by policy")
         try:
             from app.perception.spend_cap import spend_cap
             spend_cap.check(task)
@@ -426,7 +437,9 @@ class ModelRouter:
 
     def _local_first(self, task: str, *, system: str, messages: list,
                      max_tokens: int, schema: dict | None,
-                     model: str | None) -> tuple[str, dict | None, str | None]:
+                     model: str | None,
+                     speculative: bool = False
+                     ) -> tuple[str, dict | None, str | None]:
         """Local pass -> confidence/stakes gate -> Claude parent when needed.
         Returns (text, parsed_json_or_None, distill_row_id_or_None). Mirrors
         VLMRouter.describe: fail open to Claude when local is down; keep the
@@ -462,6 +475,11 @@ class ModelRouter:
             return text, parsed, rid
 
         if not self._use_local():
+            if speculative:
+                # Falling back to Claude is the correct behavior for demand
+                # traffic and exactly the wrong one here: nobody asked for
+                # this answer. Return nothing and let the cache stay cold.
+                return "", None, None
             return _parent("local_unavailable")
 
         # Retrieval few-shot: show the local model similar past prompts it
@@ -470,7 +488,6 @@ class ModelRouter:
         # Workstream C: the exemplar store (curated learning_pairs, LanceDB)
         # is tried first; the legacy distill-trail recall remains the fallback
         # so behavior is byte-identical until QUILL_EXEMPLARS=1.
-        local_system = system
         examples: list[dict] = []
         try:
             from app.services import exemplar_store
@@ -487,17 +504,25 @@ class ModelRouter:
             except Exception as exc:
                 examples = []
                 print(f"[model_router] few-shot recall skipped ({exc}).")
+        exemplar_block = ""
         if examples:
             from app.services.few_shot import few_shot
             fewshot_n = len(examples)
-            local_system = system + few_shot.render(
+            exemplar_block = few_shot.render(
                 examples, confidence_line=schema is None)
 
         try:
+            # Phase 1.2: the exemplar block goes in as its own argument, not
+            # concatenated onto `system`, so ollama_text can put the static
+            # prefix ahead of it and the prefix cache can actually hit.
             res = self._ensure_local().complete(
-                task, system=local_system, messages=messages,
-                max_tokens=max_tokens, schema=schema)
+                task, system=system, messages=messages,
+                max_tokens=max_tokens, schema=schema,
+                exemplars=exemplar_block)
         except Exception as exc:
+            if speculative:
+                print(f"[model_router] speculative local error ({exc}); dropped.")
+                return "", None, None
             print(f"[model_router] local text error ({exc}); falling back to Claude.")
             return _parent("local_error", local_error=str(exc))
 
@@ -547,6 +572,12 @@ class ModelRouter:
         except Exception as exc:  # pragma: no cover
             print(f"[model_router] router consult skipped ({exc}).")
         keep_reason = "local_kept"
+        if speculative:
+            # The ladder stops here. A low-confidence speculative answer is
+            # simply not cached; it is never worth a paid call, because the
+            # user may never ask the question.
+            should_escalate = False
+            keep_reason = "speculative_local_only"
         if should_escalate:
             local_payload = {
                 "text": _clip(res.get("text"), out_cap),
@@ -586,6 +617,14 @@ class ModelRouter:
                 schema=schema, fewshot_top_sim=top_sim, conf_effective=eff)
         return res.get("text") or "", res.get("json"), rid
 
+    @staticmethod
+    def _maybe_speculative(on: bool):
+        """Enter the speculative scope only when asked. Returns a context
+        manager either way so the call sites stay one shape."""
+        from contextlib import nullcontext
+        from app.services.model_log import speculative_scope
+        return speculative_scope() if on else nullcontext()
+
     @property
     def last_distill_id(self) -> str | None:
         """Distill row id from the most recent `complete`/`complete_json` on
@@ -596,42 +635,58 @@ class ModelRouter:
     # --- public API ----------------------------------------------------------
     def complete(self, task: str, *, system: str, messages: list,
                  max_tokens: int = 1024, schema: dict | None = None,
-                 model: str | None = None) -> str:
+                 model: str | None = None, speculative: bool = False) -> str:
         """One text completion, local-first when QUILL_TEXT_LOCAL=1 (else
         Claude-only, unchanged). Returns the reply text. When an escalation
         distill row is written, its id is also available as
-        `router.last_distill_id` on this thread (for chat verdict wiring)."""
-        if not _text_cfg().enabled:
-            _tls.distill_id = None
-            return self._complete_claude(task, system=system, messages=messages,
-                                         max_tokens=max_tokens, schema=schema,
-                                         model=model)
-        text, _, distill_id = self._local_first(
-            task, system=system, messages=messages,
-            max_tokens=max_tokens, schema=schema, model=model)
-        _tls.distill_id = distill_id
-        return text
+        `router.last_distill_id` on this thread (for chat verdict wiring).
+
+        `speculative=True` (latency program, Phase 3.3) marks work the user did
+        not ask for — pre-generated answers to predicted questions. Such calls
+        are local-only: no escalation, no fallback to Claude when the local
+        model is down or unsure, and the paid seam raises if one ever gets
+        that far. Returns "" when no local answer could be produced.
+        """
+        with self._maybe_speculative(speculative):
+            if not _text_cfg().enabled:
+                _tls.distill_id = None
+                if speculative:
+                    return ""       # Claude-only mode has no free tier to use
+                return self._complete_claude(
+                    task, system=system, messages=messages,
+                    max_tokens=max_tokens, schema=schema, model=model)
+            text, _, distill_id = self._local_first(
+                task, system=system, messages=messages,
+                max_tokens=max_tokens, schema=schema, model=model,
+                speculative=speculative)
+            _tls.distill_id = distill_id
+            return text
 
     def complete_json(self, task: str, *, system: str, messages: list,
                       schema: dict, max_tokens: int = 1024,
-                      model: str | None = None) -> dict:
+                      model: str | None = None,
+                      speculative: bool = False) -> dict:
         """`complete` + parse the JSON result (schema-enforced). A local parse
         failure is an escalate trigger; parse failure at the parent degrades to
         {} exactly as before."""
-        if not _text_cfg().enabled:
-            _tls.distill_id = None
-            text = self._complete_claude(task, system=system, messages=messages,
-                                         max_tokens=max_tokens, schema=schema,
-                                         model=model)
-            try:
-                return json.loads(text or "{}")
-            except Exception:
-                return {}
-        _, parsed, distill_id = self._local_first(
-            task, system=system, messages=messages,
-            max_tokens=max_tokens, schema=schema, model=model)
-        _tls.distill_id = distill_id
-        return parsed or {}
+        with self._maybe_speculative(speculative):
+            if not _text_cfg().enabled:
+                _tls.distill_id = None
+                if speculative:
+                    return {}
+                text = self._complete_claude(
+                    task, system=system, messages=messages,
+                    max_tokens=max_tokens, schema=schema, model=model)
+                try:
+                    return json.loads(text or "{}")
+                except Exception:
+                    return {}
+            _, parsed, distill_id = self._local_first(
+                task, system=system, messages=messages,
+                max_tokens=max_tokens, schema=schema, model=model,
+                speculative=speculative)
+            _tls.distill_id = distill_id
+            return parsed or {}
 
 
 router = ModelRouter()

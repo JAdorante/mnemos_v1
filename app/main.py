@@ -102,6 +102,20 @@ async def _startup() -> None:
         usage.start()
     except Exception as exc:
         print(f"[usage] startup hook skipped ({exc}).")
+    # Latency program, Phase 1.1: load the local text model now so the FIRST
+    # user interaction is a warm call. Measured cold-start tax on the reference
+    # machine is ~3.4 s (load_duration 3,571 ms cold vs 163 ms warm), which is
+    # the single largest avoidable delay in the local path. Off by default and
+    # on its own thread — a machine with no Ollama boots exactly as before.
+    try:
+        from app.config import settings as _s
+        if _s.text_local.enabled and _s.text_local.warmup:
+            import threading as _t
+            from app.services.ollama_text import OllamaText
+            _t.Thread(target=lambda: OllamaText().warmup(),
+                      name="ollama-warmup", daemon=True).start()
+    except Exception as exc:
+        print(f"[ollama_text] warmup hook skipped ({exc}).")
     # Version manifest check (WS-C): one unconditional GET of a static file,
     # off with QUILL_UPDATE_CHECK=0. Notification only — never downloads.
     try:

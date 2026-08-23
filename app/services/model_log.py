@@ -15,9 +15,10 @@ from __future__ import annotations
 import json
 import threading
 import time
+from contextlib import contextmanager
 from collections import defaultdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from app.config import settings
 
@@ -91,6 +92,38 @@ def _is_cloud(provider: str) -> bool:
     return (provider or "").strip().lower() in _CLOUD_PROVIDERS
 
 
+# --- speculative scope (latency program, Phase 3.3) -----------------------
+# Speculative work — pre-generating answers to questions the user has not
+# asked — is allowed to burn local inference, because that is electricity on
+# hardware the user owns. It must NEVER reach a paid provider: a wasted Claude
+# call spends real money on a guess, which breaks the cost story the whole
+# program is bound by.
+#
+# The flag lives here rather than in model_router because this is where every
+# call is stamped, so ANY cloud call made anywhere under the scope is caught —
+# not only the ones the router knows about.
+_spec_tls = threading.local()
+
+
+def in_speculative_scope() -> bool:
+    return bool(getattr(_spec_tls, "on", False))
+
+
+class SpeculativeCloudCall(RuntimeError):
+    """A paid call was attempted inside a speculative scope. Always a bug."""
+
+
+@contextmanager
+def speculative_scope() -> "Iterator[None]":
+    """Mark this thread's calls as speculative for their duration."""
+    prev = getattr(_spec_tls, "on", False)
+    _spec_tls.on = True
+    try:
+        yield
+    finally:
+        _spec_tls.on = prev
+
+
 class ModelLog:
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -150,6 +183,11 @@ class ModelLog:
         }
         if pmax:
             row["privacy_max"] = pmax
+        # Stamp speculative rows so the invariant ("no speculative row ever
+        # names a cloud provider") is checkable from the trail itself, not
+        # only from the code path that produced it.
+        if in_speculative_scope():
+            row["speculative"] = True
         if action:
             row["privacy_action"] = action
         if meta:

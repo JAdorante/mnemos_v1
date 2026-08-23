@@ -238,10 +238,23 @@ class _CaptureLocal:
         self.model, self.url = "fake-local", "http://127.0.0.1:1"
         self._res = res
         self.system = None
+        self.exemplars = ""
 
-    def complete(self, task, *, system, messages, max_tokens=1024, schema=None):
+    def complete(self, task, *, system, messages, max_tokens=1024,
+                 schema=None, exemplars=""):
         self.system = system
+        self.exemplars = exemplars
         return dict(self._res)
+
+    @property
+    def prompt(self) -> str:
+        """What the model actually receives. Phase 1.2 moved the exemplars out
+        of `system` into their own argument so the static prefix could come
+        first; the guarantee under test — local sees the examples, the parent
+        does not — is unchanged, but it now has to be checked on the composed
+        prompt rather than on `system` alone."""
+        from app.services.ollama_text import _compose_system
+        return _compose_system(self.system or "", self.exemplars or "")
 
 
 class _RouterTrailMixin:
@@ -296,9 +309,15 @@ class RouterIntegrationTests(_RouterTrailMixin, unittest.TestCase):
         local_res = {"text": "meh", "json": None, "confidence": 0.2, "parse_ok": True}
         out, local, r = self._run(local_res=local_res, examples=ex)
         self.assertEqual(out, "parent answer")
-        self.assertIn("VERIFIED EXAMPLES", local.system)       # local sees them
-        self.assertIn("CONFIDENCE: 0.9", local.system)         # trailer survives
-        self.assertTrue(local.system.startswith("s"))
+        self.assertIn("VERIFIED EXAMPLES", local.prompt)       # local sees them
+        self.assertIn("CONFIDENCE: 0.9", local.prompt)         # trailer survives
+        self.assertTrue(local.prompt.startswith("s"))
+        self.assertEqual(local.system, "s")   # the task prompt stays clean
+        # Phase 1.2: the static trailer precedes the per-call exemplars, or the
+        # prefix cache can never hit.
+        from app.services.ollama_text import _CONF_TRAILER
+        self.assertLess(local.prompt.index(_CONF_TRAILER),
+                        local.prompt.index("VERIFIED EXAMPLES"))
         _, kwargs = r._complete_claude.call_args
         self.assertEqual(kwargs["system"], "s")                # parent stays clean
         row = self._rows()[0]

@@ -132,8 +132,9 @@ class EndToEndTests(_Env, unittest.TestCase):
 
         class StubLocal:
             def complete(self, task, *, system, messages, max_tokens=1024,
-                         schema=None):
+                         schema=None, exemplars=""):
                 seen["system"] = system
+                seen["exemplars"] = exemplars
                 return {"text": "Your meeting is Wednesday at 2pm.",
                         "json": None, "confidence": 0.95, "parse_ok": True}
 
@@ -147,8 +148,13 @@ class EndToEndTests(_Env, unittest.TestCase):
                        "content": "when is my meeting with sarah?"}],
             max_tokens=256, schema=None, model=None)
         self.assertEqual(text, "Your meeting is Wednesday at 2pm.")
-        self.assertIn("Wednesday at 2pm with Sarah Kane", seen["system"])
-        self.assertIn("VERIFIED EXAMPLES", seen["system"])
+        # Phase 1.2 moved the recalled exemplars out of `system` into their own
+        # argument so the static prefix can lead. The guarantee is unchanged —
+        # the local model sees the exemplar, the task prompt stays clean — but
+        # it now reads off the block rather than off `system`.
+        self.assertEqual(seen["system"], "You are Mnemos.")
+        self.assertIn("Wednesday at 2pm with Sarah Kane", seen["exemplars"])
+        self.assertIn("VERIFIED EXAMPLES", seen["exemplars"])
 
 
 class BudgetAndRankingTests(_Env, unittest.TestCase):
@@ -230,7 +236,7 @@ class ABHarnessTests(_Env, unittest.TestCase):
 
         class FakeLocal:
             def complete(self, task, *, system, messages, max_tokens=1024,
-                         schema=None):
+                         schema=None, exemplars=""):
                 aided = "VERIFIED EXAMPLES" in system
                 good = "goodtype" in messages[0]["content"]
                 if good:

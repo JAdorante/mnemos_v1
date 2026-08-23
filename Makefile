@@ -2,6 +2,7 @@
 # Prefer the project venv when present.
 PYTHON ?= python
 
+.PHONY: bench-latency bench-latency-cold latency-baseline
 .PHONY: eval eval-live eval-people eval-people-live eval-grounding eval-planner eval-noise golden-commitments golden-entity-resolution golden-contact-attribution
 
 # Plan 2.2 + 2.3 + 2.4 + 3.3 + 5.2: golden thresholds (offline, no API key).
@@ -48,3 +49,19 @@ golden-entity-resolution:
 
 golden-contact-attribution:
 	$(PYTHON) scripts/gen_contact_attribution_golden.py
+
+# --- latency program ----------------------------------------------------------
+# The acceptance gate for every phase: run it before and after a change and
+# compare. Never makes a cloud call.
+bench-latency:
+	$(PYTHON) scripts/bench_latency.py --rounds 10 \
+	  --baseline data/latency_baseline.json
+
+# Cold-start tax: unloads the model between calls. Slow on purpose.
+bench-latency-cold:
+	$(PYTHON) scripts/bench_latency.py --rounds 5 --cold
+
+# Freeze the current numbers as the comparison point for later phases.
+latency-baseline:
+	$(PYTHON) scripts/bench_latency.py --rounds 10 \
+	  --json data/latency_baseline.json

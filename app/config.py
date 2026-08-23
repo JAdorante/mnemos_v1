@@ -306,6 +306,15 @@ class TextLocalConfig:
     # confidence is floored at top_example_sim * this weight (self-report can
     # only raise it, never fall below the evidence). 0 disables the blend.
     fewshot_conf_weight: float = float(_get("QUILL_TEXT_FEWSHOT_CONF_WEIGHT", "0.85"))
+    # Phase 1.1 — model residency. Ollama unloads a model after ~5 min idle by
+    # default, so the first interaction after a quiet spell pays a multi-second
+    # cold load. `keep_alive` is passed per request (Ollama's own knob, no
+    # daemon config needed). "0" unloads immediately, "-1" pins forever.
+    keep_alive: str = _get("QUILL_OLLAMA_KEEP_ALIVE", "30m")
+    # Warm the model once at startup so the FIRST user interaction never pays
+    # the cold load either. Off by default: it loads weights on a machine that
+    # may never make a local call this session.
+    warmup: bool = _get("QUILL_OLLAMA_WARMUP", "0") not in ("0", "false", "False")
 
     @property
     def high_stakes_tasks(self) -> tuple[str, ...]:
@@ -1410,6 +1419,22 @@ class ExportConfig:
 
 
 @dataclass(frozen=True)
+class LatencyConfig:
+    """Stage-level latency spans (see services/latency.py).
+
+    Phase 0 of the latency program: measure before optimizing. `model_log`
+    records per-call wall time; this records where that time went — queue
+    wait, cold model load, prefill, generation, retrieval, post-processing.
+
+    Off by default. A program that begins by instrumenting must not begin by
+    changing behavior, and the writer touches the request path on every trace.
+    """
+    enabled: bool = _get("QUILL_LATENCY_SPANS", "0") not in ("0", "false", "False")
+    # Rows the console and the aggregator read from the tail of the trail.
+    read_limit: int = int(_get("QUILL_LATENCY_READ_LIMIT", "20000"))
+
+
+@dataclass(frozen=True)
 class Settings:
     audio: AudioConfig = AudioConfig()
     system_audio: SystemAudioConfig = SystemAudioConfig()
@@ -1457,6 +1482,7 @@ class Settings:
     usage: UsageConfig = UsageConfig()
     update_check: UpdateCheckConfig = UpdateCheckConfig()
     export: ExportConfig = ExportConfig()
+    latency: LatencyConfig = LatencyConfig()
     # Bind address. 127.0.0.1 keeps the unauthenticated local trust model.
     # 0.0.0.0 (phone / Tailscale) enables LanApiAuthMiddleware — set
     # QUILL_API_TOKEN or let startup write data/.api_token, then unlock at /auth.

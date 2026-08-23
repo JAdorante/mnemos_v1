@@ -322,6 +322,32 @@ def update_dismiss(body: UpdateDismissIn) -> dict:
     return update_check.dismiss(body.version)
 
 
+# --- latency spans (latency program, Phase 0) ------------------------------
+# "You cannot fix what you can't see": model_log records per-call wall time,
+# this records where that time went. Read-only and local.
+
+@router.get("/console/latency")
+def console_latency(hours: float = 0.0,
+                    cold_load_ms: float | None = None) -> dict:
+    """p50/p90/p99 per stage per task, plus the cold-start census.
+
+    `hours` limits the window (0 = everything on the trail). Stages are sorted
+    by share of total time — the top row of each group is where to optimize.
+    `cold_load_ms` re-splits cold vs warm over already-collected data, since
+    the right threshold is machine- and model-dependent.
+    """
+    import time as _time
+    from app.services import latency
+    since = (_time.time() - hours * 3600.0) if hours and hours > 0 else None
+    out = latency.percentiles(since=since, cold_load_ms=cold_load_ms)
+    out["window_hours"] = hours or None
+    # The audio path reports from audio_telemetry, which already times every
+    # utterance — no second set of timers on the capture thread.
+    out["capture"] = latency.capture_stages(
+        window_s=(hours * 3600.0) if hours and hours > 0 else 86400.0)
+    return out
+
+
 # --- pilot usage ledger (WS-A) --------------------------------------------
 # Local-first by construction: /usage/stats and /usage/report only read and
 # write this machine. The one network path (/usage/ping/*) needs BOTH a

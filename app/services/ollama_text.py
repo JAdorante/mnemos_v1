@@ -40,6 +40,16 @@ def _log(task, provider, model, latency_s, **kw) -> None:
         print(f"[ollama_text] telemetry skipped ({exc}).")
 
 
+def _spans(payload: dict) -> None:
+    """Fold Ollama's own timings into the active latency trace. Same contract
+    as `_log`: telemetry never breaks the text path."""
+    try:
+        from app.services import latency
+        latency.record_ollama_timings(payload)
+    except Exception as exc:  # pragma: no cover
+        print(f"[ollama_text] spans skipped ({exc}).")
+
+
 _CONF_TRAILER = (
     "\n\nAfter your reply, end with ONE final line of exactly the form "
     "'CONFIDENCE: 0.NN' — your 0.0-1.0 confidence that the reply is correct "
@@ -112,6 +122,33 @@ def _parse_json(text: str) -> dict[str, Any] | None:
     return None
 
 
+def _compose_system(system: str, exemplars: str = "", *,
+                    schema: dict | None = None, injected: bool = False) -> str:
+    """Build the system prompt STATIC-FIRST, for prefix-cache hits (Phase 1.2).
+
+    Ollama caches the longest common prefix of consecutive prompts, so every
+    byte that varies per call invalidates everything after it. The old order
+    was `system + exemplars + trailer`, which put a constant trailer *behind*
+    the one part that changes every call — the worst possible arrangement:
+    the trailer could never be cached, and the exemplars broke the prefix
+    immediately after the system prompt.
+
+    Correct order, cheapest-to-vary last::
+
+        [system]  [confidence trailer]  [retrieval exemplars]  → messages
+
+    `system` and the trailer are fixed per task, so a run of calls on the same
+    task shares that whole prefix regardless of which exemplars were recalled.
+    This changes prompt ORDER only — the same bytes reach the model.
+    """
+    trailer = ""
+    if schema is None:
+        trailer = _CONF_TRAILER
+    elif injected:
+        trailer = _JSON_CONF_TRAILER
+    return f"{system}{trailer}{exemplars or ''}"
+
+
 def _flatten(content) -> str:
     """Anthropic-style message content may be a list of blocks; Ollama wants a string."""
     if isinstance(content, str):
@@ -141,26 +178,67 @@ class OllamaText:
         base = self.model.split(":")[0]
         return any(n == self.model or n.split(":")[0] == base for n in names)
 
+    def warmup(self) -> bool:
+        """Load the model now so the first user interaction is a warm call.
+
+        One-token generation against the real model — the cheapest request that
+        forces a load. Best-effort and silent on failure: a machine with no
+        Ollama must boot exactly as it does today.
+        """
+        try:
+            payload = {
+                "model": self.model, "stream": False,
+                "keep_alive": settings.text_local.keep_alive,
+                "options": {"temperature": 0, "num_predict": 1},
+                "messages": [{"role": "user", "content": "ok"}],
+            }
+            req = urllib.request.Request(
+                self.url + "/api/chat",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"})
+            t0 = time.time()
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                out = json.load(r)
+            load_ms = float(out.get("load_duration") or 0) / 1e6
+            print(f"[ollama_text] warm ({self.model}, load {load_ms:.0f} ms, "
+                  f"keep_alive={settings.text_local.keep_alive}).")
+            _log("warmup", "ollama", self.model, time.time() - t0, ok=True,
+                 cost_usd=0.0)
+            return True
+        except Exception as exc:
+            print(f"[ollama_text] warmup skipped ({exc}).")
+            return False
+
     def complete(self, task: str, *, system: str, messages: list,
-                 max_tokens: int = 1024, schema: dict | None = None) -> dict[str, Any]:
+                 max_tokens: int = 1024, schema: dict | None = None,
+                 exemplars: str = "") -> dict[str, Any]:
         """One local completion. Returns
         {"text": str, "json": dict|None, "confidence": float|None, "parse_ok": bool}
         — `json`/`parse_ok` only meaningful when a schema was given. Raises on
-        transport errors (the router treats that as a local_error escalate)."""
+        transport errors (the router treats that as a local_error escalate).
+
+        `exemplars` is the retrieval few-shot block, passed separately rather
+        than pre-concatenated onto `system` so THIS function owns the ordering
+        (see _compose_system): the static prefix has to come first or the
+        prefix cache never hits.
+        """
         injected = False
-        sys_prompt = system
+        if schema is not None:
+            _, injected = with_confidence(schema)
+        sys_prompt = _compose_system(system, exemplars,
+                                     schema=schema, injected=injected)
         payload: dict[str, Any] = {
             "model": self.model,
             "stream": False,
             "options": {"temperature": 0, "num_predict": max_tokens},
+            # Phase 1.1 — keep the weights resident between calls. Ollama
+            # unloads after ~5 min idle by default, so without this the first
+            # call after a quiet spell pays a full cold load.
+            "keep_alive": settings.text_local.keep_alive,
         }
         if schema is not None:
-            fmt, injected = with_confidence(schema)
+            fmt, _ = with_confidence(schema)
             payload["format"] = fmt                  # Ollama structured output
-            if injected:
-                sys_prompt = system + _JSON_CONF_TRAILER
-        else:
-            sys_prompt = system + _CONF_TRAILER
         payload["messages"] = (
             [{"role": "system", "content": sys_prompt}]
             + [{"role": m.get("role", "user"), "content": _flatten(m.get("content"))}
@@ -172,6 +250,10 @@ class OllamaText:
         t0 = time.time()
         with urllib.request.urlopen(req, timeout=self.timeout) as r:
             out = json.load(r)
+        # Stage breakdown at zero cost: Ollama returns its own nanosecond
+        # timings (load / prompt_eval / eval) for work it already did, so
+        # cold-load, prefill and generation need no extra probe on this path.
+        _spans(out)
         # Local model — free; still logged for latency + token throughput.
         _log(task, "ollama", self.model, time.time() - t0, ok=True,
              input_tokens=out.get("prompt_eval_count", 0) or 0,

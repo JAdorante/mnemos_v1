@@ -53,7 +53,8 @@ class _FakeLocal:
         self._exc = exc
         self.calls = 0
 
-    def complete(self, task, *, system, messages, max_tokens=1024, schema=None):
+    def complete(self, task, *, system, messages, max_tokens=1024,
+                 schema=None, exemplars=""):
         self.calls += 1
         if self._exc is not None:
             raise self._exc

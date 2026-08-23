@@ -603,6 +603,7 @@ class Store:
                     model              TEXT,              -- whisper model id
                     asr_latency_ms     REAL,              -- transcribe wall-time
                     total_latency_ms   REAL,              -- speech-end -> published
+                    queue_wait_ms      REAL,              -- speech-end -> dequeued
                     queue_depth        INTEGER,           -- utterances waiting at dequeue
                     avg_logprob        REAL,
                     no_speech_prob     REAL,
@@ -1243,6 +1244,17 @@ class Store:
 
             self._conn.commit()
         self._migrate()
+        self._migrate_audio_tele()
+
+    def _migrate_audio_tele(self) -> None:
+        """Latency program, Phase 0: queue_wait_ms on pre-existing stores."""
+        with self._lock:
+            cols = {r["name"] for r in self._conn.execute(
+                "PRAGMA table_info(audio_telemetry)").fetchall()}
+            if cols and "queue_wait_ms" not in cols:
+                self._conn.execute(
+                    "ALTER TABLE audio_telemetry ADD COLUMN queue_wait_ms REAL")
+                self._conn.commit()
 
     def _migrate(self) -> None:
         """Additive, idempotent migrations for DBs created before a column existed.
@@ -7429,7 +7441,8 @@ class Store:
     _AUDIO_TELE_COLS = (
         "event_id", "outcome", "drop_reason", "audio_duration_ms", "quality",
         "snr_est", "rms", "clipping_pct", "speech_ratio", "model",
-        "asr_latency_ms", "total_latency_ms", "queue_depth", "avg_logprob",
+        "asr_latency_ms", "total_latency_ms", "queue_wait_ms", "queue_depth",
+        "avg_logprob",
         "no_speech_prob", "low_confidence", "filter_verdict", "speaker",
         "speaker_known", "speaker_confidence", "char_count",
     )

@@ -278,6 +278,15 @@ class AudioPipeline:
                 "queue_depth": self._utterances.qsize(),
                 "model": self.cfg.whisper_model,
             }
+            # Latency program, Phase 0: how long this utterance sat between
+            # speech-end and the transcribe worker picking it up. Everything
+            # needed was already on hand (`t_speech_end` is stamped by the
+            # capture callback), so this costs one subtraction on a thread that
+            # must not be given real work. total - queue_wait - asr is then the
+            # post-ASR tail, which is what Phase 3.1 has to pipeline away.
+            if t_speech_end:
+                tele["queue_wait_ms"] = round(
+                    max(0.0, (time.time() - t_speech_end) * 1000.0), 1)
 
             # --- pre-ASR audio quality: score the waveform before Whisper so we
             # can tell "bad audio" from "Whisper failed", and (later) route weak
