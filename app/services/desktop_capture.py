@@ -213,6 +213,18 @@ class DesktopCapturePipeline:
         entities: list[str] = ["desktop_screen"]
         model_conf = None
 
+        # Phase 2: the frame_keep head. Judged on the window title plus the
+        # motion scalar already computed above — the only signals that exist
+        # before the VLM runs. OFF by default; in shadow mode `skip` is always
+        # False, so the VLM runs exactly as before and the head only predicts.
+        from app.services import fast_heads as _heads
+        _fk = _heads.consult("frame_keep", window_title,
+                             extra={"motion": min(float(motion) / 32.0, 1.0)})
+        if _fk.get("skip"):
+            print(f"[desktop_capture] frame skipped by head "
+                  f"(p={_fk['p']:.3f}, motion={motion:.1f})")
+            return
+
         if not self._screen_vlm_broken:
             try:
                 from app.services.vlm import vlm, align_item_confidences
@@ -228,14 +240,20 @@ class DesktopCapturePipeline:
                 if not should_ingest_screen(
                         window_title, ocr=orig_ocr, summary=orig_desc,
                         content_type=ctype):
+                    # The VLM ran and produced nothing worth keeping — the
+                    # head was right to want to skip it.
+                    _heads.record_outcome(_fk, needed_model=False)
                     print("[desktop_capture] skip CLI/log-only screen intake")
                     return
                 # Strip CLI/log lines before anything is stored or mined.
                 scrubbed = scrub_vision_result(res)
                 if scrubbed is None:
+                    _heads.record_outcome(_fk, needed_model=False)
                     print("[desktop_capture] skip empty screen after CLI scrub")
                     return
                 res = scrubbed
+                # Survived both filters: this frame genuinely needed the VLM.
+                _heads.record_outcome(_fk, needed_model=True)
                 raw = res.get("ocr_text") or res.get("description", raw)
                 summary = res.get("description", summary) or raw
                 entities = list(res.get("objects", [])) or entities

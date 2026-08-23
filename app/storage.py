@@ -1242,6 +1242,32 @@ class Store:
                 """
             )
 
+            # --- classifier-head shadow observations (Phase 2) -----------------
+            # One row per consultation: what the head predicted, and what the
+            # model actually concluded. NUMBERS AND ENUM-ISH STRINGS ONLY —
+            # the input text stays out, exactly as in usage_daily. The
+            # activation gate reads `would_skip AND needed_model`, which is
+            # the silent-drop population and the only error that can hurt a
+            # user.
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS head_observations (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts          REAL    NOT NULL,
+                    head        TEXT    NOT NULL,
+                    mode        TEXT    NOT NULL,   -- shadow | active
+                    p           REAL,               -- p(needs model)
+                    band        TEXT,               -- skip | run | no_model
+                    would_skip  INTEGER NOT NULL DEFAULT 0,
+                    skipped     INTEGER NOT NULL DEFAULT 0,
+                    needed_model INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_head_obs "
+                "ON head_observations(head, ts)")
+
             self._conn.commit()
         self._migrate()
         self._migrate_audio_tele()
@@ -3927,6 +3953,60 @@ class Store:
         with self._lock:
             rows = self._conn.execute(sql, args).fetchall()
         return [dict(r) for r in reversed(rows)]
+
+    # --- classifier-head shadow observations (Phase 2) ---------------------
+    def record_head_observation(self, *, head: str, mode: str,
+                                p: float | None, band: str,
+                                would_skip: bool, skipped: bool,
+                                needed_model: bool,
+                                ts: float | None = None) -> int:
+        """One head consultation + its ground truth. Best-effort: this runs on
+        the serving path after the real work and must never raise into it."""
+        import time as _t
+        try:
+            with self._lock:
+                cur = self._conn.execute(
+                    "INSERT INTO head_observations (ts, head, mode, p, band, "
+                    "would_skip, skipped, needed_model) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (float(ts if ts is not None else _t.time()), str(head),
+                     str(mode), (float(p) if p is not None else None),
+                     str(band), 1 if would_skip else 0, 1 if skipped else 0,
+                     1 if needed_model else 0))
+                self._conn.commit()
+                return int(cur.lastrowid)
+        except Exception as exc:
+            print(f"[head_obs] row failed: {exc}")
+            return -1
+
+    def head_observations(self, head: str,
+                          window_s: float = 604800.0) -> dict:
+        """Rollup for one head over the window.
+
+        `would_skip_but_needed` is the activation gate's numerator: events the
+        head was confident carried nothing, on which the model then found
+        something. That is the silent drop, and it is counted only over the
+        skip population — disagreement elsewhere cannot hurt a user.
+        """
+        import time as _t
+        cutoff = _t.time() - float(window_s)
+        try:
+            with self._lock:
+                row = self._conn.execute(
+                    "SELECT COUNT(*) AS events, "
+                    "SUM(would_skip) AS would_skip, "
+                    "SUM(skipped) AS skipped, "
+                    "SUM(needed_model) AS needed, "
+                    "SUM(CASE WHEN would_skip = 1 AND needed_model = 1 "
+                    "         THEN 1 ELSE 0 END) AS would_skip_but_needed "
+                    "FROM head_observations WHERE head = ? AND ts >= ?",
+                    (str(head), cutoff)).fetchone()
+            out = {k: (int(v) if v is not None else 0)
+                   for k, v in dict(row).items()}
+            out["window_s"] = window_s
+            return out
+        except Exception as exc:
+            return {"events": 0, "error": str(exc)}
 
     def add_economy_run(self, result: dict) -> int:
         import time as _time

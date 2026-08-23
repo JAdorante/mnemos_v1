@@ -260,6 +260,22 @@ async def _startup() -> None:
         worker.register("score_shadow", score_v2.run_job)
         score_v2.attach()
 
+        # Phase 2: retrain the classifier heads on the idle scheduler, the
+        # same cadence the escalation router uses. A head with too few labels
+        # declines to fit rather than producing a thin model that silently
+        # drops work, so this is safe to run unconditionally.
+        from app.services import fast_heads as _fast_heads
+
+        def _heads_train_job(_payload) -> None:
+            for name, res in _fast_heads.train_all().items():
+                if res.get("ok"):
+                    print(f"[fast_heads] {name} trained on "
+                          f"{res['labels']} labels: {res['holdout']}")
+                elif res.get("reason") != "insufficient_labels":
+                    print(f"[fast_heads] {name} not trained: {res.get('reason')}")
+
+        worker.register("heads_train", _heads_train_job)
+
         # Attribution provenance: late re-resolution of open person mentions
         # still referenced by unowned tasks/commitments. Cheap no-op when
         # nothing is open; re-enqueued after merges (see /people soft-merge).

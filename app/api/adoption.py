@@ -322,6 +322,34 @@ def update_dismiss(body: UpdateDismissIn) -> dict:
     return update_check.dismiss(body.version)
 
 
+# --- classifier heads (Phase 2) --------------------------------------------
+# Same transparency contract as the Learning tab: every head's volume, skip
+# rate and shadow disagreement are visible, and each has its own kill switch.
+
+@router.get("/console/heads")
+def console_heads(days: float = 7.0) -> dict:
+    """Per-head rollout state: is it trained, what would it skip, and how
+    often would that have been wrong?
+
+    `ready_to_activate` encodes the gate in one place so the flip is a
+    decision the Console can offer rather than a human reading a log:
+    enough shadow events, and disagreement under the threshold on the
+    population the head would have skipped.
+    """
+    from app.services import fast_heads
+    return fast_heads.status(window_s=max(0.0, days) * 86400.0)
+
+
+@router.post("/console/heads/train")
+def console_heads_train(head: str | None = None) -> dict:
+    """Fit now instead of waiting for the idle scheduler. Refuses politely
+    when a head has too few labels rather than fitting a silent dropper."""
+    from app.services import fast_heads
+    if head:
+        return {"ok": True, "result": fast_heads.train_head(head)}
+    return {"ok": True, "results": fast_heads.train_all()}
+
+
 # --- latency spans (latency program, Phase 0) ------------------------------
 # "You cannot fix what you can't see": model_log records per-call wall time,
 # this records where that time went. Read-only and local.

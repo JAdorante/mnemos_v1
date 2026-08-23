@@ -1337,6 +1337,19 @@ class Extractor:
                 if verbose:
                     print(f"[extract] skip (non-actionable): {turn.text[:70]!r}")
                 continue
+            # Phase 2: the learned peer of the pre-filter above. Same job —
+            # "is there anything here?" — trained rather than authored. OFF by
+            # default; in shadow mode `skip` is always False, so the LLM runs
+            # exactly as before and the only effect is a logged prediction.
+            from app.services import fast_heads as _heads
+            head = _heads.consult("extract_triage", turn.text)
+            if head.get("skip"):
+                marked.extend(turn.event_ids)
+                skipped += 1
+                if verbose:
+                    print(f"[extract] skip (head p={head['p']:.3f}): "
+                          f"{turn.text[:60]!r}")
+                continue
             try:
                 facts = self._extract_text(turn)  # speaker-labeled (plan 2.1)
             except Exception as exc:
@@ -1354,6 +1367,10 @@ class Extractor:
                           f"leaving for retry ({attempts}/{EXTRACT_MAX_ATTEMPTS}).")
                 continue
             n = self._persist(turn, facts, now)
+            # Ground truth for the head: did the model actually find anything?
+            # A turn the head would have skipped that produced a fact is the
+            # silent drop the activation gate counts.
+            _heads.record_outcome(head, needed_model=bool(n))
             total_facts += n
             marked.extend(turn.event_ids)
             if verbose:

@@ -1435,6 +1435,52 @@ class LatencyConfig:
 
 
 @dataclass(frozen=True)
+class HeadsConfig:
+    """Trained classifier heads — the ladder's new bottom rung (Phase 2).
+
+    The existing ladder is local-LLM → Claude. A head sits *below* the local
+    LLM and answers one binary question per task — "does this input need a
+    model at all?" — from a MiniLM embedding plus a handful of cheap scalars,
+    in well under a millisecond of CPU. Same philosophy as the hand-written
+    utterance_router, learned rather than authored, and trained on the labels
+    the learning loop already collects.
+
+    Three modes, mirroring the escalation router's rollout contract:
+      off    (default) — inert
+      shadow — the head predicts and LOGS next to what the LLM actually did;
+               the LLM always still runs. Provably no influence on behavior,
+               and the only way to earn the evidence for activation.
+      active — p < t_low skips the LLM entirely. Everything else runs it.
+
+    Precision-first, deliberately asymmetric: the costly error is a head
+    silently dropping a real task, so t_low is tuned for very high recall of
+    LLM-worthy events and a modest skip rate is accepted at first. The
+    uncertain middle band runs the LLM — the conservative default.
+    """
+    mode: str = _get("QUILL_HEADS", "off")
+    # Below t_low: skip the model. At or above t_high: it was always going to
+    # run anyway. Between: run it (see the asymmetry note above).
+    t_low: float = float(_get("QUILL_HEADS_T_LOW", "0.10"))
+    t_high: float = float(_get("QUILL_HEADS_T_HIGH", "0.60"))
+    # Labels needed before a head may be fit at all. Higher than the router's
+    # 50: a head decides whether a model runs, so a thin fit is a silent
+    # dropper.
+    min_labels: int = int(_get("QUILL_HEAD_MIN_LABELS", "200"))
+    retrain_new_labels: int = int(_get("QUILL_HEADS_RETRAIN_LABELS", "50"))
+    # Activation gate: max share of would-have-skipped events on which the
+    # head disagreed with the LLM, measured over the shadow window.
+    max_disagreement: float = float(_get("QUILL_HEADS_MAX_DISAGREEMENT", "0.02"))
+    # Shadow observations required before that share means anything.
+    min_shadow_events: int = int(_get("QUILL_HEADS_MIN_SHADOW", "200"))
+
+    @property
+    def dir(self) -> str:
+        """Versioned per-head model files (mirrors RouterConfig.dir)."""
+        return _get("QUILL_HEADS_DIR",
+                    f"{_get('QUILL_DATA_DIR', 'data')}/heads")
+
+
+@dataclass(frozen=True)
 class Settings:
     audio: AudioConfig = AudioConfig()
     system_audio: SystemAudioConfig = SystemAudioConfig()
@@ -1483,6 +1529,7 @@ class Settings:
     update_check: UpdateCheckConfig = UpdateCheckConfig()
     export: ExportConfig = ExportConfig()
     latency: LatencyConfig = LatencyConfig()
+    heads: HeadsConfig = HeadsConfig()
     # Bind address. 127.0.0.1 keeps the unauthenticated local trust model.
     # 0.0.0.0 (phone / Tailscale) enables LanApiAuthMiddleware — set
     # QUILL_API_TOKEN or let startup write data/.api_token, then unlock at /auth.
