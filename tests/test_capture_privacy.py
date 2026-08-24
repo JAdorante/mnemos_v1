@@ -168,6 +168,19 @@ class CaptureEndpointTests(unittest.TestCase):
             self.assertEqual(r.status_code, 200)
             self.assertFalse(r.json()["running"]["mic"])
 
+    def test_screen_resume_windows_only_returns_503(self):
+        """Linux / non-Windows: Privacy screen toggle must not ASGI-crash."""
+        self.client.post("/capture/consent",
+                         json={"screen": True, "consented": True})
+        import app.api.routes as routes_mod
+        with patch.object(routes_mod, "_desktop_capture") as desk_mock, \
+             patch.object(routes_mod, "_desktop_capture_running", False):
+            desk_mock.start.side_effect = RuntimeError(
+                "desktop capture is currently Windows-only")
+            r = self.client.post("/capture/resume", json={"source": "screen"})
+        self.assertEqual(r.status_code, 503)
+        self.assertIn("Windows-only", r.json().get("detail", ""))
+
     def test_kill_switch_endpoint(self):
         r = self.client.post("/console/hardening/kill-switch",
                              json={"env": "QUILL_REASONERS", "on": False})

@@ -214,7 +214,10 @@ def status(*, now: float | None = None) -> dict[str, Any]:
     manifest = state.get("manifest") if isinstance(state.get("manifest"), dict) else None
     on = enabled()
     url = manifest_url()
-    b = banner(manifest) if on else None
+    # A cached manifest outlives the config that produced it. With no URL there
+    # is no source to have learned a release from, so a leftover cache must not
+    # advertise one — it would point at a download that cannot be fetched.
+    b = banner(manifest) if (on and url) else None
     if not on:
         st = "disabled"
     elif not url:

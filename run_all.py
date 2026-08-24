@@ -26,6 +26,7 @@ Flags:
     --port 8000     API server port
     --browser-port 5000  browser-agent UI port
     --host 127.0.0.1
+    --log-level info     show per-request access logs (default: warning)
 """
 from __future__ import annotations
 
@@ -155,6 +156,9 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=int(os.environ.get("QUILL_PORT", "8000")))
     ap.add_argument("--browser-port", type=int,
                     default=int(os.environ.get("QUILL_BROWSER_PORT", "5000")))
+    ap.add_argument("--log-level", default=os.environ.get("QUILL_LOG_LEVEL", "warning"),
+                    choices=["critical", "error", "warning", "info", "debug"],
+                    help="uvicorn log level; 'info' adds per-request access logs")
     args = ap.parse_args()
 
     os.environ["QUILL_AUTOSTART"] = "1"
@@ -202,7 +206,9 @@ def main() -> None:
 
     try:
         uvicorn.run("app.main:app", host=args.host, port=args.port,
-                    log_level="warning", reload=False)
+                    log_level=args.log_level,
+                    access_log=args.log_level in ("info", "debug"),
+                    reload=False)
     finally:
         for proc in children:
             if proc.poll() is None:
