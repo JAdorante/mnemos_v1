@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import html
 
+from app.api.mnemos_theme import apply_plain as _plain
+
 
 def _esc(v) -> str:
     return html.escape(str(v if v is not None else ""))
@@ -51,25 +53,27 @@ def render_trace_page(correlation_id: str, chain: dict) -> str:
         ("agent_type", "agent_type"), ("started_at", "started_at"),
     ])
 
-    return f"""<!doctype html>
+    return _plain(f"""<!doctype html>
+<html lang="en"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Trace {_esc(correlation_id)}</title>
+<title>Trace {_esc(correlation_id)} — @@BRAND@@</title>
+@@FONTS@@
 <style>
-  :root {{ color-scheme: light dark; }}
-  body {{ font: 15px/1.5 system-ui, sans-serif; max-width: 980px;
-         margin: 40px auto; padding: 0 16px; }}
-  h1 {{ font-size: 20px; }}
-  h1 + p {{ color: gray; font: 13px/1.4 ui-monospace, monospace; }}
-  h2 {{ font-size: 15px; margin: 26px 0 8px; }}
-  table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
-  th, td {{ text-align: left; padding: 6px 8px; vertical-align: top;
-            border-bottom: 1px solid color-mix(in srgb, gray 30%, transparent); }}
-  th {{ color: gray; font-weight: 600; }}
-  td {{ max-width: 360px; overflow-wrap: anywhere; }}
-  .empty {{ color: gray; font-size: 13px; padding: 6px 0; }}
-  .count {{ color: gray; font-size: 12px; font-weight: 500; }}
-</style>
+@@ROOT@@
+body {{ font: 15px/1.5 var(--font); color: var(--text); max-width: 980px;
+       margin: 40px auto; padding: 0 16px; background: var(--paper); }}
+h1 {{ font-size: 20px; }}
+h1 + p {{ color: var(--mut); font: 13px/1.4 var(--mono); }}
+h2 {{ font-size: 15px; margin: 26px 0 8px; }}
+table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
+th, td {{ text-align: left; padding: 6px 8px; vertical-align: top;
+          border-bottom: 1px solid color-mix(in srgb, var(--mut) 30%, transparent); }}
+th {{ color: var(--mut); font-weight: 600; }}
+td {{ max-width: 360px; overflow-wrap: anywhere; }}
+.empty {{ color: var(--mut); font-size: 13px; padding: 6px 0; }}
+.count {{ color: var(--mut); font-size: 12px; font-weight: 500; }}
+</style></head><body>
 <h1>Trace</h1>
 <p>correlation_id: {_esc(correlation_id)}</p>
 
@@ -84,4 +88,4 @@ def render_trace_page(correlation_id: str, chain: dict) -> str:
 
 <h2>Agent runs <span class="count">({len(agent_runs)})</span></h2>
 {runs_html}
-"""
+</body></html>""")

@@ -13,10 +13,11 @@ from typing import Any
 APPROVAL_CSS = """\
 #mnemosApproval{
   display:none;align-items:center;gap:12px;flex-wrap:wrap;
+  position:relative;z-index:var(--z-banner);
   min-height:44px;padding:8px 22px;
-  background:linear-gradient(180deg,#FFF8F0 0%,rgba(248,246,241,.97) 100%);
-  border-bottom:1px solid rgba(184,115,51,.28);
-  border-top:1px solid rgba(184,115,51,.18);
+  background:linear-gradient(180deg,var(--acc-warm) 0%,color-mix(in srgb,var(--paper) 97%,transparent) 100%);
+  border-bottom:1px solid var(--acc-28);
+  border-top:1px solid var(--acc-18);
   font:14px/1.35 var(--font);color:var(--navy);
   animation:approvalSlide .28s var(--ease) both;
 }
@@ -29,7 +30,7 @@ APPROVAL_CSS = """\
   font:11px var(--mono);color:var(--mut);white-space:nowrap;
 }
 #mnemosApproval .ap-more{
-  font:11px var(--mono);color:var(--acc);border:1px solid rgba(184,115,51,.35);
+  font:11px var(--mono);color:var(--acc);border:1px solid var(--acc-35);
   border-radius:999px;padding:2px 8px;text-decoration:none;white-space:nowrap;
 }
 #mnemosApproval .ap-actions{display:flex;gap:8px;flex-wrap:wrap;margin-left:auto}
@@ -56,7 +57,7 @@ APPROVAL_CSS = """\
 .action-detail > summary::before{content:"▸ ";color:var(--acc);font-size:11px}
 .action-detail[open] > summary::before{content:"▾ "}
 .action-detail .detail-card{
-  margin-top:8px;padding:12px 14px;border:1px solid rgba(184,115,51,.22);
+  margin-top:8px;padding:12px 14px;border:1px solid var(--acc-22);
   border-radius:12px;background:linear-gradient(180deg,#FFFCF7 0%,var(--surface) 100%);
   border-left:3px solid var(--acc);
 }
@@ -89,7 +90,7 @@ window.MnemosApprovals = {
     const pending = !!(s && s.pending);
     bar.classList.toggle('on', pending);
     bar.setAttribute('aria-hidden', pending ? 'false' : 'true');
-    try { document.body.classList.toggle('has-approval', pending); } catch (e) {}
+    try { window.MnemosChrome && MnemosChrome.sync(); } catch (e) {}
     if (!pending) return;
     const sum = bar.querySelector('.ap-sum');
     const age = bar.querySelector('.ap-age');
@@ -110,9 +111,15 @@ window.MnemosApprovals = {
     if (chat) chat.classList.toggle('attn', true);
   },
   connect() {
+    if (this._pollTimer) { clearInterval(this._pollTimer); this._pollTimer = null; }
     if (this._es || typeof EventSource === 'undefined') {
       this.refresh();
-      if (!this._es) setInterval(() => this.refresh(), 8000);
+      if (!this._es) {
+        this._pollTimer = setInterval(() => {
+          if (document.hidden) return;
+          this.refresh();
+        }, 8000);
+      }
       return;
     }
     try {
@@ -130,7 +137,10 @@ window.MnemosApprovals = {
       this._es.onerror = () => { /* browser will retry */ };
     } catch (e) {
       this.refresh();
-      setInterval(() => this.refresh(), 8000);
+      this._pollTimer = setInterval(() => {
+        if (document.hidden) return;
+        this.refresh();
+      }, 8000);
     }
   },
   enhanceForms() {
@@ -354,6 +364,7 @@ def render_banner_html(state: dict[str, Any] | None = None, *, next_url: str = "
         )
     return f"""\
 <aside id="mnemosApproval" class="{on.strip()}" aria-hidden="{aria}" role="status"
+       aria-live="polite"
        data-packet-id="{_esc(pid) if pid is not None else ''}"
        data-payload-hash="{phash}">
   <span class="ap-dot" aria-hidden="true"></span>

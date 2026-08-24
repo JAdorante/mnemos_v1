@@ -41,8 +41,22 @@ body{margin:0;min-height:100vh;font:15px/1.55 var(--font);color:var(--text);
 .fact:first-child{border-top:0}
 .empty{color:var(--mut);padding:8px 0}
 .err{color:var(--danger);padding:20px 0}
+.fetch-err{
+  padding:10px 14px;border-radius:10px;
+  background:rgba(154,63,63,.08);border:1px solid rgba(154,63,63,.25);
+  color:var(--danger);font-size:13px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;
+}
+.fetch-err button{font:inherit;padding:4px 12px;border-radius:8px;cursor:pointer;
+  border:1px solid rgba(154,63,63,.35);background:var(--panel);color:var(--danger);}
 .detail{display:grid;grid-template-columns:120px 1fr;gap:6px 12px;font-size:.92rem}
 .detail dt{color:var(--mut);font:11px/1.2 var(--mono);letter-spacing:.04em;text-transform:uppercase}
+@media(max-width:640px){
+  .top{padding:10px 14px}
+  .wrap{padding:8px 14px 40px}
+  .detail{grid-template-columns:1fr;gap:4px}
+  .detail dt{margin-top:8px}
+  .row{flex-direction:column;align-items:flex-start;gap:4px}
+}
 </style>
 </head>
 <body>
@@ -50,26 +64,47 @@ body{margin:0;min-height:100vh;font:15px/1.55 var(--font);color:var(--text);
   <span class="page-sub">Org</span>
   @@NAV@@
   <span class="spacer"></span></div>
+<div id="orgErr" class="fetch-err" hidden role="alert" style="max-width:860px;margin:12px auto 0;padding:0 22px">
+  <span style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:10px 14px;border-radius:10px;background:rgba(154,63,63,.08);border:1px solid rgba(154,63,63,.25);color:var(--danger);font-size:13px;width:100%">
+    <span>Couldn't reach Mnemos — retrying…</span>
+    <button type="button" id="orgRetry">Retry now</button>
+  </span>
+</div>
 <div class="wrap" id="root"><div class="muted">Loading…</div></div>
 <script>
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const eid=(()=>{const m=location.pathname.match(/\/org\/(\d+)/);return m?Number(m[1]):null})();
 let graphVer=null;
+let _orgSig=null;
 
 async function load(force){
+  if(document.hidden) return;
+  const errEl=document.getElementById('orgErr');
   if(!eid){document.getElementById('root').innerHTML='<div class="err">Missing org id.</div>';return}
   try{
     const v=await fetch('/graph/version').then(r=>r.json());
     if(!force && graphVer!==null && v.version===graphVer) return;
     graphVer=v.version;
   }catch(e){}
-  const d=await fetch('/org/'+eid+'/data').then(r=>r.json());
-  if(d.detail||d.error){
-    document.getElementById('root').innerHTML='<div class="err">'+esc(d.detail||d.error)+'</div>';
-    return;
+  try{
+    const resp=await fetch('/org/'+eid+'/data');
+    if(!resp.ok) throw new Error('HTTP '+resp.status);
+    const d=await resp.json();
+    if(d.detail||d.error){
+      document.getElementById('root').innerHTML='<div class="err">'+esc(d.detail||d.error)+'</div>';
+      if(errEl) errEl.hidden=true;
+      return;
+    }
+    const sig=JSON.stringify(d);
+    if(!force && sig===_orgSig){ if(errEl) errEl.hidden=true; return; }
+    _orgSig=sig;
+    if(errEl) errEl.hidden=true;
+    render(d);
+  }catch(e){
+    if(errEl) errEl.hidden=false;
   }
-  render(d);
 }
+document.getElementById('orgRetry')?.addEventListener('click',()=>load(true));
 function render(d){
   const e=d.entity||{};
   let h='<div class="mast"><h1>'+esc(e.name||'Org')+'</h1>';
@@ -129,7 +164,19 @@ function render(d){
   document.title=(e.name||'Org')+' — @@BRAND@@';
 }
 load(true);
-setInterval(()=>load(false),4000);
+let orgStreamOn=false;
+let orgPollTimer=null;
+function startOrgPoll(){
+  if(orgPollTimer) clearInterval(orgPollTimer);
+  orgPollTimer=setInterval(()=>load(false), orgStreamOn?30000:4000);
+}
+if(window.MnemosFieldStream){
+  orgStreamOn=!!MnemosFieldStream.connect((d)=>{
+    if(d.version!=null) graphVer=null;
+    load(false);
+  });
+}
+startOrgPoll();
 </script>
 </body>
 </html>""")

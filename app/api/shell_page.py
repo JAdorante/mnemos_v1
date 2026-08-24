@@ -26,7 +26,7 @@ SHELL_PAGE = _mnemos(r"""<!doctype html>
 body{
   margin:0;min-height:100vh;font:15px/1.55 var(--font);color:var(--text);
   background:
-    radial-gradient(900px 480px at 8% -8%, rgba(184,115,51,.06), transparent 55%),
+    radial-gradient(900px 480px at 8% -8%, var(--acc-06), transparent 55%),
     radial-gradient(700px 400px at 94% 0%, rgba(30,91,79,.04), transparent 50%),
     linear-gradient(180deg,#FBF9F4 0%,var(--paper) 40%,var(--workspace) 100%);
 }
@@ -46,7 +46,7 @@ body{
   animation:fadeUp .35s var(--ease) both;
 }
 .band.proposal{
-  border-color:rgba(184,115,51,.35);
+  border-color:var(--acc-35);
   background:linear-gradient(180deg,#FFFCF7 0%,var(--surface) 70%);
   box-shadow:var(--shadow-folio);
 }
@@ -63,16 +63,9 @@ body{
   font:11px/1.2 var(--mono);padding:3px 8px;border-radius:999px;border:1px solid var(--line);
   color:var(--mut);white-space:nowrap;
 }
-.pill.attn{border-color:rgba(184,115,51,.4);color:var(--acc);background:var(--acc-dim)}
+.pill.attn{border-color:var(--acc-40);color:var(--acc);background:var(--acc-dim)}
 .pill.urgent{border-color:rgba(166,71,71,.35);color:var(--danger)}
 .actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}
-.actions button,.actions a.btnish{
-  border-radius:10px;padding:9px 16px;font:500 13px var(--font);cursor:pointer;
-  border:1px solid var(--line);background:var(--panel);color:var(--navy);
-  text-decoration:none;display:inline-flex;align-items:center;
-}
-.actions .go{background:var(--navy);color:#F8F6F1;border:none}
-.actions .quiet{background:transparent;color:var(--mut)}
 .msg{
   white-space:pre-wrap;font-size:14px;line-height:1.5;color:var(--text);
   margin:0 0 4px;
@@ -84,7 +77,7 @@ body{
 #constLink{
   display:block;width:100%;height:100%;cursor:pointer;text-decoration:none;color:inherit;
 }
-#constWrap:hover{border-color:rgba(184,115,51,.28)}
+#constWrap:hover{border-color:var(--acc-28)}
 #constCanvas{width:100%;height:100%;display:block}
 #constEmpty{
   position:absolute;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;
@@ -101,28 +94,14 @@ body{
   border-radius:10px;padding:10px 12px;font:14px/1.45 var(--font);color:var(--text);
   background:var(--panel);
 }
-.notepad-box:focus{outline:2px solid rgba(184,115,51,.35);outline-offset:1px}
+.notepad-box:focus{outline:2px solid var(--acc-35);outline-offset:1px}
 .jot-list{margin-top:10px;display:flex;flex-direction:column;gap:6px;max-height:180px;overflow:auto}
 .jot-item{
   font-size:13px;line-height:1.4;padding:6px 0;border-top:1px solid var(--line);
-  color:var(--text);
+  color:var(--text);overflow-wrap:anywhere;min-width:0;
 }
 .jot-item:first-child{border-top:0;padding-top:0}
 .jot-item .when{font:11px var(--mono);color:var(--mut);margin-top:2px}
-.skel{display:flex;flex-wrap:wrap;gap:8px}
-.skel .bone{
-  height:36px;min-width:88px;flex:1 1 120px;max-width:180px;border-radius:12px;
-  background:linear-gradient(90deg,var(--panel-2) 0%,var(--bg-elev) 50%,var(--panel-2) 100%);
-  background-size:200% 100%;animation:skelShine 1.2s var(--ease) infinite;
-  border:1px solid var(--line);
-}
-.skel.rows .bone{flex:1 1 100%;max-width:none;height:44px;border-radius:10px}
-@keyframes skelShine{
-  from{background-position:100% 0} to{background-position:-100% 0}
-}
-@media(prefers-reduced-motion:reduce){.skel .bone{animation:none}}
-.empty-state{color:var(--mut);font-size:13px;line-height:1.45}
-.empty-state a{color:var(--navy);font-weight:500}
 .hz{display:flex;flex-wrap:wrap;gap:8px}
 .hz .chip{
   border:1px solid var(--line);border-radius:12px;padding:8px 12px;font-size:13px;
@@ -136,19 +115,26 @@ body{
   background:var(--panel);max-width:100%;
 }
 .wm .slot .k{font:10px var(--mono);color:var(--mut);text-transform:uppercase;letter-spacing:.04em}
-.empty{color:var(--mut);font-size:13px}
+.fetch-err{
+  margin:0 22px 12px;padding:10px 14px;border-radius:10px;
+  background:rgba(154,63,63,.08);border:1px solid rgba(154,63,63,.25);
+  color:var(--danger);font-size:13px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;
+}
+.fetch-err button{font:inherit;padding:4px 12px;border-radius:8px;cursor:pointer;
+  border:1px solid rgba(154,63,63,.35);background:var(--panel);color:var(--danger);}
 .foot{
   margin-top:28px;display:flex;gap:14px;flex-wrap:wrap;align-items:center;
   color:var(--mut);font-size:12px;
 }
 .foot a{color:var(--mut)}
 #spotlight{
-  display:none;position:fixed;inset:0;z-index:50;background:var(--overlay);
+  display:none;position:fixed;inset:0;z-index:var(--z-modal);background:var(--overlay);
   align-items:flex-start;justify-content:center;padding:12vh 16px 16px;
 }
 #spotlight.open{display:flex}
 #spotlight .sheet{
-  width:min(560px,100%);background:var(--folio);border:1px solid var(--line);
+  width:min(560px,100%);max-height:calc(100dvh - 48px);overflow:auto;
+  background:var(--folio);border:1px solid var(--line);
   border-radius:var(--radius);box-shadow:var(--shadow-float);padding:18px;
   animation:fadeUp .28s var(--ease) both;
 }
@@ -159,7 +145,16 @@ body{
   border:1px solid var(--line);border-radius:12px;background:var(--bg-elev);color:var(--text);
 }
 .kbd{font:11px var(--mono);border:1px solid var(--line);border-radius:6px;padding:2px 6px}
-@media(max-width:720px){.mast{padding-top:10px}}
+@media(max-width:720px){
+  .mast{padding-top:10px}
+  .top{padding:10px 14px}
+  .wrap{padding:0 14px 32px}
+  .band{margin:0 14px 12px}
+  .fetch-err{margin:0 14px 12px}
+  .foot{margin:0 14px 12px}
+  #spotlight .sheet{width:100%;margin:0 8px}
+  #spotlight{padding:8vh 8px 8px}
+}
 .band .action-detail{margin:10px 0 4px}
 .band .action-detail > summary{
   cursor:pointer;font:500 13px var(--font);color:var(--navy);list-style:none;
@@ -170,7 +165,7 @@ body{
 }
 .band .action-detail[open] > summary::before{content:"▾ "}
 .band .action-detail .detail-card{
-  margin-top:8px;padding:12px 14px;border:1px solid rgba(184,115,51,.22);
+  margin-top:8px;padding:12px 14px;border:1px solid var(--acc-22);
   border-radius:12px;background:linear-gradient(180deg,#FFFCF7 0%,var(--surface) 100%);
   border-left:3px solid var(--acc);
 }
@@ -195,6 +190,10 @@ body{
   <button class="btn" id="spotOpen" type="button">Ask <span class="kbd">⌘K</span></button>
 </header>
 @@APPROVAL@@
+<div id="shellErr" class="fetch-err" hidden role="alert">
+  <span id="shellErrMsg">Couldn't reach Mnemos — retrying…</span>
+  <button type="button" id="shellRetry">Retry now</button>
+</div>
 
 <div class="wrap">
   <header class="mast">
@@ -244,7 +243,7 @@ body{
       <textarea class="notepad-box" id="noteBox" placeholder="pricing — pushback&#10;follow up with Sarah on deck" rows="3"></textarea>
       <div class="actions" style="margin-top:10px">
         <button type="button" class="go" id="noteSave">Save note</button>
-        <span class="pill" id="noteStatus" hidden></span>
+        <span class="pill" id="noteStatus" hidden role="status" aria-live="polite"></span>
         <a class="btnish" id="noteOpenEnhanced" href="/meetings" hidden>Open enhanced note</a>
       </div>
       <div class="jot-list" id="jotList"></div>
@@ -295,7 +294,7 @@ body{
 </div>
 
 <div id="spotlight" aria-hidden="true">
-  <div class="sheet" role="dialog" aria-label="Ask">
+  <div class="sheet" role="dialog" aria-modal="true" aria-label="Ask">
     <h3>Ask @@BRAND@@</h3>
     <p style="color:var(--mut);font-size:13px;margin:0 0 10px">Orientation only. Full thread lives in Chat.</p>
     <textarea id="spotBox" placeholder="A question, a task, a follow-up…"></textarea>
@@ -312,22 +311,98 @@ body{
 MnemosMemory.set('lastRoute', '/today');
 let constCtl = null;
 let pollTimer = null;
+let _shellSig = null;
+let _shellFails = 0;
+let _shellRetry = null;
+
+/* The banner means one thing only: the server is unreachable. A render bug is
+   not an outage, and must not claim to be one — nor is a refusal to answer. */
+function shellOffline(on, reason) {
+  const errEl = document.getElementById('shellErr');
+  if (!errEl) return;
+  errEl.hidden = !on;
+  const btn = document.getElementById('shellRetry');
+  if (btn) { btn.textContent = 'Retry now'; btn.dataset.mode = 'retry'; }
+  const msg = document.getElementById('shellErrMsg');
+  if (msg) {
+    msg.textContent = on
+      ? "Couldn't reach Mnemos — retrying…" + (reason ? ' (' + reason + ')' : '')
+      : "Couldn't reach Mnemos — retrying…";
+  }
+}
+
+/* 401/403 is the opposite of an outage: the server answered, and answered
+   "no". Retrying the identical request can never change that, so say what is
+   actually wrong and point at the one action that fixes it. */
+function shellLocked(status) {
+  const errEl = document.getElementById('shellErr');
+  if (!errEl) return;
+  errEl.hidden = false;
+  const msg = document.getElementById('shellErrMsg');
+  if (msg) {
+    msg.textContent = 'Mnemos is locked for network browsers (HTTP ' + status
+      + ') — unlock this browser to load your data.';
+  }
+  const btn = document.getElementById('shellRetry');
+  if (btn) { btn.textContent = 'Unlock'; btn.dataset.mode = 'unlock'; }
+}
 
 async function loadShell() {
-  const data = await (await fetch('/today/state?limit=28')).json();
-  document.getElementById('dateLabel').textContent = data.date_label || '';
-  if (data.awaiting_approval) document.getElementById('navChat').classList.add('attn');
-  else document.getElementById('navChat').classList.remove('attn');
+  let data;
+  try {
+    const r = await fetch('/today/state?limit=28', {cache: 'no-store'});
+    if (!r.ok) { const err = new Error('HTTP ' + r.status); err.status = r.status; throw err; }
+    data = await r.json();
+  } catch (e) {
+    if (e && (e.status === 401 || e.status === 403)) {
+      /* Gated, not down. Stop the backoff loop — it would poll a wall. */
+      if (_shellRetry) { clearTimeout(_shellRetry); _shellRetry = null; }
+      _shellFails = 0;
+      console.error('[shell] /today/state refused (HTTP ' + e.status + ') — browser not unlocked');
+      shellLocked(e.status);
+      return;
+    }
+    /* Transport failure. Actually retry — the banner has always promised it. */
+    _shellFails += 1;
+    console.error('[shell] /today/state failed (attempt ' + _shellFails + '):', e);
+    if (_shellFails >= 2) shellOffline(true, (e && e.message) ? e.message : String(e));
+    if (_shellRetry) clearTimeout(_shellRetry);
+    const wait = Math.min(1000 * Math.pow(2, _shellFails - 1), 15000);
+    _shellRetry = setTimeout(() => { if (!document.hidden) loadShell(); }, wait);
+    return;
+  }
+  _shellFails = 0;
+  if (_shellRetry) { clearTimeout(_shellRetry); _shellRetry = null; }
+  shellOffline(false);
 
-  renderProposal(data.proposal, data.queued_offers || 0, data.waiting_on, data.approval_packet);
-  renderWm((data.attention && data.attention.wm) || []);
-  renderNotepad(data.notepad || {}, data.latest_meeting_note || null);
-  renderHorizon((data.attention && data.attention.horizon) || []);
-  renderRisk((data.attention && data.attention.at_risk) || []);
-  renderWorld(data.world || {});
-  renderForgot(data.forgotten || []);
-  updateMastLine(data);
+  const sig = JSON.stringify(data);
+  if (sig === _shellSig) return;
+  try {
+    document.getElementById('dateLabel').textContent = data.date_label || '';
+    if (data.awaiting_approval) document.getElementById('navChat').classList.add('attn');
+    else document.getElementById('navChat').classList.remove('attn');
+
+    renderProposal(data.proposal, data.queued_offers || 0, data.waiting_on, data.approval_packet);
+    renderWm((data.attention && data.attention.wm) || []);
+    renderNotepad(data.notepad || {}, data.latest_meeting_note || null);
+    renderHorizon((data.attention && data.attention.horizon) || []);
+    renderRisk((data.attention && data.attention.at_risk) || []);
+    renderWorld(data.world || {});
+    renderForgot(data.forgotten || []);
+    updateMastLine(data);
+    _shellSig = sig;  /* commit only after a clean render, or it never repaints */
+  } catch (e) {
+    _shellSig = null;
+    console.error('[shell] render failed:', e);
+  }
 }
+document.getElementById('shellRetry')?.addEventListener('click', (ev) => {
+  if (ev.currentTarget.dataset.mode === 'unlock') {
+    location.href = '/auth?next=' + encodeURIComponent(location.pathname);
+    return;
+  }
+  loadShell();
+});
 
 let _noteSessionId = null;
 function renderNotepad(np, latestNote) {
@@ -509,8 +584,9 @@ function renderProposal(p, queued, waitingOn, packet) {
 function renderWm(slots) {
   const el = document.getElementById('wmList');
   if (!slots.length) {
-    el.innerHTML = '<div class="empty-state">Nothing in working memory yet. Focus builds from what you capture — start a chat or turn on capture. '
-      + '<a href="/chat">Open Chat</a></div>';
+    el.innerHTML = MnemosRender.empty(
+      'Nothing in working memory yet. Focus builds from what you capture — start a chat or turn on capture.',
+      { link: { href: '/chat', label: 'Open Chat' } });
     return;
   }
   el.innerHTML = slots.map(s =>
@@ -523,8 +599,9 @@ function renderWm(slots) {
 function renderHorizon(items) {
   const el = document.getElementById('hzList');
   if (!items.length) {
-    el.innerHTML = '<div class="empty-state">Nothing on the horizon yet. Open loops and upcoming calendar items appear here. '
-      + '<a href="/onboarding?step=rhythm">Open rhythm setup</a></div>';
+    el.innerHTML = MnemosRender.empty(
+      'Nothing on the horizon yet. Open loops and upcoming calendar items appear here.',
+      { link: { href: '/onboarding?step=rhythm', label: 'Open rhythm setup' } });
     return;
   }
   el.innerHTML = items.map(i => {
@@ -542,7 +619,7 @@ function renderHorizon(items) {
 function renderRisk(items) {
   const el = document.getElementById('riskList');
   if (!items.length) {
-    el.innerHTML = '<div class="empty-state">No open commitments at risk.</div>';
+    el.innerHTML = MnemosRender.empty('No open commitments at risk.');
     return;
   }
   el.innerHTML = items.map(r =>
@@ -677,13 +754,14 @@ if (startCap) {
 })();
 
 function openSpot() {
-  document.getElementById('spotlight').classList.add('open');
-  document.getElementById('spotlight').setAttribute('aria-hidden', 'false');
-  document.getElementById('spotBox').focus();
+  MnemosDialog.open(document.getElementById('spotlight'), {
+    lockScroll: true,
+    focus: '#spotBox',
+    onEscape: closeSpot,
+  });
 }
 function closeSpot() {
-  document.getElementById('spotlight').classList.remove('open');
-  document.getElementById('spotlight').setAttribute('aria-hidden', 'true');
+  MnemosDialog.close(document.getElementById('spotlight'));
 }
 document.getElementById('spotOpen').onclick = openSpot;
 document.getElementById('spotCancel').onclick = closeSpot;
@@ -708,14 +786,13 @@ document.addEventListener('keydown', e => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
     e.preventDefault(); openSpot();
   }
-  if (e.key === 'Escape') closeSpot();
 });
 
 loadShell();
-pollTimer = setInterval(loadShell, 12000);
+pollTimer = setInterval(() => { if (!document.hidden) loadShell(); }, 12000);
 if (window.MnemosFieldStream) {
   const live = MnemosFieldStream.connect(() => loadShell());
-  if (live) clearInterval(pollTimer), pollTimer = setInterval(loadShell, 45000);
+  if (live) clearInterval(pollTimer), pollTimer = setInterval(() => { if (!document.hidden) loadShell(); }, 45000);
 }
 </script>
 </body>

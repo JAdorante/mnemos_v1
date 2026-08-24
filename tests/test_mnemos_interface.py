@@ -308,12 +308,12 @@ class ThemeApplyTests(unittest.TestCase):
     def test_apply_injects_ink_and_ui(self):
         from app.api.mnemos_theme import apply
 
-        page = apply("<html>@@ROOT@@ @@INK@@ @@CHROME@@ @@UI_JS@@ @@BRAND@@</html>")
+        page = apply("<html>@@FONTS@@ @@ROOT@@ @@INK@@ @@CHROME@@ @@UI_JS@@ @@BRAND@@</html>")
         self.assertIn("--paper:", page)
-        self.assertIn("inkDraw", page)
-        self.assertIn("MnemosSeal", page)
+        self.assertIn("/static/css/mnemos-ink.css", page)
+        self.assertIn("/static/css/mnemos-chrome.css", page)
+        self.assertIn("/static/js/mnemos-ui.js", page)
         self.assertIn("Mnemos", page)
-        self.assertIn("rgba(11,19,32,.06)", page)
 
 
 if __name__ == "__main__":

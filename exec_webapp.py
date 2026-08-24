@@ -208,22 +208,11 @@ def poll():
 PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <title>Exec.AI — browser agent</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+@@FONTS@@
 <style>
-  :root{
-    color-scheme:light;
-    --bg:#F8F6F1;--panel:#FFFFFF;--panel-2:#F1EDE6;--mut:#6B6F76;
-    --line:rgba(11,19,32,.09);--navy:#0B1320;--acc:#B87333;
-    --ok:#2E6F57;--warn:#C78A2C;--danger:#A64747;
-    --radius:14px;--ease:cubic-bezier(.22,1,.36,1);
-    --shadow:0 1px 2px rgba(11,19,32,.04),0 10px 28px rgba(11,19,32,.05);
-    --font:"Inter",system-ui,sans-serif;
-    --display:"Instrument Serif",Georgia,serif;
-  }
+@@ROOT@@
   *{box-sizing:border-box}
-  body{margin:0;font:15px/1.55 var(--font);background:var(--bg);color:#23262B;
+  body{margin:0;font:15px/1.55 var(--font);background:var(--bg);color:var(--text);
     height:100vh;display:flex;flex-direction:column}
   header{padding:12px 18px;border-bottom:1px solid var(--line);display:flex;gap:12px;
     align-items:center;background:rgba(248,246,241,.94);backdrop-filter:blur(12px)}
@@ -237,7 +226,7 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   @keyframes p{50%{opacity:.35}}
   @keyframes fadeUp{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
   button,input{font:inherit}
-  .ctl{background:var(--panel);color:#23262B;border:1px solid var(--line);
+  .ctl{background:var(--panel);color:var(--text);border:1px solid var(--line);
     border-radius:10px;padding:7px 11px;cursor:pointer;
     transition:border-color .28s var(--ease),background .28s var(--ease),
       transform .22s var(--ease),box-shadow .28s var(--ease),color .28s var(--ease)}
@@ -274,7 +263,7 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   @media (prefers-reduced-motion:reduce){
     .seal-btn.holding .seal-ring circle{animation:none;stroke-dashoffset:0}
   }
-  #box{flex:1;background:var(--panel);color:#23262B;border:1px solid var(--line);
+  #box{flex:1;background:var(--panel);color:var(--text);border:1px solid var(--line);
     border-radius:var(--radius);padding:12px 14px;resize:none;height:48px;box-shadow:var(--shadow);
     transition:border-color .28s var(--ease),box-shadow .28s var(--ease)}
   #box:focus{outline:none;border-color:rgba(184,115,51,.45);box-shadow:0 0 0 3px rgba(184,115,51,.12)}
@@ -318,6 +307,7 @@ const log=document.getElementById('log'), box=document.getElementById('box'),
 function add(kind,text){const d=document.createElement('div');d.className='msg '+kind;
   d.textContent=text;log.appendChild(d);log.scrollTop=log.scrollHeight;}
 async function poll(){
+  if(document.hidden) return;
   try{
     const r=await fetch('/poll?since='+since); const j=await r.json();
     for(const e of j.events){ since=e.id+1; add(e.kind, e.text); }
@@ -362,6 +352,10 @@ async function newCtx(){await fetch('/new',{method:'POST'}); poll();}
 box.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}});
 setInterval(poll, 700); poll();
 </script></body></html>"""
+
+from app.api.mnemos_theme import apply_plain as _plain
+
+PAGE = _plain(PAGE)
 
 
 def main():

@@ -18,7 +18,7 @@ PHONE_PAGE = _mnemos(r"""<!doctype html>
 @@CHROME@@
 *{box-sizing:border-box}
 body{margin:0;font:16px/1.55 var(--font);color:var(--text);background:var(--paper)}
-.top{position:sticky;top:0;display:flex;gap:14px;align-items:center;padding:10px 20px;z-index:5}
+.top{position:sticky;top:0;display:flex;gap:14px;align-items:center;padding:10px 20px;z-index:var(--z-raised);background:var(--chrome-bg);backdrop-filter:blur(10px)}
 .wrap{max-width:760px;margin:0 auto;padding:26px 20px 80px}
 h1{font-family:var(--display);font-weight:400;font-size:2rem;letter-spacing:-.02em;color:var(--navy);margin:0 0 6px}
 .lead{color:var(--mut);margin:0 0 22px}
@@ -41,6 +41,19 @@ th{font-size:.75rem;text-transform:uppercase;letter-spacing:.05em;color:var(--mu
 td{border-top:1px solid var(--line);padding:9px 8px}
 .linkish{background:none;border:0;color:var(--danger);cursor:pointer;font:inherit;font-size:.85rem;padding:0}
 .ok{color:var(--ok);font-weight:600}
+@media(max-width:640px){
+  .top{padding:8px 14px;gap:10px;flex-wrap:wrap}
+  .wrap{padding:18px 14px 64px}
+  h1{font-size:clamp(1.5rem,6vw,2rem)}
+  .panel{padding:16px}
+  .code{font-size:1.6rem;letter-spacing:.2em}
+  .qr{flex-direction:column;align-items:flex-start}
+  .qr svg{width:min(200px,100%);height:auto;aspect-ratio:1}
+  table{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .panel div[style*="display:flex"]{flex-direction:column;align-items:stretch}
+  .panel div[style*="display:flex"] input{min-width:0!important;width:100%}
+  .panel div[style*="display:flex"] select{width:100%}
+}
 </style>
 </head>
 <body>
@@ -49,6 +62,10 @@ td{border-top:1px solid var(--line);padding:9px 8px}
   @@NAV@@
   <span class="spacer"></span></div>
 <div class="wrap">
+  <div id="phoneErr" class="fetch-err" hidden role="alert" style="margin-bottom:18px;padding:10px 14px;border-radius:10px;background:rgba(154,63,63,.08);border:1px solid rgba(154,63,63,.25);color:var(--danger);font-size:13px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+    <span>Couldn't reach Mnemos — retrying…</span>
+    <button type="button" id="phoneRetry">Retry now</button>
+  </div>
   <h1>Connect a phone</h1>
   <p class="lead">Pair your iPhone or Android so it can send @@BRAND@@ notes, dictations,
   shares, and locations directly — no Phone Link needed. Everything a phone sends becomes
@@ -153,9 +170,18 @@ td{border-top:1px solid var(--line);padding:9px 8px}
 </div>
 <script>
 let baseline = null;
+let _phoneSig = null;
 async function refresh(){
+  if(document.hidden) return;
+  const errEl=document.getElementById('phoneErr');
   try{
-    const st = await (await fetch("/phone/status")).json();
+    const r=await fetch("/phone/status");
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const st=await r.json();
+    const sig=JSON.stringify(st);
+    if(sig===_phoneSig){ if(errEl) errEl.hidden=true; return st; }
+    _phoneSig=sig;
+    if(errEl) errEl.hidden=true;
     if(st.localhost_only){
       document.getElementById("reachWarn").innerHTML =
         '<div class="warn">'+st.hint+'</div>';
@@ -181,8 +207,12 @@ async function refresh(){
       ? ("Waiting for the phone: " + pend.map(i=>i.kind+" — "+i.text.slice(0,60)).join(" · "))
       : "Outbox empty — everything delivered.";
     return st;
-  }catch(e){ return null; }
+  }catch(e){
+    if(errEl) errEl.hidden=false;
+    return null;
+  }
 }
+document.getElementById('phoneRetry')?.addEventListener('click',()=>refresh());
 async function startPair(){
   const r = await (await fetch("/phone/pair/start",{method:"POST"})).json();
   if(!r.ok){ alert(r.error||"Could not start pairing"); return; }
@@ -288,7 +318,7 @@ document.getElementById("icDisc").onclick = async () => {
 icRefresh();
 
 document.getElementById("startBtn").onclick=startPair;
-refresh(); setInterval(refresh, 3000);
+refresh(); setInterval(() => { if (!document.hidden) refresh(); }, 3000);
 </script>
 </body>
 </html>""")
@@ -327,6 +357,11 @@ h2{font-family:var(--display);font-weight:400;font-size:1.25rem;color:var(--navy
 .warn{border:1px solid rgba(199,138,44,.35);background:rgba(199,138,44,.08);
   border-radius:12px;padding:10px 12px;font-size:.88rem;margin-top:10px}
 .muted{color:var(--mut);font-size:.88rem}
+@media(max-width:640px){
+  .wrap{padding:18px 14px 64px}
+  h1{font-size:clamp(1.35rem,5.5vw,1.7rem)}
+  .panel{padding:14px}
+}
 </style>
 </head>
 <body>

@@ -18,7 +18,7 @@ PEER_PAGE = _mnemos(r"""<!doctype html>
 @@CHROME@@
 *{box-sizing:border-box}
 body{margin:0;font:16px/1.55 var(--font);color:var(--text);background:var(--paper)}
-.top{position:sticky;top:0;display:flex;gap:14px;align-items:center;padding:10px 20px;z-index:5}
+.top{position:sticky;top:0;display:flex;gap:14px;align-items:center;padding:10px 20px;z-index:var(--z-raised);background:var(--chrome-bg);backdrop-filter:blur(10px)}
 .wrap{max-width:860px;margin:0 auto;padding:26px 20px 80px}
 h1{font-family:var(--display);font-weight:400;font-size:2rem;letter-spacing:-.02em;color:var(--navy);margin:0 0 6px}
 .lead{color:var(--mut);margin:0 0 22px}
@@ -49,6 +49,20 @@ td{border-top:1px solid var(--line);padding:9px 8px;vertical-align:top}
 .pol label{font-size:.78rem;color:var(--mut)}
 .note{border:1px solid rgba(199,138,44,.35);background:rgba(199,138,44,.08);
   border-radius:12px;padding:12px 14px;font-size:.92rem;margin:12px 0}
+@media(max-width:640px){
+  .top{padding:8px 14px;gap:10px;flex-wrap:wrap}
+  .wrap{padding:18px 14px 64px}
+  h1{font-size:clamp(1.5rem,6vw,2rem)}
+  .panel{padding:16px}
+  .code{font-size:1.6rem;letter-spacing:.2em;word-break:break-all}
+  .row{flex-direction:column;align-items:stretch}
+  .row input{min-width:0;width:100%}
+  .row input[style]{max-width:none!important}
+  .ask{flex-direction:column;align-items:stretch}
+  .ask .q{min-width:0}
+  table{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .pol{flex-direction:column;align-items:flex-start}
+}
 </style>
 </head>
 <body>
@@ -57,6 +71,10 @@ td{border-top:1px solid var(--line);padding:9px 8px;vertical-align:top}
   @@NAV@@
   <span class="spacer"></span></div>
 <div class="wrap">
+  <div id="peerErr" class="fetch-err" hidden role="alert" style="margin-bottom:18px;padding:10px 14px;border-radius:10px;background:rgba(154,63,63,.08);border:1px solid rgba(154,63,63,.25);color:var(--danger);font-size:13px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+    <span>Couldn't reach Mnemos — retrying…</span>
+    <button type="button" id="peerRetry">Retry now</button>
+  </div>
   <h1>Team</h1>
   <p class="lead">Pair with a teammate who also runs @@BRAND@@. Their assistant can then ask
   yours questions — answered from <b>your</b> memory, by <b>your</b> models, only when
@@ -138,10 +156,20 @@ const post=(u,b)=>fetch(u,{method:'POST',headers:{'Content-Type':'application/js
 const LABEL={auto:'Answer',offer:'Ask me',deny:'Decline'};
 const TOPIC={availability:'Schedule & availability',work:'Work & projects',contact:'Contact details',personal:'Personal',other:'Everything else'};
 let CLASSES=[],ACTIONS=[];
+let _peerSig=null;
 
 async function refresh(){
+  if(document.hidden) return;
+  const errEl=$('peerErr');
+  try{
   if(!PEOPLE.length)await loadPeople();
-  const s=await fetch('/peer/status').then(r=>r.json());
+  const r=await fetch('/peer/status');
+  if(!r.ok) throw new Error('HTTP '+r.status);
+  const s=await r.json();
+  const sig=JSON.stringify(s);
+  if(sig===_peerSig){ if(errEl) errEl.hidden=true; return; }
+  _peerSig=sig;
+  if(errEl) errEl.hidden=true;
   CLASSES=s.classes||[];ACTIONS=s.actions||[];
   PACKS=s.packs||[];TEAMS=s.teams||[];PEERS=s.peers||[];
   $('myUrl').textContent=s.base_url||'';
@@ -150,7 +178,9 @@ async function refresh(){
   renderAsks(s.pending_asks||[]);renderPeers(s.peers||[]);renderSent(s.sent||[]);
   renderTeams(s.teams||[],s.peers||[]);
   renderLoops(s.loops||[]);renderOffers(s.pairing_offers||[]);
+  }catch(e){ if(errEl) errEl.hidden=false; }
 }
+$('peerRetry')?.addEventListener('click',()=>refresh());
 let PACKS=[],TEAMS=[],PEERS=[];
 function renderAsks(asks){
   if(!asks.length){$('asksBox').textContent='Nothing waiting.';return}
@@ -298,7 +328,7 @@ $('joinBtn').onclick=async()=>{
   $('pairMsg').innerHTML=r.ok?`<span class="ok">✓ Paired with ${esc(r.name)}.</span>`:esc(r.error||'join failed');
   refresh();
 };
-refresh();setInterval(refresh,5000);
+refresh();setInterval(()=>{ if(!document.hidden) refresh(); },5000);
 </script>
 </body>
 </html>""")

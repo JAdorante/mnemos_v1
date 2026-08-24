@@ -11,6 +11,8 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
+from app.api.mnemos_theme import apply_plain as _plain
+
 router = APIRouter()
 
 
@@ -454,17 +456,19 @@ def capture_external(
     return external_capture.ingest_transcript(device, payload)
 
 
-_PWA = """<!doctype html>
+_PWA = _plain("""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Mnemos capture</title>
+<title>@@BRAND@@ capture</title>
+@@FONTS@@
 <style>
-body{font:16px/1.45 system-ui;margin:24px;max-width:420px}
-button{font:inherit;padding:12px 18px;border-radius:10px;border:0;background:#0b1320;color:#f8f6f1}
-#log{white-space:pre-wrap;color:#555;margin-top:16px;font-size:13px}
+@@ROOT@@
+body{font:16px/1.45 var(--font);color:var(--text);margin:24px;max-width:420px;background:var(--paper)}
+button{font:inherit;padding:12px 18px;border-radius:10px;border:0;background:var(--navy);color:var(--paper)}
+#log{white-space:pre-wrap;color:var(--mut);margin-top:16px;font-size:13px}
 </style></head><body>
 <h1>Phone as mic</h1>
-<p>Records short clips and posts transcripts to this Mnemos. Pair the phone first.</p>
+<p>Records short clips and posts transcripts to this @@BRAND@@. Pair the phone first.</p>
 <label>Token <input id="tok" style="width:100%"></label>
 <button id="go" type="button">Record 8s</button>
 <div id="log"></div>
@@ -496,7 +500,7 @@ document.getElementById('go').onclick=async()=>{
 };
 </script>
 </body></html>
-"""
+""")
 
 
 @router.get("/capture/pwa", response_class=HTMLResponse)
@@ -579,14 +583,16 @@ def _bootstrap_worker():
 
 @router.get("/bootstrap")
 def bootstrap_page() -> HTMLResponse:
-    html = """<!doctype html><html lang="en"><head><meta charset="utf-8">
-<title>Mnemos — first launch</title>
-<style>body{font:16px/1.45 system-ui;margin:32px;max-width:520px}
-button{font:inherit;padding:10px 16px;border-radius:10px;border:0;background:#0b1320;color:#f8f6f1}
-#log{white-space:pre-wrap;color:#555;margin-top:16px;font-size:13px}</style></head>
+    html = _plain("""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<title>@@BRAND@@ — first launch</title>
+@@FONTS@@
+<style>@@ROOT@@
+body{font:16px/1.45 var(--font);color:var(--text);margin:32px;max-width:520px;background:var(--paper)}
+button{font:inherit;padding:10px 16px;border-radius:10px;border:0;background:var(--navy);color:var(--paper)}
+#log{white-space:pre-wrap;color:var(--mut);margin-top:16px;font-size:13px}</style></head>
 <body>
 <h1>Download speech models</h1>
-<p>Mnemos does not ship the 460MB speech models or Chromium. This runs once, locally, and can be resumed.</p>
+<p>@@BRAND@@ does not ship the 460MB speech models or Chromium. This runs once, locally, and can be resumed.</p>
 <button id="go" type="button">Download now</button>
 <p><a href="/onboarding">Skip to setup</a> if models are already cached.</p>
 <div id="log"></div>
@@ -602,7 +608,7 @@ document.getElementById('go').onclick=async()=>{
   await fetch('/bootstrap/start',{method:'POST'});
   poll();
 };
-</script></body></html>"""
+</script></body></html>""")
     return HTMLResponse(html)
 
 

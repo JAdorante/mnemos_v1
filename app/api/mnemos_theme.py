@@ -9,12 +9,21 @@ BRAND = "Mnemos"
 
 FONT_LINKS = """\
 <link rel="icon" href="/static/mnemos-logo.png" type="image/png">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin>
-<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin></script>
-<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin></script>"""
+<link rel="stylesheet" href="/static/fonts/mnemos-fonts.css">"""
+
+KATEX_LINKS = """\
+<link rel="stylesheet" href="/static/katex/katex.min.css">
+<script defer src="/static/katex/katex.min.js"></script>
+<script defer src="/static/katex/auto-render.min.js"></script>"""
+
+THEME_STYLE_LINKS = """\
+<link rel="stylesheet" href="/static/css/mnemos-ink.css">
+<link rel="stylesheet" href="/static/css/mnemos-chrome.css">
+<link rel="stylesheet" href="/static/css/mnemos-approval.css">"""
+
+THEME_SCRIPT_LINKS = """\
+<script src="/static/js/mnemos-ui.js"></script>
+<script src="/static/js/mnemos-approval.js"></script>"""
 
 # Mnemos mark — rounded frame with right tab, arched "m", copper seal at the gap.
 BRAND_MARK = """\
@@ -32,7 +41,25 @@ ROOT_TOKENS = """\
   --folio:#FFFEFB;--overlay:rgba(11,19,32,.28);--float:#FFFEFB;
   --text:#23262B;--mut:#555960;--line:rgba(11,19,32,.09);
   --navy:#0B1320;--charcoal:#3A3F47;
-  --acc:#B87333;--acc-dim:rgba(184,115,51,.12);--acc-ink:rgba(184,115,51,.22);
+  --acc:#B87333;
+  --acc-05:color-mix(in srgb,var(--acc) 5%,transparent);
+  --acc-06:color-mix(in srgb,var(--acc) 6%,transparent);
+  --acc-07:color-mix(in srgb,var(--acc) 7%,transparent);
+  --acc-08:color-mix(in srgb,var(--acc) 8%,transparent);
+  --acc-10:color-mix(in srgb,var(--acc) 10%,transparent);
+  --acc-12:color-mix(in srgb,var(--acc) 12%,transparent);
+  --acc-14:color-mix(in srgb,var(--acc) 14%,transparent);
+  --acc-15:color-mix(in srgb,var(--acc) 15%,transparent);
+  --acc-18:color-mix(in srgb,var(--acc) 18%,transparent);
+  --acc-20:color-mix(in srgb,var(--acc) 20%,transparent);
+  --acc-22:color-mix(in srgb,var(--acc) 22%,transparent);
+  --acc-25:color-mix(in srgb,var(--acc) 25%,transparent);
+  --acc-28:color-mix(in srgb,var(--acc) 28%,transparent);
+  --acc-35:color-mix(in srgb,var(--acc) 35%,transparent);
+  --acc-40:color-mix(in srgb,var(--acc) 40%,transparent);
+  --acc-45:color-mix(in srgb,var(--acc) 45%,transparent);
+  --acc-55:color-mix(in srgb,var(--acc) 55%,transparent);
+  --acc-dim:var(--acc-12);--acc-ink:var(--acc-22);--acc-warm:#FFF8F0;
   --emerald:#1E5B4F;
   --ok:#2E6F57;--warn:#A66F14;--danger:#9A3F3F;
   --audio:#1E5B4F;--vision:#A86A32;--desktop:#6E2433;
@@ -49,7 +76,21 @@ ROOT_TOKENS = """\
   /* Static CSS grain — no SVG feTurbulence at paint time. */
   --grain: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(11,19,32,.015) 2px, rgba(11,19,32,.015) 3px),
            repeating-linear-gradient(90deg, transparent, transparent 2px, rgba(11,19,32,.012) 2px, rgba(11,19,32,.012) 3px);
+  /* Stacking bands — never invent raw z-index integers outside this file. */
+  --z-base: 1;    /* in-flow decorations: ::before spines, grain overlays */
+  --z-raised: 5;  /* sticky page chrome: .top bars, .work-bar, table heads */
+  --z-rail: 15;   /* ambient side rails (legacy float; prefer layout) */
+  --z-banner: 25; /* approval / status banners */
+  --z-float: 40;  /* toasts, ghost panels, nudges — dock owns these */
+  --z-popover: 50;/* dropdowns, past-chats panel */
+  --z-system: 70; /* recording chips — must beat conversational float */
+  --z-modal: 80;  /* modal sheets, privacy dialog, hold tips */
+  --chrome-h: 56px; /* measured by MnemosChrome; fallback for first paint */
+  --chrome-bg: rgba(248,246,241,.94);
 }
+/* `hidden` must beat any class that sets display (.fetch-err{display:flex}),
+   or the element stays painted forever. Author rules outrank the UA sheet. */
+[hidden]{display:none!important}
 @supports not (backdrop-filter: blur(1px)) {
   :root{ --chrome-bg: #F8F6F1; }
 }
@@ -121,8 +162,8 @@ INK_CSS = """\
 }
 .ink-underline.on,.ink-underline:focus{background-size:100% 1.5px}
 .pen-mark{
-  background:linear-gradient(105deg,transparent 0%,rgba(184,115,51,.14) 40%,
-    rgba(184,115,51,.1) 60%,transparent 100%);
+  background:linear-gradient(105deg,transparent 0%,var(--acc-14) 40%,
+    var(--acc-10) 60%,transparent 100%);
   box-decoration-break:clone;
 }
 .surface{
@@ -139,8 +180,8 @@ INK_CSS = """\
 }
 .folio::before{
   content:"";position:absolute;left:0;top:14px;bottom:14px;width:3px;
-  background:linear-gradient(180deg,var(--acc),rgba(184,115,51,.15));
-  border-radius:2px;
+  background:linear-gradient(180deg,var(--acc),var(--acc-15));
+  border-radius:2px;z-index:var(--z-base);pointer-events:none;
 }
 .float-surface{
   background:var(--float);border:1px solid var(--line);border-radius:var(--radius);
@@ -160,7 +201,7 @@ INK_CSS = """\
 .provenance-stack{display:flex;flex-direction:column;gap:0;margin-top:10px}
 .provenance-stack .pv-step{
   display:grid;grid-template-columns:16px 1fr;gap:10px;padding:8px 0;
-  border-left:1px solid rgba(184,115,51,.25);margin-left:7px;padding-left:14px;
+  border-left:1px solid var(--acc-25);margin-left:7px;padding-left:14px;
   animation:inkBleed .35s var(--ease) both;font-size:13px;
 }
 .provenance-stack .pv-step .pv-dot{
@@ -225,11 +266,11 @@ INK_CSS = """\
   white-space:pre-wrap;
 }
 .rd-card.key_idea,.rd-card.concept{
-  background:rgba(184,115,51,.07);border-color:rgba(184,115,51,.2);
+  background:var(--acc-07);border-color:var(--acc-20);
 }
 .rd-card.key_idea .rd-card-head,.rd-card.concept .rd-card-head{color:var(--acc)}
 .rd-card.key_idea .rd-card-icon,.rd-card.concept .rd-card-icon{
-  background:rgba(184,115,51,.15);color:var(--acc);
+  background:var(--acc-15);color:var(--acc);
 }
 .rd-card.definition{
   background:rgba(30,91,79,.06);border-color:rgba(30,91,79,.18);
@@ -278,8 +319,8 @@ INK_CSS = """\
   cursor:pointer;
 }
 .rd-actions button:hover{
-  border-color:rgba(184,115,51,.4);color:var(--navy);
-  background:rgba(184,115,51,.06);transform:translateY(-1px) scale(1.01);
+  border-color:var(--acc-40);color:var(--navy);
+  background:var(--acc-06);transform:translateY(-1px) scale(1.01);
 }
 .rd-grounding{
   margin-top:4px;font-size:var(--r-meta);color:var(--mut);line-height:1.5;
@@ -349,8 +390,8 @@ a{color:inherit;text-decoration:none}
   color:var(--navy);background:rgba(11,19,32,.06);
 }
 .nav-more-menu{
-  position:absolute;left:0;top:calc(100% + 6px);z-index:40;
-  min-width:176px;padding:6px;border-radius:12px;
+  position:absolute;left:0;top:calc(100% + 6px);z-index:var(--z-popover);
+  min-width:176px;max-width:min(220px,calc(100vw - 24px));padding:6px;border-radius:12px;
   background:var(--folio,#FFFEFB);border:1px solid var(--line);
   box-shadow:var(--shadow-float,0 8px 24px rgba(11,19,32,.12));
   display:flex;flex-direction:column;gap:2px;
@@ -367,8 +408,39 @@ a{color:inherit;text-decoration:none}
 }
 .nav a.on:hover{color:var(--navy);background:rgba(11,19,32,.08);transform:translateY(-1px)}
 .nav a.attn{color:var(--acc);background:var(--acc-dim);
-  box-shadow:inset 0 0 0 1px rgba(184,115,51,.18)}
+  box-shadow:inset 0 0 0 1px var(--acc-18)}
 .spacer{flex:1}
+/* Shared button vocabulary — prefer over per-page .go/.quiet recipes */
+.btn-primary,.actions .go,#mnemosPrivacy .pv-btn.go{
+  background:var(--navy);color:var(--paper);border:none;
+  border-radius:10px;padding:9px 16px;font:500 13px var(--font);cursor:pointer;
+  text-decoration:none;display:inline-flex;align-items:center;justify-content:center;
+}
+.btn-ghost,.actions a.btnish,.btnish{
+  border-radius:10px;padding:9px 16px;font:500 13px var(--font);cursor:pointer;
+  border:1px solid var(--line);background:var(--panel);color:var(--navy);
+  text-decoration:none;display:inline-flex;align-items:center;
+}
+.btn-quiet,.actions .quiet,#mnemosPrivacy .pv-btn.quiet{
+  background:transparent;color:var(--mut);border:1px solid var(--line);
+  border-radius:10px;padding:9px 16px;font:500 13px var(--font);cursor:pointer;
+}
+.empty,.empty-state{
+  color:var(--mut);font-size:13px;line-height:1.45;
+}
+.empty-state a{color:var(--navy);font-weight:500}
+.skel{display:flex;flex-wrap:wrap;gap:8px}
+.skel .bone{
+  height:36px;min-width:88px;flex:1 1 120px;max-width:180px;border-radius:12px;
+  background:linear-gradient(90deg,var(--panel-2) 0%,var(--bg-elev) 50%,var(--panel-2) 100%);
+  background-size:200% 100%;animation:skelShine 1.2s var(--ease) infinite;
+  border:1px solid var(--line);
+}
+.skel.rows .bone{flex:1 1 100%;max-width:none;height:44px;border-radius:10px}
+@keyframes skelShine{
+  from{background-position:100% 0} to{background-position:-100% 0}
+}
+@media(prefers-reduced-motion:reduce){.skel .bone{animation:none}}
 button,.btn,.mini,.ctl{
   transition:transform .22s var(--ease),box-shadow .28s var(--ease),
     background .28s var(--ease),border-color .28s var(--ease),color .28s var(--ease),
@@ -386,6 +458,13 @@ button:active:not(:disabled),.btn:active:not(:disabled),
   box-shadow:0 1px 3px rgba(11,19,32,.06);
 }
 button:disabled,.btn:disabled{cursor:default}
+:focus-visible{
+  outline:2px solid var(--acc);outline-offset:2px;
+}
+button:focus:not(:focus-visible),.btn:focus:not(:focus-visible),
+.mini:focus:not(:focus-visible),.ctl:focus:not(:focus-visible){
+  outline:none;
+}
 .brand .mark path{
   stroke-dasharray:64;animation:inkDraw .5s var(--ease) both;
 }
@@ -394,8 +473,8 @@ button:disabled,.btn:disabled{cursor:default}
 /* The Seal + shared hold primitive */
 .seal-btn{
   position:relative;isolation:isolate;overflow:hidden;
-  border:1px solid rgba(184,115,51,.45)!important;
-  background:rgba(184,115,51,.08)!important;color:var(--navy)!important;
+  border:1px solid var(--acc-45)!important;
+  background:var(--acc-08)!important;color:var(--navy)!important;
   min-width:132px;font-weight:600;
 }
 .seal-btn .seal-ring,.holdable .hold-ring{
@@ -410,18 +489,18 @@ button:disabled,.btn:disabled{cursor:default}
 .holdable.holding .hold-ring circle{/* progress driven by --hold-p via JS */}
 .seal-btn.sealed .seal-ring,.holdable.sealed .hold-ring{opacity:.92}
 .seal-btn.sealed .seal-ring circle,.holdable.sealed .hold-ring circle{
-  stroke-dashoffset:0;fill:rgba(184,115,51,.12);
+  stroke-dashoffset:0;fill:var(--acc-12);
 }
 .holdable.hold-spine{position:relative}
 .holdable.hold-spine::after{
   content:"";position:absolute;left:0;top:14px;bottom:14px;width:2px;
-  background:var(--acc);opacity:.55;border-radius:1px;
+  background:var(--acc);opacity:.55;border-radius:1px;z-index:var(--z-base);
   transform-origin:top center;transform:scaleY(var(--hold-p,0));
   transition:none;pointer-events:none;
 }
 .holdable.hold-spine.holding::after{opacity:1}
 .holdable.hold-flash{
-  box-shadow:inset 0 0 0 1px rgba(184,115,51,.55)!important;
+  box-shadow:inset 0 0 0 1px var(--acc-55)!important;
 }
 .hold-more{
   position:absolute;right:8px;top:8px;border:0;background:transparent;
@@ -429,9 +508,17 @@ button:disabled,.btn:disabled{cursor:default}
   border-radius:6px;opacity:.55;
 }
 .hold-more:hover,.hold-more:focus{opacity:1;background:var(--panel-2);color:var(--navy)}
-/* Recording indicator — persistent, one-click pause per source */
+/* Bottom-right corner dock — one owner for rec bar / toast / ghost */
+#mnemosDockBR{
+  position:fixed;right:16px;bottom:16px;z-index:var(--z-float);
+  display:flex;flex-direction:column;gap:10px;align-items:flex-end;
+  max-height:calc(100vh - var(--chrome-h) - 32px);max-height:calc(100dvh - var(--chrome-h) - 32px);
+  overflow:auto;pointer-events:none;
+}
+#mnemosDockBR > *{pointer-events:auto}
+/* Recording indicator — docks into #mnemosDockBR; never self-positions */
 #mnemosRecBar{
-  position:fixed;z-index:70;right:16px;bottom:16px;
+  position:relative;z-index:auto;right:auto;bottom:auto;
   display:flex;flex-direction:column;gap:8px;align-items:flex-end;
   pointer-events:none;font-family:var(--font);
 }
@@ -468,19 +555,26 @@ button:disabled,.btn:disabled{cursor:default}
 }
 #mnemosRecBar .rec-chip.meeting-on .dot{background:#E8A07A}
 #mnemosRecBar .rec-consent-btn{
-  border:1px solid rgba(184,115,51,.4);background:rgba(184,115,51,.1);
+  border:1px solid var(--acc-40);background:var(--acc-10);
   color:var(--navy);border-radius:12px;padding:9px 14px;font:600 12px var(--font);
   cursor:pointer;box-shadow:0 6px 18px rgba(11,19,32,.08);
 }
 #mnemosPrivacy{
-  display:none;position:fixed;inset:0;z-index:80;background:var(--overlay);
+  display:none;position:fixed;inset:0;z-index:var(--z-modal);background:var(--overlay);
   align-items:center;justify-content:center;padding:24px 16px;
 }
 #mnemosPrivacy.open{display:flex}
 #mnemosPrivacy .pv-sheet{
-  width:min(480px,100%);background:var(--folio);border:1px solid var(--line);
+  width:min(480px,100%);max-height:calc(100dvh - 48px);overflow:auto;
+  background:var(--folio);border:1px solid var(--line);
   border-radius:var(--radius);box-shadow:var(--shadow-float);padding:22px 22px 18px;
   animation:fadeUp .28s var(--ease) both;
+}
+.mnemos-hold-tip{
+  position:fixed;z-index:var(--z-modal);max-width:240px;padding:8px 10px;
+  font:11px/1.35 var(--mono);color:var(--navy);
+  background:rgba(255,254,251,.97);border:1px solid var(--acc-35);
+  border-radius:8px;box-shadow:0 8px 24px rgba(11,19,32,.1);pointer-events:none;
 }
 #mnemosPrivacy h2{
   font-family:var(--display);font-weight:400;font-size:1.55rem;margin:0 0 8px;
@@ -594,20 +688,28 @@ def nav_markup() -> str:
     )
 
 
+def apply_plain(page: str) -> str:
+    """Utility pages: fonts + tokens only (no nav, chrome, or UI bundle)."""
+    return (
+        page.replace("@@FONTS@@", FONT_LINKS)
+        .replace("@@ROOT@@", ROOT_TOKENS)
+        .replace("@@BRAND@@", BRAND)
+    )
+
+
 def apply(page: str) -> str:
     """Inject shared fonts/tokens/ink/chrome/UI into a page with @@placeholders@@.
 
     Leaves @@APPROVAL@@ for per-request SSR via approval_partial.inject_page.
+    Pages that render math include @@KATEX@@ after @@FONTS@@ (Chat, Console).
     """
-    from app.api.approval_partial import APPROVAL_CSS, APPROVAL_JS
-    from app.api.mnemos_ui import UI_JS
-
     return (
-        page.replace("@@FONTS@@", FONT_LINKS)
+        page.replace("@@FONTS@@", FONT_LINKS + "\n" + THEME_STYLE_LINKS)
+        .replace("@@KATEX@@", KATEX_LINKS)
         .replace("@@ROOT@@", ROOT_TOKENS)
-        .replace("@@INK@@", INK_CSS)
-        .replace("@@CHROME@@", CHROME_CSS + "\n" + APPROVAL_CSS)
-        .replace("@@UI_JS@@", UI_JS + "\n" + APPROVAL_JS)
+        .replace("@@INK@@", "")
+        .replace("@@CHROME@@", "")
+        .replace("@@UI_JS@@", THEME_SCRIPT_LINKS)
         .replace("@@MARK@@", BRAND_MARK)
         .replace("@@BRAND@@", BRAND)
         .replace("@@NAV@@", nav_markup())

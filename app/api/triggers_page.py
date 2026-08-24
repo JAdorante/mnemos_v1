@@ -6,29 +6,33 @@ dynamic text lands via textContent so stored trigger names/goals are never
 re-interpreted as markup.
 """
 
-TRIGGERS_PAGE = """<!doctype html>
+from app.api.mnemos_theme import apply_plain as _plain
+
+TRIGGERS_PAGE = _plain("""<!doctype html>
+<html lang="en"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Triggers</title>
+<title>Triggers — @@BRAND@@</title>
+@@FONTS@@
 <style>
-  :root { color-scheme: light dark; }
-  body { font: 15px/1.5 system-ui, sans-serif; max-width: 760px;
-         margin: 40px auto; padding: 0 16px; }
-  h1 { font-size: 20px; } h1 + p { color: gray; }
-  h2 { font-size: 15px; margin: 22px 0 6px; }
-  .hint { border: 1px dashed color-mix(in srgb, gray 45%, transparent);
-          border-radius: 8px; padding: 10px 14px; color: gray;
-          font-size: 13px; }
-  .card { border: 1px solid color-mix(in srgb, gray 40%, transparent);
-          border-radius: 8px; padding: 10px 14px; margin: 10px 0; }
-  .card .name { font-weight: 600; }
-  .card .when { font-size: 13px; color: gray; margin-top: 2px; }
-  .card .stats { font-size: 12px; color: gray; margin-top: 6px; }
-  .card button { font: inherit; font-size: 13px; padding: 4px 12px;
-                 border-radius: 6px; cursor: pointer; margin: 8px 6px 0 0; }
-  #status { color: gray; font-size: 13px; margin-top: 18px; }
-  .empty { color: gray; font-size: 13px; }
-</style>
+@@ROOT@@
+body { font: 15px/1.5 var(--font); color: var(--text); max-width: 760px;
+       margin: 40px auto; padding: 0 16px; background: var(--paper); }
+h1 { font-size: 20px; } h1 + p { color: var(--mut); }
+h2 { font-size: 15px; margin: 22px 0 6px; }
+.hint { border: 1px dashed color-mix(in srgb, var(--mut) 45%, transparent);
+        border-radius: 8px; padding: 10px 14px; color: var(--mut);
+        font-size: 13px; }
+.card { border: 1px solid color-mix(in srgb, var(--mut) 40%, transparent);
+        border-radius: 8px; padding: 10px 14px; margin: 10px 0; }
+.card .name { font-weight: 600; }
+.card .when { font-size: 13px; color: var(--mut); margin-top: 2px; }
+.card .stats { font-size: 12px; color: var(--mut); margin-top: 6px; }
+.card button { font: inherit; font-size: 13px; padding: 4px 12px;
+               border-radius: 6px; cursor: pointer; margin: 8px 6px 0 0; }
+#status { color: var(--mut); font-size: 13px; margin-top: 18px; }
+.empty { color: var(--mut); font-size: 13px; }
+</style></head><body>
 <h1>Triggers</h1>
 <p>Standing “when it sees X, offer Y” watches. Everything here only ever
 <em>offers</em> — irreversible steps still stop for your approval.</p>
@@ -105,4 +109,4 @@ async function refresh() {
 }
 refresh();
 </script>
-"""
+</body></html>""")

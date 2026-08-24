@@ -85,7 +85,7 @@ body{margin:0;min-height:100vh;font:15px/1.55 var(--font);color:var(--text);
 .forget-person{margin-top:14px;border:1px solid var(--line);border-radius:9px;
   background:var(--panel);font:12.5px var(--font);color:var(--danger,#8a2d2d);
   cursor:pointer;padding:6px 11px}
-.work-bar{display:none;position:sticky;bottom:12px;z-index:5;margin-top:14px;
+.work-bar{display:none;position:sticky;bottom:12px;z-index:var(--z-raised);margin-top:14px;
   padding:10px 12px;border:1px solid var(--line);border-radius:12px;
   background:var(--panel);box-shadow:0 -4px 24px rgba(11,19,32,.06);
   align-items:center;gap:8px;flex-wrap:wrap}
@@ -96,6 +96,18 @@ body{margin:0;min-height:100vh;font:15px/1.55 var(--font);color:var(--text);
 .work-toolbar{display:flex;align-items:center;gap:10px;margin-top:8px;flex-wrap:wrap}
 .work-toolbar label{font:12.5px var(--font);color:var(--mut);cursor:pointer;
   display:inline-flex;align-items:center;gap:6px}
+@media(max-width:640px){
+  .top{padding:10px 14px}
+  .wrap{padding:8px 14px 40px}
+  .card{flex-direction:column;align-items:stretch}
+  .acts{align-self:flex-start;flex-wrap:wrap}
+  .pfield{flex-direction:column;align-items:stretch}
+  .pfield span[style]{min-width:0!important;align-self:stretch!important}
+  .idcard .contact span{min-width:5rem}
+  .tabs{flex-wrap:wrap;gap:4px}
+  .tabs button{padding:6px 12px;font-size:12px}
+  .work-bar{bottom:8px;margin-left:-2px;margin-right:-2px}
+}
 </style>
 </head>
 <body>
@@ -258,6 +270,8 @@ document.addEventListener('click', e=>{
 
 async function load(){
   const d=await (await fetch('/profile/data')).json();
+  if(typeof _profileSig==='string' && JSON.stringify(d)===_profileSig) return;
+  _profileSig=JSON.stringify(d);
   const id=document.getElementById('idCard');
   if(d.identity && d.identity.name){
     const c=[];
@@ -848,7 +862,9 @@ document.getElementById('wText').addEventListener('keydown', e=>{
 
 // ---------------------------------------------------------------------------
 let memVersion=null;
+let _profileSig=null;
 async function memCheck(){
+  if(document.hidden) return;
   try{
     const v=(await (await fetch('/graph/version')).json()).version;
     if(memVersion!==null&&v!==memVersion){
@@ -867,7 +883,19 @@ async function memCheck(){
 }
 load();
 setTab(MnemosMemory.get('profile.tab','profile')||'profile');
-setInterval(memCheck,4000);
+let profileStreamOn=false;
+let profilePollTimer=null;
+function startProfilePoll(){
+  if(profilePollTimer) clearInterval(profilePollTimer);
+  profilePollTimer=setInterval(memCheck, profileStreamOn?30000:4000);
+}
+if(window.MnemosFieldStream){
+  profileStreamOn=!!MnemosFieldStream.connect((d)=>{
+    if(d.version!=null) memVersion=null;
+    memCheck();
+  });
+}
+startProfilePoll();
 </script>
 </body>
 </html>

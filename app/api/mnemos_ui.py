@@ -53,6 +53,73 @@ window.MnemosMemory = {
 window.MnemosReduceMotion = () =>
   window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
+/* Chrome height → --chrome-h so fixed layers never guess header size. */
+window.MnemosChrome = (function () {
+  let _timer = null;
+  function sync() {
+    const top = document.querySelector('header.top, .top');
+    let h = top ? top.offsetHeight : 0;
+    const ap = document.getElementById('mnemosApproval');
+    if (ap && ap.classList.contains('on')) h += ap.offsetHeight;
+    document.documentElement.style.setProperty('--chrome-h', h + 'px');
+  }
+  function debounced() {
+    clearTimeout(_timer);
+    _timer = setTimeout(sync, 100);
+  }
+  function bind() {
+    sync();
+    if (typeof ResizeObserver !== 'undefined') {
+      const ro = new ResizeObserver(debounced);
+      const top = document.querySelector('header.top, .top');
+      if (top) ro.observe(top);
+      const ap = document.getElementById('mnemosApproval');
+      if (ap) ro.observe(ap);
+    }
+    window.addEventListener('resize', debounced);
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', bind);
+  } else {
+    bind();
+  }
+  return { sync, bind };
+})();
+
+/* One owner per viewport corner — floating widgets register here. */
+window.MnemosDock = {
+  PRIORITY: { ghost: 10, toast: 20, system: 30 },
+  ensure() {
+    let dock = document.getElementById('mnemosDockBR');
+    if (!dock) {
+      dock = document.createElement('div');
+      dock.id = 'mnemosDockBR';
+      document.body.appendChild(dock);
+    }
+    return dock;
+  },
+  add(el, priority) {
+    if (!el) return null;
+    const dock = this.ensure();
+    el.dataset.dockPriority = String(priority == null ? 50 : priority);
+    el.style.position = 'relative';
+    el.style.right = 'auto';
+    el.style.bottom = 'auto';
+    el.style.left = 'auto';
+    el.style.zIndex = 'auto';
+    if (el.parentNode !== dock) dock.appendChild(el);
+    this._sort();
+    return dock;
+  },
+  _sort() {
+    const dock = document.getElementById('mnemosDockBR');
+    if (!dock) return;
+    const kids = Array.from(dock.children);
+    kids.sort((a, b) => (+a.dataset.dockPriority || 0) - (+b.dataset.dockPriority || 0));
+    kids.forEach((k) => dock.appendChild(k));
+  },
+};
+
 /* Shared hold primitive — Seal + Bleed. Copper progress only; no pulse.
    HOLD_MS 700; early release (≥150ms) teaches once via server-persisted tip. */
 window.MnemosHold = {
@@ -94,10 +161,6 @@ window.MnemosHold = {
       tip = document.createElement('div');
       tip.id = 'mnemosHoldTip';
       tip.className = 'mnemos-hold-tip';
-      tip.style.cssText = 'position:fixed;z-index:80;max-width:240px;padding:8px 10px;'
-        + 'font:11px/1.35 "IBM Plex Mono",ui-monospace,monospace;color:var(--navy,#0B1320);'
-        + 'background:rgba(255,254,251,.97);border:1px solid rgba(184,115,51,.35);'
-        + 'border-radius:8px;box-shadow:0 8px 24px rgba(11,19,32,.1);pointer-events:none';
       document.body.appendChild(tip);
     }
     tip.textContent = text || 'Hold to see where this came from';
@@ -311,6 +374,129 @@ function esc(s) {
 }
 window.MnemosEsc = esc;
 
+window.MnemosRender = window.MnemosRender || {};
+window.MnemosRender.empty = function (message, opts) {
+  opts = opts || {};
+  const cls = opts.className || 'empty-state';
+  let html = '<div class="' + cls + '">' + esc(message || '');
+  const link = opts.link;
+  if (link && link.href) {
+    html += ' <a href="' + esc(link.href) + '">' + esc(link.label || 'Learn more') + '</a>';
+  }
+  html += '</div>';
+  return html;
+};
+
+window.MnemosDialog = (function () {
+  const FOCUSABLE = 'button:not([disabled]), a[href], input:not([disabled]):not([type="hidden"]), '
+    + 'select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+  let active = null;
+  let returnFocus = null;
+  let escapeFn = null;
+  let prevOverflow = null;
+
+  function focusables(root) {
+    return Array.from(root.querySelectorAll(FOCUSABLE)).filter((el) => {
+      if (el.disabled || el.getAttribute('aria-hidden') === 'true') return false;
+      const st = window.getComputedStyle(el);
+      return st.visibility !== 'hidden' && st.display !== 'none';
+    });
+  }
+
+  function lockScroll(on) {
+    const root = document.documentElement;
+    if (on) {
+      if (prevOverflow == null) prevOverflow = root.style.overflow || '';
+      root.style.overflow = 'hidden';
+    } else if (prevOverflow != null) {
+      root.style.overflow = prevOverflow;
+      prevOverflow = null;
+    }
+  }
+
+  function onKeyDown(e) {
+    if (!active) return;
+    if (e.key === 'Escape' && escapeFn) {
+      e.preventDefault();
+      escapeFn(e);
+      return;
+    }
+    if (e.key !== 'Tab') return;
+    const items = focusables(active);
+    if (!items.length) {
+      e.preventDefault();
+      return;
+    }
+    const first = items[0];
+    const last = items[items.length - 1];
+    const focused = document.activeElement;
+    if (e.shiftKey) {
+      if (focused === first || !active.contains(focused)) {
+        e.preventDefault();
+        last.focus();
+      }
+    } else if (focused === last || !active.contains(focused)) {
+      e.preventDefault();
+      first.focus();
+    }
+  }
+
+  document.addEventListener('keydown', onKeyDown);
+
+  const api = {
+    focusables,
+    isOpen(root) {
+      return active === root;
+    },
+    open(root, opts) {
+      if (!root) return;
+      opts = opts || {};
+      if (active && active !== root) {
+        api.close(active, { restoreFocus: false });
+      }
+      active = root;
+      returnFocus = opts.returnFocus || document.activeElement;
+      escapeFn = opts.onEscape || null;
+      if (opts.lockScroll) lockScroll(true);
+      if (opts.markOpen !== false) root.classList.add('open');
+      root.setAttribute('aria-hidden', 'false');
+      let target = null;
+      if (opts.focus) {
+        target = typeof opts.focus === 'string' ? root.querySelector(opts.focus) : opts.focus;
+      }
+      if (!target) {
+        const items = focusables(root);
+        target = items[0];
+      }
+      if (target && target.focus) {
+        try { target.focus(); } catch (err) {}
+      }
+    },
+    close(root, opts) {
+      if (!root) return;
+      opts = opts || {};
+      if (active === root) {
+        active = null;
+        escapeFn = null;
+        lockScroll(false);
+      }
+      root.classList.remove('open');
+      root.setAttribute('aria-hidden', 'true');
+      if (opts.restoreFocus !== false) {
+        const ret = returnFocus;
+        returnFocus = null;
+        if (ret && ret.focus) {
+          try { ret.focus(); } catch (err) {}
+        }
+      } else {
+        returnFocus = null;
+      }
+    },
+  };
+  return api;
+})();
+window.MnemosLayer = window.MnemosDialog;
+
 window.MnemosAmbient = {
   render(el, notes, opts) {
     if (!el) return;
@@ -459,7 +645,7 @@ window.MnemosConstellation = {
         legendEl.className = 'const-legend';
         // Self-contained styles so the key looks identical on the console + home
         // pages without touching two CSS blocks. Non-interactive (never eats a drag).
-        legendEl.style.cssText = 'position:absolute;left:10px;top:10px;z-index:2;'
+        legendEl.style.cssText = 'position:absolute;left:10px;top:10px;z-index:var(--z-base);'
           + 'display:flex;flex-wrap:wrap;gap:3px 10px;max-width:min(360px,72%);'
           + 'padding:6px 9px;border-radius:10px;background:rgba(255,254,251,.9);'
           + 'border:1px solid rgba(11,19,32,.1);box-shadow:0 1px 6px rgba(11,19,32,.08);'
@@ -1872,6 +2058,37 @@ window.MnemosFieldStream = {
   connected() { return !!(this._es); }
 };
 
+/* Chat SSE — push channel for /chat/stream (S-1). Polling remains fallback. */
+window.MnemosChatStream = {
+  _es: null,
+  _cb: null,
+  connect(onChange) {
+    this._cb = onChange;
+    this.disconnect();
+    if (typeof EventSource === 'undefined') return false;
+    try {
+      const es = new EventSource('/chat/stream');
+      this._es = es;
+      es.addEventListener('change', () => {
+        if (typeof this._cb === 'function') {
+          try { this._cb(); } catch (e) {}
+        }
+      });
+      es.onerror = () => { /* EventSource reconnects; poll fallback stays */ };
+      return true;
+    } catch (e) {
+      return false;
+    }
+  },
+  disconnect() {
+    if (this._es) {
+      try { this._es.close(); } catch (e) {}
+      this._es = null;
+    }
+  },
+  connected() { return !!(this._es); }
+};
+
 /* Today — thin helpers for the dashboard (offers stay on agent_bridge). */
 window.MnemosShell = {
   async state(limit) {
@@ -1995,11 +2212,18 @@ window.MnemosCapture = {
       voiceBox.checked = v.enabled !== false && !v.muted;
     }
     this.loadSharing();
-    el.classList.add('open');
+    MnemosDialog.open(el, {
+      lockScroll: true,
+      focus: '.pv-sheet input:not([disabled]), .pv-sheet button, .pv-sheet [href]',
+      onEscape: () => {
+        MnemosMemory.set('capturePromptDismissed', true);
+        this.closePrivacy();
+      },
+    });
   },
   closePrivacy() {
     const el = document.getElementById('mnemosPrivacy');
-    if (el) el.classList.remove('open');
+    if (el) MnemosDialog.close(el);
   },
   async loadSharing() {
     // Reflect stored state, and say plainly when the weekly ping is impossible
@@ -2092,13 +2316,15 @@ window.MnemosCapture = {
     const bar = document.createElement('div');
     bar.id = 'mnemosRecBar';
     bar.setAttribute('aria-live', 'polite');
-    document.body.appendChild(bar);
+    if (window.MnemosDock) MnemosDock.add(bar, MnemosDock.PRIORITY.system);
+    else document.body.appendChild(bar);
 
     const modal = document.createElement('div');
     modal.id = 'mnemosPrivacy';
     modal.setAttribute('role', 'dialog');
     modal.setAttribute('aria-modal', 'true');
     modal.setAttribute('aria-label', 'Capture privacy');
+    modal.setAttribute('aria-hidden', 'true');
     const rows = this._SOURCES.map((s) =>
       '<label class="pv-src"><input type="checkbox" id="pv_' + s.key + '">'
       + '<div><b>' + s.label + '</b><span>' + (s.warn || 'Optional. Off until you allow it.')
@@ -2215,6 +2441,7 @@ window.MnemosCapture = {
       bar.innerHTML = this._voiceChipHtml();
       const voiceBtn = document.getElementById('recVoice');
       if (voiceBtn) voiceBtn.onclick = () => this.toggleVoice();
+      try { if (typeof window.MnemosPlaceToast === 'function') window.MnemosPlaceToast(); } catch (e) {}
       return;
     }
     const consent = this._state.consent || {};
@@ -2272,6 +2499,8 @@ window.MnemosCapture = {
     });
     const voiceBtn = document.getElementById('recVoice');
     if (voiceBtn) voiceBtn.onclick = () => this.toggleVoice();
+    // RecBar height drives toast stacking on pages without a margin slot.
+    try { if (typeof window.MnemosPlaceToast === 'function') window.MnemosPlaceToast(); } catch (e) {}
   },
   _voiceChipHtml() {
     const v = this._voice || {};
@@ -2317,7 +2546,7 @@ window.MnemosCapture = {
     this.mount();
     this.tick();
     if (this._timer) clearInterval(this._timer);
-    this._timer = setInterval(() => this.tick(), 4000);
+    this._timer = setInterval(() => { if (!document.hidden) this.tick(); }, 4000);
   }
 };
 

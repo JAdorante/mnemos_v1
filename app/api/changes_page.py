@@ -9,24 +9,28 @@ feature, not a review queue — nothing here blocks the pipeline.
 Renders from JSON endpoints; dynamic text lands via textContent only.
 """
 
-CHANGES_PAGE = """<!doctype html>
+from app.api.mnemos_theme import apply_plain as _plain
+
+CHANGES_PAGE = _plain("""<!doctype html>
+<html lang="en"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Memory changes</title>
+<title>Memory changes — @@BRAND@@</title>
+@@FONTS@@
 <style>
-  :root { color-scheme: light dark; }
-  body { font: 15px/1.5 system-ui, sans-serif; max-width: 680px;
-         margin: 40px auto; padding: 0 16px; }
-  h1 { font-size: 20px; } h1 + p { color: gray; }
-  .pair { border: 1px solid color-mix(in srgb, gray 40%, transparent);
-          border-radius: 8px; padding: 12px 14px; margin: 12px 0; }
-  .old { text-decoration: line-through; color: gray; }
-  .new { font-weight: 600; margin-top: 4px; }
-  .meta { font-size: 12px; color: gray; margin-top: 6px; }
-  button { font: inherit; font-size: 13px; padding: 6px 14px;
-           border-radius: 6px; cursor: pointer; margin-top: 8px; }
-  .empty { color: gray; margin-top: 24px; }
-</style>
+@@ROOT@@
+body { font: 15px/1.5 var(--font); color: var(--text); max-width: 680px;
+       margin: 40px auto; padding: 0 16px; background: var(--paper); }
+h1 { font-size: 20px; } h1 + p { color: var(--mut); }
+.pair { border: 1px solid color-mix(in srgb, var(--mut) 40%, transparent);
+        border-radius: 8px; padding: 12px 14px; margin: 12px 0; }
+.old { text-decoration: line-through; color: var(--mut); }
+.new { font-weight: 600; margin-top: 4px; }
+.meta { font-size: 12px; color: var(--mut); margin-top: 6px; }
+button { font: inherit; font-size: 13px; padding: 6px 14px;
+         border-radius: 6px; cursor: pointer; margin-top: 8px; }
+.empty { color: var(--mut); margin-top: 24px; }
+</style></head><body>
 <h1>Memory changes</h1>
 <p>When newer evidence replaced an older fact, the swap happened automatically —
 here is every recent one, reversible. Restore if the old version was right.</p>
@@ -67,4 +71,4 @@ async function load() {
 }
 load();
 </script>
-"""
+</body></html>""")

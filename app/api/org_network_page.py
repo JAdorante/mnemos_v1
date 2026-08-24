@@ -16,7 +16,7 @@ ORG_NETWORK_PAGE = _mnemos(r"""<!doctype html>
 @@CHROME@@
 *{box-sizing:border-box}
 body{margin:0;font:16px/1.55 var(--font);color:var(--text);background:var(--paper)}
-.top{position:sticky;top:0;display:flex;gap:14px;align-items:center;padding:10px 20px;z-index:5}
+.top{position:sticky;top:0;display:flex;gap:14px;align-items:center;padding:10px 20px;z-index:var(--z-raised);background:var(--chrome-bg);backdrop-filter:blur(10px)}
 .wrap{max-width:860px;margin:0 auto;padding:26px 20px 80px}
 h1{font-family:var(--display);font-weight:400;font-size:2rem;letter-spacing:-.02em;color:var(--navy);margin:0 0 6px}
 .lead{color:var(--mut);margin:0 0 22px}
@@ -36,6 +36,15 @@ textarea{width:100%;min-height:80px}
   border-radius:12px;padding:12px 14px;font-size:.92rem;margin:12px 0}
 pre{white-space:pre-wrap;font-family:var(--mono);font-size:.82rem;background:var(--bg-elev);
   border:1px solid var(--line);border-radius:12px;padding:12px;max-height:280px;overflow:auto}
+@media(max-width:640px){
+  .top{padding:8px 14px;gap:10px;flex-wrap:wrap}
+  .wrap{padding:18px 14px 64px}
+  h1{font-size:clamp(1.5rem,6vw,2rem)}
+  .panel{padding:16px}
+  .row{flex-direction:column;align-items:stretch}
+  input,select{min-width:0;width:100%}
+  pre{max-height:220px;font-size:.78rem}
+}
 </style>
 </head>
 <body>

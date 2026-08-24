@@ -24,7 +24,7 @@ body{
   font:16px/1.55 var(--font);color:var(--text);
   min-height:100vh;display:flex;flex-direction:column;
   background:
-    radial-gradient(920px 520px at 10% -10%, rgba(184,115,51,.09), transparent 55%),
+    radial-gradient(920px 520px at 10% -10%, var(--acc-08), transparent 55%),
     radial-gradient(700px 420px at 100% 0%, rgba(30,91,79,.06), transparent 52%),
     linear-gradient(180deg, #FBF9F4 0%, var(--paper) 38%, var(--workspace) 100%);
   background-attachment:fixed;
@@ -83,8 +83,8 @@ h1{
   background:transparent;color:var(--text);border:1px solid var(--line);
 }
 .btn-ghost:hover:not(:disabled){
-  border-color:rgba(184,115,51,.45);color:var(--navy);
-  background:rgba(184,115,51,.05);box-shadow:0 4px 14px rgba(11,19,32,.06);
+  border-color:var(--acc-45);color:var(--navy);
+  background:var(--acc-05);box-shadow:0 4px 14px rgba(11,19,32,.06);
 }
 .btn:disabled{opacity:.45;cursor:not-allowed;transform:none;box-shadow:none}
 .skip{
@@ -112,7 +112,7 @@ h1{
   transition:border-color .28s var(--ease),box-shadow .28s var(--ease);
 }
 .unlock input:focus{
-  border-color:rgba(184,115,51,.45);box-shadow:0 0 0 3px var(--acc-dim);
+  border-color:var(--acc-45);box-shadow:0 0 0 3px var(--acc-dim);
 }
 .unlock .row{display:flex;gap:10px;align-items:stretch;margin-top:10px}
 .unlock .row .btn{flex:0 0 auto}

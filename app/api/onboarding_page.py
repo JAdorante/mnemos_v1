@@ -18,7 +18,7 @@ html,body{margin:0;min-height:100%}
 body{
   font:16px/1.55 var(--font);color:var(--text);
   background:
-    radial-gradient(800px 420px at 12% -8%, rgba(184,115,51,.08), transparent 55%),
+    radial-gradient(800px 420px at 12% -8%, var(--acc-08), transparent 55%),
     radial-gradient(640px 360px at 95% 8%, rgba(30,91,79,.05), transparent 50%),
     linear-gradient(180deg, #FBF9F4 0%, var(--bg) 42%, #F2EFE8 100%);
   background-attachment:fixed;
@@ -76,8 +76,8 @@ a:hover{opacity:.75}
 }
 .btn-ghost{background:transparent;color:var(--text);border:1px solid var(--line)}
 .btn-ghost:hover:not(:disabled){
-  border-color:rgba(184,115,51,.45);color:var(--navy);
-  background:rgba(184,115,51,.05);box-shadow:0 4px 14px rgba(11,19,32,.06);
+  border-color:var(--acc-45);color:var(--navy);
+  background:var(--acc-05);box-shadow:0 4px 14px rgba(11,19,32,.06);
 }
 .btn:disabled{opacity:.45;cursor:not-allowed;transform:none;box-shadow:none}
 .skip{
@@ -95,7 +95,7 @@ a:hover{opacity:.75}
   transition:background .3s var(--ease);
 }
 .progress i.on{background:var(--acc)}
-.progress i.done{background:rgba(184,115,51,.4)}
+.progress i.done{background:var(--acc-40)}
 
 .panel{
   background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
@@ -116,7 +116,7 @@ input,textarea,select{
   border:1px solid var(--line);border-radius:12px;padding:11px 13px;outline:none;
   transition:border-color .28s var(--ease),box-shadow .28s var(--ease);
 }
-input:focus,textarea:focus{border-color:rgba(184,115,51,.45);
+input:focus,textarea:focus{border-color:var(--acc-45);
   box-shadow:0 0 0 3px var(--acc-dim)}
 textarea{min-height:96px;resize:vertical}
 .row{display:grid;gap:12px}
@@ -141,8 +141,8 @@ textarea{min-height:96px;resize:vertical}
     background .28s var(--ease),transform .22s var(--ease),box-shadow .28s var(--ease);
 }
 .add:hover{
-  border-color:rgba(184,115,51,.45);color:var(--acc);
-  background:rgba(184,115,51,.04);transform:translateY(-1px);
+  border-color:var(--acc-45);color:var(--acc);
+  background:var(--acc-05);transform:translateY(-1px);
   box-shadow:0 4px 12px rgba(11,19,32,.05);
 }
 .add:active{transform:translateY(0) scale(.99)}
@@ -150,7 +150,7 @@ textarea{min-height:96px;resize:vertical}
 .chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
 .chip-in{
   display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border-radius:999px;
-  background:var(--acc-dim);border:1px solid rgba(184,115,51,.25);font-size:.9rem;color:var(--navy);
+  background:var(--acc-dim);border:1px solid var(--acc-25);font-size:.9rem;color:var(--navy);
 }
 .chip-in button{background:none;border:0;color:var(--mut);cursor:pointer;font-size:1rem;line-height:1}
 .tag-row{display:flex;gap:8px}
@@ -174,6 +174,14 @@ textarea{min-height:96px;resize:vertical}
   display:inline-flex;align-items:center;gap:6px;
 }
 .top-mini .nm .mark{width:18px;height:18px;color:var(--acc)}
+@media(max-width:640px){
+  .wrap{padding:18px 14px 64px}
+  .panel{padding:18px 16px}
+  .nav-btns{flex-direction:column-reverse;align-items:stretch}
+  .nav-btns button{width:100%}
+  .tag-row{flex-direction:column}
+  .progress{gap:4px}
+}
 </style>
 </head>
 <body>
@@ -204,7 +212,7 @@ textarea{min-height:96px;resize:vertical}
     <div class="panel step" data-step="0">
       <h2>You</h2>
       <p class="lead">So @@BRAND@@ can recognize you in conversation and memory.</p>
-      <div id="scanBox" hidden style="border:1px dashed rgba(184,115,51,.3);border-radius:12px;padding:12px 14px;margin-bottom:16px;background:rgba(184,115,51,.04)">
+      <div id="scanBox" hidden style="border:1px dashed var(--acc-28);border-radius:12px;padding:12px 14px;margin-bottom:16px;background:var(--acc-05)">
         <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
           <button type="button" class="btn btn-ghost" id="scanBtn">✨ Add context from my system</button>
           <span class="muted" id="scanStatus" style="flex:1;min-width:160px">Optional: let @@BRAND@@ learn what you're working on — the projects and tools you actually use — as background context in its memory. It doesn't fill in the answers below; those are yours to write. Nothing leaves your machine.</span>
@@ -216,7 +224,7 @@ textarea{min-height:96px;resize:vertical}
       </div>
       <!-- Documents: content-level, so it's a SEPARATE explicit consent (unlike the
            metadata scan above, this reads file text and sends it to the model). -->
-      <div id="docsBox" hidden style="border:1px dashed rgba(184,115,51,.3);border-radius:12px;padding:12px 14px;margin-bottom:16px;background:rgba(184,115,51,.04)">
+      <div id="docsBox" hidden style="border:1px dashed var(--acc-28);border-radius:12px;padding:12px 14px;margin-bottom:16px;background:var(--acc-05)">
         <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
           <button type="button" class="btn btn-ghost" id="docsBtn" disabled>📄 Read my documents</button>
           <span class="muted" id="docsStatus" style="flex:1;min-width:160px">Optional: let @@BRAND@@ read the text of your recent documents (PDF, Word, notes) so it can answer questions about them. Unlike the scan above, this sends document text to the model to pull out tasks and facts — everything it learns is <b>reviewable in Memory</b> and can be removed. <span id="docsRoots"></span></span>
@@ -744,6 +752,7 @@ async function startPhonePair(){
   document.getElementById("phonePairStatus").textContent="Waiting for the phone…";
   if(phonePoll) clearInterval(phonePoll);
   phonePoll=setInterval(async ()=>{
+    if(document.hidden) return;
     const s=await phoneStatus();
     if(s && phoneBaseline!==null && s.devices.length>phoneBaseline){
       const d=s.devices[s.devices.length-1];
@@ -901,6 +910,7 @@ document.getElementById("exBtn").onclick=async ()=>{
     }
     await fetch("/exhaust/refresh",{method:"POST"});
     const poll=setInterval(async ()=>{
+      if(document.hidden) return;
       const s=await (await fetch("/exhaust/status")).json();
       const p=s.progress||{};
       document.getElementById("exProg").textContent=

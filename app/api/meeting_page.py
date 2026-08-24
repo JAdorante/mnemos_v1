@@ -17,7 +17,7 @@ MEETING_PAGE = _mnemos(r"""<!doctype html>
 body{
   margin:0;min-height:100vh;font:15px/1.55 var(--font);color:var(--text);
   background:
-    radial-gradient(900px 480px at 8% -8%, rgba(184,115,51,.06), transparent 55%),
+    radial-gradient(900px 480px at 8% -8%, var(--acc-06), transparent 55%),
     linear-gradient(180deg,#FBF9F4 0%,var(--paper) 40%,var(--workspace) 100%);
 }
 .wrap{max-width:780px;margin:0 auto;padding:8px 22px 64px}
@@ -59,7 +59,7 @@ body{
 }
 .receipt .quote{color:var(--text);line-height:1.45}
 .receipt mark{
-  background:rgba(184,115,51,.18);color:inherit;padding:0 2px;border-radius:2px;
+  background:var(--acc-18);color:inherit;padding:0 2px;border-radius:2px;
 }
 .receipt .actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:6px;align-items:center}
 .receipt button,.item button,.actions button,.actions a.btnish{
@@ -103,6 +103,14 @@ body{
 .foot{margin-top:28px;display:flex;gap:14px;flex-wrap:wrap;font-size:13px}
 .foot a{color:var(--navy)}
 #player{display:none}
+@media(max-width:640px){
+  .wrap{padding:8px 14px 48px}
+  .mast h1{font-size:clamp(1.35rem,5vw,1.85rem)}
+  .privacy .row{flex-direction:column;align-items:flex-start}
+  .ask-row{flex-direction:column}
+  .ask-row input{min-width:0;width:100%}
+  .receipt .actions{flex-direction:column;align-items:flex-start}
+}
 </style>
 </head>
 <body>
@@ -388,6 +396,10 @@ h1{font-family:var(--display);font-weight:400;font-size:1.8rem;color:var(--navy)
 .row .m{font:12px var(--mono);color:var(--mut);margin-top:3px}
 .foot{margin-top:28px}
 .foot a{color:var(--navy);font-size:13px}
+@media(max-width:640px){
+  .wrap{padding:8px 14px 48px}
+  .row .t{font-size:15px}
+}
 </style>
 </head>
 <body>

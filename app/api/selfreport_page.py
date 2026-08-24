@@ -6,36 +6,40 @@ from JSON endpoints; all dynamic text lands via textContent so nothing the
 user typed is ever re-interpreted as markup.
 """
 
-SELFREPORT_PAGE = """<!doctype html>
+from app.api.mnemos_theme import apply_plain as _plain
+
+SELFREPORT_PAGE = _plain("""<!doctype html>
+<html lang="en"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Weekly check-in</title>
+<title>Weekly check-in — @@BRAND@@</title>
+@@FONTS@@
 <style>
-  :root { color-scheme: light dark; }
-  body { font: 15px/1.5 system-ui, sans-serif; max-width: 560px;
-         margin: 40px auto; padding: 0 16px; }
-  h1 { font-size: 20px; } h1 + p { color: gray; }
-  fieldset { border: 1px solid color-mix(in srgb, gray 40%, transparent);
-             border-radius: 8px; margin: 14px 0; padding: 10px 14px; }
-  legend { font-weight: 600; font-size: 14px; }
-  .scale { display: flex; gap: 6px; margin-top: 6px; }
-  .scale label { flex: 1; text-align: center; padding: 8px 0;
-                 border: 1px solid color-mix(in srgb, gray 40%, transparent);
-                 border-radius: 6px; cursor: pointer; user-select: none; }
-  .scale input { display: none; }
-  .scale input:checked + span { font-weight: 700; }
-  .scale label:has(input:checked) { border-color: currentColor; }
-  .ends { display: flex; justify-content: space-between; font-size: 12px;
-          color: gray; margin-top: 4px; }
-  textarea { width: 100%; min-height: 70px; margin-top: 6px;
-             font: inherit; border-radius: 6px; padding: 8px; }
-  button { font: inherit; padding: 10px 22px; border-radius: 8px;
-           cursor: pointer; margin-top: 10px; }
-  #msg { margin-top: 12px; font-weight: 600; }
-  table { border-collapse: collapse; margin-top: 26px; width: 100%; }
-  td, th { padding: 4px 10px 4px 0; text-align: left; font-size: 13px; }
-  th { color: gray; font-weight: 600; }
-</style>
+@@ROOT@@
+body { font: 15px/1.5 var(--font); color: var(--text); max-width: 560px;
+       margin: 40px auto; padding: 0 16px; background: var(--paper); }
+h1 { font-size: 20px; } h1 + p { color: var(--mut); }
+fieldset { border: 1px solid color-mix(in srgb, var(--mut) 40%, transparent);
+           border-radius: 8px; margin: 14px 0; padding: 10px 14px; }
+legend { font-weight: 600; font-size: 14px; }
+.scale { display: flex; gap: 6px; margin-top: 6px; }
+.scale label { flex: 1; text-align: center; padding: 8px 0;
+               border: 1px solid color-mix(in srgb, var(--mut) 40%, transparent);
+               border-radius: 6px; cursor: pointer; user-select: none; }
+.scale input { display: none; }
+.scale input:checked + span { font-weight: 700; }
+.scale label:has(input:checked) { border-color: currentColor; }
+.ends { display: flex; justify-content: space-between; font-size: 12px;
+        color: var(--mut); margin-top: 4px; }
+textarea { width: 100%; min-height: 70px; margin-top: 6px;
+           font: inherit; border-radius: 6px; padding: 8px; }
+button { font: inherit; padding: 10px 22px; border-radius: 8px;
+         cursor: pointer; margin-top: 10px; }
+#msg { margin-top: 12px; font-weight: 600; }
+table { border-collapse: collapse; margin-top: 26px; width: 100%; }
+td, th { padding: 4px 10px 4px 0; text-align: left; font-size: 13px; }
+th { color: var(--mut); font-weight: 600; }
+</style></head><body>
 <h1>Weekly check-in</h1>
 <p id="due"></p>
 <form id="f">
@@ -107,4 +111,4 @@ document.getElementById('f').addEventListener('submit', async e => {
 });
 refresh();
 </script>
-"""
+</body></html>""")
