@@ -59,6 +59,20 @@ EXECUTOR_VISION = os.environ.get("AGENT_EXECUTOR_VISION", "1") not in ("0", "fal
 VISION_ALWAYS = os.environ.get("AGENT_VISION_ALWAYS", "0") not in ("0", "false", "False")
 VISION_SPARSE_AT = int(os.environ.get("AGENT_VISION_SPARSE_AT", "6"))  # <N elements -> attach shot
 
+# --- Pixel fallback for graphics surfaces (canvas games, maps, editors) -----
+# When a <canvas>/<video>/embed dominates the viewport, nothing inside it can
+# ever have an element_id — the agent gets click_at / drag / press_key, confined
+# to that surface's rectangle, grounded on the attached screenshot. Off => the
+# agent can only look at such pages, never act on them.
+BROWSER_PIXEL = os.environ.get("AGENT_BROWSER_PIXEL", "1") not in ("0", "false", "False")
+# Longest edge of the grounding screenshot. Kept under Claude's 1568px vision
+# resize so the image the model measures is the image we map coordinates from.
+PIXEL_SHOT_MAX_EDGE = int(os.environ.get("AGENT_PIXEL_SHOT_MAX_EDGE", "1400"))
+# Slack (CSS px) allowed outside the surface rect — canvas borders are fuzzy.
+PIXEL_EDGE_PAD = int(os.environ.get("AGENT_PIXEL_EDGE_PAD", "8"))
+# Mouse-move steps in a drag; too few and canvas apps miss the drag entirely.
+PIXEL_DRAG_STEPS = int(os.environ.get("AGENT_PIXEL_DRAG_STEPS", "24"))
+
 # JS-heavy/SPA pages (e.g. x.com) often report a blank DOM right after navigation.
 # Wait for interactive elements to render before acting/verifying, rather than
 # acting on nothing (which stalled and produced false verify failures).

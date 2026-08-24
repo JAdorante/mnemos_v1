@@ -1902,15 +1902,14 @@ class Agent:
             # navigation away. Empty (no-op) for about:blank / unknown hosts.
             tip = tips_for_url(scan.get("url", "") or self.current_url() or "")
             tip_block = f"PROVIDER TIP:\n{tip}\n\n" if tip else ""
-            content = (
-                mode_ctx + ctx
-                + f"GOAL:\n{goal}\n\nPLAN:\n{ptext}\n\n"
-                f"INFORMATION GATHERED:\n{ginfo}\n\n"
-                f"RECENT ACTIONS:\n{_history_text(hist)}\n\n"
-                f"{tip_block}"
-                f"CURRENT PAGE:\n{render_observation(scan)}\n"
-                f"{nudge}{dry_note}\n\nChoose the next single action toward the goal."
-            )
+
+            # Pixel fallback: this page's real content is drawn into a canvas /
+            # player / embed, so no element_id can reach it. The coordinate
+            # actions are offered for this turn only, and only alongside the
+            # screenshot they are measured on — coordinates without the picture
+            # would be a guess.
+            surf = (getattr(self.driver, "pixel_surface", None)
+                    if cfg.BROWSER_PIXEL else None)
             escalate = stall >= cfg.ESCALATE_AT or no_progress >= cfg.ESCALATE_AT
             # Adaptive vision: sparse tree, stuck, OR chat SPA (message bodies
             # often aren't in the AX list — pixels arrive before the spiral).
@@ -1919,15 +1918,42 @@ class Agent:
                 scan.get("url") or self.current_url(), escalate=escalate,
                 scan=scan)
             send_vision = bool(shot_bytes) and cfg.EXECUTOR_VISION and (
-                cfg.VISION_ALWAYS or escalate or chat_vision
+                cfg.VISION_ALWAYS or escalate or chat_vision or bool(surf)
                 or scan.get("count", 0) < cfg.VISION_SPARSE_AT)
+            pixel_mode = bool(surf) and send_vision
+            pixel_block = ""
+            if pixel_mode:
+                # State the surface's bounds in the SCREENSHOT's own pixel
+                # space — the space the model measures in, which is not the
+                # page's when the display is HiDPI or the shot was fitted.
+                sc = getattr(self.driver, "pixel_scale", 1.0) or 1.0
+                iw, ih = getattr(self.driver, "shot_size", (0, 0))
+                pixel_block = (
+                    f"GRAPHICS SURFACE: the attached screenshot is {iw}x{ih} px. "
+                    f"The <{surf['kind']}> spans ({surf['x'] / sc:.0f}, "
+                    f"{surf['y'] / sc:.0f}) to ({(surf['x'] + surf['w']) / sc:.0f}, "
+                    f"{(surf['y'] + surf['h']) / sc:.0f}) in that image. Its "
+                    "contents are pixels — use click_at / drag / press_key with "
+                    "coordinates measured on this screenshot, inside those "
+                    "bounds. Elements listed below still use element_id.\n\n")
+            content = (
+                mode_ctx + ctx
+                + f"GOAL:\n{goal}\n\nPLAN:\n{ptext}\n\n"
+                f"INFORMATION GATHERED:\n{ginfo}\n\n"
+                f"RECENT ACTIONS:\n{_history_text(hist)}\n\n"
+                f"{tip_block}{pixel_block}"
+                f"CURRENT PAGE:\n{render_observation(scan)}\n"
+                f"{nudge}{dry_note}\n\nChoose the next single action toward the goal."
+            )
             act = self.llm.choose_action(
-                content, escalate=escalate,
+                content, escalate=escalate, pixel=pixel_mode,
                 image=shot_bytes if send_vision else None)
             name, args = act["name"], act.get("input") or {}
             tag = "  (escalated -> Opus)" if escalate else ""
             if send_vision:
                 tag += "  (+screenshot)"
+            if pixel_mode:
+                tag += "  (+pixel)"
             self._log(f"[step {self.step}] {name} {json.dumps(args)}{tag}")
 
             # stop a spiral: the same action repeated with no effect gets nowhere.
@@ -1937,7 +1963,12 @@ class Agent:
             # from the same page state is a revisit even if it wasn't the last act.
             act_sig = f"{name}:{json.dumps(args, sort_keys=True)}"
             state_key = "|".join(str(before.get(k) or "") for k in
-                                 ("url", "content_hash", "page_hash", "selected"))
+                                 ("url", "content_hash", "page_hash", "selected",
+                                  # canvas pages have a frozen DOM: without the
+                                  # pixel hash, dealing a second card from the
+                                  # same stock looks like the same action from
+                                  # the same state and trips the repeat guard.
+                                  "pixel_hash"))
             if (spiral.observe(act_sig, state_key) >= cfg.REPEAT_ACTION_LIMIT
                     and name not in ("ask_human", "request_approval", "done")):
                 # One recovery: auto-read visible page text (SPA chats) instead
@@ -2240,6 +2271,20 @@ class Agent:
             if name in ("scroll", "wait_for"):
                 evidence = _ov.low_risk_evidence(
                     res["ok"], "not verified (low-risk action)")
+                verified, vnote = evidence.ok, evidence.note
+            elif name in ("click_at", "drag", "press_key"):
+                # A move on a graphics surface shows up in pixels only — the DOM
+                # signature is frozen, so the LLM judge would call every real
+                # move a no-op. Compare the rendered frames instead.
+                after = signature(self.driver.scan())
+                changed = (after.get("pixel_hash") != before.get("pixel_hash")
+                           or after.get("content_hash") != before.get("content_hash")
+                           or after.get("url") != before.get("url"))
+                ok = bool(res["ok"] and changed)
+                evidence = _ov.dom_evidence(
+                    ok, "the view changed" if ok else
+                    (res["detail"] if not res["ok"]
+                     else "nothing on the page changed — aim somewhere else"))
                 verified, vnote = evidence.ok, evidence.note
             elif name == "navigate":
                 # a navigation that landed on a rendered page is success; no need

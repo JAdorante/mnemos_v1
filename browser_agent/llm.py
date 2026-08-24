@@ -25,7 +25,7 @@ _PARAM_FALLBACK = (TypeError, BadRequestError)
 from . import config as cfg
 from .prompts import (ROUTER_SYSTEM, PLANNER_SYSTEM, EXECUTOR_SYSTEM,
                       DESKTOP_EXECUTOR_SYSTEM, VERIFIER_SYSTEM)
-from .tools import (ACTION_TOOLS, DESKTOP_TOOLS, ROUTE_SCHEMA, PLAN_SCHEMA,
+from .tools import (ACTION_TOOLS, DESKTOP_TOOLS, PIXEL_TOOLS, ROUTE_SCHEMA, PLAN_SCHEMA,
                     PHONE_GOAL_SCHEMA, VERIFY_SCHEMA)
 
 # Neutral-by-default few-shot example names (data-driven when opted in). Guarded
@@ -436,7 +436,7 @@ class LLM:
         return out
 
     # --- tier 2: executor (Sonnet 4.6, escalates to Opus) ------------------
-    def choose_action(self, content, escalate=False, image=None):
+    def choose_action(self, content, escalate=False, image=None, pixel=False):
         self._require_cloud()
         model = cfg.ESCALATION_MODEL if escalate else cfg.EXECUTOR_MODEL
         effort = cfg.ESCALATION_EFFORT if escalate else cfg.EXECUTOR_EFFORT
@@ -457,7 +457,10 @@ class LLM:
             model=model,
             max_tokens=1024,
             system=_sys(EXECUTOR_SYSTEM),
-            tools=ACTION_TOOLS,
+            # Coordinate actions exist only on turns where the page is a
+            # graphics surface — off ordinary pages they aren't offered at all,
+            # so the model can't drift away from element_ids.
+            tools=(ACTION_TOOLS + PIXEL_TOOLS) if pixel else ACTION_TOOLS,
             tool_choice={"type": "any"},  # force exactly one action per turn
             messages=[{"role": "user", "content": user_content}],
         )

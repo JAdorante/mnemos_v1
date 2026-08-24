@@ -185,6 +185,75 @@ ACTION_TOOLS = [
     },
 ]
 
+# --- pixel fallback vocabulary ---------------------------------------------
+# Offered ONLY on turns where the page is dominated by a graphics surface the
+# DOM cannot describe (a <canvas> game/map/editor, a video player, a plugin
+# embed). Coordinates are in the attached screenshot's pixel space and are
+# refused outside that surface — page chrome around it keeps using element_ids,
+# so the model can't blind-click a Send/Buy button it merely guessed at.
+PIXEL_TOOLS = [
+    {
+        "name": "click_at",
+        "description": (
+            "PIXEL FALLBACK: click inside the graphics surface at (x, y) — "
+            "pixels from the top-left of the ATTACHED SCREENSHOT. Use for "
+            "things drawn on a canvas (a playing card, a map pin, a toolbar "
+            "icon) that have no element_id. Set clicks=2 to double-click. "
+            "Coordinates outside the surface are refused — use element_id for "
+            "the page's real buttons and links."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "x": {"type": "integer"},
+                "y": {"type": "integer"},
+                "button": {"type": "string",
+                           "description": "left, right, or middle (default left)"},
+                "clicks": {"type": "integer",
+                           "description": "1 (default) or 2 for a double-click"},
+            },
+            "required": ["x", "y"],
+        },
+    },
+    {
+        "name": "drag",
+        "description": (
+            "PIXEL FALLBACK: press the mouse at (from_x, from_y), move to "
+            "(to_x, to_y), and release — the drag-and-drop many canvas UIs "
+            "need (moving a card, panning a map, drawing, a custom slider). "
+            "Coordinates are pixels in the ATTACHED SCREENSHOT and both ends "
+            "must lie inside the graphics surface."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "from_x": {"type": "integer"},
+                "from_y": {"type": "integer"},
+                "to_x": {"type": "integer"},
+                "to_y": {"type": "integer"},
+            },
+            "required": ["from_x", "from_y", "to_x", "to_y"],
+        },
+    },
+    {
+        "name": "press_key",
+        "description": (
+            "Send a key or chord (enter, escape, space, arrowleft, ctrl+z, …) "
+            "to the page. Canvas apps are often driven by the keyboard — "
+            "undo a move, deal, dismiss an overlay. It goes to whatever the "
+            "page has focused, so click the surface first if unsure."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"key": {"type": "string"}},
+            "required": ["key"],
+        },
+    },
+]
+
+PIXEL_ACTIONS = frozenset({t["name"] for t in PIXEL_TOOLS})
+
+
 # --- desktop/OS action vocabulary ------------------------------------------
 # Used when the router picks surface='desktop'. Each maps to one guarded method
 # on desktop_agent.DesktopDriver — every action is jailed, allowlisted, and

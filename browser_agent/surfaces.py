@@ -138,3 +138,72 @@ def wants_early_vision(url: str | None, *, escalate: bool = False,
     if looks_like_chat(scan):
         return True
     return False
+
+
+# --- opaque (canvas/graphics) surfaces --------------------------------------
+# A page can be perfectly visible and still be unactionable through the
+# accessibility tree: a <canvas> game, a map, a drawing/CAD editor, a video
+# player, a PDF/plugin embed. Everything drawn inside is pixels, so no
+# element_id can ever exist for it. When such a surface dominates the view the
+# agent falls back to coordinates — confined to that surface's rectangle, which
+# is exactly the part of the page the DOM cannot describe.
+
+# Fraction of the viewport an opaque element must cover before pixels beat DOM.
+PIXEL_SURFACE_RATIO = 0.25
+# Interactive descendants mean the DOM does describe it — keep using element_ids.
+_MAX_INNER = 0
+
+
+def _viewport(scan: dict | None) -> tuple[int, int]:
+    vp = ((scan or {}).get("viewport") or {})
+    try:
+        w, h = int(vp.get("w") or 0), int(vp.get("h") or 0)
+    except (TypeError, ValueError):
+        w = h = 0
+    return (w or 1280), (h or 800)
+
+
+def pixel_surface(scan: dict | None, *, ratio: float | None = None) -> dict | None:
+    """The one graphics surface worth acting on with coordinates, or None.
+
+    Largest visible opaque region that covers at least `ratio` of the viewport
+    and exposes no interactive descendants. Returned rect is CSS pixels within
+    the viewport: {kind, x, y, w, h, label}.
+    """
+    if not scan:
+        return None
+    surfaces = scan.get("surfaces") or []
+    if not surfaces:
+        return None
+    vw, vh = _viewport(scan)
+    floor = (PIXEL_SURFACE_RATIO if ratio is None else ratio) * vw * vh
+    best = None
+    for s in surfaces:
+        try:
+            w, h = int(s.get("w") or 0), int(s.get("h") or 0)
+        except (TypeError, ValueError):
+            continue
+        if w <= 0 or h <= 0 or int(s.get("inner") or 0) > _MAX_INNER:
+            continue
+        if w * h < floor:
+            continue
+        if best is None or w * h > best["w"] * best["h"]:
+            best = {"kind": str(s.get("kind") or "canvas"), "x": int(s.get("x") or 0),
+                    "y": int(s.get("y") or 0), "w": w, "h": h,
+                    "label": str(s.get("label") or "")[:60]}
+    return best
+
+
+def wants_pixel_ui(scan: dict | None) -> bool:
+    """True when this page needs the coordinate fallback to be actionable."""
+    return pixel_surface(scan) is not None
+
+
+def inside_surface(surface: dict | None, x: float, y: float,
+                   *, pad: int = 0) -> bool:
+    """Is (x, y) — CSS pixels — inside the graphics surface? Coordinates outside
+    it belong to real DOM elements, which are clicked by element_id instead."""
+    if not surface:
+        return False
+    return (surface["x"] - pad <= x <= surface["x"] + surface["w"] + pad
+            and surface["y"] - pad <= y <= surface["y"] + surface["h"] + pad)

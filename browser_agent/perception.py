@@ -9,6 +9,8 @@ element approach maps cleanly back to a clickable locator.
 """
 import hashlib
 
+from .surfaces import pixel_surface
+
 # Returns {url, title, count, truncated, elements:[{id,role,name,tag,editable,value?}]}.
 # Old data-agent-id attributes are cleared first so reused ids can't collide.
 SCAN_JS = """
@@ -152,9 +154,63 @@ SCAN_JS = """
   if (cur && isVisible(cur)) {
     selectedName = accName(cur).slice(0, 120);
   }
+  // Opaque surfaces (FR-PERC pixel fallback): regions whose contents are pixels,
+  // not nodes — <canvas> games/editors/maps, <video>, plugin embeds, and
+  // role=application widgets. Nothing inside them can ever be an element_id, so
+  // a page dominated by one is only actionable through coordinates. Reported
+  // in CSS pixels, clipped to the viewport; the Python side decides dominance.
+  const OPAQUE_SEL = 'canvas, video, embed, object, [role=application]';
+  const vw = window.innerWidth, vh = window.innerHeight;
+  const surfaces = [];
+  const collect = (root, dx, dy) => {
+    for (const el of Array.from(root.querySelectorAll(OPAQUE_SEL))) {
+      const r = el.getBoundingClientRect();
+      if (r.width < 1 || r.height < 1) continue;
+      // isVisible() is bound to this window; an element in a frame's document
+      // must be measured through that document's own view.
+      const cs = (el.ownerDocument.defaultView || window).getComputedStyle(el);
+      if (cs.visibility === 'hidden' || cs.display === 'none') continue;
+      if (parseFloat(cs.opacity || '1') === 0) continue;
+      const x = Math.max(0, Math.round(r.left + dx));
+      const y = Math.max(0, Math.round(r.top + dy));
+      const w = Math.min(vw, Math.round(r.right + dx)) - x;
+      const h = Math.min(vh, Math.round(r.bottom + dy)) - y;
+      // Decorative sparklines / spinner canvases aren't surfaces to act on.
+      if (w < 120 || h < 120) continue;
+      surfaces.push({
+        kind: el.tagName.toLowerCase(),
+        x: x, y: y, w: w, h: h,
+        label: (el.getAttribute('aria-label') || el.getAttribute('title')
+                || el.getAttribute('id') || '').slice(0, 60),
+        // Interactive descendants mean the DOM CAN describe it (an <object>
+        // that is really an inlined document) — those keep element_ids.
+        inner: el.querySelectorAll(sel).length,
+      });
+    }
+  };
+  collect(document, 0, 0);
+  // Same-origin frames: querySelectorAll never crosses a frame boundary, so an
+  // embedded game (the usual way these are served) would otherwise be invisible
+  // to us. Mouse coordinates are page-wide, so a surface found inside a frame
+  // is actionable once its rect is offset by the frame's position. A frame we
+  // cannot read stays unknown — and therefore never becomes a pixel target,
+  // which is the safe default for embedded forms/checkouts.
+  for (const f of Array.from(document.querySelectorAll('iframe, frame'))) {
+    try {
+      const fr = f.getBoundingClientRect();
+      if (fr.width < 120 || fr.height < 120) continue;
+      const doc = f.contentDocument;
+      if (!doc) continue;
+      collect(doc, fr.left, fr.top);
+    } catch (e) { /* cross-origin — invisible by design */ }
+  }
+  surfaces.sort((a, b) => (b.w * b.h) - (a.w * a.h));
   const docH = document.documentElement.scrollHeight || document.body.scrollHeight || 0;
   return {
     url: location.href, title: document.title,
+    surfaces: surfaces.slice(0, 4),
+    viewport: { w: vw, h: vh },
+    dpr: window.devicePixelRatio || 1,
     count: out.length, truncated: out.length >= MAX, elements: out,
     modal: modalRoot ? (accName(modalRoot) || 'dialog') : null,
     scrollY: Math.round(window.scrollY),
@@ -206,7 +262,7 @@ def signature(scan: dict) -> dict:
     page = (scan.get("page_text") or "")[:2000]
     page_hash = hashlib.sha1(page.encode("utf-8", "ignore")).hexdigest()[:12]
     selected = (scan.get("selected") or "") or ",".join(selected_parts[:4])
-    return {
+    sig = {
         "url": scan.get("url"),
         "title": scan.get("title"),
         "count": scan.get("count"),
@@ -216,6 +272,19 @@ def signature(scan: dict) -> dict:
         "compose": "|".join(compose_parts)[:200],
         "scrollY": scan.get("scrollY", 0),
     }
+    # On a canvas/graphics page the DOM never moves — dealing a card or dragging
+    # one changes pixels only. Without this the verifier sees an identical
+    # signature after every move and reports "no effect". Present only when the
+    # driver captured one (a dominant opaque surface), so ordinary pages are
+    # byte-for-byte unchanged.
+    if scan.get("pixel_hash"):
+        sig["pixel_hash"] = scan["pixel_hash"]
+    return sig
+
+
+def _view_area(scan: dict) -> int:
+    vp = scan.get("viewport") or {}
+    return int(vp.get("w") or 1280) * int(vp.get("h") or 800)
 
 
 def render_observation(scan: dict) -> str:
@@ -242,6 +311,16 @@ def render_observation(scan: dict) -> str:
             "An overlay/popup appears to cover the page: elements marked "
             "(covered) cannot be clicked. Use the uncovered elements — likely "
             "the popup's own buttons — to dismiss it first.")
+    surf = pixel_surface(scan)
+    if surf:
+        pct = int(round(100 * (surf["w"] * surf["h"]) / max(1, _view_area(scan))))
+        label = f' "{surf["label"]}"' if surf.get("label") else ""
+        lines.append(
+            f"Graphics surface: <{surf['kind']}>{label} covering ~{pct}% of the "
+            "view. Its contents are pixels, not elements — nothing drawn inside "
+            "it can appear in the list below. When the pixel actions "
+            "(click_at / drag / press_key) are offered this turn, act on it "
+            "with those, measured on the attached screenshot.")
     lines.append(f"Interactive elements ({scan.get('count')}{suffix}):")
     for e in els:
         val = f' value="{e["value"]}"' if e.get("value") else ""

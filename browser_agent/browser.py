@@ -8,12 +8,15 @@ Two launch modes:
     survives across runs — session reuse (FR-SEC-2). Pair with channel="chrome"
     to drive real installed Chrome, which login providers rarely block.
 """
+import hashlib
+import struct
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
 from . import config as cfg
 from .perception import SCAN_JS, READ_JS
+from .surfaces import inside_surface, pixel_surface
 
 # Trim the most obvious "I'm automated" tells so login providers (Google/MS)
 # are less likely to hard-block sign-in. Not a bypass — just avoids the false
@@ -34,6 +37,11 @@ class BrowserDriver:
         self.browser = None
         self.context = None
         self.page = None
+        # Pixel fallback state, refreshed by every scan(): the graphics surface
+        # coordinates are confined to, and screenshot-px -> CSS-px scale.
+        self.pixel_surface = None
+        self.pixel_scale = 1.0
+        self.shot_size = (0, 0)
 
     def _publish_frame(self, png: bytes | None = None, url: str = "",
                        title: str = "") -> None:
@@ -145,8 +153,10 @@ class BrowserDriver:
     # --- observation -------------------------------------------------------
     @staticmethod
     def _looks_blank(s):
-        # no interactive elements at all == almost certainly still rendering
-        return s.get("count", 0) == 0
+        # no interactive elements at all == almost certainly still rendering,
+        # UNLESS the page is a rendered graphics surface (a canvas game draws
+        # no DOM at all) — waiting three more times there is pure latency.
+        return s.get("count", 0) == 0 and not (s.get("surfaces") or [])
 
     def scan(self) -> dict:
         self._sync_active_page()
@@ -167,6 +177,16 @@ class BrowserDriver:
                     s = s2
                     break
                 s = s2
+        self.pixel_surface = pixel_surface(s) if cfg.BROWSER_PIXEL else None
+        if self.pixel_surface:
+            # The DOM signature can't see a canvas move; a hash of the rendered
+            # pixels can. Costs one screenshot, and only on graphics pages.
+            png = self._grab()
+            if png:
+                s["pixel_hash"] = hashlib.sha1(png).hexdigest()[:12]
+                self._publish_frame(png=png, url=s.get("url", ""),
+                                    title=s.get("title", ""))
+                return s
         self._publish_frame(url=s.get("url", ""), title=s.get("title", ""))
         return s
 
@@ -183,13 +203,74 @@ class BrowserDriver:
 
     def screenshot_bytes(self):
         """PNG bytes of the current viewport, or None. Used to feed the executor
-        vision alongside the accessibility tree (and saved as the step artifact)."""
+        vision alongside the accessibility tree (and saved as the step artifact).
+
+        This is also the coordinate space the model measures pixel actions in,
+        so it records the screenshot -> CSS-pixel scale it hands back."""
+        png = self._grab()
+        if png is None:
+            return None
+        self._publish_frame(png=png)
+        return png
+
+    def _grab(self):
+        """Viewport PNG, fitted for grounding, with self.pixel_scale updated."""
         try:
             png = self.page.screenshot(full_page=False)
-            self._publish_frame(png=png)
-            return png
         except Exception:
             return None
+        try:
+            png = self._fit_for_grounding(png)
+        except Exception:
+            pass
+        return png
+
+    @staticmethod
+    def _png_size(png: bytes) -> tuple[int, int]:
+        """(width, height) from the IHDR chunk — no image library needed."""
+        if not png or len(png) < 24 or not png.startswith(b"\x89PNG"):
+            return (0, 0)
+        w, h = struct.unpack(">II", png[16:24])
+        return int(w), int(h)
+
+    def _fit_for_grounding(self, png: bytes) -> bytes:
+        """Keep the screenshot inside Claude's vision resize limit and record the
+        scale from its pixels back to CSS pixels.
+
+        The model measures coordinates on the image it is shown. If that image
+        is a different size than the page (a HiDPI display doubles it, and the
+        API downsizes anything past ~1568px), every coordinate it returns is off
+        by that factor — so the mapping is computed here rather than assumed."""
+        iw, ih = self._png_size(png)
+        self.shot_size = (iw, ih)
+        if not iw or not ih:
+            self.pixel_scale = 1.0
+            return png
+        css_w = iw
+        try:
+            css_w = int(self.page.evaluate("() => window.innerWidth")) or iw
+        except Exception:
+            pass
+        longest = max(iw, ih)
+        cap = max(320, cfg.PIXEL_SHOT_MAX_EDGE)
+        if longest > cap:
+            try:
+                import io
+
+                from PIL import Image
+
+                img = Image.open(io.BytesIO(png))
+                ratio = cap / float(longest)
+                img = img.resize((max(1, int(iw * ratio)), max(1, int(ih * ratio))))
+                buf = io.BytesIO()
+                img.save(buf, format="PNG")
+                png = buf.getvalue()
+                iw, ih = self._png_size(png)
+                self.shot_size = (iw, ih)
+            except Exception:
+                pass  # no Pillow — send it full size and scale from its width
+        self.pixel_scale = (css_w / float(iw)) if iw else 1.0
+        return png
 
     def wait_briefly(self):
         try:
@@ -228,6 +309,8 @@ class BrowserDriver:
                 p.goto(args["url"], wait_until="domcontentloaded", timeout=30000)
             elif name == "go_back":
                 p.go_back(timeout=15000)
+            elif name in ("click_at", "drag", "press_key"):
+                return self._pixel_action(name, args)
             elif name == "wait_for":
                 cond = str(args.get("condition", "")).lower()
                 if "idle" in cond or "network" in cond:
@@ -244,6 +327,105 @@ class BrowserDriver:
         except Exception as e:
             self._publish_frame()
             return {"ok": False, "detail": f"{type(e).__name__}: {str(e)[:200]}"}
+
+    # --- pixel fallback ----------------------------------------------------
+    @staticmethod
+    def _coord(v):
+        """Model coordinate -> float. Tolerates "412", 412.0, and the recurring
+        malformed shape where both numbers arrive packed in one field
+        ("412, 630") — the intent is unambiguous, so don't burn a retry."""
+        if isinstance(v, str):
+            v = v.strip().strip("()")
+            if "," in v:
+                v = v.split(",")[0]
+        return float(v)
+
+    def _to_css(self, x, y) -> tuple[float, float]:
+        """Screenshot pixels (what the model measured) -> CSS pixels (what the
+        browser clicks)."""
+        sc = self.pixel_scale or 1.0
+        return self._coord(x) * sc, self._coord(y) * sc
+
+    def _pixel_action(self, name: str, args: dict) -> dict:
+        """click_at / drag / press_key — the coordinate path for canvas UIs.
+
+        Refuses coordinates outside the graphics surface from the last scan:
+        that region is exactly the part of the page the DOM cannot describe,
+        and everything around it has an element_id to click instead. So a
+        misread screenshot can't blind-click a Send/Buy/Delete button."""
+        if not cfg.BROWSER_PIXEL:
+            return {"ok": False, "detail": "pixel actions are disabled"}
+        p = self.page
+        if name == "press_key":
+            key = str(args.get("key") or "").strip()
+            if not key:
+                return {"ok": False, "detail": "press_key needs a key"}
+            # Playwright wants "Control+z"; models write "ctrl+z".
+            parts = [k for k in key.replace(" ", "+").split("+") if k]
+            alias = {"ctrl": "Control", "control": "Control", "cmd": "Meta",
+                     "command": "Meta", "meta": "Meta", "alt": "Alt",
+                     "option": "Alt", "shift": "Shift", "esc": "Escape",
+                     "return": "Enter", "del": "Delete",
+                     # Playwright spells these camel-case; models don't.
+                     "left": "ArrowLeft", "right": "ArrowRight",
+                     "up": "ArrowUp", "down": "ArrowDown",
+                     "arrowleft": "ArrowLeft", "arrowright": "ArrowRight",
+                     "arrowup": "ArrowUp", "arrowdown": "ArrowDown",
+                     "pageup": "PageUp", "pagedown": "PageDown"}
+            norm = "+".join(alias.get(k.lower(), k if len(k) == 1 else k.capitalize())
+                            for k in parts)
+            p.keyboard.press(norm)
+            p.wait_for_timeout(200)
+            self._publish_frame()
+            return {"ok": True, "detail": f"pressed {norm}"}
+
+        surf = self.pixel_surface
+        if not surf:
+            return {"ok": False, "detail": (
+                "no graphics surface on this page — act by element_id")}
+        try:
+            if name == "click_at":
+                pts = [self._to_css(args.get("x"), args.get("y"))]
+            else:
+                pts = [self._to_css(args.get("from_x"), args.get("from_y")),
+                       self._to_css(args.get("to_x"), args.get("to_y"))]
+        except (TypeError, ValueError):
+            return {"ok": False, "detail": f"bad coordinates: {args}"}
+        for (cx, cy) in pts:
+            if not inside_surface(surf, cx, cy, pad=cfg.PIXEL_EDGE_PAD):
+                sc = self.pixel_scale or 1.0
+                return {"ok": False, "detail": (
+                    f"({cx / sc:.0f}, {cy / sc:.0f}) is outside the graphics "
+                    f"surface ({surf['x'] / sc:.0f}, {surf['y'] / sc:.0f}) to "
+                    f"({(surf['x'] + surf['w']) / sc:.0f}, "
+                    f"{(surf['y'] + surf['h']) / sc:.0f}) in screenshot pixels — "
+                    "use element_id for controls outside it")}
+        if name == "click_at":
+            (cx, cy) = pts[0]
+            btn = str(args.get("button") or "left").lower()
+            if btn not in ("left", "right", "middle"):
+                btn = "left"
+            try:
+                clicks = max(1, min(2, int(args.get("clicks") or 1)))
+            except (TypeError, ValueError):
+                clicks = 1
+            p.mouse.click(cx, cy, button=btn, click_count=clicks)
+            detail = f"clicked ({cx:.0f}, {cy:.0f})" + (" x2" if clicks == 2 else "")
+        else:
+            (fx, fy), (tx, ty) = pts
+            # Stepped move: canvas drag handlers track mousemove, and a single
+            # jump from press to release reads as a click, not a drag.
+            p.mouse.move(fx, fy)
+            p.mouse.down()
+            steps = max(2, cfg.PIXEL_DRAG_STEPS)
+            for i in range(1, steps + 1):
+                p.mouse.move(fx + (tx - fx) * i / steps,
+                             fy + (ty - fy) * i / steps)
+            p.mouse.up()
+            detail = f"dragged ({fx:.0f}, {fy:.0f}) -> ({tx:.0f}, {ty:.0f})"
+        p.wait_for_timeout(300)
+        self._publish_frame()
+        return {"ok": True, "detail": detail}
 
     def close(self):
         if self.attached:
