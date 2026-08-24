@@ -118,7 +118,12 @@ def _app_row(key: str, disabled: set[str]) -> dict:
     path = cfg.resolve_app_path(key)
     installed = path is not None
     is_disabled = key in disabled
-    return {
+    from . import app_promotion as promo
+    from . import app_templates
+    promoted = promo.is_promoted(key)
+    meta = promo.promotion_meta(key) if promoted else {}
+    template_id = meta.get("template") or ""
+    row = {
         "key": key,
         "display_name": cfg.app_display_name(key),
         "installed": installed,
@@ -131,8 +136,14 @@ def _app_row(key: str, disabled: set[str]) -> dict:
         "risk": caps.get("risk", "unknown"),
         "special": caps.get("pixel_ui") == "special",
         "discovered": False,
+        "remembered": promoted,
+        "template": template_id,
+        "template_label": app_templates.template_label(template_id) if template_id else "",
+        "capability_summary": (app_templates.describe_plain(template_id, cfg.app_display_name(key))
+                              if template_id else (caps.get("notes") or "")),
         "notes": caps.get("notes", ""),
     }
+    return row
 
 
 def _granted_row(key: str, grant: dict, disabled: set[str]) -> dict:
@@ -140,6 +151,7 @@ def _granted_row(key: str, grant: dict, disabled: set[str]) -> dict:
     path = grant.get("path") or None
     installed = bool(path) and Path(path).is_file()
     is_disabled = key in disabled
+    from . import app_templates
     return {
         "key": key,
         "display_name": key,
@@ -153,8 +165,12 @@ def _granted_row(key: str, grant: dict, disabled: set[str]) -> dict:
         "risk": "unknown",
         "special": False,
         "discovered": True,
-        "notes": (f"discovered at runtime via {grant.get('source') or '?'}; "
-                  "launch-only"),
+        "remembered": False,
+        "template": "",
+        "template_label": "",
+        "capability_summary": "Launch-only until you remember this app on first approval.",
+        "notes": (f"Discovered via {grant.get('source') or '?'}; "
+                  "approve once to launch, or remember to unlock full access."),
     }
 
 

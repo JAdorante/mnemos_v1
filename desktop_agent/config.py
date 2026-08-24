@@ -55,10 +55,22 @@ PIXEL_VISION = _get("QUILL_DESKTOP_UI_VISION", "1") not in ("0", "false", "False
 
 # Ghost desktop: launched app windows are parked off-screen (no taskbar
 # button) and streamed into the chat's ghost pane; the agent drives them via
-# UI Automation. Excluded apps launch visibly — their flows need the real
-# screen (canvas/pixel UIs, special drivers).
+# UI Automation / AT-SPI. Excluded apps launch visibly — their flows need the
+# real screen (canvas/pixel UIs, special drivers). Linux: X11 only.
+def _ghost_desktop_platform_ok() -> bool:
+    if os.name == "nt":
+        return True
+    if os.name == "posix":
+        try:
+            from . import x11_util
+            return x11_util.session_ok()
+        except Exception:
+            return bool(os.environ.get("DISPLAY"))
+    return False
+
+
 GHOST_DESKTOP = (
-    os.name == "nt"
+    _ghost_desktop_platform_ok()
     and _get("QUILL_GHOST_DESKTOP", "1") not in ("0", "false", "False")
 )
 GHOST_DESKTOP_EXCLUDE = frozenset(

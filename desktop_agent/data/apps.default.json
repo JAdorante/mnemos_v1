@@ -137,6 +137,23 @@
     }
   },
 
+  "gedit": {
+    "platforms": ["posix"],
+    "candidates": ["gedit", "gnome-text-editor"],
+    "capabilities": {
+      "display_name": "gedit",
+      "launch": true,
+      "open_jailed_files": [".txt", ".md", ".log", ".json", ".csv"],
+      "opens_dirs": false,
+      "pixel_ui": "approval_required",
+      "shell": false,
+      "network": false,
+      "risk": "low",
+      "demo_safe": true,
+      "notes": "Plain-text editor; opens a single jailed text file."
+    }
+  },
+
   "phonelink": {
     "platforms": ["nt"],
     "candidates": ["%WINDIR%\\explorer.exe", "explorer"],

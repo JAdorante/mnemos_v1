@@ -39,6 +39,7 @@ winsdk>=1.0.0b10; sys_platform == "win32"
 pyautogui>=0.9.54; sys_platform == "win32"
 mss>=9.0; sys_platform == "win32"
 Pillow>=10.0                    # screen/click JPEG encode for desktop capture
+python-xlib>=0.33; sys_platform == "linux"   # Linux ghost desktop (X11)
 pynput>=1.7.6; sys_platform == "win32"   # passive mouse-click observer
 pyarrow>=14.0                   # perception Parquet export (Phase D)
 psutil>=5.9                     # criterion-9 CPU/RSS harness (bench_perception_overhead)

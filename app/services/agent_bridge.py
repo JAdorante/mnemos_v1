@@ -677,9 +677,24 @@ class AgentWorker:
 
         submit = self.submit_answer_fast if use_fast else self.submit_answer
         if decision == "approve":
+            # Console-side promotion: human approved remember_app on first discovery.
+            promo_result = None
+            try:
+                merged = dict(pending.get("fields") or {})
+                if fields:
+                    merged.update({k: v for k, v in fields.items() if v is not None})
+                from desktop_agent.app_promotion import maybe_promote_from_approval
+                promo_result = maybe_promote_from_approval(
+                    merged, packet_id=int(packet_id) if packet_id else None,
+                    approved_via=approved_via)
+            except Exception:
+                promo_result = None
             submit("approve")
-            return {"ok": True, "decision": "approve", "packet_id": packet_id,
-                    "approved_via": approved_via}
+            out = {"ok": True, "decision": "approve", "packet_id": packet_id,
+                   "approved_via": approved_via}
+            if promo_result:
+                out["app_promotion"] = promo_result
+            return out
         if decision == "cancel":
             submit("cancel")
             return {"ok": True, "decision": "cancel", "packet_id": packet_id}

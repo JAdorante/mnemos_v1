@@ -486,25 +486,44 @@ class DesktopDriver:
         verb = "launch_app"
         if discovered is not None and not access.app_granted(key):
             verb = "launch_unlisted_app"
+            from . import app_promotion as promo
+            from . import app_templates
+            template = app_templates.infer_template(
+                key, exe, launch_args, discovered.get("source") or "")
             summary += (f"  [not in the app registry; discovered via "
                         f"{discovered['source']} — first use]")
         if not self._gate(Tier.MUTATING, summary, verb=verb,
-                          fields={"action": verb, "app": key, "exe": exe,
-                                  "args": list(launch_args)}):
+                          fields={
+                              "action": verb,
+                              "app": key,
+                              "exe": exe,
+                              "args": list(launch_args),
+                              **({
+                                  "discovery_source": discovered.get("source"),
+                                  "provenance_label": promo.provenance_label(discovered),
+                                  "app_template": template,
+                                  "remember_app": True,
+                                  "promotion_summary": app_templates.describe_plain(
+                                      template, key),
+                                  "display_name": key.title(),
+                              } if discovered is not None and verb == "launch_unlisted_app"
+                                 else {}),
+                          }):
             return DesktopResult(ok=False, action="launch_app", detail="denied")
         self.actions += 1
-        from . import ghost_win
-        ghosting = ghost_win.ghostable(key)
-        win_before = ghost_win.snapshot_windows() if ghosting else set()
+        from . import ghost as ghost_mod
+        ghosting = ghost_mod.ghostable(key)
+        win_before = ghost_mod.snapshot_windows() if ghosting else set()
         try:
             subprocess.Popen([exe, *launch_args])  # detached; shell=False
         except Exception as exc:
             return self._refuse("launch_app", f"launch failed: {exc}", app=key)
         if discovered is not None and not access.app_granted(key):
-            access.grant_app(key, exe, source=discovered["source"])
+            if key not in cfg.APP_CANDIDATES:
+                access.grant_app(key, exe, source=discovered["source"])
         ghost_note = ""
         if ghosting:
-            g = ghost_win.park_new_windows(key, win_before)
+            g = ghost_mod.park_new_windows(key, win_before)
             if g.get("ok"):
                 ghost_note = (" [ghosted: window parked off-screen, streaming "
                               "to the chat pane — interact via ui_scan/"
@@ -678,18 +697,18 @@ class DesktopDriver:
         app = (app or "").strip().lower()
         if app not in cfg.APP_CANDIDATES:
             return self._refuse("ui_scan", f"app '{app}' is not allowlisted")
-        from . import uia
+        from . import a11y
 
-        if not uia.available():
-            return self._refuse("ui_scan", "UI Automation unavailable")
+        if not a11y.available():
+            return self._refuse("ui_scan", "UI automation unavailable")
         try:
-            s = uia.scan(app, title_hint=title or "")
+            s = a11y.scan(app, title_hint=title or "")
         except Exception as exc:
             return self._refuse("ui_scan", f"{type(exc).__name__}: {exc}")
         if not s.get("ok"):
             return self._refuse("ui_scan", s.get("reason", "scan failed"))
         self.actions += 1
-        obs = uia.render(s)
+        obs = a11y.render(s)
         if len(obs) > 1800:
             obs = obs[:1800] + "\n… (truncated)"
         self._ghost_frame()
@@ -706,15 +725,15 @@ class DesktopDriver:
         """Activate a control from the last ui_scan (button/menuitem/tab...)."""
         if (b := self._budget_ok("ui_invoke")):
             return b
-        from . import uia
+        from . import a11y
 
         try:
             cid = int(control_id)
         except (TypeError, ValueError):
             return self._refuse("ui_invoke", f"control_id must be an integer, "
                                 f"got {control_id!r}")
-        label = uia.describe(cid)
-        window = uia.last_window_title() or uia._last_app or "?"
+        label = a11y.describe(cid)
+        window = a11y.last_window_title() or a11y._last_app or "?"
         summary = f"activate {label} in the '{window}' window (no mouse taken)"
         if not self._gate(Tier.MUTATING, summary, verb="ui_invoke",
                           fields={"action": "ui_invoke", "control_id": cid,
@@ -722,7 +741,7 @@ class DesktopDriver:
             return DesktopResult(ok=False, action="ui_invoke", detail="denied")
         self.actions += 1
         try:
-            how = uia.invoke(cid)
+            how = a11y.invoke(cid)
         except Exception as exc:
             return self._refuse("ui_invoke", f"{type(exc).__name__}: {exc}")
         self._log(f"   {summary} — {how}")
@@ -737,7 +756,7 @@ class DesktopDriver:
         control's current content — the approval prompt says so explicitly."""
         if (b := self._budget_ok("ui_set_text")):
             return b
-        from . import pixel, uia
+        from . import a11y, pixel
 
         bad = pixel.check_type_text(text)
         if bad:
@@ -747,8 +766,8 @@ class DesktopDriver:
         except (TypeError, ValueError):
             return self._refuse("ui_set_text", f"control_id must be an integer, "
                                 f"got {control_id!r}")
-        label = uia.describe(cid)
-        window = uia.last_window_title() or uia._last_app or "?"
+        label = a11y.describe(cid)
+        window = a11y.last_window_title() or a11y._last_app or "?"
         preview = (text or "")[:80] + ("…" if len(text or "") > 80 else "")
         summary = (f"REPLACE the text of {label} in the '{window}' window with "
                    f"({len(text)} chars): {preview!r}")
@@ -758,7 +777,7 @@ class DesktopDriver:
             return DesktopResult(ok=False, action="ui_set_text", detail="denied")
         self.actions += 1
         try:
-            how = uia.set_value(cid, text)
+            how = a11y.set_value(cid, text)
         except Exception as exc:
             return self._refuse("ui_set_text", f"{type(exc).__name__}: {exc}")
         self._log(f"   ui_set_text {label}: {how} ({len(text)} chars)")
@@ -773,9 +792,9 @@ class DesktopDriver:
         """After a UIA action, refresh the chat pane's frame — only for windows
         the ghost path parked (the user's own windows never stream)."""
         try:
-            from . import ghost_win, uia
-            hwnd = uia.last_window_hwnd()
-            if hwnd and hwnd in ghost_win.parked_apps():
-                ghost_win.publish_frame(hwnd)
+            from . import a11y, ghost as ghost_mod
+            hwnd = a11y.last_window_hwnd()
+            if hwnd and hwnd in ghost_mod.parked_apps():
+                ghost_mod.publish_frame(hwnd)
         except Exception:
             pass
