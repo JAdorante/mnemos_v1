@@ -37,6 +37,11 @@ TASK_TYPES = (
     "extraction.task", "extraction.commitment", "extraction.claim",
     "audit.stale_fact", "audit.forget", "brief.section",
     "person.resolution", "escalation.text", "escalation.vision",
+    # Browser-agent steps harvested from sessions/agent_distill.jsonl —
+    # a SEPARATE rung: excluded from text-LoRA curation (distill_curate) and
+    # never mapped by exemplar ROUTER_TASK_TYPES, so agent trajectories can't
+    # leak into chat/extract training or prompts.
+    "agent.act",
 )
 
 _VERDICTS = frozenset(
@@ -54,6 +59,7 @@ _MIN_TARGET_CHARS: dict[str, int] = {
     "extraction.task": 6,
     "extraction.commitment": 6,
     "extraction.claim": 6,
+    "agent.act": 10,      # a serialized {"name": ..., "args": ...} action
 }
 _MIN_TARGET_DEFAULT = 4
 

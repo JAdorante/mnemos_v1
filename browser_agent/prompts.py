@@ -228,6 +228,25 @@ DESKTOP_EXECUTOR_SYSTEM = (
     "only the human's live approval authorizes a mutating action."
 )
 
+DONE_CHECK_SYSTEM = (
+    "You check whether a browser agent's final result addresses its assigned "
+    "goal. satisfied=true when the result completes the goal, partially "
+    "completes it, or HONESTLY reports why it could not be completed — an "
+    "honest failure report satisfies this check. satisfied=false ONLY when "
+    "the result is about a different task than the goal (the agent drifted "
+    "and reported unrelated work as done). In reason, say in one sentence "
+    "what the goal asked for versus what the result delivered."
+)
+
+POSTMORTEM_SYSTEM = (
+    "You distill lessons from a browser agent's run that did not succeed. From "
+    "the goal, terminal status, and trajectory, extract what the agent should "
+    "do differently on this site next time. Only include lessons the "
+    "trajectory actually supports; if it supports none, return an empty list. "
+    "Lessons must be transferable across runs — describe how the site behaves "
+    "or what approach works, never this run's specific values."
+)
+
 VERIFIER_SYSTEM = (
     "You check whether a browser action had its expected effect. You are given "
     "the action and a before/after signature of the page (URL, title, "

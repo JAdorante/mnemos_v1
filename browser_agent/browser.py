@@ -177,6 +177,7 @@ class BrowserDriver:
                     s = s2
                     break
                 s = s2
+        self._augment_clickables_cdp(s)
         self.pixel_surface = pixel_surface(s) if cfg.BROWSER_PIXEL else None
         if self.pixel_surface:
             # The DOM signature can't see a canvas move; a hash of the rendered
@@ -189,6 +190,132 @@ class BrowserDriver:
                 return s
         self._publish_frame(url=s.get("url", ""), title=s.get("title", ""))
         return s
+
+    # Candidates for the CDP listener probe: visible, not already listed (the
+    # semantic scan + pointer sweep tag data-agent-id), and small enough to be
+    # a discrete control — listener owners above ~30% of the viewport are
+    # delegation containers (document/board-level handlers), where clicking the
+    # element's center means nothing; the 'dom' surface covers those with
+    # coordinates instead.
+    _CDP_CANDIDATES_JS = """
+    (max) => {
+      const vw = window.innerWidth, vh = window.innerHeight;
+      const out = [];
+      for (const el of document.body ? document.body.querySelectorAll('*') : []) {
+        if (out.length >= max) break;
+        if (el.closest('[data-agent-id]')) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width < 8 || r.height < 8) continue;
+        if (r.width * r.height > 0.3 * vw * vh) continue;
+        if (r.bottom < 0 || r.right < 0 || r.top > vh || r.left > vw) continue;
+        const cs = getComputedStyle(el);
+        if (cs.visibility === 'hidden' || cs.display === 'none') continue;
+        if (parseFloat(cs.opacity || '1') === 0) continue;
+        out.push(el);
+      }
+      return out;
+    }
+    """
+
+    _CDP_TAG_JS = """
+    function(n) {
+      // Re-checked at TAG time (not just collection time): earlier probes in
+      // this same pass may have tagged an ancestor/descendant, and a container
+      // wrapping listed elements (a pile div with a delegation handler around
+      // its cards) would otherwise be listed again under its children's text.
+      const near = this.closest('[data-agent-id]');
+      if (near && near !== this) return null;
+      if (this.querySelector('[data-agent-id]')) return null;
+      this.setAttribute('data-agent-id', String(n));
+      let nm = this.getAttribute('aria-label') || this.getAttribute('title')
+        || (this.innerText || this.textContent || '');
+      nm = (nm || '').replace(/\\s+/g, ' ').trim().slice(0, 120);
+      if (!nm) {
+        const cls = (typeof this.className === 'string' && this.className.trim())
+          ? '.' + this.className.trim().split(/\\s+/).slice(0, 2).join('.')
+          : (this.id ? '#' + this.id : '');
+        nm = this.tagName.toLowerCase() + cls;
+      }
+      const sel = typeof this.className === 'string'
+        && /(?:^|\\s)(?:selected|active|current|chosen)(?:\\s|$)/.test(this.className);
+      return [nm, this.tagName.toLowerCase(), sel];
+    }
+    """
+
+    _CDP_CLICK_EVENTS = frozenset(
+        {"click", "mousedown", "mouseup", "pointerdown", "pointerup", "touchstart"})
+
+    def _augment_clickables_cdp(self, s: dict) -> None:
+        """Ask Chrome (DOMDebugger.getEventListeners) which visible elements
+        have click listeners that neither the semantic scan nor the pointer
+        sweep caught, tag them, and append them as 'clickable' element_ids.
+
+        This is the ground truth the cursor heuristic approximates: a JS-wired
+        control with cursor:default is invisible to CSS but not to the debugger.
+        Sparse pages only (busy pages are already well described), main frame
+        only, and every failure degrades silently to the heuristic-only scan.
+        """
+        # Gate on the SEMANTIC count: the pointer sweep having found pieces is
+        # exactly the situation where listener-only targets are likely too.
+        semantic = s.get("semantic_count", s.get("count", 0))
+        if not cfg.CDP_LISTENERS or semantic >= cfg.CDP_SPARSE_AT:
+            return
+        try:
+            sess = getattr(self, "_cdp_sess", None)
+            if sess is None or getattr(self, "_cdp_page", None) is not self.page:
+                sess = self.page.context.new_cdp_session(self.page)
+                self._cdp_sess, self._cdp_page = sess, self.page
+            ev = sess.send("Runtime.evaluate", {
+                "expression": f"({self._CDP_CANDIDATES_JS})({cfg.CDP_MAX_NODES})",
+                "objectGroup": "agent-scan"})
+            arr_id = (ev.get("result") or {}).get("objectId")
+            if not arr_id:
+                return
+            props = sess.send("Runtime.getProperties", {
+                "objectId": arr_id, "ownProperties": True})
+            added = 0
+            next_id = len(s.get("elements", []))
+            for prop in props.get("result", []):
+                if not prop.get("name", "").isdigit():
+                    continue
+                obj_id = (prop.get("value") or {}).get("objectId")
+                if not obj_id:
+                    continue
+                try:
+                    ls = sess.send("DOMDebugger.getEventListeners",
+                                   {"objectId": obj_id})
+                except Exception:
+                    continue
+                if not any(l.get("type") in self._CDP_CLICK_EVENTS
+                           for l in ls.get("listeners", [])):
+                    continue
+                tag_res = sess.send("Runtime.callFunctionOn", {
+                    "objectId": obj_id,
+                    "functionDeclaration": self._CDP_TAG_JS,
+                    "arguments": [{"value": next_id}],
+                    "returnByValue": True})
+                val = (tag_res.get("result") or {}).get("value")
+                if not val:   # tag JS refused: overlaps an already-listed element
+                    continue
+                nm, tag, sel = (val + [False])[:3] if len(val) < 3 else val
+                item = {"id": next_id, "role": "clickable", "name": nm,
+                        "tag": tag, "editable": False, "via": "listener"}
+                if sel:
+                    item["selected"] = True
+                s.setdefault("elements", []).append(item)
+                next_id += 1
+                added += 1
+            if added:
+                s["count"] = len(s["elements"])
+            try:
+                sess.send("Runtime.releaseObjectGroup",
+                          {"objectGroup": "agent-scan"})
+            except Exception:
+                pass
+        except Exception:
+            # CDP unavailable (attach mode quirks, page swap mid-scan, old
+            # Playwright): the scan stays heuristic-only.
+            self._cdp_sess = None
 
     def read(self, element_id=None) -> str:
         self._sync_active_page()
@@ -382,7 +509,9 @@ class BrowserDriver:
         surf = self.pixel_surface
         if not surf:
             return {"ok": False, "detail": (
-                "no graphics surface on this page — act by element_id")}
+                "no graphics surface on this page — act by element_id. If a "
+                "game/widget just loaded, it may appear as a surface on the "
+                "next scan (any action triggers one).")}
         try:
             if name == "click_at":
                 pts = [self._to_css(args.get("x"), args.get("y"))]

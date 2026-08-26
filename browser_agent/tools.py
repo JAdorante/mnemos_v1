@@ -544,3 +544,16 @@ VERIFY_SCHEMA = {
     "required": ["satisfied", "reason"],
     "additionalProperties": False,
 }
+
+POSTMORTEM_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "lessons": {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": 3,
+        },
+    },
+    "required": ["lessons"],
+    "additionalProperties": False,
+}

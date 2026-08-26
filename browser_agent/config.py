@@ -73,6 +73,31 @@ PIXEL_EDGE_PAD = int(os.environ.get("AGENT_PIXEL_EDGE_PAD", "8"))
 # Mouse-move steps in a drag; too few and canvas apps miss the drag entirely.
 PIXEL_DRAG_STEPS = int(os.environ.get("AGENT_PIXEL_DRAG_STEPS", "24"))
 
+# --- Perception depth on JS-wired pages -------------------------------------
+# The SCAN_JS pointer-cursor sweep is a heuristic; CDP can ask Chrome directly
+# which elements have click listeners (DOMDebugger.getEventListeners) — the
+# ground truth the sweep approximates. Runs only when the semantic scan is
+# sparse, main frame only, and degrades silently when CDP is unavailable.
+CDP_LISTENERS = os.environ.get("AGENT_CDP_LISTENERS", "1") not in ("0", "false", "False")
+CDP_SPARSE_AT = int(os.environ.get("AGENT_CDP_SPARSE_AT", "8"))    # skip on busy pages
+CDP_MAX_NODES = int(os.environ.get("AGENT_CDP_MAX_NODES", "300"))  # listener probes per scan
+
+# A `done` whose result is about a DIFFERENT task than the goal (observed
+# live: asked to play solitaire, declared done with an X-feed summary) gets
+# one cheap goal-vs-result check; the first drifting done is rejected with a
+# nudge instead of accepted. Honest failure reports still pass.
+DONE_CHECK = os.environ.get("AGENT_DONE_CHECK", "1") not in ("0", "false", "False")
+
+# --- Learning: post-mortems + step distillation ------------------------------
+# On a non-success run a cheap model writes 1-3 one-line lessons from the
+# trajectory; they accumulate in procedural memory next to the verify notes.
+POSTMORTEM = os.environ.get("AGENT_POSTMORTEM", "1") not in ("0", "false", "False")
+# Append (observation -> action, verified) pairs per executor step to
+# sessions/agent_distill.jsonl — the imitation-learning substrate for the
+# local rung (same idea as data/escalate_distill.jsonl on the text side).
+DISTILL = os.environ.get("AGENT_DISTILL", "1") not in ("0", "false", "False")
+DISTILL_OBS_CAP = int(os.environ.get("AGENT_DISTILL_OBS_CAP", "6000"))  # chars of prompt kept
+
 # JS-heavy/SPA pages (e.g. x.com) often report a blank DOM right after navigation.
 # Wait for interactive elements to render before acting/verifying, rather than
 # acting on nothing (which stalled and produced false verify failures).

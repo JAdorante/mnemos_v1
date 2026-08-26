@@ -22,7 +22,8 @@ from .failures import INSTRUCT, LOGIN, REPLAN, STOP, classify
 from .llm import LLM
 from .memory import Memory, redact
 from .modes import resolve_mode
-from .perception import render_observation, signature
+from . import distill as distill_log
+from .perception import render_observation, scan_delta, signature
 from .provider_tips import tips_for_url
 
 
@@ -37,11 +38,11 @@ def _plan_text(plan):
     return "\n".join(lines) if lines else "(no explicit plan)"
 
 
-def _history_text(hist):
+def _history_text(hist, cap=None):
     if not hist:
         return "(none yet)"
     out = []
-    for h in hist[-cfg.HISTORY_WINDOW:]:
+    for h in hist[-(cap or cfg.HISTORY_WINDOW):]:
         line = f"- step {h['step']}: {h['action']}({json.dumps(h['args'])}) -> {h['result']}"
         if h.get("verified") is False:
             line += f"  [verify FAILED: {h.get('vreason', '')}]"
@@ -107,6 +108,14 @@ def _distill(hist, status: str | None = None):
         act = h.get("action")
         if h.get("verified") is False and h.get("vreason"):
             notes.append(h["vreason"].strip())
+        # A human's answer to ask_human is the strongest lesson a run produces
+        # — persist it so the same question never needs asking twice per site.
+        if act == "ask_human":
+            q = ((h.get("args") or {}).get("question") or "").strip()
+            a = (h.get("result") or "")
+            a = a[len("human: "):].strip() if a.startswith("human: ") else ""
+            if q and a:
+                notes.append(f'human guidance: "{q[:140]}" → "{a[:200]}"')
         if act == "navigate":
             recipe.append(f"navigate → {_generalize_url((h.get('args') or {}).get('url', ''))}")
         elif act in ("click", "type", "select") and h.get("verified"):
@@ -290,6 +299,7 @@ def _ask(prompt):
 
 _PACKET_FIELDS = [
     ("action", "Action"),
+    ("path", "Path"),
     ("to", "To"),
     ("subject", "Subject"),
     ("body", "Body"),
@@ -735,12 +745,18 @@ class Agent:
         self._grounded_source_ids = prior or None
         return fields
 
-    def _approval_decision(self, summary, fields=None):
+    def _approval_decision(self, summary, fields=None, *,
+                           force_ask=False, execution_surface=None):
         """Present a source-grounded approval packet and read the decision.
 
         Returns (decision, feedback) where decision is 'approve' | 'cancel' |
         'edit'. On 'edit', feedback is the user's revision instruction, which the
-        caller feeds back so the draft can be revised before re-asking."""
+        caller feeds back so the draft can be revised before re-asking.
+
+        `force_ask=True` still prompts when `_autonomous_run` is set — desktop
+        uses this for verbs that exceed the autonomy ceiling. Approval-off
+        (`REQUIRE_APPROVAL=0`) still skips the ask.
+        """
         fields = dict(fields or {})
         # Autonomous / approval-off still cannot unlock RISK_TABLE blocked classes
         # (plan 0.7): bypass the ask, never the policy.
@@ -750,9 +766,10 @@ class Agent:
             self._clear_bound_packet()
             self._pending_approval_packet = None
             return "cancel", ""
-        if not cfg.REQUIRE_APPROVAL or getattr(self, "_autonomous_run", False):
-            if getattr(self, "_autonomous_run", False):
-                self._log(f"   [autonomous] auto-approved: {summary}")
+        if not cfg.REQUIRE_APPROVAL:
+            return "approve", ""
+        if not force_ask and getattr(self, "_autonomous_run", False):
+            self._log(f"   [autonomous] auto-approved: {summary}")
             return "approve", ""
         self._log(f"[approval needed] {summary}")
         # UI commit-gate (click "Send" looks irreversible): do NOT attach an
@@ -778,11 +795,12 @@ class Agent:
         packet = _render_packet(fields or {})
         # Persist the packet before asking (Phase 5): this is the source-grounded
         # unit the human is about to judge, attached to the current run.
+        surface = execution_surface or "browser"
         packet_id = self._recorder.record_packet(
             summary=summary, fields=fields or {}, goal=summary,
-            execution_surface="browser", risk_level=_risk_from_route(self.last_route),
+            execution_surface=surface, risk_level=_risk_from_route(self.last_route),
             source_fact_ids=self._grounded_source_ids)
-        self._set_pending_approval_packet(packet_id, fields or {})
+        self._set_pending_approval_packet(packet_id, fields or {}, summary=summary)
         prompt = ("APPROVAL NEEDED — " + summary
                   + (("\n\n" + packet) if packet else "")
                   + "\n\nReply 'approve' to proceed, 'cancel' to stop, or tell me "
@@ -868,7 +886,7 @@ class Agent:
         self._bound_packet = None
         self._about_to_execute_fields = None
 
-    def _set_pending_approval_packet(self, packet_id, fields):
+    def _set_pending_approval_packet(self, packet_id, fields, summary=""):
         """Expose the in-flight packet so UI buttons / typed approve bind to it."""
         fields = dict(fields or {})
         row = self._fetch_packet(packet_id) if packet_id else None
@@ -878,7 +896,7 @@ class Agent:
             "payload_hash": ((row or {}).get("payload_hash")
                              or _hash_fields(fields)),
             "expires_at": (row or {}).get("expires_at") or (time.time() + 900.0),
-            "summary": (row or {}).get("summary") or "",
+            "summary": (row or {}).get("summary") or summary or "",
         }
 
     def _mint_edit_packet(self, fields, user_edit, summary):
@@ -1164,7 +1182,7 @@ class Agent:
             self._log(f"   desktop control unavailable: {exc}")
             return None
 
-        def _approve(summary, details="", action=None):
+        def _approve(summary, details="", action=None, fields=None):
             # Approval is the LIVE human's — never memory/context (guardrail).
             # Allowlisted app launches auto-approve by default (still sandboxed by
             # the app allowlist + path jail). Other mutating verbs stay gated
@@ -1175,8 +1193,13 @@ class Agent:
                     and dcfg.desktop_autoapprove("launch_app")):
                 self._log(f"   [auto-launch] {summary}")
                 return True
+            packet_fields = dict(fields or {})
+            if action and "action" not in packet_fields:
+                packet_fields["action"] = action
+            if details and "details" not in packet_fields:
+                packet_fields["details"] = details
             # RISK_TABLE first — autonomous may skip the ask, never policy.
-            blocked = _policy_block_reason(summary, {"action": action or ""})
+            blocked = _policy_block_reason(summary, packet_fields or {"action": action or ""})
             if blocked:
                 self._log(f"   [policy] {blocked}")
                 return False
@@ -1187,10 +1210,13 @@ class Agent:
                     return True
                 self._log(f"   [autonomous] {action} exceeds desktop autonomy "
                           f"ceiling ({dcfg.AGENT_AUTONOMY_DESKTOP}); asking human")
-            prompt = ("APPROVAL NEEDED — " + summary
-                      + (("\n\n" + details) if details else "")
-                      + "\nReply 'approve' to proceed, or anything else to cancel.")
-            return _is_yes(self._ask_fn(prompt))
+            # Mint the pending packet BEFORE the ask so Hold-to-seal / Yes can
+            # POST a bound decide (plan 0.6). A bare "APPROVAL NEEDED" prompt
+            # with no packet is refused as unbound.
+            decision, _ = self._approval_decision(
+                summary, packet_fields, force_ask=True,
+                execution_surface="desktop")
+            return decision == "approve"
 
         def _record_desktop_packet(fields, summary):
             return self._recorder.record_packet(
@@ -1782,13 +1808,20 @@ class Agent:
         if level != "approval":
             self._log(f"Dry-run: {level}")
 
-        lessons = ""
+        lessons, exec_lessons = "", ""
         try:
             skill = self.mem.recall_skill(intent, site)
             lessons = _lessons_text(skill)
             if lessons:
                 self._log(f"   recalled a learned playbook for {intent}@{site} "
                           f"({skill['successes']}/{skill['attempts']} past successes).")
+            # The pitfalls also go to the EXECUTOR each step (the planner alone
+            # can't dodge a mid-run trap it never sees) — short, notes only.
+            if skill and skill.get("failure_notes"):
+                exec_lessons = ("LESSONS FROM PAST RUNS ON THIS SITE:\n"
+                                + "\n".join(f"- {n}" for n in
+                                            skill["failure_notes"][:5])[:700]
+                                + "\n\n")
         except Exception:
             pass
 
@@ -1820,6 +1853,9 @@ class Agent:
         hist, stall, replans, goal_steps = [], 0, 0, 0
         asks = 0   # ask_human budget: stop instead of nagging (observed live:
                    # the same sign-in request was asked three times)
+        prev_scan = None   # last step's scan, for the explicit CHANGES delta
+        escalations = 0    # Sonnet->Opus handoffs this run (distill telemetry)
+        done_rejected = False   # drift guard fires at most once per run
         status, result = "running", None
         gathered, consec_reads, no_progress, last_sig = [], 0, 0, None
         spiral = _SpiralGuard()   # exact repeats + A/B/A oscillation cycles
@@ -1846,6 +1882,11 @@ class Agent:
                 self.driver.screenshot(str(shot_path))
 
             before = signature(scan)
+
+            # What the last action visibly did, precomputed — far easier for
+            # the model to act on than mentally diffing two element lists.
+            delta = scan_delta(prev_scan, scan) if goal_steps > 1 else ""
+            prev_scan = scan
 
             # anti-spiral: is the page actually changing between steps?
             no_progress = no_progress + 1 if before == last_sig else 0
@@ -1939,8 +1980,10 @@ class Agent:
             content = (
                 mode_ctx + ctx
                 + f"GOAL:\n{goal}\n\nPLAN:\n{ptext}\n\n"
+                f"{exec_lessons}"
                 f"INFORMATION GATHERED:\n{ginfo}\n\n"
                 f"RECENT ACTIONS:\n{_history_text(hist)}\n\n"
+                f"{delta}"
                 f"{tip_block}{pixel_block}"
                 f"CURRENT PAGE:\n{render_observation(scan)}\n"
                 f"{nudge}{dry_note}\n\nChoose the next single action toward the goal."
@@ -1948,6 +1991,8 @@ class Agent:
             act = self.llm.choose_action(
                 content, escalate=escalate, pixel=pixel_mode,
                 image=shot_bytes if send_vision else None)
+            if escalate:
+                escalations += 1
             name, args = act["name"], act.get("input") or {}
             tag = "  (escalated -> Opus)" if escalate else ""
             if send_vision:
@@ -2021,10 +2066,36 @@ class Agent:
 
             if name == "done":
                 result = args.get("result", "")
+                # Drift guard (observed live: asked to play solitaire, declared
+                # done with an X-feed summary). One rejection per run; an
+                # honest failure report passes, and the check fails open.
+                if cfg.DONE_CHECK and not done_rejected:
+                    chk = self.llm.check_done(goal, result)
+                    if not chk.get("satisfied", True):
+                        done_rejected = True
+                        why = str(chk.get("reason") or "")[:200]
+                        entry["result"] = f"done REJECTED (off-goal): {why}"
+                        entry["verified"] = False
+                        entry["vreason"] = why
+                        hist.append(entry)
+                        self.mem.log_step(
+                            self.session_id, self.step, before["url"], name,
+                            redact(args), act, False, why, str(shot_path),
+                            str(ax_path))
+                        self._log(f"   done rejected — off-goal: {why}")
+                        stall = 0
+                        continue
                 entry["result"], entry["verified"] = "DONE", True
                 hist.append(entry)
                 self.mem.log_step(self.session_id, self.step, before["url"], name,
                                   redact(args), act, True, "", str(shot_path), str(ax_path))
+                # Knowing WHEN to stop is a decision worth imitating too.
+                distill_log.log_step(
+                    session_id=self.session_id, step=self.step,
+                    url=before["url"], observation=content, action=name,
+                    args=args, model=act.get("model"), escalated=escalate,
+                    pixel=pixel_mode, vision=send_vision, verified=True,
+                    vnote="done", step_status="", intent=intent, site=site)
                 status = "success"
                 break
 
@@ -2331,6 +2402,14 @@ class Agent:
             hist.append(entry)
             self.mem.log_step(self.session_id, self.step, before["url"], name,
                               redact(args), act, verified, vnote, str(shot_path), str(ax_path))
+            # The (observation -> action, verified) pair — imitation data for
+            # the local rung, mirroring the text side's escalate distill trail.
+            distill_log.log_step(
+                session_id=self.session_id, step=self.step, url=before["url"],
+                observation=content, action=name, args=args,
+                model=act.get("model"), escalated=escalate, pixel=pixel_mode,
+                vision=send_vision, verified=verified, vnote=vnote,
+                step_status=entry["step_status"], intent=intent, site=site)
 
             # An approved irreversible click that visibly changed the page took
             # effect (e.g. the compose window closed after Send) — the task is
@@ -2453,9 +2532,34 @@ class Agent:
         # verify-failure lessons accumulate. Best-effort — never break the task.
         try:
             recipe, notes = _distill(hist, status=status)
+            # On a run that didn't succeed, a cheap model writes the post-mortem
+            # — transferable one-liners the heuristic distiller can't extract
+            # ("this site's board is JS-wired; click card then destination").
+            if status != "success" and cfg.POSTMORTEM and hist:
+                try:
+                    notes += self.llm.postmortem(
+                        goal, status, _history_text(hist, cap=30))
+                except Exception:
+                    pass
             self.mem.learn_skill(intent, site, status, goal_steps, recipe, notes)
         except Exception:
             pass
+        distill_log.log_run(
+            session_id=self.session_id, status=status, steps=goal_steps,
+            replans=replans, intent=intent, site=site, escalations=escalations)
+        # Fold the fresh trail rows into learning_pairs (task_type agent.act)
+        # while the run's outcome row is hot. Success only — the harvester's
+        # whole-run filter would skip everything else anyway. Best-effort and
+        # lazy: browser_agent stays importable without app.*.
+        if status == "success":
+            try:
+                from app.services import agent_harvest
+                h = agent_harvest.harvest()
+                if h.get("harvested"):
+                    self._log(f"   learning: harvested {h['harvested']} "
+                              "agent step pair(s).")
+            except Exception:
+                pass
 
         # Phase 5: fold this run's steps into Mnemos's canonical agent-run log, so
         # the trajectory (not just the browser agent's private episodic.db) is

@@ -24,9 +24,10 @@ _PARAM_FALLBACK = (TypeError, BadRequestError)
 
 from . import config as cfg
 from .prompts import (ROUTER_SYSTEM, PLANNER_SYSTEM, EXECUTOR_SYSTEM,
-                      DESKTOP_EXECUTOR_SYSTEM, VERIFIER_SYSTEM)
+                      DESKTOP_EXECUTOR_SYSTEM, DONE_CHECK_SYSTEM,
+                      POSTMORTEM_SYSTEM, VERIFIER_SYSTEM)
 from .tools import (ACTION_TOOLS, DESKTOP_TOOLS, PIXEL_TOOLS, ROUTE_SCHEMA, PLAN_SCHEMA,
-                    PHONE_GOAL_SCHEMA, VERIFY_SCHEMA)
+                    PHONE_GOAL_SCHEMA, POSTMORTEM_SCHEMA, VERIFY_SCHEMA)
 
 # Neutral-by-default few-shot example names (data-driven when opted in). Guarded
 # so browser_agent stays importable without app.* — see prompts.py / vocabulary.py.
@@ -540,3 +541,40 @@ class LLM:
         if "satisfied" not in out:
             out = {"satisfied": True, "reason": "verifier fallback (lenient)"}
         return out
+
+    # --- done check (Haiku): did the result address the GOAL? ---------------
+    def check_done(self, goal, result):
+        """Cheap drift guard on `done`. Fails OPEN (satisfied) — a broken
+        check must never trap a finished run in the loop."""
+        payload = (f"GOAL:\n{goal}\n\nAGENT'S FINAL RESULT:\n{str(result)[:3000]}")
+        try:
+            out = self._json_call(cfg.VERIFIER_MODEL, DONE_CHECK_SYSTEM,
+                                  payload, VERIFY_SCHEMA)
+            if "satisfied" not in out:
+                return {"satisfied": True, "reason": "check fallback (lenient)"}
+            return out
+        except Exception:
+            return {"satisfied": True, "reason": "check unavailable"}
+
+    # --- post-mortem (Haiku): lessons from a run that didn't succeed --------
+    def postmortem(self, goal, status, history_text, max_lessons=3):
+        """1-3 one-line transferable lessons distilled from a failed/stalled
+        trajectory, for procedural memory. Returns [] on any trouble — a lost
+        post-mortem must never matter."""
+        payload = (
+            f"GOAL: {goal}\n"
+            f"RUN ENDED: {status}\n"
+            f"TRAJECTORY:\n{history_text[:6000]}\n\n"
+            "Write the lessons a browser agent should remember before its NEXT "
+            "run on this site. Each lesson: one imperative sentence about how "
+            "this site/page behaves or what approach works — transferable, so "
+            "never include this run's specific values (names, dates, message "
+            "text). No restating the goal, no generic advice."
+        )
+        try:
+            out = self._json_call(
+                cfg.VERIFIER_MODEL, POSTMORTEM_SYSTEM, payload, POSTMORTEM_SCHEMA)
+            lessons = out.get("lessons") or []
+            return [str(l).strip()[:200] for l in lessons if str(l).strip()][:max_lessons]
+        except Exception:
+            return []

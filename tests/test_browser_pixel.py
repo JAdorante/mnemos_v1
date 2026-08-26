@@ -442,5 +442,214 @@ class EmbeddedCanvasTests(unittest.TestCase):
         self.assertTrue(log and log[0].startswith("down:300,"), log)
 
 
+class DomSurfaceObservationTests(unittest.TestCase):
+    def test_dom_surface_reads_as_js_driven_not_canvas(self):
+        # A synthetic 'dom' surface coexists with swept clickables, so it must
+        # not claim that nothing inside it can appear in the element list.
+        obs = render_observation(_scan(
+            [_canvas(kind="dom", label="page content")],
+            [{"id": 0, "role": "clickable", "name": "7♠"}]))
+        self.assertIn("JS-driven surface", obs)
+        self.assertNotIn("nothing drawn inside", obs)
+        self.assertIn("click_at", obs)
+        self.assertIn("[0] clickable: 7♠", obs)
+
+    def test_dom_surface_is_a_pixel_surface(self):
+        surf = pixel_surface(_scan([_canvas(kind="dom")]))
+        assert surf is not None
+        self.assertEqual(surf["kind"], "dom")
+
+
+# --- end-to-end against a DOM-drawn board -----------------------------------
+# The shape that used to end in "the cards aren't exposed as clickable
+# elements": every card is a plain positioned <div>, every move is wired with
+# addEventListener, and the only semantic elements are two <button>s. No
+# selector can see the cards, and no <canvas> exists for the opaque-surface
+# detector to find.
+_DOM_BOARD_PAGE = """
+<body style="margin:0">
+<div><button id="new">New Game</button> <button id="auto">Auto Complete</button></div>
+<div id="board" style="position:relative;width:1240px;height:600px">
+</div>
+<script>
+window.log = [];
+const board = document.getElementById('board');
+for (let p = 0; p < 7; p++) {
+  for (let c = 0; c < 5; c++) {
+    const faceUp = (c === 4);
+    const d = document.createElement('div');
+    d.className = 'card' + (faceUp ? '' : ' down');
+    d.style.cssText = 'position:absolute;width:80px;height:110px;'
+      + 'background:#fff;border:1px solid #999;'
+      + 'left:' + (20 + p * 100) + 'px;top:' + (20 + c * 24) + 'px;'
+      + (faceUp ? 'cursor:pointer;' : '');
+    if (faceUp) {
+      d.textContent = 'C' + p;
+      d.addEventListener('click', () => {
+        d.classList.toggle('selected');   // click-to-select, like real boards
+        window.log.push('card:' + p);
+      });
+    }
+    board.appendChild(d);
+  }
+}
+const slot = document.createElement('div');
+slot.id = 'slot';
+slot.style.cssText = 'position:absolute;left:1100px;top:20px;'
+  + 'width:80px;height:110px;border:1px dashed #999';
+slot.addEventListener('click', () => window.log.push('slot'));
+board.appendChild(slot);
+</script></body>
+"""
+
+
+class DomBoardPageTests(unittest.TestCase):
+    """Live headless Chromium: pointer-cursor sweep exposes the cards as
+    clickable element_ids, and the synthetic 'dom' surface lets click_at reach
+    listener-only targets (the empty slot) that show no cursor cue at all."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._patch = mock.patch.object(bcfg, "GHOST_MODE", "off")
+        cls._patch.start()
+        try:
+            cls.d = BrowserDriver(headless=True)
+            cls.d.start()
+        except Exception as e:   # no browser binary in this environment
+            cls._patch.stop()
+            raise unittest.SkipTest(f"chromium unavailable: {e}")
+        cls.d.page.set_content(_DOM_BOARD_PAGE)
+
+    @classmethod
+    def tearDownClass(cls):
+        try:
+            cls.d.close()
+        finally:
+            cls._patch.stop()
+
+    def test_cards_are_swept_into_the_element_list(self):
+        s = self.d.scan()
+        clickables = [e for e in s["elements"] if e["role"] == "clickable"]
+        names = {e["name"] for e in clickables}
+        self.assertTrue({f"C{p}" for p in range(7)} <= names)
+        # The slot has a listener but no cursor cue: only the CDP probe can
+        # see it. Face-down cards (no listener, no pointer) stay out.
+        self.assertIn("div#slot", names)
+        slot = next(e for e in clickables if e["name"] == "div#slot")
+        self.assertEqual(slot.get("via"), "listener")
+        self.assertEqual(s["count"], 2 + 7 + 1)
+
+    def test_listener_only_slot_clicks_by_element_id(self):
+        s = self.d.scan()
+        slot = next(e for e in s["elements"] if e.get("via") == "listener")
+        self.d.page.evaluate("() => { window.log = []; }")
+        res = self.d.execute("click", {"element_id": slot["id"]})
+        self.assertTrue(res["ok"], res)
+        self.assertIn("slot", self.d.page.evaluate("() => window.log"))
+
+    def test_dom_surface_is_reported_and_described(self):
+        s = self.d.scan()
+        kinds = [x["kind"] for x in (s.get("surfaces") or [])]
+        self.assertIn("dom", kinds)
+        self.assertIsNotNone(self.d.pixel_surface)
+        self.assertTrue(s.get("pixel_hash"))
+        self.assertIn("JS-driven surface", render_observation(s))
+
+    def test_card_clicks_work_by_element_id(self):
+        s = self.d.scan()
+        card0 = next(e for e in s["elements"] if e["name"] == "C0")
+        self.d.page.evaluate("() => { window.log = []; }")
+        res = self.d.execute("click", {"element_id": card0["id"]})
+        self.assertTrue(res["ok"], res)
+        self.assertIn("card:0", self.d.page.evaluate("() => window.log"))
+
+    def test_selection_is_visible_and_changes_the_signature(self):
+        # The spiral this kills: click-to-select toggles only a CSS class, so
+        # verify said "no-op click" and the model re-clicked the same card.
+        s1 = self.d.scan()
+        card = next(e for e in s1["elements"] if e["name"] == "C3")
+        self.assertFalse(card.get("selected"))
+        self.d.execute("click", {"element_id": card["id"]})
+        s2 = self.d.scan()
+        card2 = next(e for e in s2["elements"] if e["name"] == "C3")
+        self.assertTrue(card2.get("selected"))
+        self.assertNotEqual(signature(s1)["content_hash"],
+                            signature(s2)["content_hash"])
+        # deselect so later tests see a clean board
+        self.d.execute("click", {"element_id": card2["id"]})
+
+    def test_click_at_reaches_the_listener_only_slot(self):
+        self.d.scan()
+        self.d.screenshot_bytes()
+        box = self.d.page.evaluate(
+            "() => { const r = document.getElementById('slot')"
+            ".getBoundingClientRect(); return [r.left + 40, r.top + 55]; }")
+        self.d.page.evaluate("() => { window.log = []; }")
+        res = self.d.execute("click_at", {"x": box[0], "y": box[1]})
+        self.assertTrue(res["ok"], res)
+        self.assertIn("slot", self.d.page.evaluate("() => window.log"))
+
+
+_XORIGIN_HOST = """<body style="margin:0"><h1>solitaire - Google Search</h1>
+<p>About 200,000,000 results</p>
+<iframe src="https://games.other.test/solitaire" title="Solitaire"
+        style="width:1200px;height:700px;border:0"></iframe></body>"""
+
+_XORIGIN_GAME = """<body style="margin:0">
+<button onclick="window.log.push('hard')"
+        style="position:absolute;left:280px;top:290px;width:120px;height:40px">
+  Hard</button>
+<script>window.log = [];</script></body>"""
+
+
+class CrossOriginFrameTests(unittest.TestCase):
+    """The Google-solitaire shape that stalled a live run: the game loads in a
+    CROSS-ORIGIN iframe, so its DOM is unreadable — but the iframe's rectangle
+    is a legitimate pixel surface, and page-level mouse coordinates reach it."""
+
+    def setUp(self):
+        self._patch = mock.patch.object(bcfg, "GHOST_MODE", "off")
+        self._patch.start()
+        try:
+            self.d = BrowserDriver(headless=True)
+            self.d.start()
+        except Exception as e:
+            self._patch.stop()
+            raise unittest.SkipTest(f"chromium unavailable: {e}")
+        self.d.page.route("https://games.other.test/**", lambda r: r.fulfill(
+            status=200, content_type="text/html", body=_XORIGIN_GAME))
+        self.d.page.route("https://search.host.test/**", lambda r: r.fulfill(
+            status=200, content_type="text/html", body=_XORIGIN_HOST))
+        self.d.page.goto("https://search.host.test/search?q=solitaire")
+
+    def tearDown(self):
+        try:
+            self.d.close()
+        finally:
+            self._patch.stop()
+
+    def test_unreadable_frame_is_an_actionable_surface(self):
+        s = self.d.scan()
+        surfaces = s.get("surfaces") or []
+        kinds = [x["kind"] for x in surfaces]
+        self.assertIn("iframe", kinds)
+        surf = next(x for x in surfaces if x["kind"] == "iframe")
+        self.assertEqual(surf["label"], "Solitaire")
+        self.assertIsNotNone(self.d.pixel_surface)
+        # click_at lands inside the frame's own content (Hard is at ~(340,
+        # 310) in frame space; the frame starts below the host's header).
+        self.d.screenshot_bytes()
+        box = self.d.page.frames[1].evaluate(
+            "() => { const r = document.querySelector('button')"
+            ".getBoundingClientRect(); return [r.left + 20, r.top + 10]; }")
+        fr_off = self.d.page.evaluate(
+            "() => { const r = document.querySelector('iframe')"
+            ".getBoundingClientRect(); return [r.left, r.top]; }")
+        res = self.d.execute("click_at", {"x": fr_off[0] + box[0],
+                                          "y": fr_off[1] + box[1]})
+        self.assertTrue(res["ok"], res)
+        self.assertIn("hard", self.d.page.frames[1].evaluate("() => window.log"))
+
+
 if __name__ == "__main__":
     unittest.main()

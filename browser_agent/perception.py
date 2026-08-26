@@ -112,6 +112,49 @@ SCAN_JS = """
     out.push(item);
     i++;
   }
+  // JS-wired pages (games, editors, kanbans) often draw plain divs and attach
+  // clicks with addEventListener — invisible to any selector. When the
+  // semantic scan is this sparse the page may still be fully interactive, so
+  // sweep for visible pointer-cursor elements (the CSS tell of a click
+  // target) and list them as 'clickable'. Outermost only: cursor inherits, so
+  // a pointer child of a pointer parent is the same target.
+  const semanticCount = out.length;
+  const SPARSE_AT = 8, SWEEP_CAP = 3000;
+  if (semanticCount < SPARSE_AT && document.body) {
+    const ptr = (el) => {
+      try {
+        return (el.ownerDocument.defaultView || window)
+          .getComputedStyle(el).cursor === 'pointer';
+      } catch (e) { return false; }
+    };
+    const nodes = Array.from(document.body.querySelectorAll('*')).slice(0, SWEEP_CAP);
+    for (const el of nodes) {
+      if (out.length >= MAX) break;
+      if (el.closest('[data-agent-id]')) continue;       // self or listed ancestor
+      if (!ptr(el)) continue;
+      if (el.parentElement && ptr(el.parentElement)) continue;
+      if (el.querySelector('[data-agent-id]')) continue; // wraps a listed element
+      if (!isVisible(el)) continue;
+      el.setAttribute('data-agent-id', String(i));
+      let nm = accName(el);
+      if (!nm) {
+        const cls = (typeof el.className === 'string' && el.className.trim())
+          ? '.' + el.className.trim().split(/\\s+/).slice(0, 2).join('.') : '';
+        nm = el.tagName.toLowerCase() + cls;
+      }
+      const item = { id: i, role: 'clickable', name: nm,
+                     tag: el.tagName.toLowerCase(), editable: false };
+      // Selection state from the class list: JS-wired UIs mark the picked
+      // card/row with a 'selected'-style class, not aria-selected. Without
+      // this a select-then-place flow reads as a no-op click and spirals.
+      if (typeof el.className === 'string'
+          && /(?:^|\\s)(?:selected|active|current|chosen)(?:\\s|$)/.test(el.className)) {
+        item.selected = true;
+      }
+      out.push(item);
+      i++;
+    }
+  }
   // Visible page text (chat bubbles, articles) — not in the interactive list.
   // Prefer log/list/main regions; fall back to body. Cap so observations stay cheap.
   const PAGE_CAP = 2500;
@@ -192,17 +235,63 @@ SCAN_JS = """
   // Same-origin frames: querySelectorAll never crosses a frame boundary, so an
   // embedded game (the usual way these are served) would otherwise be invisible
   // to us. Mouse coordinates are page-wide, so a surface found inside a frame
-  // is actionable once its rect is offset by the frame's position. A frame we
-  // cannot read stays unknown — and therefore never becomes a pixel target,
-  // which is the safe default for embedded forms/checkouts.
+  // is actionable once its rect is offset by the frame's position.
+  // A frame we CANNOT read (cross-origin: Google's search-page games, arcade
+  // embeds) is itself an opaque surface — nothing inside it can ever get an
+  // element_id, which is exactly the pixel fallback's contract. Small
+  // cross-origin frames (ads, payment fields) are reported too but never
+  // become the pixel target: pixel_surface() requires viewport dominance
+  // (>=25%), which an embedded checkout field can't reach.
+  const frameSurface = (f, fr) => {
+    const x = Math.max(0, Math.round(fr.left));
+    const y = Math.max(0, Math.round(fr.top));
+    const w = Math.min(vw, Math.round(fr.right)) - x;
+    const h = Math.min(vh, Math.round(fr.bottom)) - y;
+    if (w < 120 || h < 120) return;
+    let host = '';
+    try { host = new URL(f.src || '', location.href).host; } catch (e) {}
+    surfaces.push({ kind: 'iframe', x: x, y: y, w: w, h: h,
+                    label: (f.getAttribute('aria-label') || f.title
+                            || host || '').slice(0, 60),
+                    inner: 0 });
+  };
   for (const f of Array.from(document.querySelectorAll('iframe, frame'))) {
     try {
       const fr = f.getBoundingClientRect();
       if (fr.width < 120 || fr.height < 120) continue;
-      const doc = f.contentDocument;
-      if (!doc) continue;
+      const cs = getComputedStyle(f);
+      if (cs.visibility === 'hidden' || cs.display === 'none') continue;
+      let doc = null;
+      try { doc = f.contentDocument; } catch (e) { /* cross-origin */ }
+      if (!doc) { frameSurface(f, fr); continue; }
       collect(doc, fr.left, fr.top);
-    } catch (e) { /* cross-origin — invisible by design */ }
+    } catch (e) {}
+  }
+  // A DOM-drawn board is as opaque to element_ids as a canvas when its clicks
+  // live in JS listeners: the pointer sweep above finds the pieces, but drop
+  // zones and click-wired containers expose no cursor cue at all. If the
+  // SEMANTIC scan found almost nothing yet the body renders plenty of nodes,
+  // report the visible content's bounding box so the coordinate fallback
+  // works alongside the swept clickables. inner is 0 by definition — this
+  // branch only exists because the DOM does not describe the page.
+  if (semanticCount < SPARSE_AT && document.body) {
+    let n = 0, x0 = vw, y0 = vh, x1 = 0, y1 = 0;
+    for (const el of Array.from(document.body.querySelectorAll('*')).slice(0, SWEEP_CAP)) {
+      const r = el.getBoundingClientRect();
+      if (r.width < 4 || r.height < 4) continue;
+      if (!isVisible(el)) continue;
+      n++;
+      x0 = Math.min(x0, r.left); y0 = Math.min(y0, r.top);
+      x1 = Math.max(x1, r.right); y1 = Math.max(y1, r.bottom);
+    }
+    if (n >= 30) {
+      const x = Math.max(0, Math.round(x0)), y = Math.max(0, Math.round(y0));
+      const w = Math.min(vw, Math.round(x1)) - x, h = Math.min(vh, Math.round(y1)) - y;
+      if (w >= 120 && h >= 120) {
+        surfaces.push({ kind: 'dom', x: x, y: y, w: w, h: h,
+                        label: 'page content', inner: 0 });
+      }
+    }
   }
   surfaces.sort((a, b) => (b.w * b.h) - (a.w * a.h));
   const docH = document.documentElement.scrollHeight || document.body.scrollHeight || 0;
@@ -212,6 +301,7 @@ SCAN_JS = """
     viewport: { w: vw, h: vh },
     dpr: window.devicePixelRatio || 1,
     count: out.length, truncated: out.length >= MAX, elements: out,
+    semantic_count: semanticCount,
     modal: modalRoot ? (accName(modalRoot) || 'dialog') : null,
     scrollY: Math.round(window.scrollY),
     scrollMax: Math.round(Math.max(0, docH - window.innerHeight)),
@@ -234,6 +324,71 @@ READ_JS = """
   return (main ? (main.innerText || '') : '').trim();
 }
 """
+
+
+def scan_delta(prev: dict | None, cur: dict | None, *, cap: int = 8) -> str:
+    """What changed between two scans, as a short prompt block — or "".
+
+    The executor otherwise has to infer "what did my last action do" by
+    comparing two long element lists in its head; computing the diff in Python
+    is cheap and much easier to act on. Elements are compared by (role, name)
+    multisets so per-page ids don't produce false churn.
+    """
+    if not prev or not cur:
+        return ""
+    lines = []
+    p_url, c_url = prev.get("url") or "", cur.get("url") or ""
+    if p_url != c_url:
+        lines.append(f"URL changed: {p_url} -> {c_url}")
+    if (prev.get("title") or "") != (cur.get("title") or ""):
+        lines.append(f'Title changed to "{cur.get("title")}"')
+    if (prev.get("modal") or None) != (cur.get("modal") or None):
+        lines.append(f'A dialog opened: "{cur["modal"]}"' if cur.get("modal")
+                     else "The dialog closed")
+
+    def _keys(scan):
+        from collections import Counter
+        return Counter((e.get("role", ""), e.get("name", ""))
+                       for e in scan.get("elements", []))
+
+    pk, ck = _keys(prev), _keys(cur)
+    appeared = list((ck - pk).elements())
+    gone = list((pk - ck).elements())
+    if appeared:
+        shown = ", ".join(f"{r}: {n}" for r, n in appeared[:cap])
+        more = f" (+{len(appeared) - cap} more)" if len(appeared) > cap else ""
+        lines.append(f"NEW elements: {shown}{more}")
+    if gone:
+        shown = ", ".join(f"{r}: {n}" for r, n in gone[:cap])
+        more = f" (+{len(gone) - cap} more)" if len(gone) > cap else ""
+        lines.append(f"GONE elements: {shown}{more}")
+    # Selection moves (a picked card/row/tab): the classic select-then-place
+    # flow changes nothing except which element is marked selected.
+    def _sel(scan):
+        return {(e.get("role", ""), e.get("name", ""))
+                for e in scan.get("elements", []) if e.get("selected")}
+
+    ps, cs = _sel(prev), _sel(cur)
+    if ps != cs:
+        now = ", ".join(n for _r, n in sorted(cs - ps)) or "(none)"
+        lines.append(f"Selection changed: now selected — {now}")
+    # Value edits on fields both scans know (compose boxes filling/clearing).
+    p_vals = {(e.get("role"), e.get("name")): e.get("value", "")
+              for e in prev.get("elements", []) if e.get("editable")}
+    for e in cur.get("elements", []):
+        if not e.get("editable"):
+            continue
+        k = (e.get("role"), e.get("name"))
+        if k in p_vals and p_vals[k] != e.get("value", ""):
+            v = (e.get("value") or "")[:60]
+            lines.append(f'"{e.get("name")}" value is now "{v}"' if v
+                         else f'"{e.get("name")}" was cleared')
+    if not lines and prev.get("pixel_hash") and cur.get("pixel_hash") \
+            and prev["pixel_hash"] != cur["pixel_hash"]:
+        lines.append("No element changes, but the rendered graphics changed.")
+    if not lines:
+        return ""
+    return "CHANGES SINCE YOUR LAST ACTION:\n" + "\n".join(f"- {ln}" for ln in lines[:10]) + "\n\n"
 
 
 def signature(scan: dict) -> dict:
@@ -312,7 +467,16 @@ def render_observation(scan: dict) -> str:
             "(covered) cannot be clicked. Use the uncovered elements — likely "
             "the popup's own buttons — to dismiss it first.")
     surf = pixel_surface(scan)
-    if surf:
+    if surf and surf["kind"] == "dom":
+        pct = int(round(100 * (surf["w"] * surf["h"]) / max(1, _view_area(scan))))
+        lines.append(
+            f"JS-driven surface: this page wires its clicks in scripts, so the "
+            f"list below (~{pct}% of the view) is likely incomplete — targets "
+            "with no cursor cue (drop zones, empty slots) have no element_id "
+            "at all. When the pixel actions (click_at / drag / press_key) are "
+            "offered this turn, use them for anything not listed, measured on "
+            "the attached screenshot; listed elements still work by element_id.")
+    elif surf:
         pct = int(round(100 * (surf["w"] * surf["h"]) / max(1, _view_area(scan))))
         label = f' "{surf["label"]}"' if surf.get("label") else ""
         lines.append(

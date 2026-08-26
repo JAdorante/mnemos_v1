@@ -83,6 +83,12 @@ def pair_to_distill_row(pair: dict, *, distill_index: dict | None = None,
     alive; every other surface gets the fixed per-type template above. The
     human verdict on the PAIR wins over whatever the old row carried."""
     v = str(pair.get("verdict") or "")
+    # agent.* pairs are a separate rung (browser-action vocabulary, not text):
+    # excluded here explicitly — not just via the human_confirmed gate — so a
+    # future confirm-UI on agent runs can't silently pull trajectories into
+    # the TEXT champion's adapter. Their curation is scripts/agent_curate-to-be.
+    if str(pair.get("task_type") or "").startswith("agent."):
+        return None
     if v not in ("accepted", "edited", "shadow_disagree"):
         return None
     if v == "shadow_disagree" and not (pair.get("human_confirmed")
