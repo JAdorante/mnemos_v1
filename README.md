@@ -32,8 +32,12 @@ before anything irreversible.
 > channels, local-first model routing, the meeting layer, and the
 > browser/desktop/phone agents all work today, behind a hardened trust layer
 > (hash-bound approvals, source policies, evidence-verified outcomes).
-> ~1,600 tests pass. Some pieces remain feature-flagged — see
-> [Known gaps & roadmap](#known-gaps--roadmap). Not production software.
+> ~2,400 tests pass. Recent work: a swappable ASR engine seam with per-engine
+> ingest calibration, pixel-level browser control for canvas pages, a Linux
+> body for the desktop agent, stage-level latency measurement, and a trained
+> classifier rung below the local LLM (shadow-only). Some pieces remain
+> feature-flagged — see [Known gaps & roadmap](#known-gaps--roadmap). Not
+> production software.
 
 ---
 
@@ -280,15 +284,35 @@ downstream rewrite.
 ### Audio (M1)
 
 **Files:** [app/services/audio.py](app/services/audio.py) ·
+[app/services/asr.py](app/services/asr.py) ·
+[app/services/asr_calibration.py](app/services/asr_calibration.py) ·
 [app/services/speakers.py](app/services/speakers.py) ·
 [app/services/ingest_filter.py](app/services/ingest_filter.py)
 
-Microphone → **Silero VAD** (ONNX) → **faster-whisper** (CTranslate2) → `Event`.
+Microphone → **Silero VAD** (ONNX) → **ASR engine** (faster-whisper by default,
+CTranslate2) → `Event`.
 
 - Capture thread stays cheap (VAD + buffer); transcription runs on a worker so
   frames aren’t dropped.
+- **Engine seam.** `asr.py` is a protocol + registry: `QUILL_ASR_ENGINE` picks
+  the engine and `audio.py` knows nothing about its internals, so adding one
+  is a module plus a `register()` line and rolling back is a restart. Mic and
+  loopback share **one model per process** (two would double RAM and make the
+  pipelines fight for cores).
+- **Confidence is engine-specific.** `ASRResult` names its scale via
+  `confidence_kind`; ingest thresholds were calibrated against Whisper's
+  `avg_logprob` and must not be reused blindly. Per-engine thresholds live in
+  `data/asr_calibration.json`, fitted offline by
+  `scripts/calibrate_asr_confidence.py` and hot-reloaded when the file changes.
+  No entry = shipped defaults; a calibration file can move thresholds but can
+  never disable the filter.
+- **WER harness.** `scripts/eval_asr.py` + fixtures under
+  `tests/fixtures/asr_eval/` (`make eval-asr` / `eval-asr-smoke` /
+  `eval-asr-baseline`) so an engine swap is measured, not asserted.
 - Ingest filter drops Whisper silence-hallucinations via `avg_logprob` /
   `no_speech_prob` (`QUILL_INGEST_FILTER=0` to disable).
+- Optional word-level timings in `meta` (`QUILL_ASR_WORD_TIMESTAMPS=1`) — costly
+  on Whisper, free on engines that emit them natively.
 - **Speaker ID** via SpeechBrain ECAPA — anonymous clusters by default; enroll
   with `python scripts/enroll_speaker.py Marc`.
 - Provenance chain per utterance: clip → transcript → corrections
@@ -347,6 +371,10 @@ See [Memory](#memory) above for the product view. Implementation detail:
 Utterances → turns (gap `QUILL_CONSOLIDATE_MAX_GAP_S`) → sessions. Heavy work
 (`consolidate` → `extract` → `graph`, plus `reflect_daily`) runs on one
 `jobs` table and one background worker — crash-safe, coalesced, no Redis.
+Retries are bounded with exponential backoff and a **dead-letter park** after
+`QUILL_WORKER_MAX_ATTEMPTS`, visible in `GET /console/jobs`; SQLite runs WAL
+with a `busy_timeout` so transient lock contention retries instead of failing
+a job.
 
 ### Facts — tasks, commitments, claims
 
@@ -418,6 +446,39 @@ levels (`plan / navigate / draft / approval / full`), failure taxonomy,
 procedural memory per `intent@site`, and semantic search over Mnemos’s own
 timeline for grounding.
 
+**Perception beyond the DOM.** A pointer-cursor sweep plus CDP listener ground
+truth (`AGENT_CDP_LISTENERS=1`) expose click-wired `<div>`s as real
+`element_id`s, and each step's prompt carries a computed changes-delta.
+
+**Pixel surfaces** (`AGENT_BROWSER_PIXEL=1`, on by default). The action
+vocabulary is `element_id`-based, so anything painted into a `<canvas>` was
+readable but not clickable. The scan now reports opaque surfaces (canvas,
+video, embed, object, `role=application`) clipped to the viewport, including
+inside same-origin frames, and promotes the largest one covering ≥25% of the
+view with no interactive descendants. On those turns only, three extra actions
+appear alongside the screenshot they are measured on: `click_at`, `drag`
+(stepped moves), and `press_key`. Guardrails are the point:
+
+- a **cross-origin frame stays unknown** and can never become a pixel target —
+  an embedded checkout must not be blind-clickable;
+- coordinates outside the surface are **refused with the bounds quoted back**,
+  so a misread screenshot cannot reach a Send/Buy button;
+- grounding is computed, not assumed — the driver reads the PNG's own IHDR,
+  fits the shot under the API's downsize cap, and maps every coordinate through
+  the recorded scale;
+- verification compares **rendered frames** (a canvas move changes no DOM), and
+  the repeat-action guard keys on that frame hash too.
+
+**Learning from runs.** `ask_human` answers and post-mortems
+(`AGENT_POSTMORTEM`) persist in procedural memory and reach the executor; a
+once-per-run done check (`AGENT_DONE_CHECK`) rejects off-goal completions.
+Every (observation → action, verified) pair lands in
+`sessions/agent_distill.jsonl` ([browser_agent/distill.py](browser_agent/distill.py))
+and, for successful runs only, harvests into `learning_pairs` as task type
+`agent.act` ([agent_harvest.py](app/services/agent_harvest.py)) — explicitly
+excluded from text-LoRA curation so agent trajectories cannot pollute the text
+champion.
+
 ### Desktop agent
 
 **Directory:** [desktop_agent/](desktop_agent/)
@@ -425,6 +486,18 @@ timeline for grounding.
 OS-level control where the allowlist *is* the sandbox: path jail, app
 allowlist, shell-verb allowlist, hard-block list, `shell=False`, tiered
 approval, budgets. Approval always from the live human, never from memory.
+
+- **Cross-platform body.** `a11y.py` is the platform-neutral seam — UI
+  Automation on Windows, AT-SPI via `a11y_linux.py` elsewhere — so the driver's
+  scan / invoke / set_text vocabulary is identical on either OS. `ghost.py`
+  does the same for off-screen window parking (`ghost_x11.py` + `x11_util.py`);
+  X11 only, and it *says so* on Wayland rather than half-working.
+  `python-xlib` is a Linux-only requirement.
+- **App promotion.** A runtime-discovered app stays launch-only until you
+  approve it once with `remember_app`, at which point `app_promotion.py`
+  promotes it against a capability template (`app_templates.py`). Desktop
+  Access rows show `remembered` / `template` / a plain-language capability
+  summary instead of a bare "discovered at runtime".
 
 ### Phone Link agent
 
@@ -440,17 +513,89 @@ Outbound SMS via Windows Phone Link UI automation after approval
 **Files:** [vlm.py](app/services/vlm.py) ·
 [ollama_text.py](app/services/ollama_text.py) ·
 [model_router.py](app/services/model_router.py) ·
-[escalate_log.py](app/services/escalate_log.py)
+[escalate_log.py](app/services/escalate_log.py) ·
+[fast_heads.py](app/services/fast_heads.py) ·
+[latency.py](app/services/latency.py)
+
+The ladder now has four rungs — a trained classifier head, the hand-written
+`utterance_router`, the local LLM, and Claude:
+
+```
+  head (<1 ms, shadow-only today) ─▶ local Ollama ─▶ Claude
+        "does this need a model?"      "can it answer?"    stakes / unsure
+```
 
 - **Vision** (`QUILL_VISION_LOCAL=1`): Ollama first; Claude for high-stakes /
   low confidence / weak capture / unreachable local.
 - **Text** (`QUILL_TEXT_LOCAL=1`, default off): local Ollama for chat /
   extract / reflect; escalate on error, parse failure, low confidence, or
-  high-stakes tasks (default: `plan`).
+  high-stakes tasks (default: `plan`). A prompt over
+  `QUILL_TEXT_LOCAL_MAX_PROMPT_CHARS` (12k) skips the local tier outright — a
+  7B model handed a whole attached document answers fluently from the part it
+  could hold and self-reports high confidence, so the confidence gate never
+  fires and length is the only signal available *before* the call.
 - Fail open to Claude if local is down; never double-bill after a usable local
   answer.
+- **Speculative work is local-only, enforced twice.** A `speculative=True` call
+  never escalates and returns `""` rather than spending; `_complete_claude`
+  itself raises `SpeculativeCloudCall` inside a speculative scope, so a future
+  code path that forgets the policy fails loudly instead of quietly spending.
+  The invariant ("no speculative row names a cloud provider") is asserted over
+  the call trail.
 - Distill trail: `data/escalate_distill.jsonl` · summary `GET /console/escalate`.
 - Telemetry: `data/model_calls.jsonl` · `GET /console/models`.
+
+### Classifier heads — the bottom rung (shadow-only)
+
+`fast_heads.py` answers one binary question per task — *does this input need a
+model at all?* — from a MiniLM embedding plus a few cheap scalars. Same idea as
+the hand-written `utterance_router`, learned rather than authored, under the
+escalation router's three-mode contract: `off` (default) · `shadow` (predicts
+and logs beside what the LLM actually did; the LLM always still runs) ·
+`active` (only a confident "nothing here" skips).
+
+- **Deliberately asymmetric.** A head that wrongly runs the LLM costs a few
+  hundred milliseconds of local compute; one that wrongly skips silently drops
+  a real commitment out of memory and nothing notices. So the uncertain middle
+  band always runs the model, and the activation gate is measured over the
+  would-have-skipped population alone.
+- Heads only ever *remove* local calls and never choose a rung, so they cannot
+  raise cloud spend.
+- Wired from the measured hot spots: **vision** (`frame_keep`) and **extract**.
+  `query_route` / `mention_detect` are declared and unwired.
+- A head's break-even is a skip *rate*, not a certainty — the shared MiniLM
+  encode it depends on costs ~26 ms whether or not the head skips, which the
+  module documents as arithmetic so nobody adds a head over a cheap call.
+- `head_observations` stores numbers and enum-ish strings only, never input
+  text. `GET /console/heads` reports per-head volume, skip rate, disagreement,
+  and why each head is not yet activatable. Nothing is activated today: the
+  gate needs 200 labels and a shadow week.
+
+### Latency — measure before optimizing
+
+`latency.py` records *where* the time went (queue wait, cold model load,
+prefill, generation, retrieval, post-processing), not just how long a call
+took. Two rules keep it honest: it never breaks the path it measures (every
+public function swallows its own exceptions), and it never adds a probe to the
+hot path — Ollama already returns `load_duration` / `prompt_eval_duration` /
+`eval_duration` on every reply, and the audio path is *bridged* from the
+`asr_latency_ms` / `queue_wait_ms` it already writes rather than
+re-instrumented.
+
+- `QUILL_LATENCY_SPANS=1` (off by default) → `data/latency_spans.jsonl` ·
+  `GET /console/latency` aggregates p50/p90/p99 per stage per task, stages
+  ranked by share of total time.
+- **Residency:** `keep_alive` is sent on every completion
+  (`QUILL_OLLAMA_KEEP_ALIVE`, default `30m`) so the model stops being evicted
+  after ~5 min idle; an optional startup warm-up (`QUILL_OLLAMA_WARMUP=1`) means
+  the first interaction never pays the ~3.4 s cold load either.
+- **Prefix ordering:** the exemplar block is handed to `ollama_text` as its own
+  argument instead of being concatenated, so the system prompt emits
+  static-first and the prefix cache works (measured: prefill 77 ms → 28 ms on a
+  repeated task). Same bytes reach the model.
+- Benches: `make bench-latency` · `make latency-baseline` · `make listen-idle` ·
+  [scripts/bench_bakeoff.py](scripts/bench_bakeoff.py) ·
+  [scripts/bench_listen_idle.py](scripts/bench_listen_idle.py).
 
 ---
 
@@ -460,6 +605,8 @@ Outbound SMS via Windows Phone Link UI automation after approval
 [exemplar_store.py](app/services/exemplar_store.py) ·
 [shadow_eval.py](app/services/shadow_eval.py) ·
 [escalation_router.py](app/services/escalation_router.py) ·
+[fast_heads.py](app/services/fast_heads.py) ·
+[agent_harvest.py](app/services/agent_harvest.py) ·
 [few_shot.py](app/services/few_shot.py) ·
 [scripts/eval_exemplars.py](scripts/eval_exemplars.py) ·
 [scripts/train_lora.py](scripts/train_lora.py) ·
@@ -492,6 +639,15 @@ any human verdict ──► learning pair (redacted, provenance-linked)
                                only if it beats the exemplar-augmented
                                incumbent on the holdout bench.
 ```
+
+Two feeds sit beside the human verdicts. **Agent trajectories** — verified
+steps from *successful* browser runs — harvest out of
+`sessions/agent_distill.jsonl` into `learning_pairs` as task type `agent.act`,
+marked machine-trusted (`shadow.agent_verified`) so the exemplar store refuses
+them unless `QUILL_SHADOW_AUTOTRUST=1`, and excluded from text-LoRA curation
+outright. And the same label pool trains the **classifier heads** described
+above — a fifth mechanism, still `off` by default, that decides whether the
+local model runs at all rather than which rung answers.
 
 **What it is not:** nothing here changes what Mnemos is *allowed* to do —
 learning affects the quality of proposals, never the authority to act (risk
@@ -527,6 +683,11 @@ Related surfaces: `/today` · `/chat` · `/ui` · `/profile` · `/org/{id}` ·
 `/meetings` · `/triggers` · `/peer` · `/desktop-access` · `/onboarding` ·
 `/docs`.
 
+Operational read-outs: `GET /console/latency` (stage p50/p90/p99) ·
+`GET /console/heads` (per-head skip rate, disagreement, why not activatable) ·
+`GET /console/jobs` (queue + dead-letter park) ·
+`GET /console/desktop-access` (allowlist, remembered apps, capabilities).
+
 ---
 
 ## Proactive behavior
@@ -552,7 +713,13 @@ yes/no in chat — nothing runs without your reply.
   cleanly.
 - Microphone / webcam optional for live capture. On Linux you need
   PortAudio (`sudo apt install libportaudio2`) for the mic and a V4L2
-  camera (`/dev/video*`) for the webcam pipeline.
+  camera (`/dev/video*`) for the webcam pipeline. Desktop control on Linux
+  needs AT-SPI and an **X11** session (`python-xlib`, installed from
+  `requirements.txt`); the ghost-window path declines on Wayland rather than
+  half-working.
+- `GET /capture/status` reports what each capture source can actually do on
+  this platform, so the Privacy sheet disables what won't work and says why
+  instead of failing at the click.
 - **Anthropic API key** for Claude tiers (vision fallback, extraction,
   reflection, browser agent). Local pieces run without it.
 
@@ -603,8 +770,9 @@ Then open:
 - **Browser agent** — <http://127.0.0.1:5000>
 
 Flags: `--no-audio` · `--no-vision` · `--no-notifications` · `--no-browser` ·
-`--desktop-capture` · `--browser-headless` · `--port` · `--browser-port` ·
-`--host`.
+`--desktop-capture` · `--system-audio` · `--browser-headless` ·
+`--no-org-coordinator` · `--port` · `--browser-port` · `--host` ·
+`--log-level` (uvicorn access logs are off by default).
 
 ---
 
@@ -678,6 +846,22 @@ curl -s "http://127.0.0.1:8000/memory/search?q=whiteboard%20series%20A"
 | **`/facts` · `/reflections`** | Programmatic review APIs |
 | **Browser agent** | Exec.AI UI at <http://127.0.0.1:5000> |
 
+Every surface is its own module under [app/api/](app/api/) (`chat_page`,
+`console_page`, `auth_page`, `desktop_access_page`, `home_page`, …) — page HTML
+no longer lives inline in `routes.py`, which keeps the routing.
+[mnemos_theme.py](app/api/mnemos_theme.py) is the **single source of brand
+tokens** (palette, type, motion, the mark), applied via `apply()` /
+`apply_plain()` so a page declares `@@BRAND@@` / `@@ROOT@@` / `@@FONTS@@`
+instead of restating hex codes; `exec_webapp.py`'s standalone page goes through
+the same path so the browser-agent UI cannot drift.
+
+Fonts, KaTeX, and the shared CSS/JS are **vendored under
+[app/static/](app/static/)** rather than fetched from a CDN at page load — the
+product is offline-first, and a page that needs the network to render is not.
+`scripts/fetch_ui_static.py` pulls upstream, `scripts/sync_ui_static.py` copies
+the theme/JS out of the Python modules, and `tests/test_ui_tokens.py` enforces
+that pages render from tokens with no external asset host.
+
 **Selected endpoints** (full list in [app/api/routes.py](app/api/routes.py)):
 
 ```
@@ -685,7 +869,9 @@ GET  /health
 POST /audio/start · /audio/stop · /vision/start · /vision/stop
 POST /notifications/start · /desktop-capture/start
 GET  /memory · /memory/search?q=
-GET  /console/*  (events, turns, sessions, activity, jobs, models, escalate, readiness, provenance, agent-runs)
+GET  /console/*  (events, turns, sessions, activity, jobs, models, escalate,
+                  readiness, provenance, agent-runs, latency, heads,
+                  desktop-access, attention, economy, hardening)
 GET  /artifact
 GET  /graph/context · /graph/stats · POST /graph/rebuild
 GET  /people/list · /people/{id} · /people/unresolved-mentions
@@ -693,7 +879,8 @@ GET  /profile · /profile/data · /org/{id} · /org/{id}/data
 GET/POST /peer/*  (pair, ask, answer, policy, link)
 GET  /facts · /facts/open_tasks · POST /facts/{id}/approve|dismiss|done|edit
 POST /reflect/run · GET /reflections*
-POST /chat · GET /chat/poll · POST /chat/answer · POST /chat/new
+POST /chat · GET /chat/poll · GET /chat/stream · POST /chat/answer · POST /chat/new
+GET  /capture/status  (per-source support + reason on this platform)
 POST /desktop · POST /phone
 GET  /onboarding* · GET /ui · POST /speak · GET /speakers
 ```
@@ -715,7 +902,8 @@ GET  /onboarding* · GET /ui · POST /speak · GET /speakers
 | **Embeddings** | sentence-transformers MiniLM | semantic vectors |
 | **Stores** | SQLite + LanceDB | timeline + meaning search |
 | **Browser agent** | Playwright + Claude tiers | web actions |
-| **Desktop agent** | allowlisted OS control | app-level actions |
+| **Desktop agent** | UIA (Win) / AT-SPI (Linux), allowlisted OS control | app-level actions |
+| **UI** | server-rendered pages + vendored fonts/KaTeX/CSS/JS | offline-first, one theme |
 
 ---
 
@@ -801,6 +989,32 @@ loaded after `.env` with override, for secrets.
 | `QUILL_TEXT_LOCAL_TIMEOUT_S` | `45` | local text timeout |
 | `QUILL_TEXT_ESCALATE_MIN_CONF` | `0.6` | escalate below this self-reported confidence |
 | `QUILL_TEXT_HIGH_STAKES_TASKS` | `plan` | comma-separated tasks that always escalate |
+| `QUILL_TEXT_LOCAL_MAX_PROMPT_CHARS` | `12000` | prompts longer than this skip the local tier (`0` disables the guard) |
+| `QUILL_OLLAMA_KEEP_ALIVE` | `30m` | keep the local model resident instead of evicting it after ~5 min idle |
+| `QUILL_OLLAMA_WARMUP` | `0` | `1` = load the local model at startup on its own thread |
+
+### Latency spans & classifier heads
+
+| Var | Default | Notes |
+|---|---|---|
+| `QUILL_LATENCY_SPANS` | `0` | record stage spans → `data/latency_spans.jsonl` (`GET /console/latency`) |
+| `QUILL_LATENCY_READ_LIMIT` | `20000` | rows the console/aggregator read from the tail of the trail |
+| `QUILL_HEADS` | `off` | `off` \| `shadow` (log-only) \| `active` (only a confident "nothing here" skips the LLM) |
+| `QUILL_HEADS_T_LOW` / `_T_HIGH` | `0.10` / `0.60` | three-band thresholds on p(needs the model) |
+| `QUILL_HEAD_MIN_LABELS` | `200` | labels before a head may be fit at all (higher than the router's 50 — a thin fit is a silent dropper) |
+| `QUILL_HEADS_RETRAIN_LABELS` | `50` | new labels that trigger an idle retrain |
+| `QUILL_HEADS_MAX_DISAGREEMENT` | `0.02` | activation gate, measured over would-have-skipped events only |
+| `QUILL_HEADS_MIN_SHADOW` | `200` | shadow observations before that share means anything |
+| `QUILL_HEADS_DIR` | `data/heads` | versioned per-head model files |
+
+### Chat attachments & research writeback
+
+| Var | Default | Notes |
+|---|---|---|
+| `QUILL_ATTACH_CONTEXT_CHARS` | `16000` | how much of an attached document rides along in the turn after the upload (fact mining still reads the whole file in the background) |
+| `QUILL_RESEARCH_INGEST` | `1` | write agent/web research answers back to memory as `chat.research` events + facts |
+| `QUILL_RESEARCH_INGEST_SYNC` | `1` | `0` = async (production-like); `1` = the next memory question sees the facts immediately |
+| `QUILL_RESEARCH_INGEST_MIN_CHARS` | `40` | shorter answers are refusals/status lines, not research |
 
 ### Learning loop (verdict harvesting → exemplars → shadow eval → router → LoRA)
 
@@ -813,7 +1027,8 @@ loaded after `.env` with override, for secrets.
 | `QUILL_EXEMPLAR_MIN_SIM` | `0.75` | cosine floor per retrieved exemplar |
 | `QUILL_EXEMPLAR_TOKEN_BUDGET` | `1200` | total added tokens per call |
 | `QUILL_SHADOW_EVAL` | `0` | idle re-grading of kept local outputs by Claude |
-| `QUILL_SHADOW_BATCH` | `20` | outputs graded per night (stratified) |
+| `QUILL_SHADOW_BATCH` | `20` | outputs graded per night (stratified); raise it to drain a backlog |
+| `QUILL_SHADOW_LOOKBACK_DAYS` | `30` | how far back the sampler may reach (a 24h window silently discarded surplus labels) |
 | `QUILL_SHADOW_BUDGET_TOKENS` | `250000` | hard daily token ceiling (≈$0.40–0.50/day at Haiku 4.5 list rates) |
 | `QUILL_SHADOW_MODEL` | `claude-haiku-4-5` | grader tier |
 | `QUILL_SHADOW_AUTOTRUST` | `0` | let UNCONFIRMED shadow pairs train (lowers label quality) |
@@ -898,7 +1113,7 @@ Off by default; enable with `QUILL_DESKTOP_CAPTURE=1` or
 | `QUILL_CONSOLIDATE` | `1` | merge utterances into turns |
 | `QUILL_CONSOLIDATE_MAX_GAP_S` | `8` | silence gap that starts a new turn |
 | `QUILL_WORKER` | `1` | durable background job runner |
-| `QUILL_WORKER_POLL_S` / `_MAX_ATTEMPTS` | `2.0` / `3` | worker poll / retry cap |
+| `QUILL_WORKER_POLL_S` / `_MAX_ATTEMPTS` | `2.0` / `5` | worker poll / retry cap before a job is dead-lettered |
 | `QUILL_EXTRACT` | `1` | run fact/task extraction (calls the LLM) |
 | `QUILL_PEOPLE_V2` | `1` | People Intelligence v2 (candidates, contacts, policies) |
 | `QUILL_OPEN_LOOPS` | `1` | waiting-on-me / waiting-on-them / unanswered-question detectors |
@@ -921,6 +1136,15 @@ Off by default; enable with `QUILL_DESKTOP_CAPTURE=1` or
 | `AGENT_VISION_SPARSE_AT` | `6` | attach a shot when fewer than N elements visible |
 | `AGENT_DATA_DIR` | `./sessions` | agent session storage |
 | `AGENT_BROWSER_CHANNEL` | — | low-level default browser channel |
+| `AGENT_BROWSER_PIXEL` | `1` | pixel actions (`click_at` / `drag` / `press_key`) on canvas-like surfaces; `0` turns the whole path off |
+| `AGENT_PIXEL_SHOT_MAX_EDGE` | `1400` | screenshot long edge the coordinates are measured on |
+| `AGENT_PIXEL_EDGE_PAD` | `8` | keep-out margin inside the surface bounds |
+| `AGENT_PIXEL_DRAG_STEPS` | `24` | intermediate mouse moves per drag (a single jump reads as a click) |
+| `AGENT_CDP_LISTENERS` | `1` | CDP listener ground truth — click-wired `<div>`s become element_ids |
+| `AGENT_CDP_SPARSE_AT` / `_MAX_NODES` | `8` / `300` | skip on busy pages / listener probes per scan |
+| `AGENT_DONE_CHECK` | `1` | once-per-run check that rejects off-goal completions |
+| `AGENT_POSTMORTEM` | `1` | post-run analysis persisted into procedural memory |
+| `AGENT_DISTILL` / `_OBS_CAP` | `1` / `6000` | append `sessions/agent_distill.jsonl` / chars of observation kept |
 
 Browser-agent model tiers are constants in
 [browser_agent/config.py](browser_agent/config.py): router/executor = Sonnet,
@@ -949,7 +1173,11 @@ planner/escalation = Opus, verifier = Haiku.
 | Voiceprints | `data/speakers/*.npy` |
 | Semantic index | `data/lance/` (LanceDB) |
 | Model-call log | `data/model_calls.jsonl` |
+| Stage-latency trail | `data/latency_spans.jsonl` (`QUILL_LATENCY_SPANS=1`) |
 | Escalation distill trail | `data/escalate_distill.jsonl` |
+| Agent-step distill trail | `sessions/agent_distill.jsonl` (+ `agent_harvest_state.json` watermark) |
+| Per-engine ASR ingest thresholds | `data/asr_calibration.json` |
+| Classifier-head models | `data/heads/` |
 | Onboarding profile | `data/onboarding_profile.json` |
 | First-run / capture-opt-in state | `data/first_run.json` |
 | Exhaust ingest ledger | `data/exhaust_ledger.json` |
@@ -982,13 +1210,21 @@ app/
   main.py                FastAPI app + startup wiring
   storage.py             SQLite: events, facts, people, relations, …
   vectorstore.py         LanceDB semantic index
-  api/routes.py          HTTP endpoints + Console HTML
+  api/routes.py          HTTP endpoints (routing only — page HTML lives in the page modules)
+  api/mnemos_theme.py    single source of brand tokens (apply / apply_plain)
+  api/chat_page.py · console_page.py · auth_page.py · desktop_access_page.py
   api/peer_page.py       Team pairing UI
   api/org_network_page.py Org AI Network UI
   api/profile_page.py    Living user profile UI
   api/org_page.py        Org living brief UI
+  static/                vendored fonts · KaTeX · shared CSS/JS (offline-first)
   services/
     memory.py            Memory Engine
+    asr.py · asr_calibration.py   ASR engine seam + per-engine ingest thresholds
+    fast_heads.py        trained classifier rung below the local LLM
+    latency.py           stage spans (queue / load / prefill / generation)
+    agent_harvest.py     agent_distill.jsonl → learning_pairs (agent.act)
+    research_ingest.py   research answers → memory · fact_titles.py display titles
     people_pipeline.py   People Intelligence v2
     graph.py             knowledge graph rebuild + context_for_person
     peer_channel.py      Mnemos↔Mnemos asks + disclosure policy
@@ -1012,11 +1248,16 @@ packaging/               PyInstaller + Inno Setup for tester builds
     todo_watcher.py · task_offer.py · anticipation.py · phone_watcher.py
     meeting_*.py         meeting join / notes / enhance / chat / mode
 
-browser_agent/           Exec.AI web agent
+browser_agent/           Exec.AI web agent (DOM + pixel surfaces, distill.py trail)
 desktop_agent/           guarded OS control
+                         a11y.py → UIA (Win) / a11y_linux.py (AT-SPI)
+                         ghost.py → ghost_x11.py + x11_util.py (X11 only)
+                         app_promotion.py · app_templates.py (remember_app)
 org_coordinator/         Hybrid Org AI Network coordinator (roles/goals/digests)
-tests/                   ~1,600 unit tests
+tests/                   ~2,400 unit tests
 scripts/                 download_models · enroll_speaker · eval_* · distill_* ·
+                         calibrate_asr_confidence · bench_* · feature_smoke ·
+                         diagnose_today · fetch_ui_static · sync_ui_static ·
                          train_lora · kg_cutover_soak · org_network_smoke · phone_link/ …
 ```
 
@@ -1025,17 +1266,39 @@ scripts/                 download_models · enroll_speaker · eval_* · distill_
 ## Development & testing
 
 ```powershell
-python -m pytest tests -q               # ~1,600 tests
+python -m pytest tests -q               # ~2,400 tests
 make eval                               # golden harness (hard thresholds)
 make eval-people                        # people entity-resolution goldens
 make eval-people-live                   # smoke against local quill.db (no LLM)
+make eval-asr                           # ASR WER/latency against the fixture manifest
+make asr-calibrate                      # fit per-engine ingest thresholds
+make bench-latency · make listen-idle   # local-path latency and idle-cost benches
+```
+
+Full-system smoke, in tiers — cheap enough to run anywhere, deep when you ask:
+
+```powershell
+python scripts/feature_smoke.py              # Tier 1: API only, ~30s, no API key
+python scripts/feature_smoke.py --ui         # + Playwright UI pages
+python scripts/feature_smoke.py --live       # + agent routing eval (needs a key)
+python scripts/feature_smoke.py --everything # + capture, browser live, goldens
+python scripts/diagnose_today.py             # against a live server: the /today banner
 ```
 
 | Suite | What it covers |
 |---|---|
-| **Unit suite** | Approval binding, source policies, commitment lifecycle, meeting layer, ranking snapshots, escalate log, local routing, few-shot, grounding, LoRA gate, peer channel, people pipeline — hermetic (no network). |
+| **Unit suite** | Approval binding, source policies, commitment lifecycle, meeting layer, ranking snapshots, escalate log, local routing, few-shot, grounding, LoRA gate, peer channel, people pipeline, ASR engine seam + calibration, latency spans, classifier heads, pixel actions — hermetic (no network). |
 | **Golden evals** | Commitment ownership, entity resolution, contact attribution with CI-able exit codes. |
-| **Desktop agent** | `tests/test_desktop_guards.py` — path jail, hard blocks, default-deny, autonomy ladder. |
+| **ASR evals** | `scripts/eval_asr.py` over `tests/fixtures/asr_eval/` — WER + latency per engine, so a swap is measured. Audio itself is git-ignored; the manifest is checked in. |
+| **Desktop agent** | `tests/test_desktop_guards.py` — path jail, hard blocks, default-deny, autonomy ladder. `test_desktop_a11y_linux.py` / `test_ghost_desktop_linux.py` cover the Linux body. |
+| **Browser pixel** | `tests/test_browser_pixel.py` — live headless Chromium against a canvas game and an iframe-embedded one, plus the out-of-bounds refusal. |
+| **UI** | `tests/test_ui_tokens.py` — pages render from theme tokens with **no external asset host**. |
+
+CI runs the theme/static sync before its smoke tests.
+`.github/workflows/perception.yml` guards the listening path on every PR that
+touches it — unit tests on Linux (no models loaded) plus the ASR harness on
+Windows against a real engine, because an engine swap or a threshold edit
+doesn't raise, it quietly changes what becomes a memory.
 
 ---
 
@@ -1048,6 +1311,10 @@ make eval-people-live                   # smoke against local quill.db (no LLM)
    surface).
 3. **Browser agent:** hash-bound, source-grounded approval packets; no
    credential entry or CAPTCHA solving; dry-run levels cap every run.
+   **Pixel actions are fenced:** they exist only on a promoted opaque surface,
+   coordinates outside it are refused with the bounds quoted back, and a
+   cross-origin frame never qualifies — so a misread screenshot cannot reach a
+   Send/Buy button.
 4. **Desktop agent:** allowlist *is* the sandbox (path jail, app/shell
    allowlists, hard-block list, budgets).
 5. **Phone / peer channels:** pairing codes, token auth, redaction, offer-by-
@@ -1061,6 +1328,13 @@ make eval-people-live                   # smoke against local quill.db (no LLM)
    class may mint. Missing table → deny, never allow.
 10. **Cloud egress is privacy-gated** — never-send refused, sensitive content
     redacted, spend capped. Outcomes need evidence, not LLM claims alone.
+11. **Speculative work never reaches a paid model** — enforced in the router
+    and again inside the Claude client (`SpeculativeCloudCall`), and asserted
+    over the call trail.
+12. **Telemetry stores numbers, not text** — `head_observations` and
+    `usage_daily` hold scalars and enum-ish strings only; the agent distill
+    trail redacts observations before writing, and drops the observation
+    entirely if redaction is unavailable.
 
 > **Handle your keys carefully.** `.env` and `.credentials.env` are
 > git-ignored but hold live API keys in plaintext.
@@ -1103,10 +1377,29 @@ make eval-people-live                   # smoke against local quill.db (no LLM)
 - **Org AI Network (experimental)** — hybrid Org Coordinator + local digests /
   priority cascade / smart escalation. OFF by default (`QUILL_ORG_NETWORK=0`).
   See [Org AI Network](#org-ai-network-experimental).
+- **Classifier heads are shadow-only.** Nothing activates: the gate needs 200
+  labels and a shadow week, and `shadow` mode is what produces both. `frame_keep`
+  in particular has a lower ceiling than the text heads — it cannot embed what
+  it judges (the shared encoder is text, the subject is pixels), so it reads the
+  window title plus the frame-diff scalar the capture loop already computes.
+- **Latency program.** Phase 0 (stage spans) and Phase 1 (residency, prefix
+  ordering) landed; the serial-vs-pipelined decision and local distillation are
+  gated on baseline data and a shadow week that hasn't run.
+- **Non-Whisper ASR engines** — the seam, calibration, and WER harness are in;
+  no second engine ships yet. Any engine reporting a different
+  `confidence_kind` needs `make asr-calibrate` before it decides what becomes a
+  memory.
+- **Desktop agent on Wayland** — X11 only; the ghost-window path declines
+  rather than half-working.
+- `/chat/stream`'s generator isn't bounded by response close, so its route test
+  is skipped rather than driven (it wedges `TestClient` lifespan teardown).
 
 Closed recently: local TTS (`voice.py`), Personal Agent Layer on by default,
 desktop-agent guard tests, verdict → few-shot/LoRA learning loop, idle LoRA
-scheduler.
+scheduler, the ASR engine seam + per-engine ingest calibration, browser pixel
+control for canvas pages, the desktop agent's Linux body and app promotion,
+the UI split out of `routes.py` behind one theme with vendored assets, and the
+tiered feature smoke harness.
 
 ---
 
