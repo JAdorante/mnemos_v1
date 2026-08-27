@@ -120,14 +120,13 @@ class KilledServerBackupTests(unittest.TestCase):
     def test_1_the_server_really_died_mid_write(self) -> None:
         """Guard the premise. A clean shutdown here would prove nothing.
 
-        `quill.db` runs on SQLite's default rollback journal (only
-        `perception.db` sets journal_mode=WAL), so the artefact of an unclean
-        kill is a `-journal` file when the process died inside a transaction,
-        and nothing at all when it died between them. Either way the property
+        `quill.db` and `perception.db` both run in WAL mode; the artefact of an
+        unclean kill is a `-wal`/`-shm` pair (or a `-journal` file on older
+        installs that never opened under WAL). Either way the property
         under test is the same: no shutdown hook ran, no connection was closed,
-        and the backup still has to recover every committed row. The WAL case —
-        where a naive copy demonstrably loses data — is covered separately in
-        WalRecoveryTests below.
+        and the backup still has to recover every committed row. The case
+        where a naive file copy of a hot WAL database demonstrably loses data
+        is covered separately in WalRecoveryTests below.
         """
         self.assertEqual(self.proc.returncode, -signal.SIGKILL)
         self.assertGreater(len(self.committed), 400)

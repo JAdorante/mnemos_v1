@@ -409,6 +409,10 @@ def record_from_distill(row: dict, outcome: str, *,
         source_refs={"distill_id": row.get("id"),
                      "task": row.get("task"),
                      "reason": row.get("reason"),
+                     # D.2b: retrieval stats measured when the call was made,
+                     # so router training reads the production values rather
+                     # than re-deriving them against a since-grown store.
+                     "retrieval": (row.get("meta") or {}).get("retrieval"),
                      "frame_path": row.get("frame_path") or None},
         model_tag=row.get("local_model"),
         created_at=row.get("time"),

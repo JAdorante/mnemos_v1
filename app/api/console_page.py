@@ -949,6 +949,78 @@ function hcard(label,val,sub){
  return '<div class="hcard"><div class="hlabel">'+label+'</div>'
   +'<div class="hval">'+val+'</div>'+(sub?'<div class="hsub">'+sub+'</div>':'')+'</div>';
 }
+// --- engine provenance ------------------------------------------------------
+// Which engine produced these transcripts, and what it cost. With the engine
+// behind a flag, "transcripts got worse" is unanswerable without this line.
+function engineSub(h){
+  const by=h.by_engine||{};
+  const names=Object.keys(by);
+  const rtf=(h.rtf!=null)?(' · RTF '+h.rtf):'';
+  if(!names.length) return 'transcribe wall-time'+rtf;
+  if(names.length===1) return MnemosEsc(names[0])+rtf;
+  // Two engines in one window means a flag was flipped mid-window; show the
+  // split rather than an average across engines, which is meaningless.
+  return names.map(n=>MnemosEsc(n)+' '+by[n].utterances
+    +(by[n].rtf!=null?(' (RTF '+by[n].rtf+')'):'')).join(' · ');
+}
+// Where the utterance budget went. VAD is shown apart from the arrow chain: it
+// runs during speech, before the speech-end the other three are measured from.
+function stageSub(h){
+  const s=h.stage_ms||{};
+  const ms=(o)=> (o&&o.p50!=null)?(o.p50+'ms'):'—';
+  const chain='queue '+ms(s.queue_wait)+' → asr '+ms(s.asr)+' → post '+ms(s.post);
+  return (s.vad&&s.vad.p50!=null)?(chain+' · vad '+ms(s.vad)+' during speech')
+                                 :chain;
+}
+// Is each engine's output being judged on thresholds fitted for ITS confidence
+// scale? Whisper never needs them — the shipped defaults were written for it.
+// Any other engine running uncalibrated is the silent-drift condition.
+function calibCard(h){
+  const c=h.calibration||{};
+  const names=Object.keys(c);
+  if(!names.length) return '';
+  const bad=names.filter(n=>!c[n].calibrated && n.split(':')[0]!=='whisper');
+  if(!bad.length){
+    const cal=names.filter(n=>c[n].calibrated);
+    if(!cal.length) return '';
+    return hcard('Ingest thresholds','calibrated',
+      cal.map(n=>MnemosEsc(n)+' · '+(c[n].n_utterances||'?')+' utterances').join(' · '));
+  }
+  return hcard('Ingest thresholds','⚠ uncalibrated',
+    bad.map(n=>MnemosEsc(n)).join(' · ')
+    +' judged on Whisper\'s confidence scale — run '
+    +'scripts/calibrate_asr_confidence.py');
+}
+function channelCard(h){
+  const by=h.by_channel||{};
+  const names=Object.keys(by);
+  if(!names.length) return '';
+  const val=names.map(n=>MnemosEsc(n)+' '+by[n].utterances).join(' · ');
+  const sub=names.map(function(n){
+    const t=by[n].total_latency_ms||{};
+    return MnemosEsc(n)+' '+(t.p50!=null?(t.p50+'ms p50'):'—');
+  }).join(' · ');
+  return hcard('By channel', val, sub);
+}
+// The offline half of the picture: how the last eval_asr.py run scored the
+// engine. Stale by nature, so it always says when it ran.
+function probeCard(h,pct){
+  const e=h.last_eval;
+  if(!e||!e.ran_at) return '';
+  const age=Math.max(0,Math.round((Date.now()/1000-e.ran_at)/86400));
+  const when=age<1?'today':(age+'d ago');
+  const raw=e.raw_hallucination_rate, post=e.post_filter_hallucination_rate;
+  const val=(post!=null)?pct(post):'—';
+  const gap=(raw!=null&&post!=null&&raw>post)
+    ? (' · '+pct(raw)+' before the ingest filter') : '';
+  const drift=(e.engine_id&&h.configured_engine
+               &&e.engine_id.split(':')[0]!==h.configured_engine)
+    ? ' · ⚠ scored '+MnemosEsc(e.engine_id)+', running '
+      +MnemosEsc(h.configured_engine) : '';
+  return hcard('Hallucination probe', val,
+    'no-speech fixtures · '+when+gap+drift
+    +(e.wer!=null?(' · WER '+e.wer):''));
+}
 function killSwitchPanel(rows){
   if(!rows||!rows.length) return '';
   const items=rows.map(s=>{
@@ -1044,14 +1116,17 @@ async function loadHealth(){
    +hcard('Utterances / hr', (ph.utterances!=null?ph.utterances:'—'),
           h.kept+' kept · '+h.dropped+' dropped')
    +hcard('Dropped / hr', (ph.dropped!=null?ph.dropped:'—'), dropList)
-   +hcard('ASR latency', lat(h.asr_latency_ms), 'Whisper transcribe wall-time')
-   +hcard('End-to-end', lat(h.total_latency_ms), 'speech-end → published')
+   +hcard('ASR latency', lat(h.asr_latency_ms), engineSub(h))
+   +hcard('End-to-end', lat(h.total_latency_ms), stageSub(h))
    +hcard('Quality mix',
           'good '+(q.good||0)+' · noisy '+(q.noisy||0)+' · bad '+(q.bad||0),
           'avg SNR '+(h.avg_snr!=null?h.avg_snr+'dB':'—')
             +' · clip '+(h.avg_clipping!=null?h.avg_clipping+'%':'—'))
    +hcard('Low-confidence', pct(h.low_confidence_rate), 'of kept transcripts')
    +hcard('Speaker unknown', pct(h.speaker_unknown_rate), 'of attributed utterances')
+   +channelCard(h)
+   +calibCard(h)
+   +probeCard(h,pct)
    +offerCards(cog.metrics||{})
    +'</div>';
  }catch(e){ list.innerHTML='<div class="empty">error loading: '+e+'</div>'; }

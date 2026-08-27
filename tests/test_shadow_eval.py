@@ -8,6 +8,8 @@ Acceptance criteria covered:
   * idle gating: no calls while the user is active / on battery
   * the report generates with agreement rates by task
   * one run per calendar day
+  * the sampler reaches back past 24h, so a busy day's surplus is graded
+    later instead of aging out — and is never re-graded once it does
 """
 from __future__ import annotations
 
@@ -177,6 +179,81 @@ class NightlyRunTests(_Env):
         self.assertTrue(rep["enabled"])
         self.assertIn("chat", rep["agreement_by_task"])
         self.assertEqual(rep["agreement_by_task"]["chat"]["agree_rate"], 1.0)
+
+
+class BacklogTests(_Env):
+    """The 24h window used to discard every kept output a day produced beyond
+    the batch size: one run per calendar day, and by the next run the surplus
+    had aged out. These pin the fix."""
+
+    def _log_at(self, ts: float, q: str) -> str:
+        rid = self._log(q=q)
+        p = Path(os.environ["QUILL_SHADOW_LOCAL_OUTPUTS_PATH"])
+        rows = [json.loads(ln) for ln in
+                p.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        rows[-1]["ts"] = ts
+        p.write_text("".join(json.dumps(r) + "\n" for r in rows),
+                     encoding="utf-8")
+        return rid
+
+    def test_rows_older_than_a_day_are_still_reachable(self) -> None:
+        import time as _t
+        old_id = self._log_at(_t.time() - 5 * 86400, "a question from five days ago")
+        calls: list = []
+        out = se.run_nightly(call=_fake_call_factory(calls), store=self.store)
+        self.assertEqual(out["graded"], 1)
+        self.assertEqual(len(calls), 1)
+        state = json.loads(
+            Path(os.environ["QUILL_SHADOW_STATE_PATH"]).read_text())
+        self.assertIn(old_id, state["graded_ids"])
+
+    def test_beyond_the_window_is_not_reached(self) -> None:
+        """The window still bounds the work — it is wider, not infinite."""
+        import time as _t
+        self._log_at(_t.time() - 400 * 86400, "a question from over a year ago")
+        calls: list = []
+        out = se.run_nightly(call=_fake_call_factory(calls), store=self.store)
+        self.assertEqual(out["graded"], 0)
+        self.assertEqual(calls, [])
+
+    def test_surplus_is_graded_on_a_later_run_not_lost(self) -> None:
+        """Three rows, batch of one: the two the batch could not reach must
+        still be gradeable on subsequent days rather than aging out."""
+        import time as _t
+        ids = [self._log_at(_t.time() - 3 * 86400, f"old question number {i}")
+               for i in range(3)]
+        graded: list[str] = []
+        with patch.dict(os.environ, {"QUILL_SHADOW_BATCH": "1"}, clear=False):
+            for day in range(3):
+                st = Path(os.environ["QUILL_SHADOW_STATE_PATH"])
+                if st.is_file():                      # clear the per-day gate
+                    d = json.loads(st.read_text())
+                    d.pop("last_day", None)
+                    st.write_text(json.dumps(d))
+                out = se.run_nightly(call=_fake_call_factory([]),
+                                     store=self.store)
+                graded.append(out["graded"])
+        self.assertEqual(graded, [1, 1, 1])           # all three, none lost
+        state = json.loads(
+            Path(os.environ["QUILL_SHADOW_STATE_PATH"]).read_text())
+        self.assertEqual(sorted(state["graded_ids"]), sorted(ids))
+
+    def test_graded_ids_do_not_grow_without_bound(self) -> None:
+        """Dedupe memory is pruned to what is still REACHABLE, so it cannot
+        grow forever — and an id still in the window is never dropped, which
+        is what would cause a re-grade and a second charge."""
+        import time as _t
+        self._log_at(_t.time() - 3 * 86400, "a recent question")
+        se.run_nightly(call=_fake_call_factory([]), store=self.store)
+        st = Path(os.environ["QUILL_SHADOW_STATE_PATH"])
+        d = json.loads(st.read_text())
+        d["graded_ids"] = ["aged-out-id-1", "aged-out-id-2"] + d["graded_ids"]
+        d.pop("last_day", None)
+        st.write_text(json.dumps(d))
+        se.run_nightly(call=_fake_call_factory([]), store=self.store)
+        after = json.loads(st.read_text())["graded_ids"]
+        self.assertNotIn("aged-out-id-1", after)      # unreachable → forgotten
+        self.assertEqual(len(after), 1)               # the reachable one stays
 
 
 class IdleGateTests(_Env):

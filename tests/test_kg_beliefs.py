@@ -164,6 +164,27 @@ class KgExplainEndpointTests(unittest.TestCase):
 class StructuredClaimBeliefTests(unittest.TestCase):
     """Plan 2.5 — parseable claims → kg_beliefs; money conflict_flag."""
 
+    def setUp(self) -> None:
+        """Cut the semantic-dedup lookup off from the developer's real memory.
+
+        `_mk()` isolates the SQLite store, but `fact_gate` does not use it for
+        the embedding check: `_similar_active` goes through the process-wide
+        `memory` singleton, whose vector index lives under the configured data
+        dir — the machine's REAL one. So a claim these tests persist can be
+        deduped ("cos 1.00 vs fact 1") against something the developer actually
+        said months ago, and `_persist` returns 0 while the temp store's `facts`
+        table is empty. The test then fails on a machine with data and passes on
+        a clean checkout, which is the worst way for a test to behave.
+
+        Nothing here is about dedup, so the honest isolation is to give the gate
+        an empty neighbourhood. The underlying seam — a gate handed a `store`
+        that it ignores for one of its two checks — is worth closing properly.
+        """
+        patcher = patch("app.services.fact_gate._similar_active",
+                        return_value=[])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_david_said_49_queryable_by_speaker(self):
         from app.services import kg_beliefs
         from app.services.consolidation import Turn

@@ -467,9 +467,15 @@ def enhance_session(
         except Exception:
             n_facts = int(n_items or 0)
         sid = session.get("id")
+        # Deep-link via /meetings/{session_id} (303 → live note). Never bake a
+        # raw reflection id into first_run.json — test DBs and restarts leave
+        # stale /meeting/note/N links that 404 in the real store.
+        href = (
+            f"/meetings/{int(sid)}" if sid is not None
+            else f"/meeting/note/{int(rid)}"
+        )
         first_run.note_brief_ready(
-            sid, has_facts=n_facts > 0 or n_items > 0,
-            href=f"/meeting/note/{int(rid)}")
+            sid, has_facts=n_facts > 0 or n_items > 0, href=href)
     except Exception as exc:
         print(f"[meeting_enhance] first-win note skipped ({exc}).")
 

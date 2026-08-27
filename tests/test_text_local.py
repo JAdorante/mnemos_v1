@@ -17,6 +17,7 @@ Providers are faked; no network, no real model calls.
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -25,7 +26,8 @@ from unittest import mock
 
 from app.services import model_router as mr
 from app.services.escalate_log import escalate_log
-from app.services.ollama_text import split_confidence, with_confidence, _parse_json
+from app.services.ollama_text import (split_confidence, strip_reasoning,
+                                      with_confidence, _parse_json)
 
 
 def _rows(path: Path) -> list[dict]:
@@ -35,13 +37,15 @@ def _rows(path: Path) -> list[dict]:
             if ln.strip()]
 
 
-def _cfg(enabled=True, min_conf=0.6, high_stakes=("plan",), fewshot_k=0):
+def _cfg(enabled=True, min_conf=0.6, high_stakes=("plan",), fewshot_k=0,
+         max_prompt=12_000):
     return SimpleNamespace(enabled=enabled, local_model="fake-local",
                            ollama_url="http://127.0.0.1:1", local_timeout_s=1.0,
                            escalate_min_conf=min_conf,
                            high_stakes_tasks=tuple(high_stakes),
                            fewshot_k=fewshot_k, fewshot_min_sim=0.4,
-                           fewshot_conf_weight=0.85)
+                           fewshot_conf_weight=0.85,
+                           local_max_prompt_chars=max_prompt)
 
 
 class _FakeLocal:
@@ -62,7 +66,14 @@ class _FakeLocal:
 
 
 class _TempTrailMixin:
-    """Point the escalate_log singleton at a temp file for the test."""
+    """Point the escalate_log singleton at a temp file for the test.
+
+    Also redirects the escalation router's directory. With QUILL_ROUTER=shadow
+    in the developer's own environment, `decide()` appends to the REAL
+    data/router/shadow_log.jsonl — so running the suite would inject fixture
+    rows into live routing telemetry and skew the weekly router-vs-heuristic
+    report. Tests must never write into the user's corpus.
+    """
 
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp(prefix="quill_text_distill_"))
@@ -72,8 +83,13 @@ class _TempTrailMixin:
         from collections import Counter
         escalate_log._counts = Counter()
         escalate_log._total = 0
+        self._router_env = mock.patch.dict(
+            os.environ, {"QUILL_ROUTER_DIR": str(self.tmp / "router")},
+            clear=False)
+        self._router_env.start()
 
     def tearDown(self) -> None:
+        self._router_env.stop()
         escalate_log._path, escalate_log._counts, escalate_log._total = self._orig
 
 
@@ -91,6 +107,27 @@ class HelperTests(unittest.TestCase):
     def test_split_confidence_clamps(self) -> None:
         _, conf = split_confidence("x\nconfidence: 1.0")   # case-insensitive
         self.assertEqual(conf, 1.0)
+
+    def test_strip_reasoning_removes_think_block(self) -> None:
+        text = strip_reasoning("<think>let me count\n1,2,3,4</think>\n"
+                               "The answer is 4.\nCONFIDENCE: 0.85")
+        self.assertEqual(text, "The answer is 4.\nCONFIDENCE: 0.85")
+        # ...and the trailer still parses, which is the point of stripping first.
+        self.assertEqual(split_confidence(text), ("The answer is 4.", 0.85))
+
+    def test_strip_reasoning_noop_without_tags(self) -> None:
+        self.assertEqual(strip_reasoning("The answer is 4."), "The answer is 4.")
+
+    def test_strip_reasoning_stray_closing_tag(self) -> None:
+        """Prefilled mid-thought: no opener, everything up to </think> is monologue."""
+        self.assertEqual(strip_reasoning("counting...</think>\nThe answer is 4."),
+                         "The answer is 4.")
+
+    def test_strip_reasoning_unterminated_empties(self) -> None:
+        """num_predict hit mid-thought -> no answer at all, so escalate."""
+        text = strip_reasoning("<think>let me count and count and coun")
+        self.assertEqual(text, "")
+        self.assertIsNone(split_confidence(text)[1])
 
     def test_with_confidence_injects_and_flags(self) -> None:
         schema = {"type": "object", "properties": {"a": {"type": "string"}},
@@ -113,6 +150,75 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(_parse_json('```json\n{"a": 1}\n```'), {"a": 1})
         self.assertEqual(_parse_json('noise {"a": 1} noise'), {"a": 1})
         self.assertIsNone(_parse_json("not json at all"))
+
+
+class LongPromptGuardTests(_TempTrailMixin, unittest.TestCase):
+    """A small local model handed a whole attached document does not fail
+    loudly — it answers fluently from the fraction it held (the grounding
+    block) and self-reports high confidence, so every post-hoc gate passes.
+    Prompt length is the only signal available before the call."""
+
+    def _router(self, local: _FakeLocal) -> mr.ModelRouter:
+        r = mr.ModelRouter()
+        r._local = local
+        r._local_ok = True
+        r._complete_claude = mock.Mock(return_value="parent answer")
+        return r
+
+    def _complete(self, r, chars: int, *, cfg=None, task="chat"):
+        with mock.patch.object(mr, "_text_cfg", return_value=cfg or _cfg()):
+            return r.complete(task, system="s",
+                              messages=[{"role": "user", "content": "q" * chars}])
+
+    def test_oversized_prompt_skips_local_entirely(self) -> None:
+        local = _FakeLocal()
+        r = self._router(local)
+        out = self._complete(r, 20_000)
+        self.assertEqual(out, "parent answer")
+        self.assertEqual(local.calls, 0)          # not even attempted
+        r._complete_claude.assert_called_once()
+        rows = _rows(self.trail)
+        self.assertEqual(rows[0]["reason"], "prompt_too_long_for_local")
+
+    def test_prompt_within_budget_still_runs_local(self) -> None:
+        local = _FakeLocal({"text": "hi", "json": None, "confidence": 0.9,
+                            "parse_ok": True})
+        r = self._router(local)
+        out = self._complete(r, 500)
+        self.assertEqual(out, "hi")
+        self.assertEqual(local.calls, 1)
+        r._complete_claude.assert_not_called()
+
+    def test_budget_counts_the_system_prompt_and_every_message(self) -> None:
+        local = _FakeLocal()
+        r = self._router(local)
+        with mock.patch.object(mr, "_text_cfg", return_value=_cfg(max_prompt=1_000)):
+            r.complete("chat", system="s" * 600,
+                       messages=[{"role": "user", "content": "a" * 300},
+                                 {"role": "assistant", "content": "b" * 300}])
+        self.assertEqual(local.calls, 0)          # 1200 > 1000, summed
+        r._complete_claude.assert_called_once()
+
+    def test_zero_disables_the_guard(self) -> None:
+        local = _FakeLocal({"text": "hi", "json": None, "confidence": 0.9,
+                            "parse_ok": True})
+        r = self._router(local)
+        out = self._complete(r, 50_000, cfg=_cfg(max_prompt=0))
+        self.assertEqual(out, "hi")
+        self.assertEqual(local.calls, 1)
+
+    def test_speculative_prefetch_does_not_buy_a_parent_call(self) -> None:
+        # Nobody asked for this answer; paying Claude for it is the wrong
+        # trade — leave the cache cold, exactly as when local is unavailable.
+        local = _FakeLocal()
+        r = self._router(local)
+        with mock.patch.object(mr, "_text_cfg", return_value=_cfg()):
+            out = r.complete("chat", system="s",
+                             messages=[{"role": "user", "content": "q" * 20_000}],
+                             speculative=True)
+        self.assertEqual(out, "")
+        self.assertEqual(local.calls, 0)
+        r._complete_claude.assert_not_called()
 
 
 class RouterPolicyTests(_TempTrailMixin, unittest.TestCase):
@@ -161,6 +267,36 @@ class RouterPolicyTests(_TempTrailMixin, unittest.TestCase):
         r._complete_claude.assert_not_called()
         self.assertEqual(_rows(self.trail), [])
         self.assertIsNone(r.last_distill_id)
+
+    def test_retrieval_stats_ride_the_kept_row(self) -> None:
+        """D.2b: the stats measured before the call must reach the row router
+        training reads. Reconstructing them later would sample a memory store
+        that has since grown — a different feature than production saw."""
+        stats = {"n_chunks": 3, "max_sim": 0.8, "mean_sim": 0.55,
+                 "entity_coverage": 0.5}
+        local = _FakeLocal({"text": "hi", "json": None, "confidence": 0.9,
+                            "parse_ok": True})
+        r = self._router(local)
+        self._complete(r, retrieval=stats)
+        self.assertEqual(_rows(self.trail)[0]["meta"]["retrieval"], stats)
+
+    def test_retrieval_stats_ride_the_escalated_row(self) -> None:
+        stats = {"n_chunks": 0, "max_sim": None, "mean_sim": None,
+                 "entity_coverage": 0.0}
+        local = _FakeLocal({"text": "meh", "json": None, "confidence": 0.2,
+                            "parse_ok": True})
+        r = self._router(local, claude_text="parent answer")
+        self._complete(r, retrieval=stats)
+        self.assertEqual(_rows(self.trail)[0]["meta"]["retrieval"], stats)
+
+    def test_retrieval_is_optional(self) -> None:
+        """Every caller that does not ground a prompt keeps working, and the
+        row stays clean rather than carrying a misleading empty dict."""
+        local = _FakeLocal({"text": "hi", "json": None, "confidence": 0.9,
+                            "parse_ok": True})
+        r = self._router(local)
+        self._complete(r)
+        self.assertNotIn("retrieval", _rows(self.trail)[0]["meta"])
 
     def test_low_confidence_escalates_and_logs(self) -> None:
         local = _FakeLocal({"text": "meh", "json": None, "confidence": 0.2,

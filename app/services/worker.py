@@ -18,6 +18,7 @@ registry, so the extractor lands as one more `register("extract", ...)` call.
 from __future__ import annotations
 
 import json
+import sqlite3
 import threading
 from typing import Callable
 
@@ -87,7 +88,16 @@ class JobWorker:
     # --- the loop ----------------------------------------------------------
     def _run(self) -> None:
         while not self._stop.is_set():
-            job = self._s().claim_job()
+            try:
+                job = self._s().claim_job()
+            except sqlite3.OperationalError as exc:
+                # "database is locked" must not kill the thread — consolidation /
+                # extract / reflection would all stop until process restart.
+                self.last_error = f"claim_job: {exc}"
+                print(f"[worker] claim_job deferred ({exc}); retrying.")
+                self._wake.wait(min(5.0, max(0.5, self._poll)))
+                self._wake.clear()
+                continue
             if job is None:
                 self._wake.wait(self._poll)   # sleep until nudged or timeout
                 self._wake.clear()

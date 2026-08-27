@@ -103,6 +103,43 @@ class ExtractTextTests(unittest.TestCase):
         (self.tmp / "big.txt").write_text("x" * 5000, encoding="utf-8")
         self.assertEqual(len(D.extract_text(self.tmp / "big.txt", cap=100)), 100)
 
+    # Word-processor exports (Google Docs / Pages) put every word in its own
+    # positioned text object; pypdf's default mode emits a newline after each
+    # one, so prose arrives as a column of single words. Layout mode
+    # reconstructs the lines — _page_text must prefer it.
+    def test_page_text_prefers_layout_mode(self) -> None:
+        mangled = "Instead\n \nof\n \nisolated\n \nassistants."
+        laid_out = "Instead of isolated assistants."
+
+        class Page:
+            def extract_text(self, extraction_mode=None):
+                return laid_out if extraction_mode == "layout" else mangled
+
+        self.assertEqual(D._page_text(Page()), laid_out)
+
+    def test_page_text_falls_back_when_layout_unavailable(self) -> None:
+        class OldPage:
+            def extract_text(self, extraction_mode=None):
+                if extraction_mode is not None:
+                    raise TypeError("unexpected keyword argument")
+                return "plain text"
+
+        self.assertEqual(D._page_text(OldPage()), "plain text")
+
+    def test_page_text_falls_back_when_layout_returns_blank(self) -> None:
+        class BlankLayoutPage:
+            def extract_text(self, extraction_mode=None):
+                return "   " if extraction_mode == "layout" else "recovered"
+
+        self.assertEqual(D._page_text(BlankLayoutPage()), "recovered")
+
+    def test_page_text_survives_a_page_that_throws_both_ways(self) -> None:
+        class BadPage:
+            def extract_text(self, extraction_mode=None):
+                raise ValueError("malformed content stream")
+
+        self.assertEqual(D._page_text(BadPage()), "")
+
 
 # --- chunking ---------------------------------------------------------------
 class ChunkTests(unittest.TestCase):

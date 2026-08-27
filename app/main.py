@@ -382,6 +382,9 @@ async def _startup() -> None:
             # Typed chat -> memory: /chat stores a TEXT event + queues this.
             from app.services import chat_ingest
             worker.register("chat_ingest", chat_ingest.run_job)
+            # Web/agent research answers -> memory (testing-first writeback).
+            from app.services import research_ingest
+            worker.register("research_ingest", research_ingest.run_job)
             # Teammate answers -> memory: an answered peer ask stores a TEXT
             # event + queues this (peer_answer source class, hearsay tier).
             from app.services import peer_channel

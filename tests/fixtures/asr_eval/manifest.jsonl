@@ -1,0 +1,5 @@
+{"id": "silence_1", "audio": "clips/silence_1.wav", "category": "no_speech", "channel": "mic", "expect_speech": false, "reference": "", "notes": "synthetic hallucination probe (bootstrap)"}
+{"id": "silence_2", "audio": "clips/silence_2.wav", "category": "no_speech", "channel": "mic", "expect_speech": false, "reference": "", "notes": "synthetic hallucination probe (bootstrap)"}
+{"id": "fan_hiss", "audio": "clips/fan_hiss.wav", "category": "no_speech", "channel": "mic", "expect_speech": false, "reference": "", "notes": "synthetic hallucination probe (bootstrap)"}
+{"id": "keyboard", "audio": "clips/keyboard.wav", "category": "no_speech", "channel": "mic", "expect_speech": false, "reference": "", "notes": "synthetic hallucination probe (bootstrap)"}
+{"id": "tone", "audio": "clips/tone.wav", "category": "no_speech", "channel": "mic", "expect_speech": false, "reference": "", "notes": "synthetic hallucination probe (bootstrap)"}

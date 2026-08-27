@@ -15,6 +15,18 @@ confidence signal (with a has-confidence flag so None is information, not
 zero), hour-of-day, and the shared input embedding (the same MiniLM that
 embeds memory search — reused, not a second stack).
 
+D.2b adds the signal that most determines whether a GROUNDED local answer can
+succeed: did retrieval find the answer? Max/mean cosine over the retrieved
+chunks, the chunk count, and an entity-coverage score (how much of the
+question's entity vocabulary actually appears in the grounding block). All are
+computable before the local call, so they cost nothing extra.
+
+These MUST be captured at call time and carried on the row — never
+reconstructed at training time. Retrieval is nondeterministic as the memory
+store grows, so a replayed value would be a subtly different feature from the
+one production saw. Rows logged before D.2b simply carry has-value flags of 0;
+the training set heals forward and no backfill is needed.
+
 Model (v1, deliberately un-gold-plated): scikit-learn LogisticRegression on
 [scalars ⊕ embedding], probability-calibrated with CalibratedClassifierCV
 (D.3). Persisted with versioned filenames under data/router/. A SetFit-style
@@ -33,6 +45,36 @@ from app.config import settings
 TASKS = ("chat", "extract", "reflect", "activity", "other")
 
 _ENTITYISH = re.compile(r"\b[A-Z][a-z]+\b|\b\d[\d./:-]*\b")
+
+# Bumped whenever the feature vector's LAYOUT changes. A model fitted under a
+# different version has a different input width, so loading it would either
+# raise inside predict (silently reverting to the heuristic with no
+# explanation) or, worse, line up by accident and read garbage. load_latest
+# refuses the mismatch out loud instead; the next retrain replaces it.
+FEATURE_VERSION = 2
+
+# Order is the wire format of the retrieval block — appending is safe, but
+# reordering or inserting requires a FEATURE_VERSION bump.
+RETRIEVAL_KEYS = ("n_chunks", "max_sim", "mean_sim", "entity_coverage")
+
+# Chunk counts are normalized against this; beyond it "lots of hits" carries
+# no extra information.
+_CHUNKS_FULL_SCALE = 20.0
+
+# Entity-coverage only. Sentence-initial capitalization is grammar, not
+# entity-hood, and `_ENTITYISH` happily matches the "Did"/"What"/"Where" a
+# question opens with. Those words are absent from any grounding block, so
+# leaving them in puts a fixed downward bias on coverage for precisely the
+# well-formed questions the feature exists to score. `entity_density` keeps
+# the unfiltered regex — it is a length-normalized proxy, not a claim that
+# each match is an entity.
+_NON_ENTITY_WORDS = frozenset("""
+a an the and but or if for from with about of to in on at as
+did do does is are was were has have had can could should would will shall
+what when where who whom whose which why how may might
+i we you they he she it my our your their this that these those
+tell show list give find remember
+""".split())
 
 
 def _cfg():
@@ -77,8 +119,13 @@ def build_dataset(store=None) -> list[dict]:
             if lab is None:
                 continue
             task, text, label = lab
+            # Captured at call time and carried through the distill row's meta
+            # into source_refs (learning_store.from_distill_row) — absent on
+            # pairs from before D.2b and on non-escalation surfaces.
+            refs = pair.get("source_refs") or {}
             rows.append({"task": task, "text": text, "confidence": None,
                          "ts": float(pair.get("created_at") or 0),
+                         "retrieval": refs.get("retrieval"),
                          "label": label})
     except Exception as exc:
         print(f"[router_train] pair labels skipped ({exc}).")
@@ -102,6 +149,7 @@ def build_dataset(store=None) -> list[dict]:
                 rows.append({"task": str(g.get("task") or "chat"),
                              "text": text,
                              "confidence": g.get("confidence"),
+                             "retrieval": g.get("retrieval"),
                              "ts": float(g.get("ts") or 0), "label": 1})
     except Exception as exc:
         print(f"[router_train] shadow labels skipped ({exc}).")
@@ -109,8 +157,61 @@ def build_dataset(store=None) -> list[dict]:
 
 
 # ----------------------------- features -------------------------------------
+def retrieval_stats(question: str, *, hits: list | None,
+                    block: str | None) -> dict:
+    """Grounding retrieval → the D.2b feature dict, computed at call time.
+
+    `hits` is grounding.compose()'s semantic layer (each carrying a `score`
+    cosine) and `block` is the assembled grounding text. Entity coverage asks
+    a different question from cosine: cosine says the retrieved chunks LOOK
+    like the query, coverage says the specific names and numbers the question
+    asks about are actually present in what the model will read. A question
+    with no entity-ish tokens has no coverage to measure, so that stays None
+    rather than being scored as a zero.
+    """
+    hits = hits or []
+    scores = [float(h["score"]) for h in hits
+              if isinstance(h, dict) and h.get("score") is not None]
+    ents = {e.lower() for e in _ENTITYISH.findall(question or "")
+            } - _NON_ENTITY_WORDS
+    coverage = None
+    if ents:
+        low = (block or "").lower()
+        coverage = sum(1 for e in ents if e in low) / len(ents)
+    return {"n_chunks": len(hits),
+            "max_sim": max(scores) if scores else None,
+            "mean_sim": sum(scores) / len(scores) if scores else None,
+            "entity_coverage": coverage}
+
+
+def _retrieval_features(retrieval: dict | None) -> list[float]:
+    """8 slots: a has-value flag + the value for each of RETRIEVAL_KEYS.
+
+    Same None-is-information convention as `confidence` above. A call with no
+    grounding at all (extract, reflect) and a grounded call that retrieved
+    NOTHING are genuinely different events, and the flags keep them apart:
+    the first has every flag at 0, the second has has_n_chunks=1 with a count
+    of 0. Rows predating D.2b look like the first, which is correct — nobody
+    measured retrieval for them.
+    """
+    r = retrieval or {}
+    out: list[float] = []
+    n = r.get("n_chunks")
+    has_n = isinstance(n, (int, float)) and not isinstance(n, bool)
+    out += [1.0 if has_n else 0.0,
+            min(float(n), _CHUNKS_FULL_SCALE) / _CHUNKS_FULL_SCALE
+            if has_n else 0.0]
+    for key in RETRIEVAL_KEYS[1:]:
+        v = r.get(key)
+        has = isinstance(v, (int, float)) and not isinstance(v, bool)
+        out += [1.0 if has else 0.0,
+                max(0.0, min(1.0, float(v))) if has else 0.0]
+    return out
+
+
 def scalar_features(task: str, text: str, confidence: float | None,
-                    ts: float | None = None) -> list[float]:
+                    ts: float | None = None,
+                    retrieval: dict | None = None) -> list[float]:
     t = task if task in TASKS else "other"
     one_hot = [1.0 if t == k else 0.0 for k in TASKS]
     n_tokens = len(text) / 4.0
@@ -124,7 +225,7 @@ def scalar_features(task: str, text: str, confidence: float | None,
         1.0 if has_conf else 0.0,
         float(confidence) if has_conf else 0.0,
         hour,
-    ]
+    ] + _retrieval_features(retrieval)
 
 
 def featurize(rows: list[dict], *, embed=None):
@@ -138,7 +239,8 @@ def featurize(rows: list[dict], *, embed=None):
     X = []
     for r, v in zip(rows, vecs):
         X.append(scalar_features(r["task"], r["text"], r.get("confidence"),
-                                 r.get("ts")) + [float(x) for x in v])
+                                 r.get("ts"), r.get("retrieval"))
+                 + [float(x) for x in v])
     return np.asarray(X, dtype=float)
 
 
@@ -234,6 +336,7 @@ def save(model, metrics: dict, *, n_labels: int) -> Path:
     path = d / f"router_v{version}.joblib"
     joblib.dump(model, path)
     meta = {"version": version, "trained_at": time.time(),
+            "feature_version": FEATURE_VERSION,
             "n_labels": n_labels, "holdout": metrics,
             "t_low": _cfg().t_low, "t_high": _cfg().t_high}
     (d / f"router_v{version}.json").write_text(json.dumps(meta, indent=2),
@@ -249,8 +352,16 @@ def load_latest():
         return None, {}
     d = model_dir()
     try:
-        model = joblib.load(d / f"router_v{v}.joblib")
         meta = json.loads((d / f"router_v{v}.json").read_text(encoding="utf-8"))
+        # Pre-D.2b models carry no stamp, so an absent field means version 1.
+        fv = int(meta.get("feature_version") or 1)
+        if fv != FEATURE_VERSION:
+            print(f"[router_train] router_v{v} was fitted on feature version "
+                  f"{fv}, this build emits {FEATURE_VERSION} — not loading. "
+                  f"The next retrain replaces it; the heuristic routes until "
+                  f"then.")
+            return None, {}
+        model = joblib.load(d / f"router_v{v}.joblib")
         return model, meta
     except Exception as exc:
         print(f"[router_train] load failed ({exc}).")

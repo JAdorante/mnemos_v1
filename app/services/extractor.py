@@ -44,9 +44,9 @@ EXTRACTOR_MODEL = os.environ.get("QUILL_EXTRACT_MODEL", "claude-haiku-4-5")
 # which prompt+schema produced the LLM output. Bump when _SYSTEM or _SCHEMA
 # changes in a way that should invalidate prior candidates.
 EXTRACT_PROMPT_VERSION = os.environ.get(
-    "QUILL_EXTRACT_PROMPT_VERSION", "extract-v1")
+    "QUILL_EXTRACT_PROMPT_VERSION", "extract-v3")
 EXTRACT_SCHEMA_VERSION = os.environ.get(
-    "QUILL_EXTRACT_SCHEMA_VERSION", "facts-schema-v3")
+    "QUILL_EXTRACT_SCHEMA_VERSION", "facts-schema-v4")
 
 # LLM output arrays written to fact_candidates (kind → facts dict key).
 _CANDIDATE_KINDS = (
@@ -156,14 +156,38 @@ _SCHEMA = {
         },
         "commitments": {
             "type": "array",
-            "description": "Promises one person made to another ('I'll send you the deck'). "
-            "Directional: who promised, to whom. Only explicit promises.",
+            "description": "Promises one person made to another ('I'll send you the deck'), "
+            "AND scheduled meetings / appointments with a named person "
+            "('I have a meeting with Andy at 8:30', 'make note of my call with Sam'). "
+            "Set form='meeting' for meetings/calls/appointments; form='promise' otherwise. "
+            "Directional: who promised (or who is attending as 'me'), to/with whom. "
+            "Only explicit statements.",
             "items": {
                 "type": "object",
                 "properties": {
-                    "text": {"type": "string", "description": "The promise, as a clean statement."},
-                    "from_person": {"type": "string", "description": "Who made the promise — a name or 'me' for the speaker."},
-                    "to_person": {"type": "string", "description": "Who it was made to — a name, or '' if unspecified."},
+                    "form": {
+                        "type": "string",
+                        "enum": ["meeting", "promise"],
+                        "description":
+                        "'meeting' for a scheduled meeting/call/appointment/sync/1:1; "
+                        "'promise' for a deliverable commitment ('I'll send the deck').",
+                    },
+                    "text": {
+                        "type": "string",
+                        "description":
+                        "Short title — NOT a transcript echo. For meetings prefer "
+                        "'Meet {person}' or 'Meet {person} about {topic}'. For promises "
+                        "use an imperative ('Send Sarah the deck'). Never lead with "
+                        "'I have/I'll/Remember that/make note of'. Timing goes in `due`.",
+                    },
+                    "topic": {
+                        "type": "string",
+                        "description":
+                        "For form=meeting only: short subject ('Mnemos', 'pricing'). "
+                        "Empty string when unstated or for promises.",
+                    },
+                    "from_person": {"type": "string", "description": "Who made the promise — a name or 'me' for the speaker. For meetings, usually 'me'."},
+                    "to_person": {"type": "string", "description": "Who it was made to / the meeting counterparty — a name, or '' if unspecified."},
                     "due": {"type": "string",
                             "description": "Absolute local due (YYYY-MM-DD or "
                             "YYYY-MM-DDTHH:MM:SS) resolved against RIGHT NOW, "
@@ -172,7 +196,7 @@ _SCHEMA = {
                     "source_span": {"type": "string", "description": "Verbatim substring this came from."},
                     "assertion": _ASSERTION_PROP,
                 },
-                "required": ["text", "from_person", "to_person", "due", "confidence", "source_span", "assertion"],
+                "required": ["form", "text", "topic", "from_person", "to_person", "due", "confidence", "source_span", "assertion"],
                 "additionalProperties": False,
             },
         },
@@ -293,11 +317,20 @@ _SYSTEM = (
     "- Extract ONLY what is explicitly stated. Never infer, guess, or invent a "
     "task/commitment that isn't clearly there. An empty array is the correct "
     "answer for small talk, filler, or fragments.\n"
-    "- A TASK is a concrete action to be done. A COMMITMENT is a promise one "
-    "person made to another. A CLAIM is a notable fact (price, date, decision) "
-    "worth remembering that is neither. A QUESTION is an explicit open question "
-    "someone asked that still needs an answer — put those in `questions`, not "
-    "claims.\n"
+    "- A TASK is a concrete action to be done. A COMMITMENT is either a promise "
+    "one person made to another OR an explicit meeting/appointment/call with a "
+    "named person (set form='meeting'). A CLAIM is a notable fact (price, date, "
+    "decision) worth remembering that is neither. A QUESTION is an explicit open "
+    "question someone asked that still needs an answer — put those in "
+    "`questions`, not claims.\n"
+    "- Title style: task `text` is a clean imperative ('Book the venue'). "
+    "For form='meeting', set to_person to the counterparty, topic to the short "
+    "subject when stated, and text to 'Meet {person}' / 'Meet {person} about "
+    "{topic}'. For form='promise', text is an imperative ('Send {person} the deck'). "
+    "Never paste the whole utterance; never lead with 'I have/I'll/Remember "
+    "that/make note of'; never put the clock time in `text` (that belongs in "
+    "`due`). If the user says 'make note of my meeting with X', emit one "
+    "commitment with form='meeting', to_person=X — not a 'make note of' title.\n"
     "- Ownership is relative to the labeled speaker of THIS turn. Use 'me' for "
     "owner/from_person/to_person when that labeled speaker refers to themselves "
     "('I'll send…', 'my task'). Do NOT use 'me' for a different person mentioned "
@@ -661,11 +694,15 @@ class Extractor:
                 pid = self_profile.self_person_id(store)
                 return ("person", pid) if pid else None
             if kind == "person":
+                # Chat / DM sources are allowed to mint; ambient ASR stays
+                # conservative so overheard names don't flood the network.
+                src = (event_source or "audio.whisper").lower()
+                boost = 0.75 if "chat" in src else 0.45
                 pid = self._resolve_person_id(
                     nm, now, event_id=anchor,
                     event_source=event_source or "audio.whisper",
                     window=window, text=text,
-                    grammatical_role="relation", relationship_boost=0.45)
+                    grammatical_role="relation", relationship_boost=boost)
                 return ("person", pid) if pid else None
             if mint_ok:
                 eid = resolver.resolve_entity(nm, ts=now)
@@ -918,8 +955,10 @@ class Extractor:
             owner_ref = _person(owner_name, role="owner", boost=0.85)
             owner_pid = owner_ref.person_id
             escrowed = _escrows_to_track(owner_name, owner_pid)
+            from app.services.fact_titles import titleize_work_item
+            task_text = titleize_work_item(t["text"], kind="task") or t["text"]
             fid = store.add_task(
-                t["text"], source_event_id=anchor,
+                task_text, source_event_id=anchor,
                 source_span=t.get("source_span", ""),
                 confidence=t.get("confidence"),
                 owner_person_id=owner_pid,
@@ -944,13 +983,13 @@ class Extractor:
             _apply(v, fid)
             if cid:
                 store.set_fact_candidate_status(cid, "accepted", verdict_reason=reason)
-            _index_fact(store, fid, "task", t["text"], now)
+            _index_fact(store, fid, "task", task_text, now)
             _stamp_context(fid)
             self._record_faithfulness(t, turn.text)
             # Proactively ask if I should action this heard task (gated by
             # confidence + cooldown; no-op when the agent/offer is disabled).
             from app.services.task_offer import offer_task
-            offer_task(t["text"], t.get("confidence"), fid)
+            offer_task(task_text, t.get("confidence"), fid)
             n += 1
         for c in facts.get("commitments", []):
             if not c.get("text"):
@@ -980,8 +1019,12 @@ class Extractor:
             to_name = c.get("to_person", "")
             to_ref = _person(to_name, role="to", boost=0.75)
             escrowed = _escrows_to_track(from_name, from_pid)
+            from app.services.fact_titles import commitment_title
+            commit_text = commitment_title(c) or (c.get("text") or "").strip()
+            if not commit_text:
+                continue
             fid = store.add_commitment(
-                c["text"], source_event_id=anchor,
+                commit_text, source_event_id=anchor,
                 source_span=c.get("source_span", ""),
                 confidence=c.get("confidence"),
                 from_person_id=from_pid,
@@ -1006,7 +1049,7 @@ class Extractor:
             _apply(v, fid)
             if cid:
                 store.set_fact_candidate_status(cid, "accepted", verdict_reason=reason)
-            _index_fact(store, fid, "commitment", c["text"], now)
+            _index_fact(store, fid, "commitment", commit_text, now)
             _stamp_context(fid)
             self._record_faithfulness(c, turn.text)
             n += 1

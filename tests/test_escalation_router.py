@@ -7,6 +7,8 @@ Acceptance criteria covered:
   * activation requires the explicit flag flip
   * the router module is never imported by the decide/approval layer
   * retrain-on-N-new-labels triggers under the idle scheduler
+  * D.2b retrieval features: measured at call time, threaded to predict,
+    recorded on the rows training reads, and version-guarded on load
 """
 from __future__ import annotations
 
@@ -112,6 +114,97 @@ class TrainingTests(_Env):
         for _ in range(1000):
             rt.scalar_features("chat", "some question " * 40, 0.7)
         self.assertLess((_t.time() - t0) / 1000, 0.01)   # <10ms per call
+
+    def test_retrieval_features_are_optional_and_fast(self) -> None:
+        """Adding retrieval must not slow the <10ms budget or change width."""
+        stats = {"n_chunks": 4, "max_sim": 0.8, "mean_sim": 0.5,
+                 "entity_coverage": 0.75}
+        base = rt.scalar_features("chat", "q about Bob", 0.7)
+        withr = rt.scalar_features("chat", "q about Bob", 0.7, None, stats)
+        self.assertEqual(len(base), len(withr))
+        self.assertNotEqual(base, withr)
+        import time as _t
+        t0 = _t.time()
+        for _ in range(1000):
+            rt.scalar_features("chat", "some question " * 40, 0.7, None, stats)
+        self.assertLess((_t.time() - t0) / 1000, 0.01)
+
+    def test_feature_version_guard_refuses_stale_model(self) -> None:
+        """A model fitted on another layout must not be loaded — otherwise the
+        router silently reverts to the heuristic with no explanation."""
+        import json
+        self._fit_and_save()
+        self.assertIsNotNone(rt.load_latest()[0])
+        meta_p = rt.model_dir() / f"router_v{rt.latest_version()}.json"
+        meta = json.loads(meta_p.read_text(encoding="utf-8"))
+        self.assertEqual(meta["feature_version"], rt.FEATURE_VERSION)
+        meta["feature_version"] = rt.FEATURE_VERSION + 1
+        meta_p.write_text(json.dumps(meta), encoding="utf-8")
+        self.assertEqual(rt.load_latest(), (None, {}))
+
+
+class RetrievalFeatureTests(unittest.TestCase):
+    """D.2b: 'did retrieval find the answer?' as a routing feature."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_stats_from_grounding_output(self) -> None:
+        st = rt.retrieval_stats(
+            "Did Bob ship 3 widgets?",
+            hits=[{"score": 0.9}, {"score": 0.5}, {"score": None}],
+            block="Bob shipped 3 widgets on Tuesday")
+        self.assertEqual(st["n_chunks"], 3)          # counts every hit
+        self.assertAlmostEqual(st["max_sim"], 0.9)   # ...scores only the scored
+        self.assertAlmostEqual(st["mean_sim"], 0.7)
+        # "Did" is a _ENTITYISH match but not an entity — filtered, so the
+        # two real ones (Bob, 3) both being present scores a clean 1.0.
+        self.assertAlmostEqual(st["entity_coverage"], 1.0)
+
+    def test_empty_retrieval_is_not_missing_retrieval(self) -> None:
+        """Retrieved nothing != nobody measured. The flags must separate them,
+        or 'grounding failed' looks identical to 'ungrounded task'."""
+        empty = rt.retrieval_stats("Where is Bob?", hits=[], block="")
+        self.assertEqual(empty["n_chunks"], 0)
+        self.assertIsNone(empty["max_sim"])
+        self.assertNotEqual(rt._retrieval_features(empty),
+                            rt._retrieval_features(None))
+        self.assertEqual(rt._retrieval_features(None), [0.0] * 8)
+
+    def test_coverage_none_when_question_has_no_entities(self) -> None:
+        """Every token here is a question word, so there is nothing to cover —
+        that is None (unmeasurable), never 0.0 (measured and missing)."""
+        st = rt.retrieval_stats("What is it?", hits=[{"score": 0.3}], block="x")
+        self.assertIsNone(st["entity_coverage"])
+
+    def test_values_are_bounded(self) -> None:
+        """Scores are cosines but nothing upstream guarantees the range."""
+        feats = rt._retrieval_features(
+            {"n_chunks": 9999, "max_sim": 4.0, "mean_sim": -2.0,
+             "entity_coverage": 0.5})
+        self.assertTrue(all(0.0 <= f <= 1.0 for f in feats), feats)
+
+    def test_build_dataset_reads_captured_stats(self) -> None:
+        """The stats must survive the trip through the pair's source_refs —
+        that join is the only path from call time to training time."""
+        stats = {"n_chunks": 2, "max_sim": 0.7, "mean_sim": 0.6,
+                 "entity_coverage": 0.5}
+
+        class _Store:
+            def list_learning_pairs(self, limit=0):
+                return [{"input_text": "q", "verdict": "accepted",
+                         "created_at": 1.0,
+                         "source_refs": {"task": "chat", "retrieval": stats}}]
+
+        # Isolate from this machine's real shadow grades.
+        from types import SimpleNamespace
+        fake = SimpleNamespace(shadow=SimpleNamespace(
+            grades_path=str(Path(self.tmp.name) / "no_grades.jsonl")))
+        with patch.object(rt, "settings", fake):
+            rows = rt.build_dataset(store=_Store())
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["retrieval"], stats)
 
 
 class BandingTests(_Env):

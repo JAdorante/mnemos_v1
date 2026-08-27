@@ -3,6 +3,9 @@
 PYTHON ?= python
 
 .PHONY: bench-latency bench-latency-cold latency-baseline
+.PHONY: eval-asr eval-asr-check eval-asr-smoke eval-asr-bootstrap eval-asr-baseline
+.PHONY: listen-idle listen-idle-baseline
+.PHONY: asr-calibrate asr-calibration
 .PHONY: eval eval-live eval-people eval-people-live eval-grounding eval-planner eval-noise golden-commitments golden-entity-resolution golden-contact-attribution
 
 # Plan 2.2 + 2.3 + 2.4 + 3.3 + 5.2: golden thresholds (offline, no API key).
@@ -65,3 +68,59 @@ bench-latency-cold:
 latency-baseline:
 	$(PYTHON) scripts/bench_latency.py --rounds 10 \
 	  --json data/latency_baseline.json
+
+# --- perception: idle footprint -----------------------------------------------
+# What listening costs while nobody speaks — the baseline Phase B's "≤ half of
+# baseline" is measured against. Paced to real time on purpose; --fast reports
+# a CPU share several times too low. Freeze it on the reference machine:
+#   make listen-idle-baseline
+listen-idle:
+	$(PYTHON) scripts/bench_listen_idle.py --seconds 30 \
+	  --baseline data/listen_idle_baseline.json
+
+listen-idle-baseline:
+	$(PYTHON) scripts/bench_listen_idle.py --seconds 30 \
+	  --json data/listen_idle_baseline.json
+
+# --- perception: ASR engine acceptance ----------------------------------------
+# The gate for every engine swap (Whisper -> Parakeet and anything after it).
+# Real fixtures live in tests/fixtures/asr_eval/ — see the README there; the
+# clips are not in git, so `eval-asr-bootstrap` first on a fresh checkout.
+eval-asr-bootstrap:
+	$(PYTHON) scripts/eval_asr.py bootstrap
+
+# Cheap and fast — run it before a long scoring run, and in CI on any PR
+# touching app/services/audio*.py or the engine seam.
+eval-asr-check:
+	$(PYTHON) scripts/eval_asr.py check
+
+# The CI gate (.github/workflows/perception.yml): audio with no speech in it
+# must not become a memory. Loads a real engine; needs no recorded fixtures.
+eval-asr-smoke:
+	$(PYTHON) scripts/eval_asr.py smoke
+
+# Score one engine: `make eval-asr ASR_ENGINE=parakeet-onnx`.
+ASR_ENGINE ?= whisper
+eval-asr: eval-asr-check
+	$(PYTHON) scripts/eval_asr.py run --engine $(ASR_ENGINE) --speakers
+
+# Freeze the incumbent as the comparison point. Every later engine is scored
+# against this file, on the same machine, or the numbers mean nothing.
+eval-asr-baseline:
+	$(PYTHON) scripts/eval_asr.py run --tag whisper-baseline --speakers \
+	  -o data/eval/asr/report_whisper-baseline.json
+
+# Fit a new engine's ingest thresholds against the incumbent's, so a different
+# confidence scale cannot quietly change what becomes a memory (§3.3). Dry-run
+# by default: read the operating-point comparison, then re-run with --write.
+#   make asr-calibrate REF=data/eval/asr/report_whisper-baseline.json \
+#                      CAND=data/eval/asr/report_parakeet.json
+REF ?= data/eval/asr/report_whisper-baseline.json
+CAND ?=
+asr-calibrate:
+	@test -n "$(CAND)" || (echo "set CAND=<candidate report.json>"; exit 2)
+	$(PYTHON) scripts/calibrate_asr_confidence.py fit $(REF) $(CAND)
+
+# What every engine is currently judged on.
+asr-calibration:
+	$(PYTHON) scripts/calibrate_asr_confidence.py show

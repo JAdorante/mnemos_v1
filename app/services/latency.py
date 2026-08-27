@@ -268,14 +268,52 @@ def record_ollama_timings(payload: dict[str, Any]) -> None:
         print(f"[latency] ollama timings skipped ({exc}).")
 
 
+def record(kind: str, task: str | None = None, *, total_ms: float,
+           stages: dict[str, float] | None = None,
+           marks: dict[str, Any] | None = None) -> None:
+    """Write one completed trace assembled from timings measured elsewhere.
+
+    Rule 2 in reverse: some paths already time their own stages for another
+    consumer (the audio pipeline stamps every stage into `audio_telemetry` so
+    the Audio Health console can show it) and opening a `trace()` around them
+    would time the same work twice. Those callers hand the numbers over here
+    instead, so the span trail is complete without a second set of probes.
+
+    `total_ms` is the caller's own end-to-end figure, not a wall-clock read at
+    call time — the difference between it and the stage sum is what shows up as
+    `unaccounted_ms`, which is the whole point of the row.
+    """
+    if not enabled():
+        return
+    try:
+        st = {str(k): round(float(v), 2) for k, v in (stages or {}).items()
+              if isinstance(v, (int, float))}
+        row: dict[str, Any] = {
+            "time": round(time.time(), 3),
+            "kind": str(kind),
+            "task": task,
+            "total_ms": round(float(total_ms), 2),
+            "stages": st,
+            "unaccounted_ms": round(max(0.0, float(total_ms) - sum(st.values())), 2),
+        }
+        if marks:
+            row["marks"] = {str(k): v for k, v in marks.items() if v is not None}
+        _write(row)
+    except Exception as exc:  # pragma: no cover - telemetry never raises
+        print(f"[latency] span record skipped ({exc}).")
+
+
+def _write(row: dict[str, Any]) -> None:
+    p = _path()
+    with _write_lock:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row) + "\n")
+
+
 def _emit(tr: Trace) -> None:
     try:
-        row = tr.row()
-        p = _path()
-        with _write_lock:
-            p.parent.mkdir(parents=True, exist_ok=True)
-            with p.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(row) + "\n")
+        _write(tr.row())
     except Exception as exc:  # pragma: no cover - telemetry never raises
         print(f"[latency] span write skipped ({exc}).")
 
@@ -426,19 +464,40 @@ def capture_stages(window_s: float = 86400.0, store=None) -> dict[str, Any]:
     `post_asr` is the residual (total - queue_wait - asr): everything between a
     finished transcript and a published event — dedup, echo suppression,
     speaker ID, storage. It is the share Phase 3.1 would pipeline away, and the
-    only way to know whether that is worth doing is to see it here first.
+    only way to know whether that is worth doing is to see it here first. The
+    capture thread also records `post_ms` directly now; the residual is kept as
+    the reported stage because it closes the budget by construction, while the
+    measured column additionally covers utterances that were *dropped* late.
+
+    `vad_ms` is reported beside the stages rather than as one of them: Silero
+    runs during speech, before the speech-end the budget starts at, so folding
+    it in would make the shares sum to more than the whole. It is a cost
+    figure — the always-on CPU that Phase B's two-tier ladder has to beat.
+
+    `by_channel` splits mic from loopback. They have different audio, different
+    timing and different failure modes; a single p90 across both is an average
+    of two distributions and moves for reasons nobody can act on.
     """
     out: dict[str, Any] = {"window_s": window_s, "n": 0, "stages": [],
-                           "capture_to_published": {}}
+                           "capture_to_published": {}, "vad_ms": {},
+                           "by_channel": {}}
+    _WHERE = ("FROM audio_telemetry WHERE ts >= ? AND outcome = 'kept' "
+              "AND total_latency_ms IS NOT NULL")
+    _BASE = "queue_wait_ms, asr_latency_ms, total_latency_ms"
     try:
         if store is None:
             from app.storage import get_store
             store = get_store()
         cutoff = time.time() - float(window_s)
-        rows = [dict(r) for r in store._conn.execute(
-            "SELECT queue_wait_ms, asr_latency_ms, total_latency_ms "
-            "FROM audio_telemetry WHERE ts >= ? AND outcome = 'kept' "
-            "AND total_latency_ms IS NOT NULL", (cutoff,)).fetchall()]
+        try:
+            rows = [dict(r) for r in store._conn.execute(
+                f"SELECT {_BASE}, vad_ms, post_ms, channel, engine {_WHERE}",
+                (cutoff,)).fetchall()]
+        except Exception:
+            # A store predating the stage-timer columns: fall back to the
+            # original three so an old DB reports rather than erroring.
+            rows = [dict(r) for r in store._conn.execute(
+                f"SELECT {_BASE} {_WHERE}", (cutoff,)).fetchall()]
     except Exception as exc:
         return {**out, "error": str(exc)}
 
@@ -472,6 +531,32 @@ def capture_stages(window_s: float = 86400.0, store=None) -> dict[str, Any]:
         "p90": round(_pct(totals, 90), 1),
         "p99": round(_pct(totals, 99), 1),
     }
+    vad = col("vad_ms")
+    if vad:
+        out["vad_ms"] = {"n": len(vad), "p50": round(_pct(vad, 50), 1),
+                         "p90": round(_pct(vad, 90), 1),
+                         "p99": round(_pct(vad, 99), 1)}
+    channels: dict[str, list[dict]] = {}
+    for r in rows:
+        ch = r.get("channel")
+        if ch:
+            channels.setdefault(str(ch), []).append(r)
+    for ch, crows in sorted(channels.items()):
+        ctot = [float(r["total_latency_ms"]) for r in crows
+                if isinstance(r.get("total_latency_ms"), (int, float))]
+        casr = [float(r["asr_latency_ms"]) for r in crows
+                if isinstance(r.get("asr_latency_ms"), (int, float))]
+        if not ctot:
+            continue
+        out["by_channel"][ch] = {
+            "n": len(ctot),
+            "total_p50": round(_pct(ctot, 50), 1),
+            "total_p90": round(_pct(ctot, 90), 1),
+            "asr_p90": round(_pct(casr, 90), 1) if casr else None,
+        }
+    engines = sorted({str(r["engine"]) for r in rows if r.get("engine")})
+    if engines:
+        out["engines"] = engines
     return out
 
 

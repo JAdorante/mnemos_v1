@@ -492,16 +492,18 @@ def link_constellation_edge(store: Store, source: str, target: str) -> dict:
 
 
 def _short_constellation_label(text: str, *, kind: str) -> str:
-    """Keep constellation labels short — long ASR/log lines ruin the sky."""
-    t = " ".join((text or "").split())
-    if not t:
-        return "…"
-    for sep in (" — ", " - ", ": ", " | "):
-        if sep in t and len(t.split(sep, 1)[0]) >= 3:
-            t = t.split(sep, 1)[0]
-            break
-    cap = 18 if kind == "person" else 22
-    return t if len(t) <= cap else (t[: cap - 1] + "…")
+    """Keep constellation labels short — long ASR/log lines ruin the sky.
+
+    Tasks/commitments go through ``fact_titles`` first so chatty extracts
+    ("I have a meeting with Andy…") become scannable ("Meet Andy about…")
+    and truncate on a word boundary instead of mid-word ("meetin…").
+    """
+    from app.services.fact_titles import short_label
+    if kind in ("commitment", "task"):
+        return short_label(text, kind=kind, cap=28)
+    if kind == "person":
+        return short_label(text, kind="person", cap=18)
+    return short_label(text, kind="entity", cap=22)
 
 
 def _sigmoid(x: float) -> float:
@@ -1042,12 +1044,14 @@ def constellation(store: Store | None = None, limit: int = 28,
         fid = f"fact:{f['fact_id']}"
         ts = f.get("extracted_at") or f.get("source_time")
         fkind = "task" if f.get("kind") == "task" else "commitment"
+        full_text = f.get("text") or f.get("source_span") or "item"
         candidates[fid] = _base(
-            fid, f.get("text") or f.get("source_span") or "item", fkind,
+            fid, full_text, fkind,
             ts=ts, confidence=float(f.get("confidence") or 0.5), due=f.get("due"),
             meta={"fact_kind": f.get("kind"), "status": f.get("status"),
                   "source_time": f.get("source_time"),
-                  "source_event_id": f.get("source_event_id")},
+                  "source_event_id": f.get("source_event_id"),
+                  "full_text": full_text},
         )
 
     # Meeting Layer P2: precompute jot timestamps once for note_adjacent.
@@ -1379,6 +1383,11 @@ def constellation(store: Store | None = None, limit: int = 28,
         cn = int(n.get("cluster_n") or 1)
         if cn > 1:
             row["cluster_n"] = cn
+        # Full work-item text for tips/inspector (label is the short sky title).
+        meta = n.get("meta") or {}
+        full = meta.get("full_text")
+        if full and full != row["label"]:
+            row["meta"] = {"full_text": full}
         clean_nodes.append(row)
 
     edge_list = sorted(edges, key=lambda e: -e["weight"])[: max(60, total * 2)]

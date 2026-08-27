@@ -176,10 +176,10 @@ class CaptureEndpointTests(unittest.TestCase):
         with patch.object(routes_mod, "_desktop_capture") as desk_mock, \
              patch.object(routes_mod, "_desktop_capture_running", False):
             desk_mock.start.side_effect = RuntimeError(
-                "desktop capture is currently Windows-only")
+                "desktop capture is currently Windows/Linux-only")
             r = self.client.post("/capture/resume", json={"source": "screen"})
         self.assertEqual(r.status_code, 503)
-        self.assertIn("Windows-only", r.json().get("detail", ""))
+        self.assertIn("Windows/Linux-only", r.json().get("detail", ""))
 
     def test_kill_switch_endpoint(self):
         r = self.client.post("/console/hardening/kill-switch",

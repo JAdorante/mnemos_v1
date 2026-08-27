@@ -75,8 +75,20 @@ def first_run_ambient(body: AmbientIn) -> dict:
 
 @router.get("/first-run/nudge")
 def first_run_nudge() -> dict:
-    from app.services import first_run
+    from app.services import first_run, meeting_enhance
+    from app.services.memory import memory
     pend = first_run.load().get("pending_first_win")
+    if isinstance(pend, dict) and pend:
+        # Re-resolve at serve time so a stale /meeting/note/{id} (e.g. from a
+        # test DB that leaked into first_run.json) never 404s the toast.
+        try:
+            store = memory._ensure_store()
+            sid = pend.get("session_id")
+            href = meeting_enhance.note_href_for_session(
+                store, int(sid) if sid is not None else None)
+            pend = {**pend, "href": href}
+        except Exception:
+            pend = {**pend, "href": pend.get("href") or "/meetings"}
     unlock = first_run.unlock_card()
     return {"first_win": pend, "unlock": unlock}
 

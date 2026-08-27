@@ -67,6 +67,35 @@ _JSON_CONF_TRAILER = (
     "use values below 0.6 only when genuinely unsure."
 )
 
+# Reasoning-model protocol. Qwen3-family tags (and other 2026-class thinking
+# models) prepend a `<think>...</think>` block to the reply unless the
+# non-thinking variant is pulled. Left in place it lands BEFORE the
+# `CONFIDENCE:` trailer parse, so the block becomes part of the answer: the
+# distill row stores reasoning as its target, and embedding similarity scores
+# the monologue instead of the reply. Stripping here — not at the call sites —
+# means pulling a thinking-default tag can never silently poison the trail.
+_THINK_PAIR_RE = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>\s*", re.S | re.I)
+_THINK_HEAD_RE = re.compile(r"\A.*?</think(?:ing)?>\s*", re.S | re.I)
+_THINK_TAIL_RE = re.compile(r"<think(?:ing)?>.*\Z", re.S | re.I)
+
+
+def strip_reasoning(text: str) -> str:
+    """Remove a model's `<think>` monologue, leaving only the reply.
+
+    Three shapes, in order: a well-formed block anywhere; a stray closing tag
+    with no opener (the model was prefilled mid-thought); and an UNTERMINATED
+    opener, which means generation hit `num_predict` before the model finished
+    thinking. That last case deliberately empties the text — a truncated
+    monologue is not an answer, and an empty reply with no CONFIDENCE trailer
+    reads as confidence None, i.e. escalate, which is the right outcome.
+    """
+    t = _THINK_PAIR_RE.sub("", text or "")
+    if "</think" in t.lower():
+        t = _THINK_HEAD_RE.sub("", t)
+    if "<think" in t.lower():
+        t = _THINK_TAIL_RE.sub("", t)
+    return t.strip()
+
 
 def split_confidence(text: str) -> tuple[str, float | None]:
     """Strip the trailing `CONFIDENCE: 0.NN` line; return (clean_text, conf).
@@ -258,7 +287,7 @@ class OllamaText:
         _log(task, "ollama", self.model, time.time() - t0, ok=True,
              input_tokens=out.get("prompt_eval_count", 0) or 0,
              output_tokens=out.get("eval_count", 0) or 0, cost_usd=0.0)
-        text = ((out.get("message") or {}).get("content") or "").strip()
+        text = strip_reasoning(((out.get("message") or {}).get("content") or ""))
 
         if schema is None:
             clean, conf = split_confidence(text)

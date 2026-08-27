@@ -13,6 +13,8 @@ Opt-in via QUILL_DESKTOP_CAPTURE=1. Independent of QUILL_DESKTOP_UI (agent contr
 from __future__ import annotations
 
 import io
+import os
+import sys
 import threading
 import time
 from pathlib import Path
@@ -24,30 +26,42 @@ from app.events import Event, Modality, bus
 from app.services import confidence as _conf
 from app.services import frame_quality
 
+# Linux click hooks: prefer Xorg so pynput does not require compiling evdev.
+if sys.platform.startswith("linux"):
+    os.environ.setdefault("PYNPUT_BACKEND", "xorg")
+
 DCfg = settings.desktop_capture
 
 
 def _foreground_window() -> dict:
-    """Best-effort foreground window title (Windows). Empty dict elsewhere."""
-    if __import__("os").name != "nt":
-        return {}
-    try:
-        import ctypes
+    """Best-effort foreground window title (Windows / Linux X11)."""
+    os = __import__("os")
+    if os.name == "nt":
+        try:
+            import ctypes
 
-        user32 = ctypes.windll.user32
-        hwnd = user32.GetForegroundWindow()
-        if not hwnd:
+            user32 = ctypes.windll.user32
+            hwnd = user32.GetForegroundWindow()
+            if not hwnd:
+                return {}
+            length = user32.GetWindowTextLengthW(hwnd)
+            buf = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buf, length + 1)
+            title = (buf.value or "").strip()
+            out: dict = {"hwnd": int(hwnd)}
+            if title:
+                out["window"] = title
+            return out
+        except Exception:
             return {}
-        length = user32.GetWindowTextLengthW(hwnd)
-        buf = ctypes.create_unicode_buffer(length + 1)
-        user32.GetWindowTextW(hwnd, buf, length + 1)
-        title = (buf.value or "").strip()
-        out: dict = {"hwnd": int(hwnd)}
-        if title:
-            out["window"] = title
-        return out
-    except Exception:
-        return {}
+    if __import__("sys").platform.startswith("linux"):
+        try:
+            from desktop_agent import x11_util
+
+            return x11_util.active_window()
+        except Exception:
+            return {}
+    return {}
 
 
 def _grab_rgb() -> tuple[np.ndarray, tuple[int, int]]:
@@ -63,7 +77,10 @@ def _grab_rgb() -> tuple[np.ndarray, tuple[int, int]]:
             arr = np.asarray(img)
             return arr, (int(shot.width), int(shot.height))
     except Exception:
-        import pyautogui
+        # pyautogui is a Windows-only dep (see requirements.txt); Linux uses mss.
+        if not sys.platform.startswith("win"):
+            raise
+        import pyautogui  # type: ignore
 
         img = pyautogui.screenshot()
         arr = np.asarray(img.convert("RGB"))
@@ -439,8 +456,25 @@ class DesktopCapturePipeline:
         if not self.cfg.enabled:
             raise RuntimeError(
                 "desktop capture disabled (set QUILL_DESKTOP_CAPTURE=1 to enable)")
-        if __import__("os").name != "nt":
-            raise RuntimeError("desktop capture is currently Windows-only")
+        plat = __import__("sys").platform
+        if not (plat.startswith("win") or plat.startswith("linux")):
+            raise RuntimeError(
+                "desktop capture is currently Windows/Linux-only "
+                "(macOS meeting path does not include screen/clicks)")
+        if plat.startswith("linux"):
+            # mss + pynput need a real X11 DISPLAY; XWayland is unreliable.
+            try:
+                from desktop_agent import x11_util
+
+                if not x11_util.session_ok():
+                    raise RuntimeError(
+                        "desktop capture needs an X11 session "
+                        "(DISPLAY set, XDG_SESSION_TYPE!=wayland)")
+            except RuntimeError:
+                raise
+            except Exception as exc:
+                raise RuntimeError(
+                    f"desktop capture X11 check failed ({exc})") from exc
         if self._screen_thread and self._screen_thread.is_alive():
             return
         # Also refuse restart while L1 owns the screen producer.
@@ -483,7 +517,9 @@ class DesktopCapturePipeline:
                 started.append("clicks")
             except Exception as exc:
                 print(f"[desktop_capture] click listener failed ({exc}). "
-                      f"Install pynput: pip install pynput")
+                      f"Install pynput: pip install pynput "
+                      f"(on Linux: pip install pynput --no-deps if evdev "
+                      f"build fails; Xorg backend uses python-xlib)")
 
         if not started:
             raise RuntimeError(

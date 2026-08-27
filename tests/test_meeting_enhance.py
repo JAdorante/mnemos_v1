@@ -78,11 +78,23 @@ class EnhancePersistTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="quill_me_")
         self.store = _store(self.tmp)
-        self.env = patch.dict(os.environ, {"QUILL_MEETING_ENHANCE": "1"})
+        self.env = patch.dict(os.environ, {
+            "QUILL_MEETING_ENHANCE": "1",
+            "QUILL_DATA_DIR": self.tmp,
+        })
         self.env.start()
+        # enhance_session writes first_run + meeting_prefs; keep them off prod data/.
+        from app.services import first_run, meeting_mode as mm
+        first_run._cached = None
+        self._prefs = patch.object(
+            mm, "_prefs_path", lambda: Path(self.tmp) / "meeting_prefs.json")
+        self._prefs.start()
 
     def tearDown(self):
+        self._prefs.stop()
         self.env.stop()
+        from app.services import first_run
+        first_run._cached = None
         self.store.close()
 
     def _session_with_fact(self):
@@ -160,6 +172,12 @@ class EnhancePersistTests(unittest.TestCase):
         self.assertIn("commitment", kinds)
         cited = next(it for it in items if it["kind"] == "commitment")
         self.assertIn(fid, cited["source_fact_ids"])
+
+        # First-win deep-link must be session-scoped (never a raw reflection id).
+        from app.services import first_run
+        pend = first_run.load().get("pending_first_win")
+        self.assertIsInstance(pend, dict)
+        self.assertEqual(pend.get("href"), "/meetings/1")
 
         # Idempotent
         res2 = me.enhance_session(sess, store=self.store, force=False)

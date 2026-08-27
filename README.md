@@ -747,6 +747,9 @@ loaded after `.env` with override, for secrets.
 
 | Var | Default | Notes |
 |---|---|---|
+| `QUILL_ASR_ENGINE` | `whisper` | which ASR engine (`app/services/asr.py`); set back to `whisper` to roll back a swap |
+| `QUILL_ASR_WORD_TIMESTAMPS` | `0` | word-level timings in `meta`; costs time on Whisper, free on engines that emit them natively |
+| _(file)_ `data/asr_calibration.json` | none | per-engine ingest thresholds fitted by `scripts/calibrate_asr_confidence.py`; absent = every engine judged on Whisper's confidence scale |
 | `QUILL_WHISPER_MODEL` | `small` | `base`, `medium`, `large-v3-turbo`, … |
 | `QUILL_WHISPER_COMPUTE` | `int8` | `int8`, `float16` (GPU), `float32` |
 | `QUILL_WHISPER_DEVICE` | `cpu` | `cuda` for a big speedup |

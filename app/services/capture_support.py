@@ -35,15 +35,14 @@ AVAILABLE = "available"
 SETUP = "setup"
 UNSUPPORTED = "unsupported"
 
-# Desktop capture (screen + click logging) and Windows toast capture are
-# Windows-only in the pipeline itself — see desktop_capture.start() and
-# services/notifications.py. docs/macos-meeting.md scopes the macOS build to
-# the meeting path, so this is the intended shape, not a gap to close later.
+# macOS desktop capture stays Windows/Linux-only — docs/macos-meeting.md scopes
+# the Mac build to the meeting path. Linux uses mss + pynput under X11
+# (see desktop_capture.start() and desktop_agent/x11_util.py).
 _DESKTOP_ONLY_ON_WINDOWS = (
-    "Screen capture is Windows-only in this build. Meetings, memory, search "
-    "and the Console all work here.")
+    "Screen capture is Windows/Linux-only in this build. Meetings, memory, "
+    "search and the Console all work here.")
 _CLICKS_ONLY_ON_WINDOWS = (
-    "Mouse-click capture is Windows-only in this build.")
+    "Mouse-click capture is Windows/Linux-only in this build.")
 _MAC_SYSTEM_AUDIO = (
     "Needs a loopback device to hear the other side of a call. Install "
     "BlackHole, set it as the output (or a Multi-Output Device with your "
@@ -52,6 +51,9 @@ _MAC_SYSTEM_AUDIO = (
 _LINUX_SYSTEM_AUDIO = (
     "Needs a PulseAudio/PipeWire monitor source. Set QUILL_SYSTEM_AUDIO_DEVICE "
     "to the monitor of your output device.")
+_LINUX_DESKTOP_NOTE = (
+    "Needs an X11 session (mss + pynput). Wayland screen/click capture is "
+    "not supported yet.")
 
 
 def _norm(platform: str | None) -> str:
@@ -83,11 +85,15 @@ def support(platform: str | None = None) -> dict[str, dict[str, Any]]:
         put("screen", AVAILABLE)
         put("clicks", AVAILABLE)
         put("system_audio", AVAILABLE)
+    elif os_name == "linux":
+        # Offered; start() still fails soft if DISPLAY/X11 is missing.
+        put("screen", AVAILABLE, _LINUX_DESKTOP_NOTE)
+        put("clicks", AVAILABLE, _LINUX_DESKTOP_NOTE)
+        put("system_audio", SETUP, _LINUX_SYSTEM_AUDIO)
     else:
         put("screen", UNSUPPORTED, _DESKTOP_ONLY_ON_WINDOWS)
         put("clicks", UNSUPPORTED, _CLICKS_ONLY_ON_WINDOWS)
-        put("system_audio", SETUP,
-            _MAC_SYSTEM_AUDIO if os_name == "macos" else _LINUX_SYSTEM_AUDIO)
+        put("system_audio", SETUP, _MAC_SYSTEM_AUDIO)
     return out
 
 
@@ -95,6 +101,14 @@ def status(platform: str | None = None) -> dict[str, Any]:
     """What ``GET /capture/status`` embeds under ``"support"``."""
     os_name = _norm(platform)
     per_source = support(platform)
+    if os_name == "windows":
+        note = ""
+    elif os_name == "linux":
+        note = ("Screen and mouse-click capture work under X11. "
+                "Wayland is not supported yet.")
+    else:
+        note = ("This build captures meetings, not your screen. "
+                "Screen and mouse-click capture are Windows/Linux-only.")
     return {
         "os": os_name,
         "sources": per_source,
@@ -103,9 +117,7 @@ def status(platform: str | None = None) -> dict[str, Any]:
         "needs_setup": sorted(k for k, v in per_source.items()
                               if v["state"] == SETUP),
         # A one-line summary the Console can show without walking the map.
-        "note": ("" if os_name == "windows" else
-                 "This build captures meetings, not your screen. "
-                 "Screen and mouse-click capture are Windows-only."),
+        "note": note,
     }
 
 

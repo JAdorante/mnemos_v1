@@ -169,6 +169,9 @@ def classify_source(
         return "peer_answer"   # a teammate's Mnemos answered over the peer channel
     if src.startswith("org"):
         return "org_coordinator"
+    # Web/agent research writeback (testing-first) — not user-typed chat.
+    if "research" in src:
+        return "research_answer"
     if "chat" in src:
         return "direct_message"
 

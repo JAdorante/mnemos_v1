@@ -1,0 +1,98 @@
+# Perception PR check (plan §7).
+#
+# The release workflow builds installers on a tag; this runs while a change to
+# the listening path is still a pull request, because the failures it catches
+# are the quiet kind. An engine swap, a threshold edit, or a dropped telemetry
+# column does not raise — it changes what becomes a memory, and the first
+# symptom is a tester saying "it stopped hearing me" three weeks later.
+#
+# Two jobs, split by what each platform is for. Unit tests run on Linux for
+# fast feedback and load no models at all. The harness runs a real engine on
+# Windows, because Windows is the platform Mnemos ships on and the audio stack
+# there is where the surprises live.
+name: perception
+
+on:
+  pull_request:
+    paths:
+      - "app/services/audio*.py"
+      - "app/services/asr*.py"
+      - "app/services/ingest_filter.py"
+      - "app/services/denoise.py"
+      - "app/services/echo_dedup.py"
+      - "app/services/speakers.py"
+      - "app/services/utterance_router.py"
+      - "app/services/latency.py"
+      # The per-utterance telemetry columns the Audio Health console reads live
+      # in storage.py. A schema change that drops one breaks the panel silently.
+      - "app/storage.py"
+      - "scripts/eval_asr.py"
+      - "scripts/calibrate_asr_confidence.py"
+      - "tests/fixtures/asr_eval/**"
+      - ".github/workflows/perception.yml"
+  workflow_dispatch:
+
+jobs:
+  unit:
+    name: perception unit tests (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install -U pip
+          pip install -r requirements.txt
+          pip install pytest
+      - name: Engine seam, calibration, harness scorers, stage timers
+        # No model, no audio device, no network: these cover the parts that can
+        # be wrong quietly — the boundary and attribution scorers, the manifest
+        # validator, and the per-engine threshold lookup.
+        run: |
+          python -m pytest -q \
+            tests/test_asr_engine_seam.py \
+            tests/test_asr_calibration.py \
+            tests/test_eval_asr.py \
+            tests/test_capture_stage_timers.py \
+            tests/test_latency_spans.py \
+            tests/test_echo_dedup.py
+
+  harness:
+    name: ASR harness smoke (windows)
+    runs-on: windows-latest
+    env:
+      # `tiny` keeps the download small; the smoke asserts a property that must
+      # hold for every model, not a WER only a big one reaches.
+      QUILL_WHISPER_MODEL: tiny
+      QUILL_ASR_ENGINE: whisper
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install -U pip
+          pip install -r requirements.txt
+      - name: Cache ASR model weights
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-whisper-tiny-${{ runner.os }}
+      - name: Generate the synthetic fixtures
+        # The recorded clips are not in git — they are audio of real people.
+        # Bootstrap regenerates the deterministic probe set from a fixed seed,
+        # so CI scores the same audio on every run.
+        run: python scripts/eval_asr.py bootstrap
+      - name: Validate the fixture manifest
+        run: python scripts/eval_asr.py check
+      - name: No-speech audio must not become a memory
+        # The one invariant that holds for every engine on every build. It fails
+        # loudly if an engine's confidence scale drifts out of step with the
+        # ingest thresholds, which is the §3.3 failure this repo cannot afford
+        # to discover in a pilot.
+        run: python scripts/eval_asr.py smoke

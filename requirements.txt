@@ -4,6 +4,10 @@ uvicorn[standard]>=0.30
 python-multipart>=0.0.9     # UploadFile / Form parsing (chat attachments)
 pydantic>=2.7
 python-dotenv>=1.0
+tzdata>=2024.1              # IANA zone database for zoneinfo. Windows ships
+                            # none at all, so without this every calendar
+                            # event with a TZID parses to a NAIVE datetime
+                            # and shows at the wrong time (icloud_calendar).
 
 # --- Milestone 1: Audio (mic -> VAD -> ASR -> transcript) ---
 sounddevice>=0.4.6          # low-latency mic capture
@@ -37,10 +41,10 @@ winsdk>=1.0.0b10; sys_platform == "win32"
 
 # --- Desktop pixel UI (screenshot + click/type for FL Studio etc.) ----------
 pyautogui>=0.9.54; sys_platform == "win32"
-mss>=9.0; sys_platform == "win32"
+mss>=9.0; sys_platform == "win32" or sys_platform == "linux"
 Pillow>=10.0                    # screen/click JPEG encode for desktop capture
 python-xlib>=0.33; sys_platform == "linux"   # Linux ghost desktop (X11)
-pynput>=1.7.6; sys_platform == "win32"   # passive mouse-click observer
+pynput>=1.7.6; sys_platform == "win32" or sys_platform == "linux"   # passive mouse-click observer
 pyarrow>=14.0                   # perception Parquet export (Phase D)
 psutil>=5.9                     # criterion-9 CPU/RSS harness (bench_perception_overhead)
 

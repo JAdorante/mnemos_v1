@@ -194,6 +194,29 @@ def _read_plain(path: Path, cap: int) -> str:
             return ""
 
 
+def _page_text(page) -> str:
+    """One page's text, preferring pypdf's layout mode.
+
+    Word-processor exports (Google Docs, Pages) place each word as its own
+    positioned text object, and pypdf's default mode emits a newline after
+    every one — "AI\\n \\nin\\n \\nthe\\n \\ncompany." Readable prose becomes a
+    column of single words, which burns a third of the char cap on whitespace
+    and is what an LLM then has to summarize. Layout mode reconstructs the
+    lines. Falls back to the default mode when layout is unavailable (older
+    pypdf) or throws on a malformed page.
+    """
+    try:
+        t = page.extract_text(extraction_mode="layout") or ""
+    except Exception:
+        t = ""
+    if t.strip():
+        return t
+    try:
+        return page.extract_text() or ""
+    except Exception:
+        return ""
+
+
 def _read_pdf(path: Path, cap: int) -> str:
     try:
         from pypdf import PdfReader
@@ -208,10 +231,7 @@ def _read_pdf(path: Path, cap: int) -> str:
                 return ""
         parts, total = [], 0
         for page in reader.pages:
-            try:
-                t = page.extract_text() or ""
-            except Exception:
-                continue
+            t = _page_text(page)
             if not t:
                 continue
             parts.append(t)
@@ -340,6 +360,36 @@ def _sig(path: Path) -> str:
 
 
 # --- fact persistence (reuses the audio extractor, minus the live-offer path) --
+def _chat_people_names(text: str) -> list[str]:
+    """Multi-word proper names in typed chat worth minting as people.
+
+    The extractor often parks a meeting as a commitment/claim with empty or
+    self/unknown parties and never passes the counterparty into
+    resolve_person_mention — so "meeting with Andy Karos" never becomes a
+    People row. Harvesting multi-word names from the raw chat text closes that
+    gap without minting every capitalized single token ("Remember", "Today").
+    """
+    from app.services.answer_check import extract_name_tokens
+    from app.services import name_quality as nq
+    from app.services import self_profile
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for tok in extract_name_tokens(text or ""):
+        if " " not in (tok or ""):
+            continue
+        if not nq.is_plausible_person(tok):
+            continue
+        if self_profile.is_self_name(tok):
+            continue
+        key = tok.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(tok)
+    return out
+
+
 def _persist_facts(store, facts: dict, anchor: int, chunk: str, now: float,
                    index: bool = True, *, event_source: str = "document",
                    window: str = "") -> int:
@@ -383,6 +433,45 @@ def _persist_facts(store, facts: dict, anchor: int, chunk: str, now: float,
             return res.person_id
         return resolver.resolve_person(name, ts=now)
 
+    def _fill_commitment_parties(fid: int, *, from_pid, to_pid) -> None:
+        """Backfill NULL party columns on a deduped commitment (never overwrite)."""
+        if not fid or (from_pid is None and to_pid is None):
+            return
+        try:
+            with store._lock:
+                if from_pid is not None:
+                    store._conn.execute(
+                        "UPDATE commitments SET from_person_id=? "
+                        "WHERE fact_id=? AND from_person_id IS NULL",
+                        (int(from_pid), int(fid)))
+                if to_pid is not None:
+                    store._conn.execute(
+                        "UPDATE commitments SET to_person_id=? "
+                        "WHERE fact_id=? AND to_person_id IS NULL",
+                        (int(to_pid), int(fid)))
+                store._conn.commit()
+            for pid in (from_pid, to_pid):
+                if pid:
+                    store.mark_graph_dirty("person", int(pid), ts=now)
+            store.mark_graph_dirty("fact", int(fid), ts=now)
+        except Exception as exc:
+            print(f"[documents] commitment party backfill skipped ({exc}).")
+
+    def _fill_task_owner(fid: int, owner_pid) -> None:
+        if not fid or owner_pid is None:
+            return
+        try:
+            with store._lock:
+                store._conn.execute(
+                    "UPDATE tasks SET owner_person_id=? "
+                    "WHERE fact_id=? AND owner_person_id IS NULL",
+                    (int(owner_pid), int(fid)))
+                store._conn.commit()
+            store.mark_graph_dirty("person", int(owner_pid), ts=now)
+            store.mark_graph_dirty("fact", int(fid), ts=now)
+        except Exception as exc:
+            print(f"[documents] task owner backfill skipped ({exc}).")
+
     def _idx(fid: int, kind: str, text: str) -> None:
         if index:
             _index_fact(store, fid, kind, text, now)
@@ -422,11 +511,18 @@ def _persist_facts(store, facts: dict, anchor: int, chunk: str, now: float,
             continue
         if v.action == "dedup":
             store.touch_fact(v.dup_fact_id, now, t.get("confidence"))
+            # Still mint/link the owner — dedupe must not skip people.
+            _fill_task_owner(
+                v.dup_fact_id,
+                _person(t.get("owner", ""), role="owner", boost=0.85))
             continue
+        # Boosts match the live speech extractor: people minting requires
+        # relationship_boost >= 0.70 (CREATE_RELEVANCE). The old 0.65/0.6
+        # floors could only leave_open even when source_policy allowed minting.
         fid = store.add_task(
             t["text"], source_event_id=anchor, source_span=t.get("source_span", ""),
             confidence=t.get("confidence"),
-            owner_person_id=_person(t.get("owner", ""), role="owner", boost=0.7),
+            owner_person_id=_person(t.get("owner", ""), role="owner", boost=0.85),
             due=_coerce_due(t.get("due")), extracted_at=now)
         _apply(v, fid)
         _idx(fid, "task", t["text"])
@@ -440,12 +536,16 @@ def _persist_facts(store, facts: dict, anchor: int, chunk: str, now: float,
             continue
         if v.action == "dedup":
             store.touch_fact(v.dup_fact_id, now, c.get("confidence"))
+            _fill_commitment_parties(
+                v.dup_fact_id,
+                from_pid=_person(c.get("from_person", ""), role="from", boost=0.8),
+                to_pid=_person(c.get("to_person", ""), role="to", boost=0.75))
             continue
         fid = store.add_commitment(
             c["text"], source_event_id=anchor, source_span=c.get("source_span", ""),
             confidence=c.get("confidence"),
-            from_person_id=_person(c.get("from_person", ""), role="from", boost=0.65),
-            to_person_id=_person(c.get("to_person", ""), role="to", boost=0.6),
+            from_person_id=_person(c.get("from_person", ""), role="from", boost=0.8),
+            to_person_id=_person(c.get("to_person", ""), role="to", boost=0.75),
             due=_coerce_due(c.get("due")),
             extracted_at=now)
         _apply(v, fid)
@@ -482,6 +582,12 @@ def _persist_facts(store, facts: dict, anchor: int, chunk: str, now: float,
             event_source=event_source, window=window, text=chunk)
     except Exception as exc:
         print(f"[documents] entity persist skipped ({exc}).")
+    # Typed chat: mint multi-word names from the raw turn even when the
+    # extractor omitted them as from/to (common for "meeting with X").
+    if "chat" in (event_source or "").lower():
+        for name in _chat_people_names(chunk):
+            if _person(name, role="relation", boost=0.75):
+                n += 1
     return n
 
 

@@ -1238,11 +1238,30 @@ def console_camera_health(limit: int = 20) -> dict:
 @router.get("/console/audio-health")
 def console_audio_health(window_s: float | None = None) -> dict:
     """Audio pipeline health (#9): throughput, drop reasons, quality mix, ASR /
-    end-to-end latency, and low-confidence / unknown-speaker rates over a window
-    — separates 'the audio was bad' from 'Whisper failed'."""
+    end-to-end latency, stage breakdown, per-engine and per-channel splits, and
+    low-confidence / unknown-speaker rates over a window — separates 'the audio
+    was bad' from 'the engine failed'.
+
+    `configured_engine` and `last_eval` are the engine-provenance half: what
+    this process would load, and how the last harness run scored whatever it
+    did load. A tester's screenshot then carries both."""
     store = memory._ensure_store()
     w = window_s if window_s and window_s > 0 else settings.telemetry.window_s
-    return store.audio_health(w)
+    out = store.audio_health(w)
+    try:
+        from app.services import asr as _asr
+        from app.services import asr_calibration as _calib
+        out["configured_engine"] = _asr.configured()
+        out["last_eval"] = _asr.last_eval_report()
+        # Whether each engine that actually produced transcripts in this window
+        # was judged on thresholds fitted for its confidence scale. An
+        # uncalibrated non-Whisper engine is the silent-drift condition §3.3
+        # exists to prevent, so the panel has to be able to say so.
+        out["calibration"] = {e: _calib.describe(e)
+                              for e in (out.get("by_engine") or {})}
+    except Exception as exc:      # a decoration, never a reason to 500
+        print(f"[console] engine provenance skipped ({exc}).")
+    return out
 
 
 # --- Phase 5: agent activity (runs / packets / verdicts) --------------------
@@ -2390,7 +2409,11 @@ def meeting_note(reflection_id: int, format: str = "html"):
     store = memory._ensure_store()
     header = store.get_reflection(reflection_id)
     if header is None or header.get("scope") != "meeting":
-        raise HTTPException(status_code=404, detail="meeting note not found")
+        if (format or "").lower() == "json":
+            raise HTTPException(status_code=404, detail="meeting note not found")
+        # HTML: never dump a bare JSON 404 into the browser — fall back to the
+        # list (or latest) the same way /meetings/{session_id} does.
+        return RedirectResponse(url="/meetings", status_code=303)
     if (format or "").lower() == "json":
         return {"note": meeting_enhance.hydrate_meeting_note(store, header)}
     from app.api.meeting_page import MEETING_PAGE

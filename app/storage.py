@@ -85,8 +85,15 @@ class Store:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.audio_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        # timeout=30: wait on writers from a second connection (export VACUUM,
+        # restore drill, a leftover process) instead of failing in ~5s. WAL lets
+        # readers proceed while a writer holds the write lock — same posture as
+        # perception.db; backups still use VACUUM INTO so sidecars stay out of zips.
+        self._conn = sqlite3.connect(
+            self.db_path, check_same_thread=False, timeout=30.0)
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA busy_timeout=30000")
         self._init_schema()
 
     def _init_schema(self) -> None:
@@ -604,6 +611,8 @@ class Store:
                     asr_latency_ms     REAL,              -- transcribe wall-time
                     total_latency_ms   REAL,              -- speech-end -> published
                     queue_wait_ms      REAL,              -- speech-end -> dequeued
+                    vad_ms             REAL,              -- Silero compute over the utterance
+                    post_ms            REAL,              -- ASR done -> published/dropped
                     queue_depth        INTEGER,           -- utterances waiting at dequeue
                     avg_logprob        REAL,
                     no_speech_prob     REAL,
@@ -612,7 +621,9 @@ class Store:
                     speaker            TEXT,
                     speaker_known      INTEGER,
                     speaker_confidence REAL,
-                    char_count         INTEGER
+                    char_count         INTEGER,
+                    channel            TEXT,              -- mic | loopback (which pipeline)
+                    engine             TEXT               -- ASR engine id (whisper:small, ...)
                 )
                 """
             )
@@ -1272,14 +1283,34 @@ class Store:
         self._migrate()
         self._migrate_audio_tele()
 
+    # Stage timers added after the table shipped. Additive only, and the type is
+    # part of the tuple so a new column never needs a second lookup elsewhere.
+    _AUDIO_TELE_ADDED = (
+        ("queue_wait_ms", "REAL"),    # latency program, Phase 0
+        ("vad_ms", "REAL"),           # perception Phase 0: Silero compute
+        ("post_ms", "REAL"),          # perception Phase 0: ASR done -> published
+        ("channel", "TEXT"),          # mic | loopback
+        ("engine", "TEXT"),           # ASR engine id
+    )
+
     def _migrate_audio_tele(self) -> None:
-        """Latency program, Phase 0: queue_wait_ms on pre-existing stores."""
+        """Stage-timer columns on pre-existing stores.
+
+        Kept separate from `_migrate` because telemetry is the one table that
+        must survive a half-applied migration silently: a missing column costs a
+        measurement, never a capture."""
         with self._lock:
             cols = {r["name"] for r in self._conn.execute(
                 "PRAGMA table_info(audio_telemetry)").fetchall()}
-            if cols and "queue_wait_ms" not in cols:
-                self._conn.execute(
-                    "ALTER TABLE audio_telemetry ADD COLUMN queue_wait_ms REAL")
+            if not cols:
+                return
+            added = False
+            for name, typ in self._AUDIO_TELE_ADDED:
+                if name not in cols:
+                    self._conn.execute(
+                        f"ALTER TABLE audio_telemetry ADD COLUMN {name} {typ}")
+                    added = True
+            if added:
                 self._conn.commit()
 
     def _migrate(self) -> None:
@@ -7521,7 +7552,8 @@ class Store:
     _AUDIO_TELE_COLS = (
         "event_id", "outcome", "drop_reason", "audio_duration_ms", "quality",
         "snr_est", "rms", "clipping_pct", "speech_ratio", "model",
-        "asr_latency_ms", "total_latency_ms", "queue_wait_ms", "queue_depth",
+        "asr_latency_ms", "total_latency_ms", "queue_wait_ms", "vad_ms",
+        "post_ms", "queue_depth", "channel", "engine",
         "avg_logprob",
         "no_speech_prob", "low_confidence", "filter_verdict", "speaker",
         "speaker_known", "speaker_confidence", "char_count",
@@ -7551,7 +7583,15 @@ class Store:
     def audio_health(self, window_s: float = 3600.0) -> dict:
         """Aggregate the last `window_s` of audio telemetry into the Audio Health
         summary: throughput, drop reasons, quality mix, ASR/end-to-end latency
-        (avg/p50/p95/max), and low-confidence / unknown-speaker rates."""
+        (avg/p50/p95/max), low-confidence / unknown-speaker rates, and — since
+        the engine became swappable — which engine produced the transcripts,
+        what it cost (RTF), where the time went (stage breakdown), and how mic
+        and loopback differ.
+
+        The engine and channel splits exist for one specific support problem: a
+        tester on a flag-flipped build reports "transcripts got worse", and the
+        first question is which engine and which pipeline produced them. An
+        average across two engines or two channels cannot answer that."""
         import time as _t
 
         cutoff = _t.time() - window_s
@@ -7588,6 +7628,37 @@ class Store:
             vals = [r.get(key) for r in rowset if r.get(key) is not None]
             return round(sum(vals) / len(vals), 1) if vals else None
 
+        # Real-time factor: transcribe wall-time over the audio's own duration.
+        # Below 1.0 means the engine keeps up with a live stream on this machine
+        # — the single most portable cost number an engine swap moves.
+        def _rtf(rowset: list):
+            asr = sum(r["asr_latency_ms"] for r in rowset
+                      if isinstance(r.get("asr_latency_ms"), (int, float)))
+            dur = sum(r["audio_duration_ms"] for r in rowset
+                      if isinstance(r.get("audio_duration_ms"), (int, float))
+                      and isinstance(r.get("asr_latency_ms"), (int, float)))
+            return round(asr / dur, 3) if dur else None
+
+        def _split(key: str) -> dict:
+            groups: dict[str, list] = {}
+            for r in rows:
+                v = r.get(key)
+                if v:
+                    groups.setdefault(str(v), []).append(r)
+            out = {}
+            for name, grp in sorted(groups.items()):
+                gkept = [r for r in grp if r["outcome"] == "kept"]
+                out[name] = {
+                    "utterances": len(grp), "kept": len(gkept),
+                    "dropped": len(grp) - len(gkept),
+                    "asr_latency_ms": _lat([r.get("asr_latency_ms")
+                                            for r in gkept]),
+                    "total_latency_ms": _lat([r.get("total_latency_ms")
+                                              for r in gkept]),
+                    "rtf": _rtf(gkept),
+                }
+            return out
+
         low_n = sum(1 for r in kept if r.get("low_confidence"))
         spk = [r for r in kept if r.get("speaker") is not None]
         spk_unknown = sum(1 for r in spk if not r.get("speaker_known"))
@@ -7609,6 +7680,18 @@ class Store:
             "speaker_unknown_rate": round(spk_unknown / len(spk), 3) if spk else None,
             "avg_snr": _avg("snr_est", rows),
             "avg_clipping": _avg("clipping_pct", rows),
+            "rtf": _rtf(kept),
+            # Where an utterance's time actually went. `vad` is listed but is
+            # NOT part of the speech-end -> published budget: Silero runs during
+            # speech, before the clock the other three share starts.
+            "stage_ms": {
+                "vad": _lat([r.get("vad_ms") for r in kept]),
+                "queue_wait": _lat([r.get("queue_wait_ms") for r in kept]),
+                "asr": _lat([r.get("asr_latency_ms") for r in kept]),
+                "post": _lat([r.get("post_ms") for r in kept]),
+            },
+            "by_engine": _split("engine"),
+            "by_channel": _split("channel"),
         }
 
     def close(self) -> None:

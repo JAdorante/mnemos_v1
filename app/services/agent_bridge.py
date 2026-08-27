@@ -82,6 +82,17 @@ def _parse_approval_packet(text: str) -> dict | None:
     return {"kind": "approval", "summary": summary, "fields": fields}
 
 
+def _is_approval_ask(ev: dict) -> bool:
+    """True for Seal/approval asks — keep these on cold hydrate."""
+    if not isinstance(ev, dict):
+        return False
+    pkt = ev.get("packet")
+    if isinstance(pkt, dict) and pkt.get("kind") == "approval":
+        return True
+    text = ev.get("text") or ""
+    return "APPROVAL NEEDED" in text
+
+
 def _env_flag(key: str, default: bool) -> bool:
     v = os.environ.get(key)
     if v is None:
@@ -862,16 +873,23 @@ class AgentWorker:
             return len(self.offer_queue)
 
     def expire_stale_offers(self) -> int:
-        """Drop pending/queued offers older than TTL. Returns how many dropped."""
+        """Drop pending/queued offers older than TTL. Returns how many dropped.
+
+        A surfaced offer that times out without yes/no is treated as a soft
+        ignore (same cooldown path as Not now for reasoners) so reload/ticks
+        do not keep recycling the same card.
+        """
         if _OFFER_TTL_S <= 0:
             return 0
         now = time.time()
         dropped = 0
+        expired_pending: dict | None = None
         with self.lock:
             pend = self.pending_todo
             if pend is not None:
                 age = now - float(pend.get("created_at") or now)
                 if age > _OFFER_TTL_S:
+                    expired_pending = pend
                     self.pending_todo = None
                     dropped += 1
             keep: list[dict] = []
@@ -890,6 +908,8 @@ class AgentWorker:
                     and self.cmd_q.empty() and self.fast_q.empty()):
                 self.pending_todo = self.offer_queue.pop(0)
                 nxt = self.pending_todo
+        if expired_pending is not None:
+            self._record_offer_timeout(expired_pending)
         if dropped:
             self._emit(
                 "system",
@@ -898,6 +918,27 @@ class AgentWorker:
         if nxt is not None:
             self._emit("ask", nxt["message"])
         return dropped
+
+    def _record_offer_timeout(self, pend: dict) -> None:
+        """Silence reincarnation after the user never answered."""
+        kind = str(pend.get("kind") or "")
+        if kind.startswith("reasoner_"):
+            try:
+                from app.services.reasoners.base import mark_dismissed_from_offer
+                mark_dismissed_from_offer(pend)
+            except Exception:
+                pass
+        if pend.get("kind") in ("task", "phone", "anticipation", "todo", "homework") \
+                or kind.startswith("reasoner_"):
+            try:
+                from app.services.task_offer import record_offer_outcome
+                items = pend.get("items") or []
+                record_offer_outcome(
+                    items[0] if items else (pend.get("title") or ""), False,
+                    kind=pend.get("kind") or "task",
+                    fact_id=pend.get("fact_id"))
+            except Exception:
+                pass
 
     def _dismiss_offer(self, *, reason: str = "skipped") -> dict | None:
         """Clear the active offer without treating it as an accept. Returns it."""
@@ -1731,7 +1772,18 @@ class AgentWorker:
                 study = None
         waiting_on = self._offer_waiting_summary()
         with self.lock:
-            evs = [e for e in self.events if e["id"] >= since]
+            # Cold hydrate (since=0 / page reload): do not replay proactive
+            # offer asks into the transcript. Dock + banner already carry the
+            # live yes/no; replaying fills an empty Chat with recycled NEEDS YES.
+            # Approval folios still hydrate so Seal can resume.
+            cold = since <= 0
+            evs = []
+            for e in self.events:
+                if e["id"] < since:
+                    continue
+                if cold and e.get("kind") == "ask" and not _is_approval_ask(e):
+                    continue
+                evs.append(e)
             awaiting = self.awaiting or self.awaiting_fast
             question = self.question if self.awaiting else self.question_fast
             pkt = _parse_approval_packet(question or "")
@@ -1809,9 +1861,14 @@ class AgentWorker:
             fids.insert(0, int(fact_id))
         # Resolve a fast-lane surface: explicit /desktop|/phone, or a heuristic
         # "open <app>" / text/call intent — these must not sit behind Playwright.
+        # Read the USER'S INSTRUCTION only. `text` may carry an attached
+        # document or pasted notes merged in by Add context, and the heuristic
+        # is a bare word match — a PDF that happens to say "call", "text" or
+        # "phone" would force-route "what is in this file?" to Phone Link
+        # (observed live, Aug 26 2026). `display` is the typed message alone.
         resolved = surface if surface in ("desktop", "phone_link") else None
         if resolved is None:
-            resolved = _guess_surface(text)
+            resolved = _guess_surface(display if display is not None else text)
         # `surface="desktop"` or `surface="phone_link"` forces that loop (see
         # /desktop and /phone routes), skipping the router. None = route normally.
         # Personal Agent Layer (#5): plan the goal on the WORKER thread when it's a
@@ -1821,10 +1878,16 @@ class AgentWorker:
         # Cheap rule gate for multi-task fan-out (free string check; the real LLM
         # split runs on the worker thread). A forced surface (a /desktop or /phone
         # route) is already a single intent, so never fan it out.
+        # Same seam as the surface guess: fan-out is decided by what the user
+        # ASKED for, not by what Add context merged in. `looks_multi` fires on
+        # a semicolon or two list-ish lines, which describes almost every
+        # attached document — "what is in this file?" would decompose into a
+        # handful of invented sub-tasks.
+        instruction = display if display is not None else text
         multi = False
         try:
             from app.services.multitask import looks_multi, enabled as _mt_on
-            multi = bool(resolved is None and _mt_on() and looks_multi(text))
+            multi = bool(resolved is None and _mt_on() and looks_multi(instruction))
         except Exception:
             multi = False
         # Forced desktop/phone never goes through the planner — keep the fast
@@ -1905,7 +1968,27 @@ class AgentWorker:
         self._emit("result", result or f"(no answer — {status})",
                    distill_id=distill_id,
                    sources=sources, context=None, question=question)
+        self._maybe_research_ingest(
+            result or "", status, agent=self.agent,
+            question=cmd.get("display") or cmd.get("text"))
         return result or "", status
+
+    def _maybe_research_ingest(
+            self, text: str, status: str, *, agent=None,
+            question: str | None = None) -> None:
+        """Write research/hands answers into durable memory (best-effort).
+
+        Testing-first: default sync ingest so a follow-up memory question in
+        the same session can recall what the agent just pulled from the web.
+        Pure memory-only replies are skipped inside research_ingest.
+        """
+        try:
+            from app.services import research_ingest
+            route = getattr(agent, "last_route", None) if agent else None
+            research_ingest.ingest(
+                text, status=status, route=route, question=question)
+        except Exception as exc:
+            print(f"[research_ingest] hook skipped ({exc}).")
 
     def recent_results(self, limit: int = 12) -> list[str]:
         """Result texts across BOTH agent lanes, oldest first. Injected into
@@ -2059,6 +2142,8 @@ class AgentWorker:
             self._emit("result", result or f"(no answer — {status})",
                        distill_id=getattr(self.agent, "last_distill_id", None),
                        sources=sources, context=block, question=question)
+            self._maybe_research_ingest(
+                result or "", status, agent=self.agent, question=text)
             return result or "", status
         last: tuple[str, str] = ("", "success")
         for step in steps:
@@ -2099,6 +2184,9 @@ class AgentWorker:
                 self._emit("result", result or f"(no answer — {status})",
                            distill_id=getattr(self.agent, "last_distill_id", None),
                            sources=sources, context=None, question=question)
+                self._maybe_research_ingest(
+                    result or "", status, agent=self.agent,
+                    question=step.goal or text)
                 last = (result or "", status)
         return last
 
@@ -2256,6 +2344,9 @@ class AgentWorker:
                     self._emit("result", result or f"(no answer — {status})",
                                distill_id=getattr(agent, "last_distill_id", None),
                                sources=sources, context=None, question=question)
+                    self._maybe_research_ingest(
+                        result or "", status, agent=agent,
+                        question=cmd.get("display") or cmd.get("text"))
                 elif typ == "new":
                     if self.fast_agent is not None:
                         self.fast_agent.transcript.clear()

@@ -43,6 +43,10 @@ def apply_tester_profile() -> None:
         "QUILL_PHONE_WATCH": "0",
         "QUILL_AUTOSTART_NOTIFICATIONS": "0",
         "QUILL_TEXT_LOCAL": "0",
+        # Research → memory writeback (sync) so memory-only follow-ups work
+        # in the same test loop without a Helpful click.
+        "QUILL_RESEARCH_INGEST": "1",
+        "QUILL_RESEARCH_INGEST_SYNC": "1",
     }
     if not _ollama_reachable():
         pins["QUILL_VISION_LOCAL"] = "0"
@@ -91,6 +95,15 @@ class AudioConfig:
     condition_on_previous_text: bool = _get(
         "QUILL_ASR_CONDITION_PREVIOUS", "1"
     ) not in ("0", "false", "False")
+    # Which ASR engine transcribes utterances (see services/asr.py). "whisper"
+    # is the incumbent and the rollback target for every later engine; the flag
+    # exists so a swap is a restart, not a deploy.
+    asr_engine: str = _get("QUILL_ASR_ENGINE", "whisper")
+    # Word-level timestamps on every transcript. Off for Whisper because it
+    # costs real time there; Parakeet emits them natively, at which point they
+    # become free and provenance can point at exact seconds.
+    word_timestamps: bool = _get("QUILL_ASR_WORD_TIMESTAMPS", "0") not in (
+        "0", "false", "False")
     # CTranslate2 threading: one shared Whisper serves mic + loopback.
     cpu_threads: int = int(_get("QUILL_WHISPER_CPU_THREADS", "0"))  # 0 = library default
     num_workers: int = int(_get("QUILL_WHISPER_NUM_WORKERS", "1"))
@@ -316,6 +329,15 @@ class TextLocalConfig:
     # may never make a local call this session.
     warmup: bool = _get("QUILL_OLLAMA_WARMUP", "0") not in ("0", "false", "False")
 
+    # Prompt size above which the local tier is skipped and Claude answers.
+    # A 7B model handed a whole attached document plus the grounding block
+    # does not fail loudly — it answers fluently from the part it could hold,
+    # which is the retrieved memories, and self-reports high confidence, so
+    # the confidence gate never fires. Length is the only signal available
+    # BEFORE the call. 0 disables the guard.
+    local_max_prompt_chars: int = int(
+        _get("QUILL_TEXT_LOCAL_MAX_PROMPT_CHARS", "12000"))
+
     @property
     def high_stakes_tasks(self) -> tuple[str, ...]:
         """Tasks that always escalate to Claude (comma-separated; user-extendable —
@@ -409,6 +431,14 @@ class ShadowEvalConfig:
     enabled: bool = _get("QUILL_SHADOW_EVAL", "0") not in ("0", "false", "False")
     # Outputs re-graded per night (stratified across task types).
     batch: int = int(_get("QUILL_SHADOW_BATCH", "20"))
+    # How far back the sampler may reach. This used to be a hard-coded 24h,
+    # which silently DISCARDED labels: with one run per calendar day and a
+    # batch of `batch`, any day that produced more kept-local answers than the
+    # batch could grade lost the surplus forever — it aged out of the window
+    # before the next run reached it, and a backlog could never be worked off.
+    # The window is now wide enough that the batch size alone governs
+    # throughput; raise QUILL_SHADOW_BATCH to drain a backlog faster.
+    lookback_days: float = float(_get("QUILL_SHADOW_LOOKBACK_DAYS", "30"))
     # Hard DAILY token ceiling (input+output) for grading calls. 250K tokens
     # at claude-haiku-4-5 list rates ($1/MTok in, $5/MTok out) is ≈$0.21 in +
     # ≈$0.19 out at the observed ~85/15 split — ≈$0.40/day, ≈$0.50 worst-case.
@@ -953,6 +983,12 @@ class DocumentsConfig:
     max_chars: int = int(_get("QUILL_DOCUMENTS_MAX_CHARS", "40000"))       # per file text cap
     chunk_chars: int = int(_get("QUILL_DOCUMENTS_CHUNK", "2500"))          # per extractor call
     max_depth: int = int(_get("QUILL_DOCUMENTS_MAX_DEPTH", "4"))           # folder recursion cap
+    # How much of an attached document rides along in the chat turn that
+    # follows the upload. Fact mining reads the whole text in the background,
+    # but "what is this document about?" is answered from THIS window alone —
+    # 4k chars was ~2 pages of a 43-page PDF, so the answer came from memory
+    # instead of the file. Raise for longer docs, lower for a small local model.
+    attach_context_chars: int = int(_get("QUILL_ATTACH_CONTEXT_CHARS", "16000"))
 
     @property
     def exts(self) -> frozenset:

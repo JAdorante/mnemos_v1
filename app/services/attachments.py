@@ -125,14 +125,34 @@ def _ingest_document(path: Path, original_name: str, data: bytes) -> dict:
     # Do not block the HTTP response on N LLM extract calls (one per chunk).
     _schedule_fact_mine(_mine_document_facts, original_name, text, anchor, now)
 
-    # Snippet for the current chat turn's sticky context.
-    snippet = text if len(text) <= 4000 else text[:4000] + "…"
+    # Text for the current chat turn. Fact mining (above) reads the whole
+    # document in the background, but the turn right after the upload — "what
+    # is this about?" — is answered from THIS window only, so it has to
+    # carry enough of the file to answer from. Labelled as the turn's
+    # SUBJECT, not a sticky note: retrieval also runs on the goal and returns
+    # unrelated memories, and an unlabelled excerpt loses to them.
+    limit = settings.documents.attach_context_chars
+    truncated = len(text) > limit
+    snippet = text if not truncated else text[:limit] + "…"
+    head = (f"[ATTACHED DOCUMENT — the user just uploaded this file and it "
+            f"is the subject of their message. Answer from ITS content "
+            f"below, not from retrieved memories.]\nFilename: {original_name}\n")
+    # `text` is itself capped at documents.max_chars, so for a long file the
+    # honest denominator is "at least this much", not len(text).
+    capped_at_ingest = len(text) >= settings.documents.max_chars
+    if truncated:
+        total = f"{len(text):,}+" if capped_at_ingest else f"{len(text):,}"
+        head += (f"Note: this is the first {limit:,} of {total} characters — "
+                 f"say so if the answer needs a part you cannot see.\n")
+    elif capped_at_ingest:
+        head += ("Note: long file — this is the leading section, not the whole "
+                 "document. Say so if the answer needs a part you cannot see.\n")
     return {
         "ok": True, "kind": "document", "name": original_name,
         "path": str(path), "event_id": anchor, "chars": len(text),
         "facts": 0, "facts_pending": True,
         "summary": ev.summary,
-        "context": f"[Attached document: {original_name}]\n{snippet}",
+        "context": f"{head}\n{snippet}",
     }
 
 

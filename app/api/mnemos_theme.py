@@ -636,12 +636,12 @@ def nav_markup() -> str:
     hide = {"phone", "desktop", "org"} if tester else set()
     primary = (
         ('/today', 'Today', ''),
-        ('/meetings', 'Meetings', ''),
         ('/chat', 'Chat', ' id="navChat"'),
         ('/memory', 'Memory', ''),
-        ('/profile', 'You', ''),
+        ('/profile?tab=people', 'People', ''),
     )
     more = (
+        ('/meetings', 'Meetings', 'meetings'),
         ('/peer', 'Team', 'team'),
         ('/phone', 'Phone', 'phone'),
         ('/desktop-access', 'Desktop', 'desktop'),
@@ -653,6 +653,11 @@ def nav_markup() -> str:
     extra_links = "".join(
         f'<a href="{href}">{label}</a>'
         for href, label, key in more if key not in hide)
+    profile = (
+        '<a class="nav-profile" href="/profile" title="You" aria-label="Profile">'
+        '<span class="nav-profile-dot" aria-hidden="true"></span>'
+        '</a>'
+    )
     return (
         f'<nav class="nav" id="mnemosNav" aria-label="Primary">'
         f'{links}'
@@ -660,14 +665,19 @@ def nav_markup() -> str:
         f'<summary>More</summary>'
         f'<div class="nav-more-menu">{extra_links}</div>'
         f'</details></nav>'
+        f'<span class="spacer"></span>'
+        f'{profile}'
         f'<script>(function(){{'
         f'var n=document.getElementById("mnemosNav");if(!n)return;'
         f'var p=(location.pathname||"/").replace(/\\/$/,"")||"/";'
+        f'var q=(location.search||"");'
         f'function hit(h){{'
         f'if(h==="/today")return p==="/today"||p==="/"||p==="/shell";'
         f'if(h==="/meetings")return p==="/meetings"||p.indexOf("/meetings/")===0||p.indexOf("/meeting/")===0;'
         f'if(h==="/chat")return p==="/chat"||p.indexOf("/chat/")===0;'
         f'if(h==="/memory")return p==="/memory"||p==="/console";'
+        f'if(h.indexOf("/profile?tab=people")===0)'
+        f'return p==="/profile"&&q.indexOf("tab=people")>=0;'
         f'if(h==="/profile")return p==="/profile";'
         f'if(h==="/peer")return p==="/peer"||p.indexOf("/peer/")===0;'
         f'if(h==="/phone")return p.indexOf("/phone")===0;'
@@ -682,6 +692,8 @@ def nav_markup() -> str:
         f'}});'
         f'var m=n.querySelector(".nav-more");'
         f'if(moreOn&&m)m.classList.add("on");'
+        f'var pf=document.querySelector(".nav-profile");'
+        f'if(pf&&p==="/profile"&&q.indexOf("tab=people")<0)pf.classList.add("on");'
         f'document.addEventListener("click",function(e){{'
         f'if(m&&m.open&&!m.contains(e.target))m.removeAttribute("open");}});'
         f'}})();</script>'

@@ -68,6 +68,58 @@ class OfferReplyTests(unittest.TestCase):
         self.assertGreaterEqual(n, 1)
         self.assertIsNone(w.pending_todo)
 
+    def test_reasoner_timeout_marks_dismissed(self) -> None:
+        w = AgentWorker()
+        prop = mock.Mock()
+        prop.reasoner = "scheduling"
+        prop.summary = "Schedule work: Finish memo"
+        prop.goal = "Propose a schedule window to finish: Finish memo"
+        prop.why = ["due_in_1d"]
+        prop.confidence = 0.7
+        prop.fact_id = 42
+        prop.person = None
+        prop.deliverable_only = True
+        prop.kind = "reasoner_scheduling"
+        with mock.patch(
+                "app.services.reasoners.base.mark_dismissed_from_offer") as md, \
+             mock.patch(
+                "app.services.task_offer.record_offer_outcome") as ro:
+            w.propose_reasoner(prop)
+            self.assertIsNotNone(w.pending_todo)
+            w.pending_todo["created_at"] = time.time() - (ab._OFFER_TTL_S + 5)
+            w.expire_stale_offers()
+        self.assertIsNone(w.pending_todo)
+        md.assert_called_once()
+        ro.assert_called_once()
+        self.assertFalse(ro.call_args[0][1])
+
+    def test_cold_hydrate_skips_offer_asks(self) -> None:
+        w = AgentWorker()
+        w.propose_todo(["buy milk"], "groceries")
+        self.assertIsNotNone(w.pending_todo)
+        cold, state = w.snapshot(0)
+        self.assertTrue(state.get("todo_pending"))
+        self.assertTrue(any(e.get("kind") == "ask" for e in w.events))
+        self.assertFalse(any(e.get("kind") == "ask" for e in cold))
+        # Incremental poll still delivers the ask once.
+        live, _ = w.snapshot(0)  # still cold
+        self.assertFalse(any(e.get("kind") == "ask" for e in live))
+        # After the client has advanced past cold start, new asks stream.
+        since = state["next"]
+        w._emit("ask", "APPROVAL NEEDED — launch notepad\nReply 'approve'…")
+        later, _ = w.snapshot(since)
+        self.assertTrue(any(
+            e.get("kind") == "ask" and "APPROVAL NEEDED" in (e.get("text") or "")
+            for e in later))
+
+    def test_cold_hydrate_keeps_approval_asks(self) -> None:
+        w = AgentWorker()
+        w._emit("ask", "APPROVAL NEEDED — send email\nReply 'approve' to proceed.")
+        cold, _ = w.snapshot(0)
+        self.assertTrue(any(
+            e.get("kind") == "ask" and "APPROVAL NEEDED" in (e.get("text") or "")
+            for e in cold))
+
     def test_waiting_on_summary(self) -> None:
         w = AgentWorker()
         w.propose_todo(["a", "b"], "Trip")

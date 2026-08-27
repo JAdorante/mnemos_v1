@@ -733,8 +733,9 @@ window.MnemosConstellation = {
     function renderTip(n, clientX, clientY) {
       if (!tip || !n) { if (tip) tip.hidden = true; return; }
       const why = (n.why && n.why.length) ? n.why.join(' · ') : '';
+      const tipTitle = (n.meta && n.meta.full_text) || n.label || n.id;
       tip.hidden = false;
-      tip.innerHTML = '<strong>' + MnemosEsc(n.label || n.id) + '</strong>'
+      tip.innerHTML = '<strong>' + MnemosEsc(tipTitle) + '</strong>'
         + '<span class="const-tip-kind">' + MnemosEsc(n.kind || '') + '</span>'
         + (why ? '<div class="const-tip-why">' + MnemosEsc(why) + '</div>' : '');
       if (wrap) {
@@ -865,7 +866,10 @@ window.MnemosConstellation = {
         const data = await (await fetch('/graph/constellation/evidence?id='
           + encodeURIComponent(id))).json();
         const n = data.node || state.byId[id] || {};
-        let html = '<div class="const-edit-head"><strong>' + MnemosEsc(n.label || id)
+        const fullTitle = (data.detail && data.detail.fact && data.detail.fact.text)
+          || (n.meta && n.meta.full_text)
+          || n.label || id;
+        let html = '<div class="const-edit-head"><strong>' + MnemosEsc(fullTitle)
           + '</strong><button type="button" data-act="close-ev" class="linkish">Close</button></div>';
         html += '<div class="const-tip-kind">' + MnemosEsc(n.kind || '')
           + (n.layer ? ' · ' + MnemosEsc(n.layer) : '') + '</div>';
@@ -1068,8 +1072,13 @@ window.MnemosConstellation = {
     }
 
     function shortLabel(s) {
+      // Server already titleizes + word-boundary truncates; only clip if a
+      // raw long string slipped through (avoid a second mid-word cut).
       s = String(s || '');
-      return s.length > 16 ? s.slice(0, 15) + '…' : s;
+      if (s.length <= 28) return s;
+      const cut = s.slice(0, 28);
+      const sp = cut.lastIndexOf(' ');
+      return ((sp > 8 ? cut.slice(0, sp) : cut.slice(0, 27)).replace(/[.,;:\-\s]+$/, '')) + '…';
     }
 
     function sumCodes(s) {

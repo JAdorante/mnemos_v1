@@ -490,6 +490,10 @@ def resolve_person_mention(
             decision, chosen = "leave_open", None
         if chosen is not None and mint_name.lower() != display.lower():
             store.touch_person(chosen, ts, alias=display)
+        if chosen is not None and policy.create_person_candidates:
+            # User-asserted / allowed sources earn recognition immediately so
+            # the People tab (which hides candidates by default) shows them.
+            _bump_promotion(store, chosen, relevance, ts)
         if chosen is not None and mint_email:
             try:
                 store.upsert_contact_point(

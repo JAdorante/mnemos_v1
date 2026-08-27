@@ -180,6 +180,37 @@ class WorkerDeadLetterTests(unittest.TestCase):
         self.assertEqual(self.calls, 3)
         self.assertIn("boom", self.worker.last_error or "")
 
+    def test_claim_lock_error_does_not_kill_loop(self):
+        """A transient SQLite lock must not tear down the job-worker thread."""
+        self.worker.register("ok", lambda _p: None)
+        self.worker.enqueue("ok")
+        claims = {"n": 0}
+        real_claim = self.store.claim_job
+
+        def flaky_claim():
+            claims["n"] += 1
+            if claims["n"] == 1:
+                raise sqlite3.OperationalError("database is locked")
+            return real_claim()
+
+        with patch.object(self.store, "claim_job", side_effect=flaky_claim):
+            self.worker.start()
+            deadline = time.time() + 2.0
+            while time.time() < deadline:
+                row = self.store._conn.execute(
+                    "SELECT status FROM jobs LIMIT 1").fetchone()
+                if row and row["status"] == "done":
+                    break
+                time.sleep(0.05)
+            self.worker.stop()
+            self.worker._thread.join(timeout=1.0)
+
+        self.assertGreaterEqual(claims["n"], 2)
+        self.assertIn("database is locked", self.worker.last_error or "")
+        row = dict(self.store._conn.execute(
+            "SELECT status FROM jobs LIMIT 1").fetchone())
+        self.assertEqual(row["status"], "done")
+
 
 class ConsoleJobsApiShapeTests(unittest.TestCase):
     """Smoke: /console/jobs payload includes dead-letter fields."""

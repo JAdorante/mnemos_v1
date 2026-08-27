@@ -117,9 +117,49 @@ def window_title(xid: int) -> str:
     try:
         d = display()
         w = d.create_resource_object("window", int(xid))
-        return w.get_wm_name() or ""
+        try:
+            net = w.get_full_property(
+                d.intern_atom("_NET_WM_NAME"), d.intern_atom("UTF8_STRING"))
+            if net and net.value:
+                raw = net.value
+                if isinstance(raw, bytes):
+                    return raw.decode("utf-8", errors="replace").strip()
+                return str(raw).strip()
+        except Exception:
+            pass
+        title = w.get_wm_name() or ""
+        if isinstance(title, bytes):
+            title = title.decode("utf-8", errors="replace")
+        return (title or "").strip()
     except Exception:
         return ""
+
+
+def active_window() -> dict:
+    """Foreground window as ``{hwnd, window}`` (hwnd = XID). Empty on failure.
+
+    Shape matches Win32 ``_foreground_window`` in desktop_capture so callers
+    can share intake filters without an OS branch.
+    """
+    if not session_ok():
+        return {}
+    try:
+        d = display()
+        root = d.screen().root
+        prop = root.get_full_property(
+            d.intern_atom("_NET_ACTIVE_WINDOW"), d.intern_atom("WINDOW"))
+        if not prop or not prop.value:
+            return {}
+        xid = int(prop.value[0])
+        if not xid:
+            return {}
+        out: dict = {"hwnd": xid}
+        title = window_title(xid)
+        if title:
+            out["window"] = title
+        return out
+    except Exception:
+        return {}
 
 
 def move_offscreen(xid: int) -> bool:

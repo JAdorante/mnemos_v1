@@ -122,6 +122,25 @@ class SchedulingReasonerTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_meeting_note_not_schedule_work(self):
+        """Meeting announcements must not reopen Chat as 'Schedule work'."""
+        from app.services.reasoners import scheduling
+        from app.storage import Store
+
+        with tempfile.TemporaryDirectory() as td:
+            store = Store(Path(td) / "t.db")
+            try:
+                now = time.time()
+                due = time.strftime("%Y-%m-%dT%H:%M:%S",
+                                    time.localtime(now + 0.5 * 86400))
+                fid = store.add_task(
+                    "I have a meeting with Andy Karos today at 8:30 pm about Mnemos",
+                    confidence=0.9, extracted_at=now - 3600, due=due)
+                props = scheduling.propose(store, now=now)
+                self.assertFalse(any(p.fact_id == fid for p in props))
+            finally:
+                store.close()
+
 
 class ReasonerGateAndCompilerTests(unittest.TestCase):
     def test_run_once_respects_readiness_hold(self):

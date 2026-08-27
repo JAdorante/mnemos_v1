@@ -38,10 +38,34 @@ def _cfg():
     return settings.router
 
 
+_MODES = ("off", "shadow", "active")
+
+# Values already complained about — mode() runs on every routing decision, so
+# the warning has to be once-per-value, not once-per-call.
+_warned_modes: set[str] = set()
+
+
 def mode() -> str:
+    """The routing mode, normalized. An unrecognized value reads as `off`.
+
+    That fallback is the safe direction but a silent one: the symptom of a
+    typo (or of `enforce`, which belongs to QUILL_APPROVAL_BIND) is that
+    shadow logging and per-call retrieval-feature capture simply stop, with
+    nothing in the log to say why — and those features cannot be recovered
+    after the fact. So say it out loud, once.
+    """
     import os
-    m = (os.environ.get("QUILL_ROUTER") or _cfg().mode or "off").strip().lower()
-    return m if m in ("off", "shadow", "active") else "off"
+    raw = (os.environ.get("QUILL_ROUTER") or _cfg().mode or "off").strip()
+    m = raw.lower()
+    if m in _MODES:
+        return m
+    if m not in _warned_modes:
+        _warned_modes.add(m)
+        print(f"[escalation_router] QUILL_ROUTER={raw!r} is not one of "
+              f"{'|'.join(_MODES)} — treating it as 'off'. The router is "
+              f"inert and NO retrieval features are being recorded. "
+              f"(Did you mean QUILL_ROUTER=shadow, or QUILL_APPROVAL_BIND?)")
+    return "off"
 
 
 class EscalationRouter:
@@ -63,16 +87,22 @@ class EscalationRouter:
                 self._version_loaded = v
         return self._model
 
-    def predict(self, task: str, text: str,
-                confidence: float | None) -> float | None:
-        """Calibrated p(local fails), or None when no model is trained."""
+    def predict(self, task: str, text: str, confidence: float | None,
+                retrieval: dict | None = None) -> float | None:
+        """Calibrated p(local fails), or None when no model is trained.
+
+        `retrieval` is the D.2b grounding-stats dict measured for THIS call
+        (router_train.retrieval_stats). None means nobody measured it — the
+        feature flags encode that, so ungrounded tasks and pre-D.2b callers
+        keep working unchanged.
+        """
         try:
             model = self._ensure()
             if model is None or not text:
                 return None
             from app.services import router_train
             rows = [{"task": task, "text": text, "confidence": confidence,
-                     "ts": time.time()}]
+                     "retrieval": retrieval, "ts": time.time()}]
             X = router_train.featurize(rows)
             return float(model.predict_proba(X)[:, 1][0])
         except Exception as exc:
@@ -92,7 +122,8 @@ class EscalationRouter:
     def decide(self, task: str, messages: list | None,
                confidence: float | None,
                *, heuristic_escalates: bool,
-               heuristic_reason: str | None = None) -> dict:
+               heuristic_reason: str | None = None,
+               retrieval: dict | None = None) -> dict:
         """One routing consult. Returns
         {mode, p_fail, band, escalate, shadow_priority} where `escalate` is
         the FINAL local-vs-parent decision this module endorses:
@@ -112,12 +143,12 @@ class EscalationRouter:
             text = query_focus(query_text(messages))
         except Exception:
             pass
-        p = self.predict(task, text, confidence)
+        p = self.predict(task, text, confidence, retrieval)
         band = self.band(p)
         out["p_fail"], out["band"] = p, band
         if m == "shadow":
             self._log_shadow(task, p, band, heuristic_escalates,
-                             heuristic_reason)
+                             heuristic_reason, retrieval)
             return out                      # provably: decision untouched
         # active: hard gates already filtered by the caller; here the router
         # augments the confidence gate.
@@ -136,7 +167,8 @@ class EscalationRouter:
         return Path(_cfg().dir) / "shadow_log.jsonl"
 
     def _log_shadow(self, task: str, p_fail: float | None, band: str,
-                    heuristic_escalates: bool, reason: str | None) -> None:
+                    heuristic_escalates: bool, reason: str | None,
+                    retrieval: dict | None = None) -> None:
         try:
             p = self._shadow_log_path()
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -145,6 +177,8 @@ class EscalationRouter:
                     "ts": time.time(), "task": task, "p_fail": p_fail,
                     "band": band, "heuristic_escalated": heuristic_escalates,
                     "heuristic_reason": reason,
+                    # Stats only — no retrieved CONTENT reaches this log.
+                    "retrieval": retrieval,
                 }) + "\n")
         except Exception:
             pass

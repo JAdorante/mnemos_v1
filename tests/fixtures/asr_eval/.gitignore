@@ -1,0 +1,5 @@
+# Audio of real people does not belong in the repo — the manifest is what is
+# versioned, the clips live wherever the team keeps recordings. Bootstrap's
+# synthetic probes are regenerable: `python scripts/eval_asr.py bootstrap`.
+clips/
+*.wav

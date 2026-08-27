@@ -85,7 +85,7 @@ class RunJobTests(unittest.TestCase):
         self.store = Store(db_path=Path(self.tmp) / "t.db",
                            audio_dir=Path(self.tmp) / "audio")
 
-    def _run(self, text, facts, queued):
+    def _run(self, text, facts, queued, *, event_id=None, event_source="chat.user"):
         class _FakeWorker:
             def enqueue(self, kind, payload=None, *, unique=False):
                 queued.append(kind)
@@ -93,13 +93,20 @@ class RunJobTests(unittest.TestCase):
 
         import app.services.worker as worker_mod
         import app.storage as storage_mod
+        if event_id is not None:
+            from app.events import Event, Modality
+            ev = Event(time=1.0, modality=Modality.TEXT, raw=text,
+                       summary=f"[chat] {text[:40]}", source=event_source)
+            # Force the id the job will look up (insert assigns next id).
+            event_id = self.store.insert(ev)
         with patch.object(storage_mod, "get_store", return_value=self.store), \
              patch.object(worker_mod, "worker", _FakeWorker()), \
              patch("app.services.extractor.extractor._extract_text",
                    return_value=facts), \
              patch("app.services.extractor._index_fact", lambda *a, **k: None), \
              patch("app.services.fact_gate._similar_active", return_value=[]):
-            chat_ingest.run_job({"event_id": None, "text": text})
+            chat_ingest.run_job({"event_id": event_id, "text": text})
+        return event_id
 
     def test_facts_persist_and_graph_chains(self):
         queued: list[str] = []
@@ -127,6 +134,78 @@ class RunJobTests(unittest.TestCase):
     def test_empty_payload_is_noop(self):
         chat_ingest.run_job({})
         chat_ingest.run_job(None)
+
+    def test_passes_chat_user_event_source(self):
+        """Regression: without chat.user, People v2 treats chat like a
+        document and refuses to mint new people."""
+        queued: list[str] = []
+        seen = {}
+
+        def _capture(store, facts, anchor, chunk, now, index=True, *,
+                     event_source="document", window=""):
+            seen["event_source"] = event_source
+            return 0
+
+        import app.services.worker as worker_mod
+        import app.storage as storage_mod
+        from app.events import Event, Modality
+        ev = Event(time=1.0, modality=Modality.TEXT,
+                   raw="meeting with Andy Karos",
+                   summary="[chat] meeting", source="chat.user")
+        eid = self.store.insert(ev)
+        with patch.object(storage_mod, "get_store", return_value=self.store), \
+             patch.object(worker_mod, "worker",
+                          type("W", (), {"enqueue": lambda *a, **k: 1})()), \
+             patch("app.services.extractor.extractor._extract_text",
+                   return_value={"tasks": [], "commitments": [], "claims": [],
+                                 "entities": [], "relations": []}), \
+             patch("app.services.documents._persist_facts", side_effect=_capture):
+            chat_ingest.run_job({"event_id": eid,
+                                 "text": "meeting with Andy Karos"})
+        self.assertEqual(seen.get("event_source"), "chat.user")
+
+    def test_named_counterparty_mints_person_from_chat(self):
+        """Chat commitment with to_person=Andy Karos should mint a people row
+        under direct_message policy (the bug that kept Andy off You → People)."""
+        queued: list[str] = []
+        text = "I have a meeting with Andy Karos today at 8:30 pm about Mnemos"
+        self._run(
+            text,
+            {"tasks": [], "commitments": [{
+                "text": "meeting with Andy Karos today at 8:30 pm about Mnemos",
+                "from_person": "me",
+                "to_person": "Andy Karos",
+                "source_span": "meeting with Andy Karos today at 8:30 pm",
+                "confidence": 0.95,
+                "due": "2026-08-26T20:30:00",
+                "assertion": "asserted",
+            }], "claims": [], "entities": [], "relations": []},
+            queued,
+            event_id=1,
+            event_source="chat.user",
+        )
+        names = {p["name"].lower() for p in self.store.all_people()}
+        self.assertTrue(
+            any("andy" in n for n in names),
+            f"expected Andy Karos in people, got {names}")
+
+    def test_chat_text_harvest_mints_when_extractor_omits_party(self):
+        """Even if the LLM returns no from/to, multi-word names in the chat
+        turn itself must still land on People."""
+        queued: list[str] = []
+        text = "Remember I have a meeting with Andy Karos today at 8:30 pm about Mnemos."
+        self._run(
+            text,
+            {"tasks": [], "commitments": [], "claims": [],
+             "entities": [], "relations": []},
+            queued,
+            event_id=1,
+            event_source="chat.user",
+        )
+        names = {p["name"].lower() for p in self.store.all_people()}
+        self.assertTrue(
+            any("andy" in n for n in names),
+            f"expected Andy Karos harvested from chat text, got {names}")
 
 
 class MemoryVersionTests(unittest.TestCase):

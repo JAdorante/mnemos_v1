@@ -117,7 +117,7 @@ class CaptureSupportTests(unittest.TestCase):
             src = st["sources"][key]
             self.assertFalse(src["available"])
             # A reason a non-engineer can act on, not a stack trace.
-            self.assertIn("Windows-only", src["reason"])
+            self.assertIn("Windows/Linux-only", src["reason"])
         self.assertIn("meetings, not your screen", st["note"].lower())
 
     def test_macos_keeps_the_meeting_path_available(self) -> None:
@@ -136,10 +136,19 @@ class CaptureSupportTests(unittest.TestCase):
         self.assertIn("BlackHole", src["reason"])
         self.assertIn("mic still records", src["reason"])
 
-    def test_linux_matches_macos_but_names_its_own_fix(self) -> None:
+    def test_linux_offers_desktop_capture_with_x11_note(self) -> None:
         from app.services import capture_support as cs
-        self.assertEqual(cs.status("linux")["unsupported"], ["clicks", "screen"])
+        st = cs.status("linux")
+        self.assertEqual(st["unsupported"], [])
+        self.assertEqual(st["needs_setup"], ["system_audio"])
+        for key in ("screen", "clicks"):
+            src = st["sources"][key]
+            self.assertTrue(src["available"], key)
+            self.assertEqual(src["state"], cs.AVAILABLE)
+            self.assertIn("X11", src["reason"])
         self.assertIn("monitor", cs.support("linux")["system_audio"]["reason"])
+        self.assertIn("X11", st["note"])
+
 
     def test_every_privacy_sheet_source_has_an_entry(self) -> None:
         """A source the UI shows but the map omits would render un-annotated."""

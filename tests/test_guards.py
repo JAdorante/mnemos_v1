@@ -12,6 +12,7 @@ Run with either:
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -274,9 +275,20 @@ class OpenTargetPolicyTests(unittest.TestCase):
     def test_editor_refuses_unknown_extension(self) -> None:
         self.assertRefused("cursor", ".flp", False)
 
+    @unittest.skipUnless(sys.platform == "win32",
+                         "notepad is a win32-only registry entry: build_registry "
+                         "drops off-platform apps, so off Windows it resolves to "
+                         "LOCKED_CAPS and opens nothing")
     def test_notepad_refuses_folder_allows_text(self) -> None:
         self.assertRefused("notepad", "", True)
         self.assertAllowed("notepad", ".txt", False)
+
+    def test_an_unregistered_app_opens_nothing(self) -> None:
+        """The fail-closed half of the same contract, on every platform: an app
+        with no capability entry — including a win32 app off Windows — is
+        launch-only, never pointed at a target."""
+        self.assertRefused("no-such-app", ".txt", False)
+        self.assertRefused("no-such-app", "", True)
 
     def test_flstudio_opens_audio_and_project(self) -> None:
         for ext in (".flp", ".wav", ".mp3", ".mid", ".midi"):

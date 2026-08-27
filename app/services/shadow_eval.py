@@ -18,7 +18,11 @@ machine through this path. Cost invariant: a hard daily token budget
 
 Scheduling: rides the idle trainer's hourly tick (idle_trainer.tick calls
 maybe_run_idle BEFORE the training-eligibility check — shadow eval feeds the
-same store training reads). One run per calendar day.
+same store training reads). One run per calendar day, sampling anything
+ungraded within QUILL_SHADOW_LOOKBACK_DAYS (default 30) — NOT just the last
+24h, which used to discard every kept output a busy day produced beyond the
+batch size. `batch` is the throughput/spend knob; the window only decides what
+is still reachable.
 """
 from __future__ import annotations
 
@@ -95,6 +99,21 @@ def _batch_size() -> int:
     return int(v) if v else int(_cfg().batch)
 
 
+def _lookback_s() -> float:
+    """How far back the sampler may reach, in seconds.
+
+    Was a hard-coded 24h, which quietly threw labels away: one run per
+    calendar day grading at most `batch` rows means any busier day's surplus
+    aged out of the window before the next run could reach it, and no backlog
+    could ever be drained. Widening it makes `batch` the only throughput
+    limit — which is the knob that should govern spend anyway.
+    """
+    import os
+    v = os.environ.get("QUILL_SHADOW_LOOKBACK_DAYS")
+    days = float(v) if v else float(getattr(_cfg(), "lookback_days", 30.0))
+    return max(1.0, days) * 86400.0
+
+
 # ---------------------------------------------------------------------------
 # The local_outputs log (written by model_router on every KEPT local answer)
 # ---------------------------------------------------------------------------
@@ -114,7 +133,8 @@ def _last_user_text(messages: list | None) -> str:
 
 def log_local_output(task: str, *, messages: list | None, text: str | None,
                      confidence: float | None, model_tag: str | None,
-                     shadow_priority: bool = False) -> str | None:
+                     shadow_priority: bool = False,
+                     retrieval: dict | None = None) -> str | None:
     """Append one kept local output to the sample pool. Redacted at the write
     boundary; privacy-classed on the RAW text (fail-closed) so the nightly
     sampler can exclude personal rows without re-reading anything. Never
@@ -150,6 +170,10 @@ def log_local_output(task: str, *, messages: list | None, text: str | None,
             # D.3 middle band: the router flagged this kept answer as
             # uncertain — B.2's sampler puts it first in line.
             "shadow_priority": bool(shadow_priority),
+            # D.2b router features as measured at call time. Numeric stats
+            # only — no retrieved content — so this rides the same privacy
+            # stamp as the rest of the row without widening what it exposes.
+            "retrieval": retrieval or None,
         }
         p = Path(_cfg().local_outputs_path)
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -308,7 +332,7 @@ def run_nightly(now: float | None = None, *, call: Callable | None = None,
     budget = _budget_tokens()
     call = call or _anthropic_call
     graded_ids = frozenset(state.get("graded_ids") or [])
-    rows = _read_rows(since=now - 86400.0)
+    rows = _read_rows(since=now - _lookback_s())
     batch = sample(rows, _batch_size(), graded_ids=graded_ids)
 
     spent = 0
@@ -350,6 +374,9 @@ def run_nightly(now: float | None = None, *, call: Callable | None = None,
                     "id": row.get("id"), "ts": now, "task": row.get("task"),
                     "verdict": v, "input": row.get("input"),
                     "confidence": row.get("confidence"),
+                    # Carried through so router_train.build_dataset sees the
+                    # same features the call itself was routed on.
+                    "retrieval": row.get("retrieval"),
                     "model_tag": row.get("model_tag"),
                 }, ensure_ascii=False) + "\n")
         except Exception:
@@ -397,9 +424,15 @@ def run_nightly(now: float | None = None, *, call: Callable | None = None,
     }
     _append_report(summary)
     state["last_day"] = today
-    # Keep two days of graded ids — enough to dedupe overlapping 24h windows.
-    keep = [i for i in (state.get("graded_ids") or [])][-500:] + newly_graded
-    state["graded_ids"] = keep[-1000:]
+    # Dedupe memory must cover the whole lookback window or rows get re-graded
+    # (and re-paid for) once their id falls off the end. A fixed cap cannot do
+    # that once the window is configurable — so instead of counting ids, keep
+    # exactly those still REACHABLE: an id whose row has aged out of the window
+    # can never be sampled again, so forgetting it is safe. That bounds the set
+    # at the window's own size with no arbitrary cap and no re-grading.
+    visible = {str(r.get("id")) for r in rows}
+    kept = [i for i in (state.get("graded_ids") or []) if str(i) in visible]
+    state["graded_ids"] = kept + [i for i in newly_graded if i not in kept]
     _save_state(state)
     return summary
 

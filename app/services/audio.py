@@ -1,6 +1,6 @@
 """Milestone 1 — live audio pipeline.
 
-    Laptop Mic  ->  VAD (Silero)  ->  utterance segmentation  ->  ASR (Whisper)
+    Laptop Mic  ->  VAD (Silero)  ->  utterance segmentation  ->  ASR (engine)
                 ->  TranscriptEvent  ->  EventBus
 
 Design notes
@@ -10,17 +10,19 @@ Design notes
   the audio callback never blocks and never drops frames.
 * Silero VAD's `VADIterator` gives us speech-start / speech-end events. We
   accumulate raw samples between start and end into one utterance, then hand
-  the whole utterance to Whisper. This is far more accurate than transcribing
-  fixed windows.
-* No PyTorch required: `silero-vad` ships an ONNX model and `faster-whisper`
-  runs on CTranslate2.
+  the whole utterance to the ASR engine. This is far more accurate than
+  transcribing fixed windows.
+* Which engine that is comes from `services/asr.py` (``QUILL_ASR_ENGINE``).
+  This module never names one: it hands over samples and gets back an
+  `ASRResult`, so swapping engines does not touch the capture path.
+* No PyTorch required: `silero-vad` ships an ONNX model and the default engine
+  (`faster-whisper`) runs on CTranslate2.
 """
 from __future__ import annotations
 
 import queue
 import threading
 import time
-from contextlib import nullcontext
 from typing import Callable
 
 import numpy as np
@@ -98,39 +100,13 @@ def _log_mic_open_failure(exc: BaseException, devices=None) -> None:
 # A callback that receives finalized transcript text. Defaults to bus publish.
 TranscriptSink = Callable[[Event], None]
 
-# One Whisper + one rolling session context for ALL pipelines (mic + loopback).
+# One engine + one rolling session context for ALL pipelines (mic + loopback).
 # Loading two models doubles RAM and fights for CPU cores — the main reason
-# meeting backlog blew past a minute while ASR itself was only ~5–14s.
-_shared_whisper = None
-_shared_whisper_lock = threading.Lock()
-_shared_transcribe_lock = threading.Lock()
+# meeting backlog blew past a minute while ASR itself was only ~5–14s. The
+# sharing (and the model, and its locking) now lives in services/asr.py; this
+# module asks for an engine and does not know which one it got.
 _shared_session = None
 _shared_session_lock = threading.Lock()
-
-
-def _get_shared_whisper():
-    """Lazy-load a process-wide WhisperModel shared by every AudioPipeline."""
-    global _shared_whisper
-    with _shared_whisper_lock:
-        if _shared_whisper is None:
-            from faster_whisper import WhisperModel
-
-            kwargs = dict(
-                device=AudioCfg.device,
-                compute_type=AudioCfg.compute_type,
-            )
-            if AudioCfg.cpu_threads > 0:
-                kwargs["cpu_threads"] = AudioCfg.cpu_threads
-            if AudioCfg.num_workers > 1:
-                kwargs["num_workers"] = AudioCfg.num_workers
-            print(
-                f"[audio] loading shared Whisper '{AudioCfg.whisper_model}' "
-                f"({AudioCfg.compute_type}, {AudioCfg.device}, "
-                f"beam={AudioCfg.beam_size}, workers={AudioCfg.num_workers}) ..."
-            )
-            _shared_whisper = WhisperModel(AudioCfg.whisper_model, **kwargs)
-            print("[audio] shared Whisper ready.")
-        return _shared_whisper
 
 
 def _get_shared_session():
@@ -161,7 +137,7 @@ def _ms_speaker_space(source: str) -> str:
 
 
 class AudioPipeline:
-    """One capture -> VAD -> Whisper pipeline instance.
+    """One capture -> VAD -> ASR pipeline instance.
 
     `capture` picks the audio source: "mic" (default, sounddevice input stream)
     or "loopback" (WASAPI what-the-computer-is-playing via `soundcard` — meeting
@@ -187,11 +163,14 @@ class AudioPipeline:
         self._worker: threading.Thread | None = None
         self._reader: threading.Thread | None = None   # loopback capture thread
         self._stream = None
-        self._model = None
+        self._engine = None
         self._vad = None
         self._buffer: list[np.ndarray] = []
         self._in_speech = False
         self._speech_started_ts = 0.0   # wall-clock at VAD speech-start (telemetry)
+        # Silero compute accumulated over the current utterance. Reset per
+        # utterance so the stage timer describes one utterance, not the run.
+        self._vad_ms = 0.0
         self._last_text = ""       # for consecutive-duplicate suppression
         self._last_text_ts = 0.0
         # Shared across mic + loopback so meeting names bias both sides.
@@ -201,7 +180,9 @@ class AudioPipeline:
     def _load(self) -> None:
         from silero_vad import load_silero_vad, VADIterator
 
-        self._model = _get_shared_whisper()
+        from app.services import asr as _asr
+
+        self._engine = _asr.get_engine()
         vad_model = load_silero_vad(onnx=True)
         self._vad = VADIterator(
             vad_model,
@@ -218,7 +199,12 @@ class AudioPipeline:
             print(f"[audio] stream status: {status}")
         # indata: float32 (frames, channels) -> mono float32 vector
         mono = indata[:, 0].copy() if indata.ndim > 1 else indata.copy()
+        # Two perf_counter reads (~100 ns) on the audio thread, which is the
+        # only place Silero's cost is visible: it runs per 32 ms chunk, so it
+        # cannot be timed from the worker side after the fact.
+        _t_vad = time.perf_counter()
         speech_dict = self._vad(mono, return_seconds=False)
+        self._vad_ms += (time.perf_counter() - _t_vad) * 1000.0
 
         if self._in_speech:
             self._buffer.append(mono)
@@ -232,22 +218,28 @@ class AudioPipeline:
                     self._buffer = []
                     # Stay in-speech: next frames continue the same talk turn.
                     self._utterances.put(
-                        (utterance, self._speech_started_ts, time.time()))
+                        (utterance, self._speech_started_ts, time.time(),
+                         self._vad_ms))
                     self._speech_started_ts = time.time()
+                    self._vad_ms = 0.0
 
         if speech_dict is not None:
             if "start" in speech_dict:
                 self._in_speech = True
                 self._speech_started_ts = time.time()
                 self._buffer = [mono]
+                self._vad_ms = 0.0
             elif "end" in speech_dict and self._in_speech:
                 self._in_speech = False
                 utterance = np.concatenate(self._buffer) if self._buffer else mono
                 self._buffer = []
-                # Carry the speech start/end wall-clock with the audio so the
-                # transcribe worker can measure end-to-end (speech-end -> published)
+                # Carry the speech start/end wall-clock (and the VAD compute
+                # spent on this utterance) with the audio so the transcribe
+                # worker can measure end-to-end (speech-end -> published)
                 # latency for the Audio Health telemetry.
-                self._utterances.put((utterance, self._speech_started_ts, time.time()))
+                self._utterances.put((utterance, self._speech_started_ts,
+                                      time.time(), self._vad_ms))
+                self._vad_ms = 0.0
 
     # ------------------------------ transcribe ---------------------------
     def _transcribe_loop(self) -> None:
@@ -256,11 +248,14 @@ class AudioPipeline:
                 item = self._utterances.get(timeout=0.25)
             except queue.Empty:
                 continue
-            # Unpack (audio, speech_start, speech_end); tolerate a bare array.
+            # Unpack (audio, speech_start, speech_end, vad_ms); tolerate the
+            # older 3-tuple and a bare array, so a queue drained across a
+            # restart never crashes the worker on shape alone.
             if isinstance(item, tuple):
-                audio, _t_speech_start, t_speech_end = item
+                audio, _t_speech_start, t_speech_end = item[:3]
+                vad_ms = item[3] if len(item) > 3 else None
             else:
-                audio, _t_speech_start, t_speech_end = item, None, None
+                audio, _t_speech_start, t_speech_end, vad_ms = item, None, None, None
             if audio is None or len(audio) < self.cfg.sample_rate * 0.2:
                 continue  # ignore < 200 ms blips
 
@@ -276,8 +271,20 @@ class AudioPipeline:
                 "audio_duration_ms": round(
                     1000.0 * len(audio) / self.cfg.sample_rate, 1),
                 "queue_depth": self._utterances.qsize(),
-                "model": self.cfg.whisper_model,
+                "model": getattr(self._engine, "model_id", self.cfg.whisper_model),
+                # Which pipeline produced this row. mic and loopback have
+                # different audio, different timing and different failure modes;
+                # aggregating them together hid both.
+                "channel": self.capture,
+                # Engine provenance per transcript, so a report from a tester
+                # on a flag-flipped build says which engine produced it.
+                "engine": getattr(self._engine, "engine_id", "?"),
             }
+            if vad_ms is not None:
+                tele["vad_ms"] = round(float(vad_ms), 1)
+            # Handed to _record_tele, which turns them into post_ms and the
+            # latency span. Stripped before the row is written.
+            tele["_t_speech_end"] = t_speech_end
             # Latency program, Phase 0: how long this utterance sat between
             # speech-end and the transcribe worker picking it up. Everything
             # needed was already on hand (`t_speech_end` is stamped by the
@@ -288,9 +295,9 @@ class AudioPipeline:
                 tele["queue_wait_ms"] = round(
                     max(0.0, (time.time() - t_speech_end) * 1000.0), 1)
 
-            # --- pre-ASR audio quality: score the waveform before Whisper so we
-            # can tell "bad audio" from "Whisper failed", and (later) route weak
-            # audio through denoising. Best-effort; a failure never blocks ASR.
+            # --- pre-ASR audio quality: score the waveform before ASR so we
+            # can tell "bad audio" from "the engine failed", and (later) route
+            # weak audio through denoising. Best-effort; a failure never blocks ASR.
             aq = None
             if settings.audio_quality.enabled:
                 try:
@@ -307,8 +314,8 @@ class AudioPipeline:
                     tele.update(quality=aq["quality"], snr_est=aq["snr_est"],
                                 rms=aq["rms"], clipping_pct=aq["clipping_pct"],
                                 speech_ratio=aq["vad_speech_ratio"])
-                # Optional gate (off by default): don't feed Whisper clearly-bad
-                # audio. Keep an audio-only event so nothing is silently lost.
+                # Optional gate (off by default): don't feed the engine
+                # clearly-bad audio. Keep an audio-only event so nothing is silently lost.
                 if (aq is not None and settings.audio_quality.skip_bad
                         and aq["quality"] == "bad"):
                     self._emit_audio_only(
@@ -318,7 +325,7 @@ class AudioPipeline:
                     continue
 
             # --- denoise only when needed (#2): 'noisy' audio is enhanced before
-            # Whisper; 'good' is left untouched (denoising clean speech adds
+            # ASR; 'good' is left untouched (denoising clean speech adds
             # latency and can distort). The raw clip is kept for provenance —
             # only this ASR copy is enhanced.
             asr_audio = audio
@@ -343,11 +350,14 @@ class AudioPipeline:
                     print(f"[audio] denoise error: {exc}")
                     asr_audio = audio
 
-            # --- session-aware ASR bias (#3): prime Whisper with known names /
-            # projects (from the KG) + the last few transcripts, so it spells
-            # "Abby Nengel" right instead of "Abby Nagle". Best-effort.
+            # --- session-aware ASR bias (#3): prime the engine with known
+            # names / projects (from the KG) + the last few transcripts, so it
+            # spells "Abby Nengel" right instead of "Abby Nagle". Skipped for an
+            # engine with no context hook — see ASREngine.supports_context.
+            # Best-effort.
             initial_prompt = None
-            if settings.asr_bias.enabled:
+            if settings.asr_bias.enabled and getattr(
+                    self._engine, "supports_context", False):
                 try:
                     from app.services.vocabulary import vocabulary
 
@@ -360,29 +370,23 @@ class AudioPipeline:
 
             t_asr_start = time.time()
             try:
-                # Serialize when the shared model has a single CTranslate2 worker;
-                # with num_workers>1 concurrent transcribe() calls are supported.
-                lock = (nullcontext() if self.cfg.num_workers > 1
-                        else _shared_transcribe_lock)
-                with lock:
-                    segments, info = self._model.transcribe(
-                        asr_audio,
-                        language=self.cfg.language,
-                        vad_filter=False,          # we already did VAD
-                        beam_size=max(1, self.cfg.beam_size),
-                        best_of=max(1, self.cfg.best_of),
-                        temperature=self.cfg.temperature,
-                        condition_on_previous_text=self.cfg.condition_on_previous_text,
-                        initial_prompt=initial_prompt,
-                    )
-                    # Materialize under the lock: the generator pulls from the model.
-                    segs = list(segments)
-                text = " ".join(s.text.strip() for s in segs).strip()
+                # Whatever engine is configured. Decoding parameters, model
+                # sharing and concurrency are the engine's business now; this
+                # loop's business is what to do with the words.
+                res = self._engine.transcribe(
+                    asr_audio, self.cfg.sample_rate, context=initial_prompt)
+                segs = res.segments
+                text = res.text
             except Exception as exc:  # keep the pipeline alive
                 print(f"[audio] transcription error: {exc}")
                 self._record_tele(tele, "dropped", "asr_error")
                 continue
             tele["asr_latency_ms"] = round((time.time() - t_asr_start) * 1000, 1)
+            # Everything after this point is the post-ASR tail: ingest filter,
+            # dedupe, routing, provenance, speaker ID, WAV write, publish. It is
+            # the share of the utterance-end -> event budget that a faster
+            # engine does NOT fix, so it has to be measured separately.
+            tele["_t_asr_done"] = time.time()
             if not text:
                 self._record_tele(tele, "dropped", "empty")
                 continue
@@ -394,9 +398,15 @@ class AudioPipeline:
             quality = None
             needs_review = False
             if settings.ingest.enabled:
+                from app.services.asr_calibration import cfg_for as _ingest_cfg
                 from app.services.ingest_filter import assess, normalize
 
-                verdict = assess(text, segs)
+                # Judged on THIS engine's thresholds. Whisper has none and gets
+                # the shipped defaults — they were written for its scale. An
+                # engine on a different confidence scale is judged on numbers
+                # fitted for it, so a swap cannot quietly move the line between
+                # "kept as memory" and "discarded".
+                verdict = assess(text, segs, _ingest_cfg(res.engine_id))
                 tele.update(avg_logprob=verdict.avg_logprob,
                             no_speech_prob=verdict.no_speech_prob,
                             filter_verdict=verdict.action,
@@ -452,11 +462,25 @@ class AudioPipeline:
             except Exception as exc:
                 print(f"[audio] self-echo guard skipped ({exc}).")
 
-            # avg_logprob (transcription confidence) if the filter computed it,
-            # else fall back to language-detection probability.
+            # Transcription confidence: the filter's per-segment mean when it
+            # ran, else the engine's own. Both are on the engine's confidence
+            # scale (`res.confidence_kind`) — which is why the scale is recorded
+            # on the event rather than assumed downstream. `conf_from_asr`
+            # handles a negative log-probability and an already-0..1 value alike.
             avg_logprob = (quality["avg_logprob"] if quality is not None
-                           else getattr(info, "language_probability", None))
-            meta = {"duration_s": round(len(audio) / self.cfg.sample_rate, 2)}
+                           else res.avg_confidence)
+            meta = {"duration_s": round(len(audio) / self.cfg.sample_rate, 2),
+                    # Which engine produced these words. A tester's bug report
+                    # on a mixed-engine build has to say that, and a memory
+                    # stored under one engine's confidence scale has to record
+                    # which scale that was.
+                    "asr_engine": res.engine_id,
+                    "confidence_kind": res.confidence_kind}
+            # Word-level timings when the engine emits them (Parakeet does,
+            # natively). Additive: nothing downstream requires the key, and
+            # provenance links can point at exact seconds once it is there.
+            if res.word_timestamps:
+                meta["word_timestamps"] = res.word_timestamps
             if quality is not None:
                 meta["quality"] = quality
             if needs_review:
@@ -488,8 +512,8 @@ class AudioPipeline:
                 except Exception as exc:
                     print(f"[audio] wav save error: {exc}")
                 # #12: also keep the ENHANCED copy actually transcribed (when
-                # denoise ran) — otherwise the enhanced audio, which is what Whisper
-                # heard, is lost and the transcript can't be traced to its true
+                # denoise ran) — otherwise the enhanced audio, which is what the
+                # engine heard, is lost and the transcript can't be traced to its true
                 # input. Saved under a distinct name so the raw stays the ground truth.
                 if (denoise_info is not None and denoise_info.get("applied")
                         and asr_audio is not audio):
@@ -601,19 +625,60 @@ class AudioPipeline:
 
     def _record_tele(self, tele: dict, outcome: str,
                      drop_reason: str | None = None) -> None:
-        """Write one audio telemetry row (#9). Best-effort — telemetry must never
-        break capture, so a disabled flag or any DB hiccup is swallowed."""
-        if not settings.telemetry.enabled:
-            return
-        try:
-            get_store().record_audio_telemetry(
-                outcome=outcome, drop_reason=drop_reason, **tele)
-        except Exception as exc:
-            print(f"[audio] telemetry error: {exc}")
+        """Close out one utterance: derive the post-ASR tail, write the telemetry
+        row (#9), and emit the capture latency span.
+
+        Both consumers are fed from the same numbers rather than from a second
+        set of probes — the stage timings this needs were already taken for the
+        Audio Health console, so the span trail costs one dict lookup on a
+        thread that must not be given real work. Best-effort throughout:
+        telemetry must never break capture.
+        """
+        # Private marks handed over by the worker; never columns.
+        t_speech_end = tele.pop("_t_speech_end", None)
+        t_asr_done = tele.pop("_t_asr_done", None)
+        now = time.time()
+        if t_asr_done:
+            tele["post_ms"] = round(max(0.0, (now - t_asr_done) * 1000.0), 1)
+        # End-to-end for the span even when the utterance was dropped — a drop
+        # still consumed the budget, and a pipeline that is slow *because* it
+        # drops late is invisible if only kept rows are timed. The telemetry
+        # column keeps its kept-only meaning; this is span-side only.
+        total_ms = (max(0.0, (now - t_speech_end) * 1000.0)
+                    if t_speech_end else None)
+
+        if settings.telemetry.enabled:
+            try:
+                get_store().record_audio_telemetry(
+                    outcome=outcome, drop_reason=drop_reason, **tele)
+            except Exception as exc:
+                print(f"[audio] telemetry error: {exc}")
+
+        if total_ms is not None:
+            try:
+                from app.services import latency as _lat
+
+                _lat.record(
+                    _lat.KIND_CAPTURE, task=self.capture, total_ms=total_ms,
+                    stages={k: v for k, v in (
+                        ("vad", tele.get("vad_ms")),
+                        ("queue_wait", tele.get("queue_wait_ms")),
+                        ("asr", tele.get("asr_latency_ms")),
+                        ("post", tele.get("post_ms")),
+                    ) if v is not None},
+                    marks={"outcome": outcome, "drop_reason": drop_reason,
+                           "engine": tele.get("engine"),
+                           "channel": tele.get("channel"),
+                           "quality": tele.get("quality"),
+                           "audio_duration_ms": tele.get("audio_duration_ms"),
+                           "queue_depth": tele.get("queue_depth")},
+                )
+            except Exception as exc:
+                print(f"[audio] latency span skipped ({exc}).")
 
     # ------------------------------ lifecycle ----------------------------
     def start(self) -> None:
-        if self._model is None:
+        if self._engine is None:
             self._load()
         # Pilot ledger (WS-A): accrue capture minutes while the pipeline runs.
         # Start/stop only — the ledger's flush timer turns wall time into whole

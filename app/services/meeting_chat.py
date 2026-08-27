@@ -203,6 +203,14 @@ def ask(
     )
     context = g.get("block") or ""
     sources = g.get("sources") or []
+    # D.2b: same routing features as the general chat path (services/llm.py) —
+    # measured here, before the call, because retrieval cannot be replayed.
+    retrieval = None
+    try:
+        from app.services.router_train import retrieval_stats
+        retrieval = retrieval_stats(q, hits=g.get("hits"), block=context)
+    except Exception as exc:
+        print(f"[meeting_chat] retrieval stats skipped ({exc}).")
     answer = ""
     try:
         from app.services.model_router import router
@@ -220,6 +228,7 @@ def ask(
                        f"Meeting context:\n{context or '(none)'}\n\n"
                        f"Question: {q}"}],
             max_tokens=800,
+            retrieval=retrieval,
         ).strip()
     except Exception as exc:
         answer = f"(Could not generate: {exc})\n\nWhat I found:\n{context[:1200]}"

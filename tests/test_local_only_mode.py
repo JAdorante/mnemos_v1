@@ -113,7 +113,14 @@ class DeadLaneRejectTests(unittest.TestCase):
                                    and e["text"] == "open notepad"
                                    for e in evs))
         errs = [e["text"] for e in evs if e["kind"] == "error"]
-        self.assertTrue(any("ANTHROPIC_API_KEY" in t for t in errs))
+        # Assert the MEANING, not the env-var name. The copy deliberately says
+        # "connect an Anthropic key in Setup" rather than naming a variable —
+        # telling a tester to set an environment variable is not a fix they can
+        # act on — and the old literal-string assertion failed on that
+        # improvement while the behaviour it guards was still correct.
+        self.assertTrue(
+            any("anthropic" in t.lower() and "setup" in t.lower() for t in errs),
+            f"expected an error pointing at Anthropic credentials; got {errs}")
 
 
 class LocalOnlyStartTests(unittest.TestCase):

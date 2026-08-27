@@ -12,32 +12,66 @@ CHAT_PAGE = _mnemos(r"""<!doctype html><html lang="en"><head><meta charset="utf-
 @@CHROME@@
 *{box-sizing:border-box}
 body{
-  margin:0;font:15px/1.55 var(--font);color:var(--text);
+  margin:0;font:15.5px/1.6 var(--font);color:var(--text);
   height:100vh;display:flex;flex-direction:column;
-  background:
-    radial-gradient(900px 480px at 8% -5%, var(--acc-05), transparent 55%),
-    radial-gradient(700px 400px at 96% 0%, rgba(30,91,79,.04), transparent 50%),
-    linear-gradient(180deg, #FBF9F4 0%, var(--paper) 40%, var(--workspace) 100%);
+  background:var(--paper);
 }
 .chat-layout{
   flex:1;min-height:0;display:grid;
-  grid-template-columns:minmax(0,min(200px,18vw)) minmax(0,1fr);
+  grid-template-columns:minmax(0,min(240px,22vw)) minmax(0,1fr);
+  transition:grid-template-columns .28s var(--ease);
+}
+.chat-layout.stream-collapsed{
+  grid-template-columns:48px minmax(0,1fr);
 }
 #ambientChat{
-  padding:14px 12px;overflow:auto;min-width:0;border-right:1px solid var(--line);
+  padding:18px 14px;overflow:auto;min-width:0;
+  border-right:1px solid rgba(11,19,32,.06);
+  background:var(--surface);
 }
+.chat-layout.stream-collapsed #ambientChat{
+  padding:14px 8px;overflow:hidden;
+}
+.chat-layout.stream-collapsed #ambientChat .cs-body{display:none}
+#streamExpand{
+  display:none;width:100%;height:auto;padding:10px 0;
+  background:transparent;border:none;cursor:pointer;color:var(--mut);
+  font:500 11px/1.2 var(--mono);letter-spacing:.06em;text-transform:uppercase;
+  writing-mode:vertical-rl;transform:rotate(180deg);box-shadow:none;
+}
+.chat-layout.stream-collapsed #streamExpand{display:inline-flex;align-items:center;justify-content:center}
+.chat-layout.stream-collapsed #streamExpand:hover{color:var(--acc);transform:rotate(180deg)}
 @media(max-width:900px){
-  .chat-layout{grid-template-columns:1fr}
+  .chat-layout,.chat-layout.stream-collapsed{grid-template-columns:1fr}
   #ambientChat{display:none}
 }
 .top{
-  display:flex;align-items:center;gap:18px;flex-wrap:wrap;
-  padding:14px 22px;
+  display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+  padding:12px 22px;
 }
-.page-sub{margin-left:-4px}
-.meta{display:flex;gap:14px;align-items:center;font-family:var(--mono);font-size:12px;color:var(--mut);min-width:0}
-.meta #url{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.chat-tools{display:flex;gap:8px;align-items:center;position:relative}
+.chat-status{
+  position:relative;
+}
+.chat-status > summary{
+  list-style:none;cursor:pointer;user-select:none;
+  font:500 12px var(--font);color:var(--mut);
+  padding:6px 10px;border-radius:10px;border:1px solid transparent;
+}
+.chat-status > summary::-webkit-details-marker{display:none}
+.chat-status > summary:hover,
+.chat-status[open] > summary{
+  color:var(--text);border-color:rgba(11,19,32,.1);background:rgba(11,19,32,.03);
+}
+.chat-status .status-panel{
+  position:absolute;right:0;top:calc(100% + 8px);z-index:var(--z-popover);
+  width:min(280px,calc(100vw - 24px));
+  background:var(--float);border:1px solid rgba(11,19,32,.1);border-radius:14px;
+  box-shadow:var(--shadow-float);padding:12px 14px;
+  font:11px/1.45 var(--mono);color:var(--mut);
+  display:flex;flex-direction:column;gap:6px;
+}
+.chat-status .status-panel span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chat-tools{display:flex;gap:6px;align-items:center;position:relative}
 .chat-tools button{
   background:transparent;border:1px solid transparent;border-radius:10px;
   padding:6px 10px;font:500 12px var(--font);color:var(--mut);cursor:pointer;
@@ -49,9 +83,9 @@ body{
 }
 .chat-tools button:active{transform:none}
 #pastPanel{
-  display:none;position:absolute;right:0;top:calc(100% + 8px);z-index:var(--z-popover);
+  display:none;position:absolute;left:0;bottom:calc(100% + 8px);z-index:var(--z-popover);
   width:min(340px,calc(100vw - 24px));max-height:min(360px,calc(100dvh - var(--chrome-h) - 24px));overflow:auto;
-  background:var(--surface);border:1px solid rgba(11,19,32,.1);border-radius:14px;
+  background:var(--float);border:1px solid rgba(11,19,32,.1);border-radius:14px;
   box-shadow:var(--shadow-float);padding:8px;animation:fadeUp .22s var(--ease) both;
 }
 #pastPanel.open{display:block}
@@ -70,7 +104,7 @@ body{
 .past-item .past-title{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .past-item .past-meta{display:block;margin-top:3px;font:11px var(--mono);color:var(--mut)}
 #archiveBanner{
-  display:none;width:min(640px,94%);margin:8px auto 0;padding:10px 14px;
+  display:none;width:min(800px,94%);margin:8px auto 0;padding:10px 14px;
   background:rgba(30,91,79,.06);border:1px solid rgba(30,91,79,.18);
   border-radius:12px;font:13px var(--font);color:var(--navy);
   align-items:center;justify-content:space-between;gap:12px;
@@ -83,67 +117,65 @@ body{
 }
 #archiveBanner button:hover{background:rgba(11,19,32,.04);transform:none;box-shadow:none}
 #log{
-  flex:1;overflow:auto;padding:32px 20px 40px;
+  flex:1;overflow:auto;padding:28px 20px 48px;
   display:flex;flex-direction:column;gap:4px;align-items:center;min-width:0;min-height:0;
 }
 .chat-main{display:flex;flex-direction:column;min-width:0;min-height:0}
 .msg{
-  max-width:min(640px,94%);width:100%;
+  max-width:min(800px,94%);width:100%;
   animation:fadeUp .32s var(--ease) both;
   position:relative;
 }
 .msg-label{
   font:500 10px/1 var(--mono);letter-spacing:.08em;text-transform:uppercase;
-  color:var(--mut);margin:0 0 6px;padding:0 2px;
+  color:var(--mut);margin:0 0 8px;padding:0 2px;
 }
 .msg-body{
   white-space:pre-wrap;word-wrap:break-word;overflow-wrap:anywhere;
-  font:15px/1.65 var(--font);color:var(--text);letter-spacing:-.01em;
+  font:15.5px/1.65 var(--font);color:var(--text);letter-spacing:-.01em;
 }
-/* You — quiet ink note, not a navy brick */
+/* User — warm ivory bubble, right */
 .msg.user{
-  align-self:stretch;max-width:min(640px,94%);
-  margin:14px 0 6px;display:flex;flex-direction:column;align-items:flex-end;
+  align-self:stretch;max-width:min(800px,94%);
+  margin:16px 0 8px;display:flex;flex-direction:column;align-items:flex-end;
 }
-.msg.user .msg-label{align-self:flex-end;color:rgba(11,19,32,.45)}
+.msg.user .msg-label{display:none}
 .msg.user .msg-body{
   max-width:min(420px,88%);
-  background:transparent;color:var(--navy);font-weight:500;
-  padding:0 0 10px;border-bottom:1.5px solid var(--acc-35);
-  text-align:right;box-shadow:none;border-radius:0;
+  background:var(--panel-2);color:var(--navy);font-weight:500;
+  padding:12px 16px;border-radius:16px 16px 4px 16px;
+  text-align:left;box-shadow:var(--shadow-workspace);
+  border:1px solid rgba(11,19,32,.05);
 }
-/* Mnemos — paper page of a reply */
+/* Mnemos — uncontained editorial prose */
 .msg.result{
-  margin:18px 0 8px;padding:0;
+  margin:20px 0 10px;padding:0;
 }
 .msg.result .msg-shell{
-  background:var(--surface);border:1px solid rgba(11,19,32,.07);
-  border-radius:16px;padding:16px 18px 14px;
-  box-shadow:var(--shadow-surface);
-  position:relative;
+  background:transparent;border:none;border-radius:0;padding:0;
+  box-shadow:none;position:relative;
 }
-.msg.result .msg-shell::before{
-  content:"";position:absolute;left:0;top:14px;bottom:14px;width:2px;
-  background:linear-gradient(180deg,var(--acc-55),var(--acc-08));
-  border-radius:2px;
-}
-.msg.result .msg-label{color:var(--navy);opacity:.55}
-.msg.result .msg-body{padding-left:8px}
+.msg.result .msg-shell::before{display:none}
+.msg.result .msg-label{color:var(--mut);opacity:.9}
+.msg.result .msg-body{padding-left:0}
 .msg.result .msg-body.rd-host{padding-left:0;white-space:normal}
-.msg.result .msg-shell{padding:18px 20px 16px}
-.sources{
-  margin:10px 0 0 8px;padding-top:8px;border-top:1px solid rgba(11,19,32,.06);
-  font-size:12px;color:var(--mut);line-height:1.55;
+.sources,.mnemos-prov.sources{
+  margin:12px 0 0;
 }
-.sources summary{
+.sources:not(.mnemos-prov){
+  padding:8px 12px;border:1px solid rgba(11,19,32,.06);border-radius:12px;
+  background:var(--surface);box-shadow:var(--shadow-workspace);
+  font-size:11px;color:var(--mut);line-height:1.55;
+}
+.sources:not(.mnemos-prov) summary{
   cursor:pointer;user-select:none;list-style:none;
-  font:500 11px/1.2 var(--mono);letter-spacing:.04em;text-transform:uppercase;
+  font:500 11px/1.2 var(--mono);letter-spacing:.02em;color:var(--charcoal);
 }
 .sources summary::-webkit-details-marker{display:none}
 .sources summary:hover{color:var(--navy)}
 .sources div{margin:4px 0 0 2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .verdict{
-  display:flex;gap:6px;margin:12px 0 0 8px;padding-top:10px;
+  display:flex;gap:6px;margin:14px 0 0;padding-top:10px;
   border-top:1px solid rgba(11,19,32,.06);
 }
 .verdict button{
@@ -164,13 +196,11 @@ body{
 .msg.system .msg-body{
   font:italic 13px/1.5 var(--font);color:var(--mut);text-align:center;
 }
-.msg.ask{
-  margin:14px 0 8px;
-}
+.msg.ask{margin:14px 0 8px}
 .msg.ask:not(.folio-wrap) .msg-shell{
-  background:rgba(255,254,251,.9);border:1px solid rgba(199,138,44,.22);
+  background:rgba(255,254,251,.95);border:1px solid rgba(199,138,44,.22);
   border-radius:16px;padding:14px 16px;
-  box-shadow:var(--shadow-workspace);
+  box-shadow:var(--shadow-surface);
 }
 .msg.ask .msg-label{color:var(--warn)}
 .msg.ask.folio-wrap{background:transparent;border:none;box-shadow:none;padding:0;margin:18px 0}
@@ -182,22 +212,105 @@ body{
 .msg.error .msg-label{color:var(--danger)}
 .msg.error .msg-body{color:#6b3030;font-size:14px}
 .msg.progress{
-  margin:2px 0;max-width:min(640px,94%);
+  margin:2px 0;max-width:min(800px,94%);
 }
 .msg.progress .msg-body{
-  font:12px/1.5 var(--mono);color:rgba(107,111,118,.85);
+  font:11px/1.5 var(--mono);color:rgba(107,111,118,.85);
   padding:3px 0 3px 14px;border-left:1.5px solid rgba(11,19,32,.1);
   background:transparent;box-shadow:none;
 }
+/* Empty welcome */
+#emptyState{
+  width:min(800px,94%);margin:auto 0;padding:48px 8px 32px;
+  text-align:center;animation:fadeUp .4s var(--ease) both;
+}
+#emptyState.hidden{display:none}
+#emptyState .empty-greeting{
+  font-family:var(--display);font-size:clamp(26px,3.2vw,32px);font-weight:400;
+  line-height:1.2;letter-spacing:-.02em;color:var(--navy);margin:0 0 8px;
+}
+#emptyState .empty-sub{
+  font:15px/1.5 var(--font);color:var(--mut);margin:0 0 28px;
+}
+#emptyState .empty-actions{
+  display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;
+  max-width:640px;margin:0 auto;text-align:left;
+}
+@media(max-width:720px){
+  #emptyState .empty-actions{grid-template-columns:1fr}
+}
+.empty-card{
+  background:var(--float);border:1px solid rgba(11,19,32,.07);
+  border-radius:14px;padding:14px 16px;cursor:pointer;box-shadow:var(--shadow-workspace);
+  transition:border-color .22s var(--ease),box-shadow .22s var(--ease),transform .22s var(--ease);
+  text-align:left;width:100%;font:inherit;color:inherit;
+}
+.empty-card:hover{
+  border-color:var(--acc-35);box-shadow:var(--shadow-surface);
+  transform:translateY(-1px);
+}
+.empty-card .ec-title{
+  display:block;font:600 13px/1.3 var(--font);color:var(--navy);margin-bottom:4px;
+}
+.empty-card .ec-desc{
+  display:block;font:12px/1.45 var(--font);color:var(--mut);
+}
+/* Context stream */
+.cs-head{
+  display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:14px;
+}
+.cs-kicker{
+  font:500 10px/1 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--mut);
+}
+.cs-collapse{
+  background:transparent;border:none;color:var(--mut);cursor:pointer;
+  font:14px var(--font);padding:2px 6px;border-radius:8px;box-shadow:none;line-height:1;
+}
+.cs-collapse:hover{color:var(--navy);background:rgba(11,19,32,.04);transform:none;box-shadow:none}
+.cs-section{margin-bottom:18px}
+.cs-listen-row{display:flex;align-items:center;gap:8px;margin-bottom:4px}
+.cs-dot{
+  width:7px;height:7px;border-radius:999px;background:rgba(11,19,32,.2);flex:0 0 auto;
+}
+.cs-dot.on{
+  background:var(--acc);
+  box-shadow:0 0 0 0 var(--acc-35);
+  animation:listenPulse 2.4s var(--ease) infinite;
+}
+@keyframes listenPulse{
+  0%,100%{box-shadow:0 0 0 0 var(--acc-28)}
+  50%{box-shadow:0 0 0 6px transparent}
+}
+@media(prefers-reduced-motion:reduce){
+  .cs-dot.on{animation:none;box-shadow:0 0 0 3px var(--acc-12)}
+}
+.cs-listen-label{font:500 13px/1.2 var(--font);color:var(--navy)}
+.cs-status{margin:0;font:12px/1.4 var(--font);color:var(--mut);padding-left:15px}
+.cs-empty{margin:6px 0 0;font:12px var(--font);color:var(--mut)}
+.cs-recent{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-direction:column;gap:2px}
+.cs-recent-item{
+  display:flex;flex-direction:column;gap:2px;width:100%;text-align:left;
+  background:transparent;border:none;border-radius:10px;padding:8px 8px;
+  cursor:pointer;box-shadow:none;color:var(--text);
+}
+.cs-recent-item:hover{background:var(--acc-08);transform:none;box-shadow:none}
+.cs-recent-time{font:10px/1.2 var(--mono);color:var(--mut)}
+.cs-recent-title{
+  font:12.5px/1.35 var(--font);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.cs-mem{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-direction:column;gap:6px}
+.cs-mem li{font:12.5px/1.35 var(--font);color:var(--charcoal)}
+.cs-mem-n{font:500 12px var(--mono);color:var(--acc);margin-right:4px}
+/* Dock + floating composer */
 .dock{
-  border-top:1px solid rgba(11,19,32,.06);background:rgba(248,246,241,.96);backdrop-filter:blur(14px);
-  padding:0 18px 18px;display:flex;flex-direction:column;align-items:center;
+  border-top:none;background:transparent;
+  padding:0 18px 20px;display:flex;flex-direction:column;align-items:center;
 }
 #bar{
   display:none;gap:10px;align-items:center;justify-content:flex-start;flex-wrap:wrap;
-  width:min(640px,100%);margin:12px 0 4px;padding:10px 14px;
-  background:var(--surface);border:1px solid rgba(11,19,32,.08);border-radius:14px;
-  box-shadow:var(--shadow-workspace);animation:fadeUp .3s var(--ease) both;
+  width:min(800px,100%);margin:8px 0 4px;padding:10px 14px;
+  background:var(--float);border:1px solid rgba(11,19,32,.08);border-radius:14px;
+  box-shadow:var(--shadow-surface);animation:fadeUp .3s var(--ease) both;
 }
 #bar .action-detail{flex:1 1 100%;order:5;margin:4px 0 0}
 #bar .approval-form{order:6}
@@ -220,52 +333,65 @@ body{
   box-shadow:0 4px 14px rgba(166,71,71,.12);
 }
 .composer-wrap{
-  display:flex;flex-direction:column;gap:8px;width:min(640px,100%);padding-top:12px;
+  display:flex;flex-direction:column;gap:8px;width:min(820px,100%);padding-top:8px;
+}
+.composer-toolbar{
+  display:flex;align-items:center;justify-content:flex-end;gap:4px;
+  width:100%;position:relative;
 }
 .composer{
-  display:flex;gap:10px;align-items:stretch;width:100%;
+  display:flex;flex-direction:column;gap:10px;width:100%;
+  background:var(--float);border:1px solid rgba(11,19,32,.08);
+  border-radius:18px;padding:14px 14px 12px;
+  box-shadow:var(--shadow-float);
+}
+.composer-footer{
+  display:flex;align-items:center;gap:6px;flex-wrap:wrap;
 }
 #box{
-  flex:1;background:var(--panel);color:var(--text);border:1px solid var(--line);
-  border-radius:var(--radius);padding:12px 14px;resize:none;min-height:52px;height:52px;
-  font:inherit;line-height:1.45;box-shadow:var(--shadow);
-  transition:border-color .28s var(--ease),box-shadow .28s var(--ease);
+  width:100%;background:transparent;color:var(--text);border:none;
+  border-radius:0;padding:2px 4px;resize:none;min-height:56px;max-height:40vh;
+  height:56px;font:inherit;line-height:1.5;box-shadow:none;overflow-y:auto;
 }
-#box:focus{outline:none;border-color:var(--acc-45);box-shadow:0 0 0 3px var(--acc-dim)}
+#box:focus{outline:none;border:none;box-shadow:none}
+.composer:focus-within{
+  border-color:var(--acc-40);
+  box-shadow:var(--shadow-float),0 0 0 3px var(--acc-dim);
+}
 #dry,#studyMode{
-  background:var(--panel);color:var(--mut);border:1px solid var(--line);
-  border-radius:var(--radius);padding:0 10px;min-width:132px;font:13px var(--font);
-  cursor:pointer;
-  transition:border-color .28s var(--ease),color .28s var(--ease),
-    background .28s var(--ease),box-shadow .28s var(--ease),transform .22s var(--ease);
+  background:transparent;color:var(--mut);border:1px solid transparent;
+  border-radius:10px;padding:6px 8px;min-width:0;max-width:140px;
+  font:500 12px var(--font);cursor:pointer;box-shadow:none;
+  transition:border-color .22s var(--ease),color .22s var(--ease),background .22s var(--ease);
 }
-#studyMode{min-width:148px}
-#dry:hover,#studyMode:hover{
-  color:var(--text);border-color:var(--acc-40);
-  background:var(--bg-elev);transform:translateY(-1px);
-  box-shadow:0 4px 12px rgba(11,19,32,.06);
+#studyMode{max-width:150px}
+#dry:hover,#studyMode:hover,
+#dry:focus,#studyMode:focus{
+  color:var(--navy);border-color:var(--acc-35);background:var(--acc-06);
+  outline:none;transform:none;box-shadow:none;
 }
-#dry:focus,#studyMode:focus{color:var(--text);outline:none;border-color:var(--acc-40)}
+#dry:focus,#studyMode:focus{border-color:var(--acc-45)}
 #ctxBtn{
-  background:var(--panel);color:var(--mut);border:1px solid var(--line);
-  border-radius:var(--radius);padding:0 12px;min-width:auto;cursor:pointer;
-  font:500 13px var(--font);white-space:nowrap;
+  background:transparent;color:var(--mut);border:1px solid transparent;
+  border-radius:10px;padding:6px 10px;min-width:auto;cursor:pointer;
+  font:500 12px var(--font);white-space:nowrap;box-shadow:none;
 }
 #ctxBtn:hover{
-  color:var(--text);border-color:var(--acc-40);
-  background:var(--bg-elev);
+  color:var(--navy);border-color:var(--acc-35);background:var(--acc-06);
+  transform:none;box-shadow:none;
 }
 #ctxBtn.on{color:var(--navy);border-color:var(--acc-45);background:var(--acc-08)}
-#ctxBtn.has{color:var(--ok);border-color:rgba(46,111,87,.4)}
+#ctxBtn.has{color:var(--ok);border-color:rgba(46,111,87,.35)}
+.composer-footer .grow{flex:1;min-width:4px}
 #ctxPanel{
-  display:none;width:100%;background:var(--panel);border:1px solid var(--line);
-  border-radius:var(--radius);padding:10px 12px;box-shadow:var(--shadow);
+  display:none;width:100%;background:var(--float);border:1px solid rgba(11,19,32,.08);
+  border-radius:16px;padding:12px 14px;box-shadow:var(--shadow-surface);
   animation:fadeUp .25s var(--ease) both;
 }
 #ctxPanel.open{display:block}
 #ctxPanel .ctx-label{
   display:flex;align-items:center;justify-content:space-between;gap:8px;
-  font:12px var(--mono);color:var(--mut);margin-bottom:6px;
+  font:11px var(--mono);color:var(--mut);margin-bottom:6px;
 }
 #ctxPanel .ctx-label button{
   background:transparent;border:none;color:var(--mut);cursor:pointer;
@@ -319,16 +445,19 @@ body{
   margin-top:6px;font:11px var(--mono);color:var(--mut);line-height:1.35;
 }
 #send{
-  background:var(--navy);color:#F8F6F1;border:none;border-radius:var(--radius);
-  padding:0 22px;cursor:pointer;font-weight:600;font-size:14px;
-  box-shadow:0 2px 8px rgba(11,19,32,.16);
+  width:36px;height:36px;flex:0 0 auto;padding:0;
+  background:var(--navy);color:#F8F6F1;border:none;border-radius:999px;
+  cursor:pointer;font:600 16px/1 var(--font);
+  box-shadow:0 2px 8px rgba(11,19,32,.14);
+  display:inline-flex;align-items:center;justify-content:center;
 }
 #send:hover{
-  background:#152033;transform:translateY(-2px);
-  box-shadow:0 8px 20px rgba(11,19,32,.22);
+  background:#152033;transform:translateY(-1px);
+  box-shadow:0 6px 16px rgba(11,19,32,.2);
   filter:brightness(1.06);
 }
-#send:active{transform:translateY(0) scale(.97);box-shadow:0 2px 6px rgba(11,19,32,.14)}
+#send:active{transform:scale(.96);box-shadow:0 2px 6px rgba(11,19,32,.14)}
+#send:disabled{opacity:.45;cursor:default;transform:none}
 #ghost{
   position:relative;width:min(380px,calc(100vw - 48px));display:none;
   background:var(--float);border:1px solid var(--line);border-radius:var(--radius);
@@ -354,49 +483,56 @@ body{
 @media(max-width:900px){#ghost{width:min(280px,calc(100vw - 48px))}}
 @media(max-width:640px){
   .top{padding:10px 14px;gap:10px}
-  .meta{width:100%;flex-wrap:wrap;gap:8px;font-size:11px}
-  .chat-tools{margin-left:auto}
-  #pastPanel{right:-8px;width:min(340px,calc(100vw - 28px))}
   #log{padding:20px 12px 32px}
-  .composer{padding:10px 12px calc(10px + env(safe-area-inset-bottom,0px))}
-  .composer{flex-wrap:wrap}
-  #dry,#studyMode,#send,#ctxBtn{height:44px}
-  #ctxBtn{flex:0 0 auto}
-  #dry,#studyMode{flex:1} #send{flex:0 0 auto}
+  .composer{padding:12px 12px calc(12px + env(safe-area-inset-bottom,0px))}
   .msg{max-width:100%}
-  .msg.user .msg-body{max-width:92%;text-align:left}
-  .msg.user,.msg.user .msg-label{align-items:flex-start;align-self:flex-start}
+  .msg.user .msg-body{max-width:92%}
   #ghost{display:none !important}
   #archiveBanner{width:calc(100% - 24px);flex-wrap:wrap}
 }
 </style></head><body>
 <header class="top">
   <a class="brand" href="/">@@MARK@@ @@BRAND@@</a>
-  <span class="page-sub">Chat</span>
   @@NAV@@
-  <span class="spacer"></span>
-  <div class="chat-tools">
-    <button type="button" id="pastBtn" title="Browse saved conversations">Past</button>
-    <button type="button" id="newChatBtn" title="Save this chat and start fresh">New</button>
-    <div id="pastPanel" role="dialog" aria-modal="true" aria-label="Past conversations" aria-hidden="true">
-      <div class="past-head"><span>Saved chats</span><span id="pastCount"></span></div>
-      <div id="pastList"><div class="past-empty">No saved chats yet.</div></div>
+  <details class="chat-status" id="chatStatus">
+    <summary title="Model &amp; session status">Status</summary>
+    <div class="status-panel">
+      <span id="url"></span>
+      <span id="policy"></span>
+      <span id="cost"></span>
     </div>
-  </div>
-  <div class="meta">
-    <span id="url"></span>
-    <span id="policy"></span>
-    <span id="cost"></span>
-  </div>
+  </details>
 </header>
-<div class="chat-layout">
-<aside id="ambientChat" aria-hidden="true"></aside>
+<div class="chat-layout" id="chatLayout">
+<aside id="ambientChat" aria-label="Context stream">
+  <button type="button" id="streamExpand" title="Expand context stream">Context</button>
+  <div class="cs-body" id="csBody"></div>
+</aside>
 <div class="chat-main">
 <div id="archiveBanner">
   <span id="archiveBannerText">Viewing a saved conversation (read-only).</span>
   <button type="button" id="backLiveBtn">Back to live</button>
 </div>
-<div id="log"></div>
+<div id="log">
+  <div id="emptyState">
+    <h1 class="empty-greeting" id="emptyGreeting">Good day.</h1>
+    <p class="empty-sub">What are we working through?</p>
+    <div class="empty-actions">
+      <button type="button" class="empty-card" data-prompt="What do you remember about ">
+        <span class="ec-title">Recall something</span>
+        <span class="ec-desc">Search what Mnemos remembers</span>
+      </button>
+      <button type="button" class="empty-card" data-prompt="Help me think through ">
+        <span class="ec-title">Think through something</span>
+        <span class="ec-desc">Work through an idea with your context</span>
+      </button>
+      <button type="button" class="empty-card" data-prompt="Help me draft or prepare ">
+        <span class="ec-title">Take an action</span>
+        <span class="ec-desc">Draft, research, or prepare something</span>
+      </button>
+    </div>
+  </div>
+</div>
 </div>
 </div>
 @@UI_JS@@
@@ -431,6 +567,16 @@ body{
     </form>
   </div>
   <div class="composer-wrap">
+    <div class="composer-toolbar">
+      <div class="chat-tools">
+        <button type="button" id="pastBtn" title="Browse saved conversations">Past</button>
+        <button type="button" id="newChatBtn" title="Save this chat and start fresh">New</button>
+        <div id="pastPanel" role="dialog" aria-modal="true" aria-label="Past conversations" aria-hidden="true">
+          <div class="past-head"><span>Saved chats</span><span id="pastCount"></span></div>
+          <div id="pastList"><div class="past-empty">No saved chats yet.</div></div>
+        </div>
+      </div>
+    </div>
     <div id="ctxPanel">
       <div class="ctx-label">
         <span>Extra context for the next message (notes, files, photos)</span>
@@ -443,35 +589,46 @@ body{
       <div id="ctxLearn">Attachments are kept in memory (reviewable in Memory) so @@BRAND@@ can learn about you.</div>
     </div>
     <div class="composer">
-      <textarea id="box" placeholder="Ask @@BRAND@@, or give the agent a task… (show a to-do list to the camera and it will offer to run it)"></textarea>
-      <button type="button" id="ctxBtn" title="Add notes, documents, or photos for the next message">+ Context</button>
-      <select id="studyMode" title="Study mode — how the assistant coaches this session">
-        <option value="general">Mode: General</option>
-        <option value="lecture_notes">Lecture notes</option>
-        <option value="homework">Homework help</option>
-        <option value="study_quiz">Study / quiz</option>
-        <option value="syllabus">Syllabus &amp; deadlines</option>
-        <option value="essay_rubric">Essay / rubric</option>
-        <option value="reading">Reading / textbook</option>
-      </select>
-      <select id="dry" title="How far the agent may go this turn">
-        <option value="">Posture: default</option>
-        <option value="plan">Plan only</option>
-        <option value="navigate">Navigate only</option>
-        <option value="draft">Draft only</option>
-        <option value="approval">Approval</option>
-        <option value="full">Full (autonomous)</option>
-        <option value="autonomous">Autonomous</option>
-      </select>
-      <button id="send" onclick="send()">Send</button>
+      <textarea id="box" placeholder="Ask @@BRAND@@ anything…" rows="2"></textarea>
+      <div class="composer-footer">
+        <button type="button" id="ctxBtn" title="Add notes, documents, or photos for the next message">+ Context</button>
+        <select id="studyMode" title="Study mode — how the assistant coaches this session">
+          <option value="general">General</option>
+          <option value="lecture_notes">Lecture notes</option>
+          <option value="homework">Homework help</option>
+          <option value="study_quiz">Study / quiz</option>
+          <option value="syllabus">Syllabus &amp; deadlines</option>
+          <option value="essay_rubric">Essay / rubric</option>
+          <option value="reading">Reading / textbook</option>
+        </select>
+        <select id="dry" title="How far the agent may go this turn">
+          <option value="">Default</option>
+          <option value="plan">Plan only</option>
+          <option value="navigate">Navigate only</option>
+          <option value="draft">Draft only</option>
+          <option value="approval">Approval</option>
+          <option value="full">Full (autonomous)</option>
+          <option value="autonomous">Autonomous</option>
+        </select>
+        <span class="grow"></span>
+        <button id="send" onclick="send()" title="Send" aria-label="Send">↑</button>
+      </div>
     </div>
   </div>
 </div>
 <script>
 let since=0, awaiting=false, todo=false, polling=false, approvalMode=false;
-let lastErrShown=null; // dedup: state.error persists across polls — show once
+let lastErrShown=null;
 let liveMode=true;
+let userName='there';
+let streamRecent=[];
+let streamMemory={people:null,commitments:null,related:null};
+let lastStreamStatus='Quiet for now';
 const log=document.getElementById('log'), box=document.getElementById('box');
+const emptyState=document.getElementById('emptyState');
+const chatLayout=document.getElementById('chatLayout');
+const ambientEl=document.getElementById('ambientChat');
+const csBody=document.getElementById('csBody');
 function fillDockDetail(s){
   const det=document.getElementById('dockDetail');
   if(!det) return;
@@ -491,7 +648,6 @@ function fillDockDetail(s){
   if(body){ payload.hidden=false; payload.textContent=body; }
   else { payload.hidden=true; payload.textContent=''; }
   det.open=outbound;
-  // Show detail whenever the bar is visible (mobile + minimized ghost).
   det.style.display=(s&&(s.awaiting||s.todo_pending))?'block':'none';
 }
 window.addEventListener('mnemos:approval-resolved',()=>{ try{ poll(); }catch(e){} });
@@ -506,7 +662,6 @@ const pastBtn=document.getElementById('pastBtn'), pastPanel=document.getElementB
       archiveBanner=document.getElementById('archiveBanner'),
       archiveBannerText=document.getElementById('archiveBannerText'),
       backLiveBtn=document.getElementById('backLiveBtn');
-// Pending attachments for the next send: {id,name,kind,context,summary,status,error}
 let pendingAttach=[];
 let attachSeq=0;
 MnemosMemory.set('lastRoute','/chat');
@@ -517,6 +672,10 @@ MnemosMemory.set('lastRoute','/chat');
   if(st.draft) box.value=st.draft;
   if(st.ctx){ ctxBox.value=st.ctx; }
   if(st.ctxOpen){ ctxPanel.classList.add('open'); ctxBtn.classList.add('on'); }
+  if(MnemosMemory.get('chat.streamCollapsed', false)){
+    chatLayout.classList.add('stream-collapsed');
+  }
+  resizeBox();
 })();
 function persistChat(){
   MnemosMemory.set('chat',{
@@ -534,13 +693,99 @@ function fmtWhen(iso){
     return d.toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
   }catch(e){ return iso; }
 }
+function fmtTime(iso){
+  if(!iso) return '';
+  try{
+    const d=new Date(iso); if(isNaN(d)) return '';
+    return d.toLocaleTimeString([], {hour:'numeric',minute:'2-digit'});
+  }catch(e){ return ''; }
+}
+function greetingForNow(){
+  const h=new Date().getHours();
+  if(h<12) return 'Good morning';
+  if(h<17) return 'Good afternoon';
+  return 'Good evening';
+}
+function firstName(name){
+  const n=(name||'').trim();
+  if(!n) return 'there';
+  return n.split(/\s+/)[0];
+}
+function syncEmptyGreeting(){
+  const el=document.getElementById('emptyGreeting');
+  if(el) el.textContent=greetingForNow()+', '+firstName(userName)+'.';
+}
+function hasConversation(){
+  return !!(log.querySelector('.msg.user, .msg.result, .msg.ask, .msg.error'));
+}
+function syncEmptyState(){
+  if(!emptyState) return;
+  const show=liveMode && !hasConversation();
+  emptyState.classList.toggle('hidden', !show);
+  if(show){
+    if(!emptyState.parentElement || emptyState.parentElement!==log){
+      log.prepend(emptyState);
+    }
+  }
+}
+function resizeBox(){
+  box.style.height='auto';
+  const next=Math.min(Math.max(box.scrollHeight, 56), Math.floor(window.innerHeight*0.4));
+  box.style.height=next+'px';
+}
 function setLiveMode(on){
   liveMode=!!on;
   archiveBanner.classList.toggle('show', !liveMode);
   box.disabled=!liveMode;
   document.getElementById('send').disabled=!liveMode;
   if(liveMode) archiveBannerText.textContent='Viewing a saved conversation (read-only).';
+  syncEmptyState();
 }
+function setStreamCollapsed(on){
+  chatLayout.classList.toggle('stream-collapsed', !!on);
+  MnemosMemory.set('chat.streamCollapsed', !!on);
+}
+function renderContextStream(){
+  if(!window.MnemosContextStream || !csBody) return;
+  const host=csBody;
+  MnemosContextStream.render(host, {
+    listening: liveMode,
+    status: lastStreamStatus,
+    recent: streamRecent,
+    memory: streamMemory,
+  }, {
+    onCollapse:()=>setStreamCollapsed(true),
+    onOpenSession:(id, title)=>{ if(id) openPast(id, title); },
+  });
+}
+async function refreshStreamData(){
+  try{
+    const r=await fetch('/chat/sessions?limit=5'); const j=await r.json();
+    streamRecent=((j&&j.sessions)||[]).map(s=>({
+      id:s.id, title:s.title||'Untitled chat',
+      saved_at:s.saved_at, when:fmtTime(s.saved_at)
+    }));
+  }catch(e){}
+  try{
+    const [pd, pl]=await Promise.all([
+      fetch('/profile/data').then(x=>x.json()).catch(()=>({})),
+      fetch('/people/list?include_candidates=0').then(x=>x.json()).catch(()=>({})),
+    ]);
+    if(pd&&pd.identity&&pd.identity.name){
+      userName=pd.identity.name; syncEmptyGreeting();
+    }
+    const work=(pd&&pd.work)||[];
+    const commitments=work.filter(w=>w.kind==='commitment').length;
+    const people=((pl&&pl.people)||[]).length;
+    streamMemory={
+      related: ((pd&&pd.about)||[]).length + work.length,
+      people: people,
+      commitments: commitments,
+    };
+  }catch(e){}
+  renderContextStream();
+}
+document.getElementById('streamExpand').onclick=()=>setStreamCollapsed(false);
 async function refreshPast(){
   try{
     const r=await fetch('/chat/sessions?limit=40'); const j=await r.json();
@@ -573,19 +818,21 @@ async function openPast(id, title){
     if(!r.ok||!j.session){ alert((j&&j.detail)||'Could not open saved chat'); return; }
     setLiveMode(false);
     archiveBannerText.textContent='Viewing “'+(title||j.session.title||'saved chat')+'” (read-only).';
-    log.innerHTML='';
+    [...log.querySelectorAll('.msg')].forEach(n=>n.remove());
     for(const e of (j.session.events||[])){
       add(e.kind, e.text, e.distill_id, e.sources, e.packet, null);
     }
     if(!(j.session.events||[]).length){
       add('system','(empty saved chat)');
     }
+    syncEmptyState();
   }catch(e){ alert('Could not open saved chat'); }
 }
 async function backToLive(){
   setLiveMode(true);
-  log.innerHTML='';
+  [...log.querySelectorAll('.msg')].forEach(n=>n.remove());
   since=0;
+  syncEmptyState();
   await poll();
 }
 async function newChat(){
@@ -599,13 +846,14 @@ async function newChat(){
     const j=await r.json().catch(()=>({}));
     if(!r.ok||j.ok===false){ alert(j.error||j.detail||'Could not start a new chat'); return; }
     setLiveMode(true);
-    log.innerHTML='';
+    [...log.querySelectorAll('.msg')].forEach(n=>n.remove());
     since=0;
+    syncEmptyState();
     await poll();
     refreshPast();
+    refreshStreamData();
   }catch(e){ alert('Could not start a new chat'); }
 }
-let _pastReturn=null;
 function closePastPanel(){
   MnemosDialog.close(pastPanel);
 }
@@ -614,15 +862,8 @@ pastBtn.onclick=(ev)=>{
   if(MnemosDialog.isOpen(pastPanel)){
     closePastPanel();
   }else{
-    const rect=pastBtn.getBoundingClientRect();
-    const panelW=Math.min(340, window.innerWidth-24);
-    if(rect.right+panelW>window.innerWidth-12){
-      pastPanel.style.right='0';
-      pastPanel.style.left='auto';
-    }else{
-      pastPanel.style.left='0';
-      pastPanel.style.right='auto';
-    }
+    pastPanel.style.left='auto';
+    pastPanel.style.right='0';
     MnemosDialog.open(pastPanel,{
       onEscape:closePastPanel,
       focus:'button',
@@ -637,8 +878,15 @@ document.addEventListener('click',(ev)=>{
   if(pastPanel.contains(ev.target)||pastBtn.contains(ev.target)) return;
   closePastPanel();
 });
-box.addEventListener('input', persistChat);
+box.addEventListener('input', ()=>{ persistChat(); resizeBox(); });
 document.getElementById('dry').addEventListener('change', persistChat);
+document.querySelectorAll('.empty-card').forEach(card=>{
+  card.addEventListener('click',()=>{
+    const p=card.getAttribute('data-prompt')||'';
+    box.value=p; persistChat(); resizeBox(); box.focus();
+    try{ box.setSelectionRange(p.length, p.length); }catch(e){}
+  });
+});
 async function setStudyMode(id){
   const mode=id||document.getElementById('studyMode').value||'general';
   document.getElementById('studyMode').value=mode;
@@ -739,7 +987,6 @@ function bindFolioSeal(root){
   const payloadHash=row.getAttribute('data-payload-hash')||'';
   async function decide(decision, extra){
     if(!packetId||!payloadHash){
-      // Legacy folio without bind metadata — fall back to typed reply.
       reply(decision==='cancel'?'cancel':(extra&&extra.user_edit)||'approve');
       return;
     }
@@ -805,6 +1052,7 @@ function add(kind,text,distillId,sources,packet,compiled){
     d.innerHTML=MnemosRenderFolio(pkt,{editable:true,meta:'Hold to seal · release early to abort'});
     bindFolioSeal(d);
     log.appendChild(d);log.scrollTop=log.scrollHeight;
+    syncEmptyState();
     return;
   }
   const labels={user:'You',result:'@@BRAND@@',ask:'Needs you',error:'Issue',
@@ -822,31 +1070,35 @@ function add(kind,text,distillId,sources,packet,compiled){
   const useDoc=kind==='result' && doc && doc.sections && doc.sections.length
     && window.MnemosResponse;
   if(useDoc){
-    // Grounding lives inside the compiled document (collapsed).
     MnemosResponse.mount(body, doc, {
       includeGrounding:true,
       onAction:(prompt)=>{
         if(!prompt) return;
-        box.value=prompt; persistChat(); send();
+        box.value=prompt; persistChat(); resizeBox(); send();
       }
     });
-    // Keep raw text for verdict edit fallback
     body.dataset.rawText=text||'';
   }else{
     body.textContent=text;
   }
   host.appendChild(body);
   if(kind==='result' && sources && sources.length && !useDoc){
-    const det=document.createElement('details');det.className='sources';
+    const det=document.createElement('details');det.className='sources mnemos-prov';
     const total=sources.reduce((n,s)=>n+(s.n||(s.items||[]).length||0),0);
     const sum=document.createElement('summary');
-    sum.textContent='Grounded in '+total+' memory source'+(total===1?'':'s');
+    sum.innerHTML='<span class="prov-mark" aria-hidden="true">◇</span>'
+      +'<span class="prov-label">Remembered</span>'
+      +'<span class="prov-meta">From your memory · '+total+' source'+(total===1?'':'s')+'</span>'
+      +'<a class="prov-go" href="/memory" title="Open Memory" onclick="event.stopPropagation()">↗</a>';
     det.appendChild(sum);
+    const bodyWrap=document.createElement('div');bodyWrap.className='prov-body';
     for(const s of sources){
       for(const it of (s.items||[])){
-        const li=document.createElement('div');li.textContent='— '+it;det.appendChild(li);
+        const li=document.createElement('div');li.className='rd-g-item';li.textContent='— '+it;
+        bodyWrap.appendChild(li);
       }
     }
+    det.appendChild(bodyWrap);
     host.appendChild(det);
   }
   if(kind==='result' && distillId){
@@ -863,6 +1115,7 @@ function add(kind,text,distillId,sources,packet,compiled){
     host.appendChild(acts);
   }
   log.appendChild(d);log.scrollTop=log.scrollHeight;
+  syncEmptyState();
 }
 async function verdict(acts,distillId,outcome,btn){
   let edited=null;
@@ -887,49 +1140,43 @@ async function verdict(acts,distillId,outcome,btn){
   }catch(e){alert('label failed: '+e);}
 }
 async function poll(){
- // Guard against overlap: `since` only advances after the await, so a second
- // poll firing mid-flight (send()+setInterval, or a burst after the tab
- // regains focus) would re-fetch and re-render the same events (the "exit 0
- // x8" duplication). Skip if one is already running; the cursor persists.
  if(document.hidden) return;
  if(polling) return; polling=true;
  try{
   const r=await fetch('/chat/poll?since='+since); const j=await r.json();
   for(const e of (j.events||[])){
     since=e.id+1;
-    if(e.kind==='error') lastErrShown=e.text; // event already renders it
+    if(e.kind==='error') lastErrShown=e.text;
     if(liveMode) add(e.kind, e.text, e.distill_id, e.sources, e.packet, e.compiled);
   }
   const s=j.state||{};
   awaiting=!!s.awaiting; todo=!!s.todo_pending;
   approvalMode=!!(s.packet && s.packet.kind==='approval')
     || !!(s.question && /APPROVAL NEEDED/.test(s.question));
-  document.getElementById('url').textContent=s.url||'';
+  document.getElementById('url').textContent=s.url?('URL · '+s.url):'URL · —';
   const pol=[]; if(s.study_mode)pol.push(s.study_mode); if(s.mode)pol.push(s.mode); if(s.dry_run&&s.dry_run!=='approval')pol.push(s.dry_run==='full'||s.dry_run==='autonomous'?'autonomous':s.dry_run);
-  document.getElementById('policy').textContent=pol.join(' · ');
-  document.getElementById('cost').textContent=(s.cost!=null)?('$'+Number(s.cost).toFixed(4)):'';
+  document.getElementById('policy').textContent=pol.length?('Mode · '+pol.join(' · ')):'Mode · —';
+  document.getElementById('cost').textContent=(s.cost!=null)?('Cost · $'+Number(s.cost).toFixed(4)):'Cost · —';
   const waitEl=document.getElementById('waiting');
   if(waitEl) waitEl.textContent=s.waiting_on||(awaiting?(approvalMode?'Seal the approval folio…':'Waiting on your reply…'):(todo?'Waiting on yes/no…':''));
-  // Offers keep Yes/No; approvals live in the folio Seal (hide generic bar).
   document.getElementById('bar').style.display=(liveMode&&((awaiting&&!approvalMode)||todo))?'flex':'none';
   fillDockDetail(s);
   box.placeholder=!liveMode?'Viewing a saved chat — Back to live to continue…'
     :(awaiting||todo)?(approvalMode?'Edit the folio, or type a revision…':'Yes/no above, or type a new request…')
-    :'Ask @@BRAND@@, or give the agent a task…';
-  // Banner + NEEDS YOU card + dock Yes/No already show pending offers —
-  // never mirror waiting_on into the ambient column.
-  const notes=[];
+    :'Ask @@BRAND@@ anything…';
   if(liveMode){
-    if(!(approvalMode || todo)){
-      if(s.waiting_on) notes.push({text:s.waiting_on,attention:false});
-    }
+    if(approvalMode || todo) lastStreamStatus=s.waiting_on||'Waiting on you';
+    else if(s.busy) lastStreamStatus='Working…';
+    else if(s.waiting_on) lastStreamStatus=s.waiting_on;
+    else lastStreamStatus='Quiet for now';
   } else {
-    notes.push({text:'Reading a saved conversation.',attention:false});
+    lastStreamStatus='Reading a saved conversation.';
   }
-  MnemosAmbient.render(document.getElementById('ambientChat'), notes);
+  renderContextStream();
   if(liveMode && s.error && s.error!==lastErrShown){
     lastErrShown=s.error; add('error', s.error);
   }
+  syncEmptyState();
  }catch(e){}
  finally{ polling=false; }
 }
@@ -940,7 +1187,7 @@ async function send(){
    alert('Still uploading attachments — wait a moment, then send.');
    return;
  }
- box.value='';
+ box.value=''; resizeBox(); persistChat();
  const dry=document.getElementById('dry').value||null;
  const mode=document.getElementById('studyMode').value||'general';
  const note=(ctxBox.value||'').trim();
@@ -948,8 +1195,6 @@ async function send(){
    .map(a=>a.context).join('\n\n');
  const ctxParts=[note,attachCtx].filter(Boolean);
  const ctx=ctxParts.length?ctxParts.join('\n\n'):null;
- // Sticky context + attachment snippets are one-shot with the message.
- // File contents stay in memory (source=chat.attach) for learning.
  if(note||pendingAttach.length){
    ctxBox.value=''; pendingAttach=[]; renderAttach();
    ctxPanel.classList.remove('open'); ctxBtn.classList.remove('on'); syncCtxBtn();
@@ -969,10 +1214,12 @@ function startChatPoll(){
 if(window.MnemosChatStream){
   chatStreamOn=!!MnemosChatStream.connect(()=>poll());
 }
+syncEmptyGreeting();
+syncEmptyState();
+refreshStreamData();
 startChatPoll();
 poll();
 
-// --- ghost browser pane: the agent's live view, no window on your screen ---
 const ghostEl=document.getElementById('ghost'), ghostImg=document.getElementById('ghostimg'),
       ghostTtl=document.getElementById('ghostttl');
 if(window.MnemosDock&&ghostEl) MnemosDock.add(ghostEl, MnemosDock.PRIORITY.ghost);
@@ -992,11 +1239,10 @@ document.getElementById('ghostreveal').onclick=async()=>{
 };
 async function ghostPoll(){
  if(document.hidden) return;
-  if(document.hidden) return;
   try{
     const s=await (await fetch('/agent/ghost/status')).json();
     if(s.fresh){
-      ghostHideAt=Date.now()+30000;   // linger a moment after the run ends
+      ghostHideAt=Date.now()+30000;
       ghostEl.style.display='block';
       ghostEl.classList.add('ink-border');
       ghostTtl.textContent=s.title||s.url||'Agent browser';

@@ -193,6 +193,18 @@ def suspect_answer(answer: str, messages: list | None) -> str | None:
     return None
 
 
+def _prompt_chars(system: str | None, messages: list | None) -> int:
+    """Total characters the local model would have to hold for this call."""
+    from app.services.ollama_text import _flatten
+    n = len(system or "")
+    for m in (messages or []):
+        try:
+            n += len(_flatten(m.get("content")))
+        except Exception:
+            continue
+    return n
+
+
 def _prompt_head(messages: list | None) -> str:
     """First ~500 chars of the last user message — enough to identify the call."""
     if not messages:
@@ -384,7 +396,8 @@ class ModelRouter:
                  local_error: str | None = None, messages: list | None = None,
                  system: str | None = None, fewshot_n: int = 0,
                  schema: dict | None = None, fewshot_top_sim: float | None = None,
-                 conf_effective: float | None = None) -> str | None:
+                 conf_effective: float | None = None,
+                 retrieval: dict | None = None) -> str | None:
         """Persist a local→parent pair for later idle distillation (best-effort).
 
         `prompt_head` stays truncated for browsing; with full-fidelity on, the
@@ -406,6 +419,11 @@ class ModelRouter:
                 meta["fewshot_top_sim"] = round(fewshot_top_sim, 4)
             if conf_effective is not None:
                 meta["conf_effective"] = round(conf_effective, 4)
+            if retrieval:
+                # D.2b router features, measured at CALL time. Replaying them
+                # later would give different numbers as the memory store grows,
+                # so this is the only place they can honestly be recorded.
+                meta["retrieval"] = retrieval
             if settings.escalate_log.full_fidelity:
                 from app.services.ollama_text import _flatten
                 if system:
@@ -438,7 +456,8 @@ class ModelRouter:
     def _local_first(self, task: str, *, system: str, messages: list,
                      max_tokens: int, schema: dict | None,
                      model: str | None,
-                     speculative: bool = False
+                     speculative: bool = False,
+                     retrieval: dict | None = None
                      ) -> tuple[str, dict | None, str | None]:
         """Local pass -> confidence/stakes gate -> Claude parent when needed.
         Returns (text, parsed_json_or_None, distill_row_id_or_None). Mirrors
@@ -467,6 +486,7 @@ class ModelRouter:
             rid = self._distill(task=task, reason=reason, local=local,
                                 parent={"text": _clip(text, out_cap)},
                                 parent_model=parent_model,
+                                retrieval=retrieval,
                                 local_error=local_error,
                                 messages=messages, system=system,
                                 fewshot_n=fewshot_n, schema=schema,
@@ -481,6 +501,22 @@ class ModelRouter:
                 # this answer. Return nothing and let the cache stay cold.
                 return "", None, None
             return _parent("local_unavailable")
+
+        # Too much context for the small model to actually read. It would still
+        # answer — fluently, from whatever it held — and self-report high
+        # confidence, so the post-hoc gates below never fire. An attached
+        # document is the common case: the file plus the grounding block runs
+        # far past what a 7B holds, and the answer comes back about the
+        # memories instead of the file.
+        max_prompt = int(getattr(cfg, "local_max_prompt_chars", 0) or 0)
+        if max_prompt > 0:
+            n_chars = _prompt_chars(system, messages)
+            if n_chars > max_prompt:
+                if speculative:
+                    return "", None, None
+                print(f"[model_router] prompt {n_chars} chars > "
+                      f"{max_prompt} — skipping local, asking Claude.")
+                return _parent("prompt_too_long_for_local")
 
         # Retrieval few-shot: show the local model similar past prompts it
         # needed rescuing on, with the human-verified answer. Local-only —
@@ -560,7 +596,8 @@ class ModelRouter:
                     task, messages,
                     (float(eff) if eff is not None else conf),
                     heuristic_escalates=heuristic_escalates,
-                    heuristic_reason=reason)
+                    heuristic_reason=reason,
+                    retrieval=retrieval)
                 if _router_mode() == "active":
                     soft_only = (not heuristic_escalates
                                  or reason == "low_confidence")
@@ -599,7 +636,8 @@ class ModelRouter:
             shadow_eval.log_local_output(
                 task, messages=messages, text=res.get("text"),
                 confidence=(float(eff) if eff is not None else conf),
-                model_tag=cfg.local_model, shadow_priority=shadow_priority)
+                model_tag=cfg.local_model, shadow_priority=shadow_priority,
+                retrieval=retrieval)
         except Exception as exc:  # pragma: no cover
             print(f"[model_router] shadow log skipped ({exc}).")
         # Verdict-able tasks still get a distill row (no parent side) so the
@@ -614,7 +652,8 @@ class ModelRouter:
                        "json": res.get("json"), "confidence": conf},
                 parent={}, parent_model="(not called)",
                 messages=messages, system=system, fewshot_n=fewshot_n,
-                schema=schema, fewshot_top_sim=top_sim, conf_effective=eff)
+                schema=schema, fewshot_top_sim=top_sim, conf_effective=eff,
+                retrieval=retrieval)
         return res.get("text") or "", res.get("json"), rid
 
     @staticmethod
@@ -635,7 +674,8 @@ class ModelRouter:
     # --- public API ----------------------------------------------------------
     def complete(self, task: str, *, system: str, messages: list,
                  max_tokens: int = 1024, schema: dict | None = None,
-                 model: str | None = None, speculative: bool = False) -> str:
+                 model: str | None = None, speculative: bool = False,
+                 retrieval: dict | None = None) -> str:
         """One text completion, local-first when QUILL_TEXT_LOCAL=1 (else
         Claude-only, unchanged). Returns the reply text. When an escalation
         distill row is written, its id is also available as
@@ -646,6 +686,12 @@ class ModelRouter:
         are local-only: no escalation, no fallback to Claude when the local
         model is down or unsure, and the paid seam raises if one ever gets
         that far. Returns "" when no local answer could be produced.
+
+        `retrieval` (D.2b) is router_train.retrieval_stats() for the grounding
+        this call was built on — STATS only, never retrieved content. Callers
+        that ground a prompt should pass it; the router reads it as a feature
+        and it is recorded on the distill/shadow rows so training sees the
+        same numbers production saw. Omitting it is always safe.
         """
         with self._maybe_speculative(speculative):
             if not _text_cfg().enabled:
@@ -658,14 +704,15 @@ class ModelRouter:
             text, _, distill_id = self._local_first(
                 task, system=system, messages=messages,
                 max_tokens=max_tokens, schema=schema, model=model,
-                speculative=speculative)
+                speculative=speculative, retrieval=retrieval)
             _tls.distill_id = distill_id
             return text
 
     def complete_json(self, task: str, *, system: str, messages: list,
                       schema: dict, max_tokens: int = 1024,
                       model: str | None = None,
-                      speculative: bool = False) -> dict:
+                      speculative: bool = False,
+                      retrieval: dict | None = None) -> dict:
         """`complete` + parse the JSON result (schema-enforced). A local parse
         failure is an escalate trigger; parse failure at the parent degrades to
         {} exactly as before."""
@@ -684,7 +731,7 @@ class ModelRouter:
             _, parsed, distill_id = self._local_first(
                 task, system=system, messages=messages,
                 max_tokens=max_tokens, schema=schema, model=model,
-                speculative=speculative)
+                speculative=speculative, retrieval=retrieval)
             _tls.distill_id = distill_id
             return parsed or {}
 

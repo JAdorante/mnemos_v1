@@ -6,9 +6,30 @@ can be used later; v1 delivers a scheduling brief / goal).
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from app.services.reasoners.base import Proposal
+
+# Meeting announcements mis-stored as due tasks ("I have a meeting with X
+# today at 8:30 pm…") are not "schedule work to finish" — offering them
+# recycles the same NEEDS YES card on every Chat reload.
+_MEETING_NOTE_RE = re.compile(
+    r"\b(meeting|meet(?:ing)? with|call with|zoom|standup|sync with)\b",
+    re.I,
+)
+_WHEN_CUE_RE = re.compile(
+    r"\b(today|tomorrow|tonight|this (?:morning|afternoon|evening)|"
+    r"\d{1,2}:\d{2}\s*(?:am|pm)?|(?:am|pm)\b)",
+    re.I,
+)
+
+
+def _looks_like_meeting_note(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    return bool(_MEETING_NOTE_RE.search(t) and _WHEN_CUE_RE.search(t))
 
 
 def propose(store, *, now: float | None = None) -> list[Proposal]:
@@ -72,6 +93,8 @@ def propose(store, *, now: float | None = None) -> list[Proposal]:
             continue
         text = (f.get("text") or "").strip()
         if not text:
+            continue
+        if _looks_like_meeting_note(text):
             continue
         fid = f.get("fact_id") or f.get("id")
         days = max(1, int(dt / 86400) or 1)

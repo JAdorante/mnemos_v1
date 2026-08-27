@@ -96,15 +96,19 @@ def replay_messages(row: dict) -> list[dict]:
             for m in (row.get("meta") or {}).get("messages", [])]
 
 
-def run_row(row: dict, local, *, fewshot: bool, exclude_ids: frozenset,
-            fewshot_k: int, fewshot_min_sim: float,
-            escalate_min_conf: float, conf_weight: float = 0.0,
-            exemplars: bool = False) -> dict:
-    """Replay one labeled call against the local model; score vs the gold.
-    The escalate decision uses the ROUTER's own calibrated-confidence policy
-    (model_router.effective_confidence), so bench numbers match production.
-    `exemplars` mirrors production's QUILL_EXEMPLARS=1 path (exemplar store
-    first, legacy few-shot fallback) — the third arm of the E.3 gate."""
+def probe_row(row: dict, local, *, fewshot: bool, exclude_ids: frozenset,
+              fewshot_k: int, fewshot_min_sim: float, conf_weight: float = 0.0,
+              exemplars: bool = False) -> dict:
+    """Replay one labeled call and score it, WITHOUT applying the escalate gate.
+
+    Split out of `run_row` so a caller can sweep the confidence threshold over
+    a single set of replays instead of re-running the model per threshold
+    (scripts/bench_bakeoff.py). `hard_escalate` is the threshold-independent
+    half of the router's policy — parse failure or a suspect answer, which
+    escalate at any threshold; `conf_effective` is the half the threshold
+    gates. `exemplars` mirrors production's QUILL_EXEMPLARS=1 path (exemplar
+    store first, legacy few-shot fallback) — the third arm of the E.3 gate.
+    """
     meta = row.get("meta") or {}
     system = meta["system"]
     messages = replay_messages(row)
@@ -142,18 +146,29 @@ def run_row(row: dict, local, *, fewshot: bool, exclude_ids: frozenset,
                                weight=conf_weight)
     suspect = None if schema is not None else suspect_answer(
         res.get("text") or "", messages)
-    would_escalate = (not res.get("parse_ok", True) or bool(suspect)
-                      or eff is None or float(eff) < escalate_min_conf)
     from app.services.embeddings import embedder
     import numpy as np
     pred, gold = res.get("text") or "", gold_answer(row)
     vecs = embedder.encode_many([pred, gold])
     sim = float(np.dot(vecs[0], vecs[1]))
     return {"id": row.get("id"), "task": row["task"], "sim": round(sim, 4),
-            "pass": sim >= PASS_SIM, "would_escalate": would_escalate,
+            "pass": sim >= PASS_SIM,
+            "hard_escalate": (not res.get("parse_ok", True)) or bool(suspect),
             "confidence": conf,
             "conf_effective": None if eff is None else round(float(eff), 3),
             "fewshot_n": len(ex), "latency_s": round(latency, 2)}
+
+
+def run_row(row: dict, local, *, escalate_min_conf: float, **kw) -> dict:
+    """Replay one labeled call and apply the escalate gate at
+    `escalate_min_conf`. The decision uses the ROUTER's own calibrated-
+    confidence policy (model_router.effective_confidence), so bench numbers
+    match production."""
+    s = probe_row(row, local, **kw)
+    eff = s["conf_effective"]
+    s["would_escalate"] = (s.pop("hard_escalate")
+                           or eff is None or float(eff) < escalate_min_conf)
+    return s
 
 
 def aggregate(scored: list[dict]) -> dict:

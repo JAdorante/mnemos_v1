@@ -39,6 +39,7 @@ def answer(question: str) -> dict:
     (when text routing is enabled) generate local-first; any failure degrades
     to the retrieval-only placeholder."""
     sources: list = []
+    retrieval: dict | None = None
     try:
         from app.services.grounding import compose
         g = compose(question, semantic_limit=8)
@@ -48,6 +49,15 @@ def answer(question: str) -> dict:
         print(f"[llm] structured grounding skipped ({exc}); flat search.")
         hits = memory.search(question, limit=8)
         context = "\n".join(f"- {h['raw']}" for h in hits)
+    # D.2b escalation-router features: "did retrieval find the answer?" is the
+    # strongest predictor of whether a grounded LOCAL answer can succeed, and
+    # it is only measurable here, before the call. Best-effort — a routing
+    # feature must never be able to break the answer path.
+    try:
+        from app.services.router_train import retrieval_stats
+        retrieval = retrieval_stats(question, hits=hits, block=context)
+    except Exception as exc:
+        print(f"[llm] retrieval stats skipped ({exc}).")
     out = {
         "question": question,
         "retrieved": hits,
@@ -75,6 +85,7 @@ def answer(question: str) -> dict:
                            f"Retrieved memories:\n{context or '(none)'}\n\n"
                            f"Question: {question}"}],
                 max_tokens=1024,
+                retrieval=retrieval,
             ).strip()
             if reply:
                 out["answer"] = reply

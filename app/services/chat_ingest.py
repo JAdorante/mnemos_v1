@@ -105,8 +105,20 @@ def run_job(payload: dict) -> None:
         speaker = (user_identity(store).get("name") or "").strip() or None
     except Exception:
         pass
+    # Prefer the stored event's source so People v2 source_policy classifies
+    # this as direct_message (create_person_candidates=True). Defaulting to
+    # "document" wrongly treated chat like a doc and rejected new people.
+    event_source = "chat.user"
+    if anchor is not None:
+        try:
+            ev = store.get_event(int(anchor))
+            if ev and (ev.get("source") or "").strip():
+                event_source = str(ev["source"]).strip()
+        except Exception:
+            pass
     facts = extractor._extract_text(text, speaker=speaker)
-    n = _persist_facts(store, facts, anchor, text, now)
+    n = _persist_facts(store, facts, anchor, text, now,
+                       event_source=event_source)
     try:
         if anchor is not None:
             store.mark_extracted([anchor], now)
