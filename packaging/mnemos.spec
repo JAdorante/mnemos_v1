@@ -67,7 +67,9 @@ datas = [
     (str(ROOT / "docs"), "docs"),
     (str(ROOT / "app" / "static"), "app/static"),
 ]
-for pkg in ("silero_vad", "sentence_transformers", "lancedb", "faster_whisper"):
+for pkg in ("silero_vad", "sentence_transformers", "lancedb", "faster_whisper",
+            # pywebview ships JS bridge files it reads off disk at runtime.
+            "webview"):
     try:
         datas += collect_data_files(pkg)
     except Exception as exc:              # pragma: no cover - build-time only
@@ -128,7 +130,18 @@ a = Analysis(  # noqa: F821
         "sentence_transformers",
         # The desktop shell. Optional at runtime (desktop_app degrades to the
         # browser), but the packaged build is the whole reason they exist.
-        "webview", "pystray", "PIL",
+        # pywebview picks its platform module by string at import, so the
+        # Windows backend is invisible to PyInstaller's analysis; without it
+        # the packaged app silently falls back to opening a browser tab.
+        "webview", "webview.platforms.edgechromium", "webview.platforms.winforms",
+        "clr_loader", "pystray", "pystray._win32", "PIL",
+        # Windows integrations. Named explicitly because each is reached
+        # through a late or dynamic import that static analysis misses:
+        # voice.py does `import win32com.client` inside a function, the
+        # notification mirror uses winsdk's namespace packages, and the UIA
+        # bridge generates comtypes.gen modules at runtime.
+        "win32com", "win32com.client", "pythoncom", "pywintypes",
+        "winsdk", "comtypes", "comtypes.client", "pynput", "mss", "soundcard",
     ],
     hookspath=[],
     hooksconfig={},

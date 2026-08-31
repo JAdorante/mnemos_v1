@@ -167,6 +167,16 @@ CRITICAL_IMPORTS = (
 )
 
 
+# The shell. Missing these is not fatal — desktop_app falls back to the default
+# browser and no tray — but on the packaged build that fallback *is* the bug:
+# the whole point is not being a browser tab. Reported, never fatal, because a
+# working-but-plain app beats refusing to start.
+SHELL_IMPORTS = (
+    ("webview", "native window (Edge WebView2 on Windows)"),
+    ("pystray", "tray icon: Open / Stop capture / Quit"),
+)
+
+
 def self_test() -> int:
     """Prove this build can load what it needs. Exit 0 when it can.
 
@@ -181,6 +191,14 @@ def self_test() -> int:
         except Exception as exc:
             failed.append(name)
             print(f"  MISSING  {name:24} {why}\n           -> {exc}", flush=True)
+    for name, why in SHELL_IMPORTS:
+        try:
+            __import__(name)
+            print(f"  ok       {name:24} {why}", flush=True)
+        except Exception as exc:
+            print(f"  degraded {name:24} {why}\n           -> {exc}\n"
+                  f"           the app still runs, but as a browser tab",
+                  flush=True)
     try:
         from app.services.model_fetch import check
         missing = check(log=lambda m: None)
