@@ -36,6 +36,17 @@ _INTERNAL = frozenset({"_provider", "_route"})
 # never SET via set_user_outcome — labeling only moves a row forward.
 _OUTCOMES = frozenset({"accepted", "rejected", "edited"})
 
+# Rows written to the trail for labeling/training that are NOT escalations
+# (no successful parent call). They used to sit unmarked in the by_reason
+# histogram, so /console/escalate's "escalation reasons" was ~26% non-
+# escalations — stats() now reports the filtered view alongside.
+_KEEP_REASONS = frozenset({"local_kept", "speculative_local_only",
+                           "parent_failed"})
+
+# parent_sim at or above this counts as "the parent agreed with the local
+# answer" — i.e. the escalation likely bought nothing.
+_PARENT_AGREE_SIM = 0.8
+
 
 def _clean_payload(res: dict | None) -> dict | None:
     if not res:
@@ -283,6 +294,7 @@ class EscalateLog:
         """
         recent_rows: list[dict] = []
         by_outcome: Counter[str] = Counter()
+        sims: list[float] = []
         if self._path.is_file():
             try:
                 text = self._path.read_text(encoding="utf-8")
@@ -293,6 +305,9 @@ class EscalateLog:
                     except Exception:
                         continue
                     by_outcome[str(row.get("user_outcome") or "unknown")] += 1
+                    sim = (row.get("meta") or {}).get("parent_sim")
+                    if isinstance(sim, (int, float)):
+                        sims.append(float(sim))
                     if recent > 0 and i >= len(lines) - recent:
                         recent_rows.append(row)
             except Exception as exc:
@@ -300,11 +315,29 @@ class EscalateLog:
         with self._lock:
             by_reason = dict(self._counts)
             total = self._total
+        by_reason_escalated = {r: n for r, n in by_reason.items()
+                               if r not in _KEEP_REASONS}
+        # "Was escalating worth it?" — of the escalations where both answers
+        # exist, how often the parent essentially agreed with the local one.
+        # A high agree_rate on a reason is the router escalating needlessly.
+        agreement = None
+        if sims:
+            agreement = {
+                "n": len(sims),
+                "mean_sim": round(sum(sims) / len(sims), 4),
+                "agree_rate": round(
+                    sum(1 for s in sims if s >= _PARENT_AGREE_SIM) / len(sims),
+                    4),
+                "agree_sim": _PARENT_AGREE_SIM,
+            }
         return {
             "enabled": self.enabled(),
             "path": str(self._path),
             "total": total,
             "by_reason": by_reason,
+            "escalations": sum(by_reason_escalated.values()),
+            "by_reason_escalated": by_reason_escalated,
+            "parent_agreement": agreement,
             "by_outcome": dict(by_outcome),
             "recent": recent_rows,
         }

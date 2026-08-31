@@ -265,9 +265,21 @@ class VisionConfig:
     # local_cooldown as the #1 escalation reason), but still bounded so a truly
     # hung model can't stall the pipeline for a minute per frame.
     local_timeout_s: float = float(_get("QUILL_VISION_LOCAL_TIMEOUT_S", "25"))
-    # After a local timeout/error, skip Ollama for this many seconds and go
-    # straight to Claude so every frame isn't taxed by another dead wait.
+    # After repeated local timeouts/errors, skip Ollama for this many seconds
+    # and go straight to Claude so every frame isn't taxed by another dead wait.
     local_cooldown_s: float = float(_get("QUILL_VISION_LOCAL_COOLDOWN_S", "120"))
+    # Consecutive local errors before the cooldown trips. Telemetry (week of
+    # 2026-08-24) showed error:cooldown rows in exact 1:1 lockstep — every
+    # one-off timeout under CPU contention bought a full window of paid
+    # frames. One error now gets a second chance; a streak still trips.
+    local_cooldown_errors: int = int(_get("QUILL_VISION_LOCAL_COOLDOWN_ERRORS", "2"))
+    # Each further consecutive error doubles the cooldown, capped here — a
+    # genuinely dead daemon backs off instead of re-arming flat 120s windows.
+    local_cooldown_max_s: float = float(_get("QUILL_VISION_LOCAL_COOLDOWN_MAX_S", "480"))
+    # A failed availability probe is re-tried after this many seconds instead
+    # of pinning the whole session to Claude (the probe used to cache forever,
+    # so Ollama starting a beat after Mnemos meant paid frames all day).
+    local_probe_ttl_s: float = float(_get("QUILL_VISION_LOCAL_PROBE_TTL_S", "60"))
     # When the local VLM is down/cooling, "1" routes frames to the cheap Claude
     # tier (never miss a frame); "0" skips ambient frames entirely until local
     # recovers (never pay for a frame local would have handled). Deliberate
@@ -303,8 +315,22 @@ class TextLocalConfig:
     local_model: str = _get("QUILL_TEXT_LOCAL_MODEL", "llama3.2")
     ollama_url: str = _get("QUILL_OLLAMA_URL", "http://127.0.0.1:11434")  # shared with vision
     local_timeout_s: float = float(_get("QUILL_TEXT_LOCAL_TIMEOUT_S", "45"))
+    # A failed availability probe is re-tried after this many seconds. The
+    # probe used to cache its answer for the life of the process, so Ollama
+    # starting a beat after Mnemos pinned every text call to Claude all day
+    # (the local_unavailable rows in the escalate trail).
+    local_probe_ttl_s: float = float(_get("QUILL_TEXT_LOCAL_PROBE_TTL_S", "60"))
     # Escalate to Claude when the local model's self-reported confidence is below this.
+    # Per-task override: QUILL_TEXT_ESCALATE_MIN_CONF_<TASK> (e.g. _CHAT),
+    # read env-first at call time so it is tunable without a restart.
     escalate_min_conf: float = float(_get("QUILL_TEXT_ESCALATE_MIN_CONF", "0.6"))
+    # Infrastructure-driven escalations (local down / errored / truncated /
+    # unparseable) just need *a* decent answer — the local model was expected
+    # to handle them; nothing about the task demanded the accurate tier. On
+    # ambient tasks they go to this cheap parent instead of the task default
+    # (the same tiering vlm.py applies to frames). User-initiated tasks
+    # (chat/plan) and explicit model= overrides keep their configured model.
+    cheap_parent_model: str = _get("QUILL_TEXT_CHEAP_PARENT_MODEL", "claude-haiku-4-5")
     # Retrieval few-shot (services/few_shot.py): before a local attempt, inject
     # up to K past escalations with similar prompts whose parent answer a human
     # accepted/edited — worked examples of this model's own failure modes.
@@ -343,6 +369,16 @@ class TextLocalConfig:
         """Tasks that always escalate to Claude (comma-separated; user-extendable —
         add e.g. `extract` to force the parent on sensitive extraction)."""
         raw = _get("QUILL_TEXT_HIGH_STAKES_TASKS", "plan")
+        return tuple(t.strip() for t in raw.split(",") if t.strip())
+
+    @property
+    def cheap_parent_reasons(self) -> tuple[str, ...]:
+        """Escalation reasons routed to `cheap_parent_model` on ambient tasks
+        (comma-separated). Deliberately excludes low_confidence and
+        prompt_too_long_for_local — those are judgement calls where the
+        accurate tier is the point."""
+        raw = _get("QUILL_TEXT_CHEAP_PARENT_REASONS",
+                   "local_error,local_unavailable,parse_failure,local_truncated")
         return tuple(t.strip() for t in raw.split(",") if t.strip())
 
 

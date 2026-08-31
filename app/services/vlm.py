@@ -285,16 +285,26 @@ class VLMRouter:
         self.claude = ClaudeVLM()                                   # accurate tier
         self.claude_lite = ClaudeVLM(settings.vision.fallback_model)  # cheap tier
         self._local_ok: bool | None = None
+        self._local_probe_t: float = 0.0
         self._warned = False
         self._local_cool_until: float = 0.0
+        self._local_err_streak: int = 0
 
     def _use_local(self) -> bool:
         if not settings.vision.local_vlm:
             return False
         if time.time() < self._local_cool_until:
             return False
-        if self._local_ok is None:               # probe once, cache
+        # A NEGATIVE probe only holds for local_probe_ttl_s — the old
+        # cache-forever meant Ollama starting a beat after Mnemos sent every
+        # frame of the session to paid Claude. A positive probe stays cached;
+        # later failures go through the cooldown path instead.
+        ttl = float(getattr(settings.vision, "local_probe_ttl_s", 60) or 0)
+        stale = (self._local_ok is False
+                 and time.time() - self._local_probe_t >= ttl)
+        if self._local_ok is None or stale:
             self._local_ok = self.local.available()
+            self._local_probe_t = time.time()
             if not self._local_ok and not self._warned:
                 print(f"[vlm] local model '{self.local.model}' not reachable at "
                       f"{self.local.url}; using Claude for now. Enable local vision "
@@ -303,11 +313,28 @@ class VLMRouter:
         return bool(self._local_ok)
 
     def _trip_local_cooldown(self, exc: Exception) -> None:
+        """Count consecutive local errors; trip the cooldown only on a streak,
+        with exponential backoff. Telemetry (week of 2026-08-24) showed
+        error:cooldown rows in exact 1:1 lockstep — a single 25s timeout under
+        CPU contention bought a full 120s window of paid frames, the same
+        penalty as a genuinely dead daemon. Now one error gets a second
+        chance; each error past the threshold doubles the window, capped."""
         cool = float(getattr(settings.vision, "local_cooldown_s", 120) or 0)
         if cool <= 0:
             return
-        self._local_cool_until = time.time() + cool
-        print(f"[vlm] local VLM cooling down {cool:.0f}s after error ({exc}).")
+        self._local_err_streak += 1
+        need = max(1, int(getattr(settings.vision, "local_cooldown_errors", 2)
+                          or 1))
+        if self._local_err_streak < need:
+            print(f"[vlm] local VLM error {self._local_err_streak}/{need} "
+                  f"({exc}); no cooldown yet.")
+            return
+        max_s = float(getattr(settings.vision, "local_cooldown_max_s", 480)
+                      or cool)
+        dur = min(max_s, cool * (2 ** (self._local_err_streak - need)))
+        self._local_cool_until = time.time() + dur
+        print(f"[vlm] local VLM cooling down {dur:.0f}s after "
+              f"{self._local_err_streak} consecutive errors ({exc}).")
 
     @staticmethod
     def _budget_ok() -> bool:
@@ -418,6 +445,7 @@ class VLMRouter:
 
         try:
             local = self.local.describe(jpeg_bytes)
+            self._local_err_streak = 0       # a success ends any error streak
         except Exception as exc:
             self._trip_local_cooldown(exc)
             if not escalate:

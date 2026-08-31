@@ -349,13 +349,18 @@ def run_nightly(now: float | None = None, *, call: Callable | None = None,
             print(f"[shadow_eval] budget hit after {spent} tokens — "
                   f"{len(batch) - len(newly_graded)} rows left ungraded.")
             break
+        t0 = time.time()
         verdict, tok_in, tok_out = grade_one(
             row, call, model=cfg.model, max_tokens=cfg.max_grade_tokens)
         spent += tok_in + tok_out
         try:
             from app.services.model_log import model_log
+            # Measured wall time — these grading calls used to log 0.0s and
+            # were the single largest zero-latency Claude population in the
+            # trail, which made /console/models' latency average meaningless.
             model_log.log_call(task="shadow_eval", provider="claude",
-                               model=cfg.model, latency_s=0.0, ok=verdict is not None,
+                               model=cfg.model, latency_s=time.time() - t0,
+                               ok=verdict is not None,
                                input_tokens=tok_in, output_tokens=tok_out)
         except Exception:
             pass

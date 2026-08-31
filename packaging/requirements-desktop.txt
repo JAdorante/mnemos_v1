@@ -1,0 +1,22 @@
+# Build- and shell-only dependencies for the packaged desktop app.
+#
+# Deliberately separate from requirements.txt: the scripted tester install
+# (install.bat / install.command) runs the app in a console and needs none of
+# this, and making every tester install a GUI toolkit and PyInstaller to get a
+# terminal launcher would be backwards.
+#
+#   pip install -r requirements.txt -r packaging/requirements-desktop.txt
+#   pyinstaller packaging/mnemos.spec
+#
+# Build with the CPU-ONLY torch wheel. The default Linux wheel drags in the
+# CUDA stack — measured at 3.3 GB of the 5.2 GB bundle (nvidia/ + triton/) —
+# and not one byte of it is reachable: ASR is CTranslate2 int8 on CPU and VAD
+# is ONNX. Windows PyPI wheels are already CPU-only, so this matters most for
+# Linux/CI builds, and the spec excludes the CUDA packages as a backstop.
+#
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+pyinstaller>=6.10          # onedir build
+pywebview>=5.3             # native window (Edge WebView2 on Windows, WKWebView on macOS)
+pystray>=0.19              # tray icon: Open / Stop capture / Quit
+pillow>=10.0               # tray icon image + packaging/mnemos.ico

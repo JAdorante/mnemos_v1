@@ -2,70 +2,67 @@
 
     python scripts/download_models.py            # downloads the configured model
     python scripts/download_models.py base small # downloads specific sizes
+    python scripts/download_models.py --check    # report what is already cached
+    python scripts/download_models.py --retries 5
 
 Downloads:
   * faster-whisper model(s)  -> HF cache (Systran/faster-whisper-<size>)
   * Silero VAD (ONNX)        -> silero_vad package cache
+  * ECAPA-TDNN speaker embedder and the MiniLM sentence embedder, when enabled
 
-Safe to re-run: already-cached files are skipped.
+Safe to re-run, and *designed* to be re-run: retries resume from the partial
+file rather than restarting. The logic lives in `app.services.model_fetch` so
+the packaged desktop build's first-run page can call the same code — it cannot
+shell out to this script, because `scripts/` is not in the bundle and a frozen
+`sys.executable` is `Mnemos.exe`. This file is the CLI over it.
+
+Exit codes: 0 everything cached, 1 something still missing after retries.
 """
 from __future__ import annotations
 
-import os
+import argparse
 import sys
 from pathlib import Path
 
 # Allow running as `python scripts/download_models.py` from anywhere.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# Quiet the noisy first-run warnings.
-os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
-os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "0")  # keep the progress bar
-
-from app.config import settings  # noqa: E402
+from app.services.model_fetch import (  # noqa: E402
+    DEFAULT_RETRIES, check, default_sizes, fetch_models,
+)
 
 
-def download_whisper(size: str) -> None:
-    from faster_whisper import WhisperModel
-
-    print(f"[models] fetching faster-whisper '{size}' ...")
-    # Constructing the model downloads + caches the weights.
-    WhisperModel(size, device="cpu", compute_type="int8")
-    print(f"[models] faster-whisper '{size}' ready.")
+def _print(msg: str) -> None:
+    print(f"[models] {msg}", flush=True)
 
 
-def download_vad() -> None:
-    from silero_vad import load_silero_vad
+def main(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(
+        description="Pre-download (or check) Mnemos's local models.")
+    ap.add_argument("sizes", nargs="*",
+                    help="whisper sizes (default: the configured model)")
+    ap.add_argument("--retries", type=int, default=DEFAULT_RETRIES,
+                    help=f"attempts per model (default {DEFAULT_RETRIES})")
+    ap.add_argument("--check", action="store_true",
+                    help="report what is cached and exit; downloads nothing")
+    args = ap.parse_args(argv[1:])
 
-    print("[models] fetching Silero VAD (ONNX) ...")
-    load_silero_vad(onnx=True)
-    print("[models] Silero VAD ready.")
+    sizes = args.sizes or default_sizes()
+    if args.check:
+        missing = check(sizes, log=_print)
+        if missing:
+            _print(f"{len(missing)} model(s) still to download: "
+                   f"{', '.join(missing)}")
+            return 1
+        _print("every model is cached — first run starts without downloading.")
+        return 0
 
-
-def download_speaker_model() -> None:
-    print("[models] fetching ECAPA-TDNN speaker embedder ...")
-    from app.services.speakers import speakers
-
-    speakers._load()
-    print("[models] ECAPA speaker embedder ready.")
-
-
-def main(argv: list[str]) -> None:
-    sizes = argv[1:] or [settings.audio.whisper_model]
-    download_vad()
-    for size in sizes:
-        download_whisper(size)
-    if settings.speakers.enabled:
-        download_speaker_model()
-    if settings.memory.semantic:
-        print("[models] fetching sentence-transformers embedder ...")
-        from app.services.embeddings import embedder
-
-        embedder._load()
-        print("[models] embedder ready.")
-    print(f"\n[models] done. cached: VAD + whisper {sizes}")
-    print("[models] first `python run_audio.py` will now start without downloading.")
+    ok = fetch_models(sizes=sizes, retries=args.retries, log=_print)
+    if not ok:
+        return 1
+    _print("first `python run_audio.py` will now start without downloading.")
+    return 0
 
 
 if __name__ == "__main__":
-    main(sys.argv)
+    sys.exit(main(sys.argv))

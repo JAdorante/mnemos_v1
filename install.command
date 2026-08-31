@@ -28,7 +28,22 @@ RED=$'\033[31m'; RESET=$'\033[0m'
 step() { printf '\n%s==> %s%s\n' "$CYAN" "$1" "$RESET"; }
 ok()   { printf '    %s%s%s\n' "$GREEN" "$1" "$RESET"; }
 warn() { printf '    %s%s%s\n' "$YELLOW" "$1" "$RESET"; }
-fail() { printf '\n%sERROR: %s%s\n' "$RED" "$1" "$RESET"; read -r -p "Press return to close." _; exit 1; }
+
+# Unattended installs: CI on a clean runner, a scripted rollout, or anything
+# that pipes stdin. Without this the model-account prompt and the closing
+# "press return" block forever, so an unattended run becomes a hang rather than
+# a pass or a clean failure. A redirected stdin implies it too — a prompt no
+# one can answer is never the right behaviour.
+NONINTERACTIVE=0
+case "${QUILL_INSTALL_NONINTERACTIVE:-0}" in 0|""|false|False|no|No) ;; *) NONINTERACTIVE=1 ;; esac
+[ -t 0 ] || NONINTERACTIVE=1
+
+# Ollama is a ~10 GB decision and pointless on a throwaway CI machine.
+SKIP_OLLAMA=0
+case "${QUILL_INSTALL_SKIP_OLLAMA:-0}" in 0|""|false|False|no|No) ;; *) SKIP_OLLAMA=1 ;; esac
+
+hold() { [ "$NONINTERACTIVE" = "1" ] || read -r -p "Press return to close." _; }
+fail() { printf '\n%sERROR: %s%s\n' "$RED" "$1" "$RESET"; hold; exit 1; }
 
 [ -f "$ROOT/run_all.py" ] || fail "Run this from inside the Mnemos folder (run_all.py not found)."
 
@@ -97,7 +112,9 @@ fi
 # more per day but works. Never installed silently — it is a 10 GB decision.
 step "Checking for Ollama (optional local models)"
 OLLAMA_OK=0
-if command -v ollama >/dev/null 2>&1; then
+if [ "$SKIP_OLLAMA" = "1" ]; then
+    warn "Skipped (QUILL_INSTALL_SKIP_OLLAMA=1) - cloud-only."
+elif command -v ollama >/dev/null 2>&1; then
     ollama list >/dev/null 2>&1 || { (ollama serve >/dev/null 2>&1 &) ; sleep 6; }
     warn "Pulling qwen2.5:7b-instruct (~4.7 GB) - this is the long part ..."
     if ollama pull qwen2.5:7b-instruct; then
@@ -115,10 +132,12 @@ fi
 
 # --- 6. Speech / embedding models ---------------------------------------------
 step "Pre-downloading speech + embedding models (Whisper, VAD, speaker, MiniLM)"
-if "$VENV_PY" "$ROOT/scripts/download_models.py"; then
+echo "    ~700 MB on a fresh machine. Each model retries and resumes, so a"
+echo "    dropped connection costs the remainder, not the whole download."
+if "$VENV_PY" "$ROOT/scripts/download_models.py" --retries 5; then
     ok "Speech + embedding models cached."
 else
-    warn "Model pre-download hit an error - Mnemos will fetch them on first run instead."
+    warn "Some models did not finish downloading. Re-run install.command when you have a steady connection - what already downloaded is kept and partial files continue where they stopped. Mnemos still starts; it fetches whatever is missing on first use."
 fi
 
 # --- 7. .env + model account --------------------------------------------------
@@ -135,7 +154,43 @@ if [ -z "$INVITE_URL" ]; then
 fi
 
 INVITED=0
-if [ -n "$INVITE_URL" ]; then
+if [ "$NONINTERACTIVE" = "1" ]; then
+    # Same two paths as the prompt, taken from the environment instead of a
+    # human: an invite code, else a key, else neither (a valid outcome - the
+    # app installs and runs, chat waits for a key in .env).
+    if [ -n "$INVITE_URL" ] && [ -n "${QUILL_INVITE_CODE:-}" ]; then
+        if "$VENV_PY" - "$QUILL_INVITE_CODE" "$ROOT" <<'PYCODE'
+import sys
+sys.path.insert(0, sys.argv[2])
+from app.services.invite import InviteError, redeem_and_save
+try:
+    out = redeem_and_save(sys.argv[1])
+    print("    invite accepted" + (" for " + out["label"] if out.get("label") else ""))
+except InviteError as exc:
+    print("    " + str(exc))
+    sys.exit(1)
+PYCODE
+        then INVITED=1; ok "Connected with your invite code."
+        else warn "QUILL_INVITE_CODE was refused - continuing without a model account."
+        fi
+    fi
+    if [ "$INVITED" = "0" ] && [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+        if "$VENV_PY" - "$ANTHROPIC_API_KEY" <<'PYCODE'
+import sys, anthropic
+try:
+    anthropic.Anthropic(api_key=sys.argv[1]).models.list()
+    print("    key OK")
+except Exception as e:
+    print("    key check failed: " + type(e).__name__)
+    sys.exit(1)
+PYCODE
+        then sed -i '' "s|^ANTHROPIC_API_KEY=.*|ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY|" "$ENV_PATH"
+        else warn "ANTHROPIC_API_KEY did not validate - leaving .env without a key."
+        fi
+    elif [ "$INVITED" = "0" ]; then
+        warn "No QUILL_INVITE_CODE or ANTHROPIC_API_KEY set - add a key to .env before chat works."
+    fi
+elif [ -n "$INVITE_URL" ]; then
     export QUILL_INVITE_URL="$INVITE_URL"
     echo ""
     echo "  How do you want to connect Mnemos to Claude?"
@@ -170,7 +225,7 @@ PYCODE
     done
 fi
 
-if [ "$INVITED" = "0" ]; then
+if [ "$NONINTERACTIVE" != "1" ] && [ "$INVITED" = "0" ]; then
     while :; do
         read -r -p "Paste YOUR Anthropic API key (sk-ant-..., from console.anthropic.com) or press return to add it to .env later: " key
         if [ -z "$key" ]; then
@@ -216,4 +271,4 @@ echo "     memory, search and the Console all work here."
 echo "   - Remote voices are quiet without BlackHole - see TESTER_SETUP-macos.md."
 echo "   - Ambient cloud spend is capped at \$2/day by default."
 printf '%s=============================================================%s\n' "$GREEN" "$RESET"
-read -r -p "Press return to close." _
+hold

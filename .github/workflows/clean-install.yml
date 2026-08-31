@@ -1,0 +1,161 @@
+# "A Boost Run employee must succeed with zero help from us: clean machine,
+# double-click, done." GitHub's windows-latest / macos-latest runners are the
+# closest thing we have to that clean machine: wiped for every run, no Mnemos
+# state, and not ours. So this job runs the installer a *tester* runs — not a
+# `pip install -r requirements.txt` — then boots the app, proves /health
+# answers on localhost, and proves the uninstaller leaves nothing behind.
+#
+# What it deliberately does NOT cover, and still needs a human on real
+# hardware before we hand out an install link:
+#   * the double-click itself — SmartScreen and Gatekeeper never fire here
+#   * winget/Homebrew installing Python — runners ship it, so that branch of
+#     the installer is exercised by nobody until someone runs it on a bare box
+#   * microphone / screen TCC prompts and real audio devices
+#   * ~10 GB over a home connection: Ollama is skipped and whisper is `tiny`,
+#     so this proves the installer's control flow, not its bandwidth
+name: clean-install
+
+on:
+  pull_request:
+    paths:
+      - "install.bat"
+      - "install.command"
+      - "start.bat"
+      - "start.command"
+      - "uninstall.bat"
+      - "uninstall.command"
+      - "scripts/install.ps1"
+      - "scripts/download_models.py"
+      - "scripts/uninstall.py"
+      - "app/services/wipe.py"
+      - "requirements.txt"
+      - ".env.example"
+      - ".github/workflows/clean-install.yml"
+  # Weekly, because most clean-install breakage arrives from outside the repo:
+  # a yanked wheel, a Playwright bump, a runner image change.
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: clean-install-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The installer prompts for a model account; nobody is here to answer.
+  QUILL_INSTALL_NONINTERACTIVE: "1"
+  # ~10 GB of local models is not what this job is testing.
+  QUILL_INSTALL_SKIP_OLLAMA: "1"
+  QUILL_WHISPER_MODEL: tiny
+
+jobs:
+  windows:
+    name: install → run → uninstall (clean windows)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # No setup-python on purpose: the installer's own Python discovery is
+      # part of what is under test.
+      - name: Run the installer a tester runs
+        shell: cmd
+        # `< NUL` is the unattended equivalent of the double-click's stdin: it
+        # satisfies install.bat's trailing `pause`, and it makes install.ps1
+        # see a redirected stdin — the second non-interactive trigger, so this
+        # would still not hang if the env var above were ever dropped.
+        run: install.bat < NUL
+
+      - name: The installer produced what a tester needs
+        shell: pwsh
+        run: |
+          if (-not (Test-Path '.venv\Scripts\python.exe')) { throw 'no .venv - install did not complete' }
+          if (-not (Test-Path '.env')) { throw '.env was never created' }
+          # --check is offline, so this asserts the weights are really cached
+          # rather than re-downloading them and calling that a pass.
+          & '.venv\Scripts\python.exe' scripts\download_models.py --check
+          if ($LASTEXITCODE -ne 0) { throw 'models are not cached after a successful install' }
+
+      - name: It starts, and answers on localhost
+        shell: pwsh
+        run: |
+          # --no-browser: the Exec.AI child drives a real Chromium, which is a
+          # different test. Chromium's install is already asserted above.
+          $p = Start-Process -PassThru -FilePath '.venv\Scripts\python.exe' `
+               -ArgumentList 'run_all.py', '--no-browser'
+          try {
+            $ok = $false
+            foreach ($i in 1..60) {
+              Start-Sleep -Seconds 5
+              try {
+                $r = Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:8000/health' -TimeoutSec 5
+                if ($r.StatusCode -eq 200) { $ok = $true; Write-Host $r.Content; break }
+              } catch { }
+            }
+            if (-not $ok) { throw '/health never answered - a fresh install does not start' }
+          } finally {
+            # /T: run_all.py owns child processes; killing only the parent
+            # leaves a server holding the database the next step deletes.
+            taskkill /PID $p.Id /T /F 2>$null
+          }
+
+      - name: Uninstall leaves nothing behind
+        shell: pwsh
+        run: |
+          Start-Sleep -Seconds 5
+          # No --force: the running-server probe must find the server gone. If
+          # it does not, that is a real finding about shutdown, not CI noise.
+          & '.venv\Scripts\python.exe' scripts\uninstall.py --yes --credentials
+          if ($LASTEXITCODE -ne 0) { throw 'uninstall reported an incomplete wipe' }
+          if (Test-Path 'data\quill.db')   { throw 'data\quill.db survived the wipe' }
+          if (Test-Path '.credentials.env'){ throw 'the API key survived the wipe' }
+          $receipt = Get-ChildItem -Filter 'mnemos-deletion-receipt-*.json' | Select-Object -First 1
+          if (-not $receipt) { throw 'no deletion receipt was written' }
+          Get-Content $receipt.FullName
+
+  macos:
+    name: install → run → uninstall (clean macos)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run the installer a tester runs
+        # Same two triggers as Windows: the env var, and a redirected stdin
+        # that `[ -t 0 ]` catches. macOS ships bash 3.2 — this is also the only
+        # place the installer is executed by that shell rather than parsed.
+        run: bash install.command < /dev/null
+
+      - name: The installer produced what a tester needs
+        run: |
+          test -x .venv/bin/python || { echo "no .venv - install did not complete"; exit 1; }
+          test -f .env || { echo ".env was never created"; exit 1; }
+          .venv/bin/python scripts/download_models.py --check \
+            || { echo "models are not cached after a successful install"; exit 1; }
+
+      - name: It starts, and answers on localhost
+        run: |
+          .venv/bin/python run_all.py --no-browser &
+          pid=$!
+          ok=0
+          for i in $(seq 1 60); do
+            sleep 5
+            if curl -fsS --max-time 5 http://127.0.0.1:8000/health; then ok=1; break; fi
+          done
+          # Kill the process group: run_all.py owns children, and a surviving
+          # server holds the database the next step deletes.
+          kill -TERM -"$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+          sleep 3
+          kill -9 -"$pid" 2>/dev/null || true
+          [ "$ok" = "1" ] || { echo "/health never answered - a fresh install does not start"; exit 1; }
+
+      - name: Uninstall leaves nothing behind
+        run: |
+          sleep 5
+          .venv/bin/python scripts/uninstall.py --yes --credentials \
+            || { echo "uninstall reported an incomplete wipe"; exit 1; }
+          test ! -f data/quill.db     || { echo "data/quill.db survived the wipe"; exit 1; }
+          test ! -f .credentials.env  || { echo "the API key survived the wipe"; exit 1; }
+          receipt="$(ls mnemos-deletion-receipt-*.json 2>/dev/null | head -n 1)"
+          [ -n "$receipt" ] || { echo "no deletion receipt was written"; exit 1; }
+          cat "$receipt"

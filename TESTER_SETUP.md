@@ -116,8 +116,53 @@ your `data\` folder, `.env` and `.credentials.env`), and re-run `install.bat` �
 it skips anything already done. The version you're running is shown in the
 Memory Console footer; quote it in any bug report.
 
+## Stopping capture
+
+Two clicks, either of them instant:
+
+* **Stop all** on the recording bar (bottom of any Mnemos page) — halts every
+  source immediately and leaves them off until you turn them back on.
+* **Privacy controls → Stop capture now** — the same thing, next to the
+  explanation of what each source does.
+
+Both revoke the allow-list *and* stop the running pipelines, so nothing keeps
+recording in the background. Closing Mnemos also stops everything.
+
+## Deleting your data
+
+**In the app:** Privacy controls → **Delete everything**. It shows you exactly
+how much is stored and where, asks you to type `DELETE MY MEMORY`, then empties
+every directory Mnemos writes and saves a **deletion receipt** — a small JSON
+file listing each directory and its size before deletion. Nothing personal is
+in the receipt; it exists so you can prove the deletion happened.
+
+**With Mnemos closed** (also the fix if a file was in use and the in-app delete
+reported it):
+
+```
+.venv\Scripts\python scripts\uninstall.py           # asks before deleting
+.venv\Scripts\python scripts\uninstall.py --yes --all
+```
+
+or just double-click `uninstall.bat`. `--all` additionally removes your API
+key, the shipped config and the `.venv`.
+
+There is no server-side copy of anything, so a deletion here is the only
+deletion there is. **Take a backup first if you might want it back** — this
+cannot be undone.
+
 ## Uninstalling
 
-Delete the folder. Optionally uninstall Ollama from Windows Settings → Apps.
-All of your data lives in the folder's `data\` directory — deleting it removes
-everything Mnemos remembered. Take a backup first if you might want it back.
+Run `uninstall.bat` (above), then delete the folder. Optionally uninstall
+Ollama from Windows Settings → Apps.
+
+Your data lives in three places inside the folder, which is why deleting
+`data\` alone is not enough:
+
+| Folder | What's in it |
+|---|---|
+| `data\` | Memory, transcripts, audio, frames, indexes |
+| `sessions\` | Browser-agent page captures (screenshots, page trees) |
+| `desktop_agent\sessions\` | Desktop-agent action audit log |
+
+`uninstall.bat` clears all three. Deleting the whole folder also does it.

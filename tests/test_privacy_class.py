@@ -172,3 +172,21 @@ class GateCloudTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def setUpModule() -> None:
+    # Telemetry sandbox: model_log resolves its trail path once at import, so
+    # without this every faked model call in this module appends a bogus row
+    # (fake models, 0s latency) to the REAL data/model_calls.jsonl trail.
+    global _model_log_orig_path
+    import tempfile as _tempfile
+    from pathlib import Path as _Path
+    from app.services.model_log import model_log as _ml
+    _model_log_orig_path = _ml._path
+    _ml._path = (_Path(_tempfile.mkdtemp(prefix="mnemos-test-telemetry-"))
+                 / "model_calls.jsonl")
+
+
+def tearDownModule() -> None:
+    from app.services.model_log import model_log as _ml
+    _ml._path = _model_log_orig_path

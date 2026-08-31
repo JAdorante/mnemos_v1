@@ -238,41 +238,21 @@ class OllamaText:
             print(f"[ollama_text] warmup skipped ({exc}).")
             return False
 
-    def complete(self, task: str, *, system: str, messages: list,
-                 max_tokens: int = 1024, schema: dict | None = None,
-                 exemplars: str = "") -> dict[str, Any]:
-        """One local completion. Returns
-        {"text": str, "json": dict|None, "confidence": float|None, "parse_ok": bool}
-        — `json`/`parse_ok` only meaningful when a schema was given. Raises on
-        transport errors (the router treats that as a local_error escalate).
-
-        `exemplars` is the retrieval few-shot block, passed separately rather
-        than pre-concatenated onto `system` so THIS function owns the ordering
-        (see _compose_system): the static prefix has to come first or the
-        prefix cache never hits.
-        """
-        injected = False
-        if schema is not None:
-            _, injected = with_confidence(schema)
-        sys_prompt = _compose_system(system, exemplars,
-                                     schema=schema, injected=injected)
+    def _chat(self, task: str, msgs: list[dict], *, num_predict: int,
+              fmt: dict | None) -> dict[str, Any]:
+        """One raw /api/chat round trip, logged. Raises on transport errors."""
         payload: dict[str, Any] = {
             "model": self.model,
             "stream": False,
-            "options": {"temperature": 0, "num_predict": max_tokens},
+            "options": {"temperature": 0, "num_predict": num_predict},
             # Phase 1.1 — keep the weights resident between calls. Ollama
             # unloads after ~5 min idle by default, so without this the first
             # call after a quiet spell pays a full cold load.
             "keep_alive": settings.text_local.keep_alive,
+            "messages": msgs,
         }
-        if schema is not None:
-            fmt, _ = with_confidence(schema)
+        if fmt is not None:
             payload["format"] = fmt                  # Ollama structured output
-        payload["messages"] = (
-            [{"role": "system", "content": sys_prompt}]
-            + [{"role": m.get("role", "user"), "content": _flatten(m.get("content"))}
-               for m in messages]
-        )
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(self.url + "/api/chat", data=data,
                                      headers={"Content-Type": "application/json"})
@@ -287,17 +267,80 @@ class OllamaText:
         _log(task, "ollama", self.model, time.time() - t0, ok=True,
              input_tokens=out.get("prompt_eval_count", 0) or 0,
              output_tokens=out.get("eval_count", 0) or 0, cost_usd=0.0)
-        text = strip_reasoning(((out.get("message") or {}).get("content") or ""))
+        return out
 
-        if schema is None:
-            clean, conf = split_confidence(text)
-            return {"text": clean, "json": None, "confidence": conf, "parse_ok": True}
+    def complete(self, task: str, *, system: str, messages: list,
+                 max_tokens: int = 1024, schema: dict | None = None,
+                 exemplars: str = "") -> dict[str, Any]:
+        """One local completion (with at most one free local retry). Returns
+        {"text": str, "json": dict|None, "confidence": float|None,
+         "parse_ok": bool, "truncated": bool}
+        — `json`/`parse_ok` only meaningful when a schema was given. Raises on
+        transport errors (the router treats that as a local_error escalate).
 
-        parsed = _parse_json(text)
-        if parsed is None:
-            return {"text": text, "json": None, "confidence": 0.0, "parse_ok": False}
-        conf = parsed.get("confidence")
-        conf = float(conf) if isinstance(conf, (int, float)) else None
-        if injected:
-            parsed.pop("confidence", None)
-        return {"text": text, "json": parsed, "confidence": conf, "parse_ok": True}
+        The retry is the cheapest possible rescue before a paid escalation:
+        a generation that hit `num_predict` (Ollama done_reason "length" — the
+        thinking monologue or the JSON ran past the budget) is re-run once
+        with double the budget; a non-truncated reply that failed to parse is
+        re-asked once with the bad reply and a correction appended (at
+        temperature 0 an unchanged prompt would just reproduce the failure).
+        `truncated` reports the FINAL attempt so the router can label the
+        escalation honestly (local_truncated, not low_confidence).
+
+        `exemplars` is the retrieval few-shot block, passed separately rather
+        than pre-concatenated onto `system` so THIS function owns the ordering
+        (see _compose_system): the static prefix has to come first or the
+        prefix cache never hits.
+        """
+        injected = False
+        fmt = None
+        if schema is not None:
+            fmt, injected = with_confidence(schema)
+        sys_prompt = _compose_system(system, exemplars,
+                                     schema=schema, injected=injected)
+        msgs = (
+            [{"role": "system", "content": sys_prompt}]
+            + [{"role": m.get("role", "user"), "content": _flatten(m.get("content"))}
+               for m in messages]
+        )
+        num_predict = max_tokens
+        retried = False
+        while True:
+            out = self._chat(task, msgs, num_predict=num_predict, fmt=fmt)
+            raw = ((out.get("message") or {}).get("content") or "")
+            text = strip_reasoning(raw)
+            truncated = str(out.get("done_reason") or "") == "length"
+
+            if schema is None:
+                clean, conf = split_confidence(text)
+                if truncated and conf is None and not retried:
+                    # The budget ran out before the reply (or its CONFIDENCE
+                    # trailer) finished — worth one wider local attempt.
+                    num_predict = max_tokens * 2
+                    retried = True
+                    continue
+                return {"text": clean, "json": None, "confidence": conf,
+                        "parse_ok": True, "truncated": truncated}
+
+            parsed = _parse_json(text)
+            if parsed is None and not retried:
+                retried = True
+                if truncated:
+                    num_predict = max_tokens * 2
+                else:
+                    msgs = msgs + [
+                        {"role": "assistant", "content": raw},
+                        {"role": "user", "content":
+                         "That reply was not valid JSON for the required "
+                         "schema. Answer again with ONLY the JSON object — "
+                         "no prose, no code fences."}]
+                continue
+            if parsed is None:
+                return {"text": text, "json": None, "confidence": 0.0,
+                        "parse_ok": False, "truncated": truncated}
+            conf = parsed.get("confidence")
+            conf = float(conf) if isinstance(conf, (int, float)) else None
+            if injected:
+                parsed.pop("confidence", None)
+            return {"text": text, "json": parsed, "confidence": conf,
+                    "parse_ok": True, "truncated": truncated}

@@ -43,6 +43,7 @@ REASONER_OFFER = "reasoner_offer"   # Track D: surfaced vs suppressed reasoner o
 TRIGGER_OFFER = "trigger_offer"     # standing triggers: surfaced vs suppressed fires
 OPEN_LOOP = "open_loop"             # plan 4.3: open-loop chip surfaced
 OPEN_LOOP_DISMISS = "open_loop_dismiss"  # plan 4.3: user snoozed / dismissed a loop
+FACT_HYGIENE = "fact_hygiene"       # write-gate verdicts: hit = clean insert
 
 _WORD = re.compile(r"[a-z0-9$]+")
 
@@ -69,16 +70,28 @@ _HIGHER_IS_BETTER = {FAITHFULNESS: True, GROUNDING: True, OFFER: False,
                      OFFER_OUTCOME: True, REASONER_OFFER: False,
                      TRIGGER_OFFER: False,
                      OPEN_LOOP: False,          # more surfaces → watch chatty
-                     OPEN_LOOP_DISMISS: False}  # dismiss rate up → precision down
+                     OPEN_LOOP_DISMISS: False,  # dismiss rate up → precision down
+                     FACT_HYGIENE: True}        # clean-insert rate
 
 
 class CogTelemetry:
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._path = Path(settings.storage.data_dir) / "cognition.jsonl"
+        self._path: Path | None = None      # explicit override (tests) wins
         # metric -> {"total": n, "hits": n}. `hits`/`total` is the rate.
         self._agg: dict[str, dict[str, int]] = defaultdict(
             lambda: {"total": 0, "hits": 0})
+
+    def _trail_path(self) -> Path:
+        """Resolved per write, env-first (the codebase's runtime-knob
+        convention — see usage_ledger.enabled): a test or operator that sets
+        QUILL_DATA_DIR after import is honored instead of silently appending
+        to the data dir frozen into `settings` at process start."""
+        if self._path is not None:
+            return self._path
+        import os
+        root = os.environ.get("QUILL_DATA_DIR") or settings.storage.data_dir
+        return Path(root) / "cognition.jsonl"
 
     def record(self, metric: str, hit: bool, **meta: Any) -> None:
         """Record one judgement outcome for `metric`. `hit` is the numerator
@@ -91,8 +104,9 @@ class CogTelemetry:
                 a["hits"] += 1 if hit else 0
             row = {"ts": round(time.time(), 3), "metric": metric,
                    "hit": bool(hit), **meta}
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            with self._path.open("a", encoding="utf-8") as f:
+            path = self._trail_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(row, default=str) + "\n")
         except Exception as exc:  # telemetry must never break the caller
             print(f"[cog_telemetry] record skipped ({exc}).")

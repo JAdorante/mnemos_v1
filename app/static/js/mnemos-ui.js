@@ -2214,6 +2214,7 @@ window.MnemosCapture = {
       voiceBox.checked = v.enabled !== false && !v.muted;
     }
     this.loadSharing();
+    this.loadEgress();
     MnemosDialog.open(el, {
       lockScroll: true,
       focus: '.pv-sheet input:not([disabled]), .pv-sheet button, .pv-sheet [href]',
@@ -2386,6 +2387,44 @@ window.MnemosCapture = {
       + '<div><b>Check for new versions</b><span>Downloads a small version file. '
       + 'Sends nothing about you — not even which version you run.</span></div></label>'
       + '</div>'
+      + '<div class="pv-ret" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line)">'
+      + '<b style="font-size:13px;color:var(--navy)">What has left this machine</b>'
+      + '<p style="font-size:12px;color:var(--mut);margin:6px 0 8px;line-height:1.45">'
+      + 'Read from this machine&rsquo;s own logs, not from a promise. Recording, '
+      + 'transcription and memory never leave; a frontier model is called only '
+      + 'for hard questions, under a hard daily cap.</p>'
+      + '<div id="pvEgress" style="font-size:12px;line-height:1.6;color:var(--mut)">'
+      + 'reading the log&hellip;</div>'
+      + '</div>'
+      + '<div class="pv-ret" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line)">'
+      + '<b style="font-size:13px;color:var(--navy)">Leave nothing behind</b>'
+      + '<p style="font-size:12px;color:var(--mut);margin:6px 0 8px;line-height:1.45">'
+      + 'Stop every source instantly, or delete everything Mnemos has recorded '
+      + 'here. Deleting cannot be undone &mdash; back up first if you might want it back.</p>'
+      + '<div style="display:flex;gap:8px;flex-wrap:wrap">'
+      + '<button type="button" class="pv-btn" id="pvStopAll">Stop capture now</button>'
+      + '<button type="button" class="pv-btn quiet" id="pvWipe" '
+      + 'style="color:#8c1d18;border-color:rgba(140,29,24,.4)">Delete everything&hellip;</button>'
+      + '</div>'
+      + '<div id="pvWipeBox" hidden style="margin-top:10px;padding:10px;border-radius:8px;'
+      + 'border:1px solid rgba(140,29,24,.35);background:rgba(140,29,24,.04)">'
+      + '<div id="pvWipeWhat" style="font-size:12px;color:var(--mut);line-height:1.5">'
+      + 'measuring&hellip;</div>'
+      + '<label class="pv-src" style="margin-top:8px"><input type="checkbox" id="pvWipeCreds">'
+      + '<div><b>Also remove my key</b><span>You would need a new invite code to '
+      + 'use the cloud tier again.</span></div></label>'
+      + '<label for="pvWipeConfirm" style="display:block;font-size:12px;color:var(--mut);'
+      + 'margin:8px 0 4px">Type <b>DELETE MY MEMORY</b> to confirm:</label>'
+      + '<input type="text" id="pvWipeConfirm" autocomplete="off" spellcheck="false" '
+      + 'style="width:100%;box-sizing:border-box;padding:7px 9px;border-radius:7px;'
+      + 'border:1px solid var(--line);font:inherit;font-size:13px">'
+      + '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">'
+      + '<button type="button" class="pv-btn" id="pvWipeGo" disabled '
+      + 'style="color:#8c1d18;border-color:rgba(140,29,24,.4)">Delete permanently</button>'
+      + '<button type="button" class="pv-btn quiet" id="pvWipeCancel">Cancel</button>'
+      + '</div></div>'
+      + '<div id="pvWipeNote" style="font-size:12px;color:var(--mut);margin-top:8px"></div>'
+      + '</div>'
       + '<div class="pv-actions">'
       + '<button type="button" class="pv-btn quiet" id="pvRevoke">Turn all off</button>'
       + '<button type="button" class="pv-btn quiet" id="pvCancel">Not now</button>'
@@ -2428,13 +2467,176 @@ window.MnemosCapture = {
     if (backupBtn) backupBtn.onclick = () => { window.location = '/export/backup'; };
     const takeoutBtn = document.getElementById('pvTakeout');
     if (takeoutBtn) takeoutBtn.onclick = () => { window.location = '/export/takeout'; };
-    document.getElementById('pvRevoke').onclick = async () => {
-      try {
-        this._state = await this.revoke();
-        this.render();
-        this.closePrivacy();
-      } catch (e) {}
+    document.getElementById('pvRevoke').onclick = () => this.stopAll(true);
+    const stopBtn = document.getElementById('pvStopAll');
+    if (stopBtn) stopBtn.onclick = () => this.stopAll(false);
+    const wipeBtn = document.getElementById('pvWipe');
+    if (wipeBtn) wipeBtn.onclick = () => this.openWipe();
+    const wipeCancel = document.getElementById('pvWipeCancel');
+    if (wipeCancel) wipeCancel.onclick = () => {
+      const box = document.getElementById('pvWipeBox');
+      if (box) box.hidden = true;
     };
+    const confirmBox = document.getElementById('pvWipeConfirm');
+    if (confirmBox) confirmBox.oninput = () => {
+      const go = document.getElementById('pvWipeGo');
+      // The button stays dead until the phrase matches, so the destructive
+      // click can never be the one a mis-aimed Enter key lands on.
+      if (go) go.disabled = confirmBox.value.trim().toUpperCase() !== 'DELETE MY MEMORY';
+    };
+    const wipeGo = document.getElementById('pvWipeGo');
+    if (wipeGo) wipeGo.onclick = () => this.runWipe();
+  },
+  async stopAll(closeAfter) {
+    // Revoking consent alone leaves the already-running mic thread recording
+    // until restart, so this goes through /privacy/stop, which does both.
+    try {
+      await fetch('/privacy/stop', {method: 'POST'});
+    } catch (e) {}
+    try {
+      this._state = await this.status();
+      this.render();
+    } catch (e) {}
+    if (closeAfter) this.closePrivacy();
+  },
+  async loadEgress() {
+    const el = document.getElementById('pvEgress');
+    if (!el) return;
+    const when = (t) => {
+      if (!t) return 'never';
+      try { return new Date(t * 1000).toLocaleString(); } catch (e) { return 'once'; }
+    };
+    let d;
+    try {
+      d = await (await fetch('/privacy/egress')).json();
+    } catch (e) {
+      el.textContent = 'Could not read the log on this machine.';
+      return;
+    }
+    const rows = [];
+    const sp = d.spend || {};
+    if (sp.ok === false) {
+      rows.push(['Cloud spend today', 'ledger unavailable', false]);
+    } else if (sp.uncapped) {
+      rows.push(['Cloud spend today',
+        '$' + Number(sp.spent_usd || 0).toFixed(2) + ' — no cap set on this install', true]);
+    } else {
+      const spent = Number(sp.spent_usd || 0);
+      const cap = Number(sp.budget_usd_day || 0);
+      let line = '$' + spent.toFixed(2) + ' of the $' + cap.toFixed(2) + '/day cap';
+      if (sp.denied_today) {
+        // Don't say "cap reached" — the denial count is for the whole day and
+        // would sit next to a spend figure below the cap, contradicting it.
+        line += ' — ' + sp.denied_today + ' cloud call'
+          + (sp.denied_today === 1 ? ' was' : 's were')
+          + ' refused by the cap today and stayed local';
+      }
+      rows.push(['Cloud spend today', line, spent > 0 || !!sp.denied_today]);
+    }
+    const cl = d.cloud || {};
+    const recent = cl.recent || [];
+    if (cl.ok === false) {
+      rows.push(['Questions sent to the cloud', 'call log unavailable', false]);
+    } else if (!recent.length) {
+      rows.push(['Questions sent to the cloud', 'none recorded', false]);
+    } else {
+      // by_class/max_seen count every call that reached the privacy gate,
+      // including the ones it refused — so this must say "reached the gate",
+      // never "was sent". Overstating egress on the privacy page is the one
+      // error here that costs trust outright.
+      let line = recent.length + ' recent call' + (recent.length === 1 ? '' : 's')
+        + ' in the log';
+      if (cl.refused) {
+        line += '; ' + cl.refused + ' call' + (cl.refused === 1 ? ' was' : 's were')
+          + ' refused by your privacy rules before anything was sent';
+      }
+      if (cl.max_seen) {
+        line += '. Highest sensitivity class to reach the privacy gate: '
+          + cl.max_seen;
+      }
+      rows.push(['Questions sent to the cloud', line, true]);
+    }
+    const up = d.usage_ping || {};
+    rows.push(['Anonymous usage counts',
+      up.consented ? ('on — last sent ' + when(up.last_ping_at))
+                   : 'off — nothing sent automatically',
+      !!up.consented]);
+    const uc = d.update_check || {};
+    rows.push(['Version check',
+      uc.enabled ? ('on — last checked ' + when(uc.checked_at)
+                    + ' (downloads a version file; sends nothing about you)')
+                 : 'off',
+      !!uc.enabled]);
+    el.innerHTML = rows.map((r) =>
+      '<div style="display:flex;gap:8px;padding:3px 0">'
+      + '<span style="flex:0 0 auto;width:9px;height:9px;border-radius:50%;margin-top:5px;'
+      + 'background:' + (r[2] ? 'var(--navy)' : 'rgba(11,19,32,.18)') + '"></span>'
+      + '<span><b style="color:var(--navy);font-weight:600">' + MnemosEsc(r[0])
+      + '</b> — ' + MnemosEsc(r[1]) + '</span></div>').join('')
+      + '<div style="margin-top:6px;padding-top:6px;border-top:1px dashed var(--line)">'
+      + 'Nothing else leaves. There is no Mnemos server holding your memory.</div>';
+  },
+  async openWipe() {
+    const box = document.getElementById('pvWipeBox');
+    const what = document.getElementById('pvWipeWhat');
+    const confirmBox = document.getElementById('pvWipeConfirm');
+    const go = document.getElementById('pvWipeGo');
+    if (!box) return;
+    box.hidden = false;
+    if (confirmBox) confirmBox.value = '';
+    if (go) go.disabled = true;
+    if (!what) return;
+    what.textContent = 'measuring…';
+    try {
+      const d = await (await fetch('/privacy/wipe/preview')).json();
+      const lines = (d.targets || []).filter((t) => t.exists && t.files)
+        .map((t) => '<div>' + MnemosEsc(t.label) + ' — ' + MnemosEsc(t.human)
+          + ' in ' + t.files + ' file' + (t.files === 1 ? '' : 's') + '</div>');
+      what.innerHTML = '<b style="color:#8c1d18">This deletes '
+        + MnemosEsc(d.total_human || '0 B') + ' across ' + (d.total_files || 0)
+        + ' file' + (d.total_files === 1 ? '' : 's') + ':</b>'
+        + (lines.length ? lines.join('') : '<div>Nothing captured yet.</div>')
+        + '<div style="margin-top:6px">A deletion receipt is written to '
+        + MnemosEsc(d.receipt_dir || '') + '.</div>';
+    } catch (e) {
+      what.textContent = 'Could not measure what is stored — deleting still works.';
+    }
+  },
+  async runWipe() {
+    const confirmBox = document.getElementById('pvWipeConfirm');
+    const creds = document.getElementById('pvWipeCreds');
+    const note = document.getElementById('pvWipeNote');
+    const go = document.getElementById('pvWipeGo');
+    if (go) go.disabled = true;
+    if (note) note.textContent = 'Stopping capture and deleting…';
+    try {
+      const r = await fetch('/privacy/wipe', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          confirm: confirmBox ? confirmBox.value : '',
+          credentials: !!(creds && creds.checked),
+        }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || 'refused');
+      const box = document.getElementById('pvWipeBox');
+      if (box) box.hidden = true;
+      if (note) {
+        note.innerHTML = d.complete
+          ? ('<b style="color:var(--navy)">Deleted.</b> Receipt: '
+             + MnemosEsc(d.receipt_path || '(not written)')
+             + '. You can close Mnemos and delete its folder.')
+          : ('<b style="color:#8c1d18">Partly deleted.</b> Some files were in '
+             + 'use: ' + MnemosEsc((d.failures || []).slice(0, 3).join('; '))
+             + '. Close Mnemos and run the uninstall script.');
+      }
+      this._state = await this.status();
+      this.render();
+    } catch (e) {
+      if (note) note.textContent = 'Nothing was deleted: ' + (e.message || 'refused') + '.';
+      if (go) go.disabled = false;
+    }
   },
   render() {
     const bar = document.getElementById('mnemosRecBar');
@@ -2488,6 +2690,13 @@ window.MnemosCapture = {
           + '<span class="act">' + (on ? 'pause' : 'resume') + '</span>'
           + '</button>';
       });
+      // One click to stop everything, on the bar itself: a tester who wants
+      // recording to stop should not have to find it inside a settings sheet.
+      if (liveKeys.some((k) => running[k])) {
+        html += '<button type="button" class="rec-chip" id="recStopAll" '
+          + 'style="color:#8c1d18" title="Stop every capture source now">'
+          + '<span>Stop all</span><span class="act">stop</span></button>';
+      }
       html += '<button type="button" class="rec-chip paused" id="recOpenPrivacy" '
         + 'title="Privacy controls"><span class="act">privacy</span></button>';
       html += '</div>';
@@ -2496,6 +2705,8 @@ window.MnemosCapture = {
     bar.innerHTML = html;
     const openBtn = document.getElementById('recOpenPrivacy');
     if (openBtn) openBtn.onclick = () => this.openPrivacy();
+    const stopAllBtn = document.getElementById('recStopAll');
+    if (stopAllBtn) stopAllBtn.onclick = () => this.stopAll(false);
     bar.querySelectorAll('.rec-chip[data-src]').forEach((btn) => {
       btn.onclick = () => this.toggle(btn.getAttribute('data-src'));
     });

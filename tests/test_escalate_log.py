@@ -300,3 +300,40 @@ class RouterDistillTests(_TempTrailMixin, unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StatsEscalationViewTests(_TempTrailMixin, unittest.TestCase):
+    """stats() separates real escalations from the labeling-only rows the
+    text router also writes (local_kept / speculative_local_only /
+    parent_failed) — with them mixed in, /console/escalate's "escalation
+    reasons" histogram was ~26% non-escalations — and aggregates the
+    parent_sim signal ("did escalating actually change the answer?")."""
+
+    def test_kept_rows_are_filtered_from_the_escalation_view(self) -> None:
+        for reason in ("low_confidence", "low_confidence", "local_kept",
+                       "speculative_local_only", "parent_failed"):
+            escalate_log.record(task="chat", reason=reason, parent={"t": "p"},
+                                modality="text")
+        s = escalate_log.stats()
+        self.assertEqual(s["total"], 5)
+        self.assertEqual(s["escalations"], 2)
+        self.assertEqual(s["by_reason_escalated"], {"low_confidence": 2})
+        # The unfiltered histogram still shows everything.
+        self.assertEqual(s["by_reason"]["local_kept"], 1)
+
+    def test_parent_agreement_aggregates_parent_sim(self) -> None:
+        escalate_log.record(task="chat", reason="low_confidence",
+                            parent={"t": "p"}, local={"t": "l"},
+                            modality="text", meta={"parent_sim": 0.9})
+        escalate_log.record(task="chat", reason="low_confidence",
+                            parent={"t": "p"}, local={"t": "l"},
+                            modality="text", meta={"parent_sim": 0.5})
+        pa = escalate_log.stats()["parent_agreement"]
+        self.assertEqual(pa["n"], 2)
+        self.assertAlmostEqual(pa["mean_sim"], 0.7)
+        self.assertEqual(pa["agree_rate"], 0.5)    # one of two >= 0.8
+
+    def test_agreement_is_none_without_the_signal(self) -> None:
+        escalate_log.record(task="vision.describe", reason="hard_type",
+                            parent={"t": "p"})
+        self.assertIsNone(escalate_log.stats()["parent_agreement"])

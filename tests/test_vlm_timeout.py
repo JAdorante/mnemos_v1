@@ -68,19 +68,46 @@ class LocalCooldownTests(unittest.TestCase):
         r.claude_lite = lite
         r._local_ok = True
 
+        # First error: escalates the frame, but does NOT trip the cooldown —
+        # a one-off timeout under CPU contention gets a second chance instead
+        # of buying a whole window of paid frames.
         out1 = r.describe(b"jpg")
         self.assertEqual(out1["_provider"], "claude")
         self.assertEqual(local.calls, 1)
+        self.assertLessEqual(r._local_cool_until, time.time())
+
+        # Second consecutive error: the streak trips the cooldown.
+        out2 = r.describe(b"jpg")
+        self.assertEqual(out2["_provider"], "claude")
+        self.assertEqual(local.calls, 2)
         self.assertGreater(r._local_cool_until, time.time())
 
         # While cooling, local must not be called again — and outage traffic
         # goes to the cheap tier, never the accurate reader.
-        out2 = r.describe(b"jpg")
-        self.assertEqual(out2["_provider"], "claude")
-        self.assertEqual(out2.get("_route", {}).get("reason"), "local_cooldown")
-        self.assertEqual(local.calls, 1)  # unchanged
-        self.assertEqual(lite.calls, 2)
+        out3 = r.describe(b"jpg")
+        self.assertEqual(out3["_provider"], "claude")
+        self.assertEqual(out3.get("_route", {}).get("reason"), "local_cooldown")
+        self.assertEqual(local.calls, 2)  # unchanged
+        self.assertEqual(lite.calls, 3)
         self.assertEqual(accurate.calls, 0)
+
+    def test_success_resets_error_streak(self) -> None:
+        self._set_cloud(True)
+        r = VLMRouter()
+        local = _FakeProvider(_res("notes", 0.9), exc=TimeoutError("timed out"))
+        lite = _FakeProvider(_res("notes", 0.9))
+        r.local = local
+        r.claude = _FakeProvider(_res("notes", 0.9))
+        r.claude_lite = lite
+        r._local_ok = True
+
+        r.describe(b"jpg")                       # error #1 — no cooldown
+        local.exc = None
+        out = r.describe(b"jpg")                 # success resets the streak
+        self.assertEqual(out["_provider"], "ollama")
+        local.exc = TimeoutError("timed out")
+        r.describe(b"jpg")                       # error #1 again, not #2
+        self.assertLessEqual(r._local_cool_until, time.time())
 
     def test_cloud_off_skips_frames_during_outage(self) -> None:
         self._set_cloud(False)
@@ -91,18 +118,21 @@ class LocalCooldownTests(unittest.TestCase):
         r.claude_lite = lite
         r._local_ok = True
 
-        out1 = r.describe(b"jpg")  # local errors -> skip, no Claude spend
+        out1 = r.describe(b"jpg")  # error #1 -> skip, no Claude spend
         self.assertEqual(out1["_provider"], "none")
         self.assertEqual(out1["_route"]["reason"], "local_error_cloud_off")
-        out2 = r.describe(b"jpg")  # cooling -> still skip, still no spend
+        out2 = r.describe(b"jpg")  # error #2 -> cooldown trips, still no spend
         self.assertEqual(out2["_provider"], "none")
-        self.assertEqual(out2["_route"]["reason"], "local_cooldown_cloud_off")
+        self.assertEqual(out2["_route"]["reason"], "local_error_cloud_off")
+        out3 = r.describe(b"jpg")  # cooling -> still skip, still no spend
+        self.assertEqual(out3["_provider"], "none")
+        self.assertEqual(out3["_route"]["reason"], "local_cooldown_cloud_off")
         self.assertEqual(lite.calls, 0)
         # local recovers after cooldown -> frames flow again
         r._local_cool_until = 0.0
         local.exc = None
-        out3 = r.describe(b"jpg")
-        self.assertEqual(out3["_provider"], "ollama")
+        out4 = r.describe(b"jpg")
+        self.assertEqual(out4["_provider"], "ollama")
 
 
 if __name__ == "__main__":

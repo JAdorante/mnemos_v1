@@ -135,8 +135,60 @@ xattr -dr com.apple.quarantine .
 The version you're running is in the Memory Console footer — quote it in any
 bug report.
 
+## Stopping capture
+
+Two clicks, either of them instant:
+
+* **Stop all** on the recording bar (bottom of any Mnemos page) — halts every
+  source immediately and leaves them off until you turn them back on.
+* **Privacy controls → Stop capture now** — the same thing, next to the
+  explanation of what each source does.
+
+Both revoke the allow-list *and* stop the running pipelines. Closing Mnemos
+also stops everything. Revoking the microphone in System Settings → Privacy &
+Security works too, and Mnemos will say the source is unavailable rather than
+failing silently.
+
+## Deleting your data
+
+**In the app:** Privacy controls → **Delete everything**. It shows you how much
+is stored and where, asks you to type `DELETE MY MEMORY`, then empties every
+directory Mnemos writes and saves a **deletion receipt** — a small JSON file
+listing each directory and its size before deletion. Nothing personal is in the
+receipt; it exists so you can prove the deletion happened.
+
+**With Mnemos closed** (also the fix if a file was in use and the in-app delete
+reported it):
+
+```bash
+.venv/bin/python scripts/uninstall.py            # asks before deleting
+.venv/bin/python scripts/uninstall.py --yes --all
+```
+
+or right-click → Open on `uninstall.command`. `--all` additionally removes your
+API key, the shipped config and the `.venv`.
+
+There is no server-side copy of anything, so a deletion here is the only
+deletion there is. **Take a backup first if you might want it back** — this
+cannot be undone.
+
 ## Uninstalling
 
-Delete the folder. Optionally `brew uninstall ollama portaudio`. All of your
-data lives in the folder's `data/` directory — deleting it removes everything
-Mnemos remembered. Take a backup first if you might want it back.
+Run `uninstall.command` (above), then delete the folder. Optionally
+`brew uninstall ollama portaudio`, and remove BlackHole with its own
+uninstaller if you installed it.
+
+Your data lives in three places inside the folder, which is why deleting
+`data/` alone is not enough:
+
+| Folder | What's in it |
+|---|---|
+| `data/` | Memory, transcripts, audio, frames, indexes |
+| `sessions/` | Browser-agent page captures (screenshots, page trees) |
+| `desktop_agent/sessions/` | Desktop-agent action audit log |
+
+`uninstall.command` clears all three. Deleting the whole folder also does it.
+
+macOS also remembers the permissions you granted. To clear those, remove Mnemos
+(or Terminal) from System Settings → Privacy & Security → Microphone / Screen
+Recording.

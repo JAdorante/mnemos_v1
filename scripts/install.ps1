@@ -27,6 +27,24 @@ if (-not (Test-Path (Join-Path $root 'run_all.py'))) {
     Fail "Run this from inside the Mnemos folder (run_all.py not found)."
 }
 
+# Unattended installs: CI on a clean runner, a scripted rollout, or anything
+# that pipes stdin. Without this the model-account prompt blocks forever, so an
+# unattended run becomes a six-hour hang rather than a pass or a clean failure.
+# Redirected stdin implies it too — a prompt no one can answer is never right.
+$nonInteractive = $false
+if ($env:QUILL_INSTALL_NONINTERACTIVE -and
+    $env:QUILL_INSTALL_NONINTERACTIVE -notin @('0', 'false', 'False', 'no')) {
+    $nonInteractive = $true
+} elseif ([Console]::IsInputRedirected) {
+    $nonInteractive = $true
+}
+# Ollama is a ~10 GB decision and pointless on a throwaway CI machine.
+$skipOllama = ($env:QUILL_INSTALL_SKIP_OLLAMA -and
+               $env:QUILL_INSTALL_SKIP_OLLAMA -notin @('0', 'false', 'False', 'no'))
+if ($nonInteractive) {
+    Warn "Unattended install - no prompts. Model account from QUILL_INVITE_CODE or ANTHROPIC_API_KEY."
+}
+
 Write-Host "Mnemos tester install" -ForegroundColor White
 Write-Host "Needs ~20 GB free disk (models + dependencies) and a while on first run."
 
@@ -83,14 +101,21 @@ function Find-Ollama {
     if (Test-Path $p) { return $p }
     return $null
 }
-$ollama = Find-Ollama
-if (-not $ollama -and $winget) {
-    Warn "Ollama not found - installing via winget ..."
-    winget install -e --id Ollama.Ollama --accept-source-agreements --accept-package-agreements --silent
+# Guard the winget install too, not just the pulls: on a skipped run we must
+# not leave a ~1 GB Ollama on the machine we were told to keep clean.
+$ollama = $null
+if (-not $skipOllama) {
     $ollama = Find-Ollama
+    if (-not $ollama -and $winget) {
+        Warn "Ollama not found - installing via winget ..."
+        winget install -e --id Ollama.Ollama --accept-source-agreements --accept-package-agreements --silent
+        $ollama = Find-Ollama
+    }
 }
 $ollamaOk = $false
-if ($ollama) {
+if ($skipOllama) {
+    Warn "Skipped (QUILL_INSTALL_SKIP_OLLAMA=1) - cloud-only."
+} elseif ($ollama) {
     try { & $ollama list *> $null } catch {}
     if ($LASTEXITCODE -ne 0) {
         Start-Process -FilePath $ollama -ArgumentList 'serve' -WindowStyle Hidden
@@ -108,9 +133,12 @@ else { Warn "Ollama models unavailable - Mnemos will run cloud-only (higher API 
 
 # --- 5. Speech / embedding models ---------------------------------------------
 Step "Pre-downloading speech + embedding models (Whisper, VAD, speaker, MiniLM)"
-& $venvPy (Join-Path $root 'scripts\download_models.py')
-if ($LASTEXITCODE -ne 0) { Warn "Model pre-download hit an error - Mnemos will fetch them on first run instead." }
-else { Ok "Speech + embedding models cached." }
+Write-Host "    ~700 MB on a fresh machine. Each model retries and resumes, so a"
+Write-Host "    dropped connection costs the remainder, not the whole download."
+& $venvPy (Join-Path $root 'scripts\download_models.py') --retries 5
+if ($LASTEXITCODE -ne 0) {
+  Warn "Some models did not finish downloading. Re-run install.bat when you have a steady connection - what already downloaded is kept and partial files continue where they stopped. Mnemos still starts; it fetches whatever is missing on first use."
+} else { Ok "Speech + embedding models cached." }
 
 # --- 6. .env + Anthropic API key -----------------------------------------------
 Step "Configuring .env"
@@ -147,7 +175,28 @@ if (-not $inviteUrl) {
                    Select-Object -First 1)
     if ($inviteLine) { $inviteUrl = $inviteLine -replace '^QUILL_INVITE_URL=', '' }
 }
-if ($inviteUrl) {
+if ($nonInteractive) {
+    # Same two paths as the prompt, taken from the environment instead of a
+    # human: an invite code, else a key, else neither (a valid outcome - the
+    # app installs and runs, chat waits for a key in .env).
+    if ($inviteUrl) { $env:QUILL_INVITE_URL = $inviteUrl.Trim() }
+    $envCode = $env:QUILL_INVITE_CODE
+    if ($inviteUrl -and $envCode) {
+        & $venvPy -c $inviteRedeem $envCode.Trim() $root
+        if ($LASTEXITCODE -eq 0) { $invited = $true; Ok "Connected with your invite code." }
+        else { Warn "QUILL_INVITE_CODE was refused - continuing without a model account." }
+    }
+    if (-not $invited) {
+        $envKey = $env:ANTHROPIC_API_KEY
+        if ($envKey) {
+            & $venvPy -c $keyCheck $envKey.Trim()
+            if ($LASTEXITCODE -eq 0) { $key = $envKey.Trim() }
+            else { Warn "ANTHROPIC_API_KEY did not validate - leaving .env without a key." }
+        } else {
+            Warn "No QUILL_INVITE_CODE or ANTHROPIC_API_KEY set - add a key to .env before chat works."
+        }
+    }
+} elseif ($inviteUrl) {
     $env:QUILL_INVITE_URL = $inviteUrl.Trim()
     Write-Host ""
     Write-Host "  How do you want to connect Mnemos to Claude?"
@@ -167,7 +216,7 @@ if ($inviteUrl) {
     }
 }
 
-if (-not $invited) {
+if ((-not $nonInteractive) -and (-not $invited)) {
     while ($true) {
         $key = Read-Host "Paste YOUR Anthropic API key (sk-ant-..., from console.anthropic.com) or press Enter to add it to .env later"
         if (-not $key) { Warn "Skipped - Mnemos needs ANTHROPIC_API_KEY in .env before chat works."; break }

@@ -54,7 +54,11 @@ _VERDICT_TASKS = frozenset({"chat"})
 
 # task -> default model id. Override per task with QUILL_<TASK>_MODEL.
 MODELS: dict[str, str] = {
-    "extract": os.environ.get("QUILL_EXTRACT_MODEL", "claude-opus-4-8"),
+    # Haiku, matching extractor.EXTRACTOR_MODEL — the two read the SAME env
+    # var and used to disagree on the default, so an extract call that reached
+    # the router without an explicit model= silently paid Opus prices for a
+    # task telemetry showed Haiku handling at ~1/100th the spend.
+    "extract": os.environ.get("QUILL_EXTRACT_MODEL", "claude-haiku-4-5"),
     "chat": os.environ.get("QUILL_CHAT_MODEL", "claude-opus-4-8"),
     # Plan 3.3 — local-eligible route classifier (not high-stakes / not ambient).
     "query_route": os.environ.get("QUILL_QUERY_ROUTE_MODEL",
@@ -193,6 +197,46 @@ def suspect_answer(answer: str, messages: list | None) -> str | None:
     return None
 
 
+# User-initiated tasks — same set spend_cap exempts from the ambient budget.
+# They keep their configured (accurate) parent even on infra-driven
+# escalations: the user asked, so answer quality is the point.
+_USER_TASKS = frozenset({"chat", "plan"})
+
+
+def _min_conf(cfg, task: str) -> float:
+    """Per-task confidence floor: QUILL_TEXT_ESCALATE_MIN_CONF_<TASK> wins
+    over the global escalate_min_conf. Env-first at call time (the codebase's
+    runtime-knob convention) so chat can run a lower bar than extract without
+    a restart."""
+    raw = os.environ.get(f"QUILL_TEXT_ESCALATE_MIN_CONF_{task.upper()}")
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return cfg.escalate_min_conf
+
+
+def _answer_sim(a: str | None, b: str | None) -> float | None:
+    """Embedding cosine between two answers, or None when either is empty or
+    the embedder is unavailable. Best-effort — never raises. Only runs when
+    the embeddings module is already imported (it always is once grounding
+    has run): scoring one pair is never worth a cold model load."""
+    if not (a or "").strip() or not (b or "").strip():
+        return None
+    import sys
+    if "app.services.embeddings" not in sys.modules:
+        return None
+    try:
+        import numpy as np
+        from app.services.embeddings import embedder
+        v = embedder.encode_many([a, b])
+        return float(np.dot(v[0], v[1]))
+    except Exception as exc:  # pragma: no cover
+        print(f"[model_router] answer-sim skipped ({exc}).")
+        return None
+
+
 def _prompt_chars(system: str | None, messages: list | None) -> int:
     """Total characters the local model would have to hold for this call."""
     from app.services.ollama_text import _flatten
@@ -220,7 +264,8 @@ class ModelRouter:
     def __init__(self) -> None:
         self._client = None
         self._local = None                 # lazy OllamaText
-        self._local_ok: bool | None = None  # availability probe, cached per process
+        self._local_ok: bool | None = None  # availability probe (see _use_local)
+        self._local_probe_t: float = 0.0    # when the cached probe result landed
         self._warned = False
 
     def _ensure(self):
@@ -381,9 +426,21 @@ class ModelRouter:
 
     # --- local-first tier ----------------------------------------------------
     def _use_local(self) -> bool:
-        if self._local_ok is None:              # probe once, cache
+        """Availability of the local tier. A positive probe is cached for the
+        process (a later failure escalates as local_error and re-marks it); a
+        NEGATIVE probe is only cached for local_probe_ttl_s — the old
+        cache-forever behavior meant Ollama starting a beat after Mnemos
+        pinned every call of the session to the paid parent."""
+        ttl = float(getattr(_text_cfg(), "local_probe_ttl_s", 60) or 0)
+        stale = (self._local_ok is False
+                 and time.time() - self._local_probe_t >= ttl)
+        if self._local_ok is None or stale:
             local = self._ensure_local()
-            self._local_ok = local.available()
+            try:
+                self._local_ok = bool(local.available())
+            except Exception:
+                self._local_ok = False
+            self._local_probe_t = time.time()
             if not self._local_ok and not self._warned:
                 print(f"[model_router] local text model '{local.model}' not "
                       f"reachable at {local.url}; using Claude for now. Enable "
@@ -391,13 +448,21 @@ class ModelRouter:
                 self._warned = True
         return self._local_ok
 
+    def _mark_local_down(self) -> None:
+        """Half-open breaker: after a confirmed-dead local error, skip the
+        local attempt (and its full timeout wait) until the probe TTL expires."""
+        self._local_ok = False
+        self._local_probe_t = time.time()
+
     def _distill(self, *, task: str, reason: str, parent: dict,
                  local: dict | None = None, parent_model: str | None = None,
                  local_error: str | None = None, messages: list | None = None,
                  system: str | None = None, fewshot_n: int = 0,
                  schema: dict | None = None, fewshot_top_sim: float | None = None,
                  conf_effective: float | None = None,
-                 retrieval: dict | None = None) -> str | None:
+                 retrieval: dict | None = None,
+                 reasons: list[str] | None = None,
+                 parent_sim: float | None = None) -> str | None:
         """Persist a local→parent pair for later idle distillation (best-effort).
 
         `prompt_head` stays truncated for browsing; with full-fidelity on, the
@@ -419,6 +484,17 @@ class ModelRouter:
                 meta["fewshot_top_sim"] = round(fewshot_top_sim, 4)
             if conf_effective is not None:
                 meta["conf_effective"] = round(conf_effective, 4)
+            if reasons and len(reasons) > 1:
+                # The primary `reason` is first-match by precedence; a call
+                # can trip several gates at once, and the old single label
+                # undercounted everything below the first match in the
+                # /console/escalate histogram.
+                meta["reasons"] = list(reasons)
+            if parent_sim is not None:
+                # Embedding cosine local-answer vs parent-answer: the direct
+                # "did escalating actually change the answer?" signal nothing
+                # else records. High sim = the escalation bought little.
+                meta["parent_sim"] = round(parent_sim, 4)
             if retrieval:
                 # D.2b router features, measured at CALL time. Replaying them
                 # later would give different numbers as the memory store grows,
@@ -472,11 +548,23 @@ class ModelRouter:
         def _parent(reason: str, local: dict | None = None,
                     local_error: str | None = None,
                     fewshot_top_sim: float | None = None,
-                    conf_effective: float | None = None
+                    conf_effective: float | None = None,
+                    reasons: list[str] | None = None
                     ) -> tuple[str, dict | None, str | None]:
+            # Tier by reason (the same split vlm.py applies to frames): an
+            # infra-driven escalation on an ambient task was work the LOCAL
+            # model was supposed to do — it needs *a* decent answer, not the
+            # accurate tier. User-initiated tasks, high-stakes tasks and
+            # explicit model= overrides keep their configured parent.
+            use_model = parent_model
+            if (model is None and task not in _USER_TASKS
+                    and task not in cfg.high_stakes_tasks
+                    and reason in getattr(cfg, "cheap_parent_reasons", ())):
+                use_model = (getattr(cfg, "cheap_parent_model", "")
+                             or parent_model)
             text = self._complete_claude(task, system=system, messages=messages,
                                          max_tokens=max_tokens, schema=schema,
-                                         model=parent_model)
+                                         model=use_model)
             parsed = None
             if schema is not None:
                 try:
@@ -485,13 +573,16 @@ class ModelRouter:
                     parsed = {}
             rid = self._distill(task=task, reason=reason, local=local,
                                 parent={"text": _clip(text, out_cap)},
-                                parent_model=parent_model,
+                                parent_model=use_model,
                                 retrieval=retrieval,
                                 local_error=local_error,
                                 messages=messages, system=system,
                                 fewshot_n=fewshot_n, schema=schema,
                                 fewshot_top_sim=fewshot_top_sim,
-                                conf_effective=conf_effective)
+                                conf_effective=conf_effective,
+                                reasons=reasons,
+                                parent_sim=_answer_sim(
+                                    (local or {}).get("text"), text))
             return text, parsed, rid
 
         if not self._use_local():
@@ -547,20 +638,44 @@ class ModelRouter:
             exemplar_block = few_shot.render(
                 examples, confidence_line=schema is None)
 
-        try:
+        def _local_call():
             # Phase 1.2: the exemplar block goes in as its own argument, not
             # concatenated onto `system`, so ollama_text can put the static
             # prefix ahead of it and the prefix cache can actually hit.
-            res = self._ensure_local().complete(
+            return self._ensure_local().complete(
                 task, system=system, messages=messages,
                 max_tokens=max_tokens, schema=schema,
                 exemplars=exemplar_block)
+
+        res = None
+        try:
+            res = _local_call()
         except Exception as exc:
-            if speculative:
-                print(f"[model_router] speculative local error ({exc}); dropped.")
-                return "", None, None
-            print(f"[model_router] local text error ({exc}); falling back to Claude.")
-            return _parent("local_error", local_error=str(exc))
+            # Half-open breaker: a 3s probe decides between a transient fault
+            # (retry once, free) and a dead daemon (mark local down so the
+            # next calls skip straight to the parent instead of each paying
+            # the full local timeout, and escalate this one now).
+            err = exc
+            alive = False
+            try:
+                alive = bool(self._ensure_local().available())
+            except Exception:
+                alive = False
+            if alive:
+                try:
+                    res = _local_call()
+                except Exception as exc2:
+                    err = exc2
+            else:
+                self._mark_local_down()
+            if res is None:
+                if speculative:
+                    print(f"[model_router] speculative local error ({err}); "
+                          "dropped.")
+                    return "", None, None
+                print(f"[model_router] local text error ({err}); "
+                      "falling back to Claude.")
+                return _parent("local_error", local_error=str(err))
 
         conf = res.get("confidence")
         # Calibration (#6): retrieval evidence floors the miscalibrated
@@ -574,14 +689,39 @@ class ModelRouter:
                                    weight=cfg.fewshot_conf_weight)
         hard = task in cfg.high_stakes_tasks
         parse_fail = schema is not None and not res.get("parse_ok")
-        unsure = eff is None or float(eff) < cfg.escalate_min_conf
+        unsure = eff is None or float(eff) < _min_conf(cfg, task)
         suspect = (None if schema is not None else
                    suspect_answer(res.get("text") or "", messages))
         heuristic_escalates = bool(hard or parse_fail or unsure or suspect)
+        # A generation that hit num_predict (even after ollama_text's wider
+        # retry) is a token-budget problem, not a judgement problem — label it
+        # honestly instead of burying it under low_confidence/parse_failure.
+        truncated = bool(res.get("truncated"))
+        empty = not (res.get("text") or "").strip()
         reason = ("high_stakes_task" if hard else
-                  "parse_failure" if parse_fail else
+                  ("local_truncated" if truncated else "parse_failure")
+                  if parse_fail else
                   suspect if (suspect and not unsure) else
-                  "low_confidence" if unsure else None)
+                  ("local_truncated" if (truncated and empty)
+                   else "low_confidence") if unsure else None)
+        # Every gate that fired, not just the first match — the single-label
+        # histogram undercounted everything below the winning branch.
+        reasons_all: list[str] = []
+        if hard:
+            reasons_all.append("high_stakes_task")
+        if parse_fail:
+            reasons_all.append(
+                "local_truncated" if truncated else "parse_failure")
+        if suspect:
+            reasons_all.append(suspect)
+        if unsure:
+            lbl = ("local_truncated" if (truncated and empty)
+                   else "low_confidence")
+            if lbl not in reasons_all:
+                reasons_all.append(lbl)
+        if reason in reasons_all:
+            reasons_all.remove(reason)
+            reasons_all.insert(0, reason)
         # Workstream D: consult the trained escalation router. In shadow mode
         # this only LOGS its decision next to the heuristic's; in active mode
         # it augments the CONFIDENCE gate only — the hard safety gates
@@ -623,7 +763,8 @@ class ModelRouter:
             }
             try:
                 return _parent(reason or "low_confidence", local=local_payload,
-                               fewshot_top_sim=top_sim, conf_effective=eff)
+                               fewshot_top_sim=top_sim, conf_effective=eff,
+                               reasons=reasons_all)
             except Exception as exc:
                 print(f"[model_router] escalation to Claude failed ({exc}); "
                       "keeping local.")

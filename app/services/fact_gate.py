@@ -157,8 +157,8 @@ def _similar_active(kind: str, text: str, k: int = 4) -> list[tuple[int, float, 
 
 def _telemetry(action: str, reason: str, kind: str, text: str) -> None:
     try:
-        from app.services.cog_telemetry import cog_telemetry
-        cog_telemetry.record("fact_hygiene", action == "insert",
+        from app.services.cog_telemetry import FACT_HYGIENE, cog_telemetry
+        cog_telemetry.record(FACT_HYGIENE, action == "insert",
                              action=action, reason=reason, kind=kind,
                              text=(text or "")[:120])
     except Exception:
@@ -183,7 +183,9 @@ def gate_fact(kind: str, text: str, confidence: float | None,
     cfg = settings.facts
     text = (text or "").strip()
     if not text:
-        return Verdict("drop", "empty text")
+        v = Verdict("drop", "empty text")
+        _telemetry(v.action, v.reason, kind, text)
+        return v
 
     if cfg.min_conf > 0 and confidence is not None and confidence < cfg.min_conf:
         v = Verdict("drop", f"confidence {confidence:.2f} < floor {cfg.min_conf}")
@@ -229,8 +231,14 @@ def gate_fact(kind: str, text: str, confidence: float | None,
             _telemetry(v.action, v.reason, kind, text)
             return v
 
+    # The insert (pass) verdicts are recorded too — telemetry used to fire
+    # only on the drop/dedup/review paths, which made fact_hygiene a
+    # rejection counter mislabeled as a pass rate: the numerator could never
+    # increment, so the console pinned it at 0% forever.
     if not cfg.dedup:
-        return Verdict("insert")
+        v = Verdict("insert")
+        _telemetry(v.action, "dedup disabled", kind, text)
+        return v
 
     cands = _similar_active(kind, text)
     for fid, score, _old in cands:
@@ -259,4 +267,6 @@ def gate_fact(kind: str, text: str, confidence: float | None,
                     supersede_ids=tuple(superseded))
         _telemetry(v.action, v.reason, kind, text)
         return v
-    return Verdict("insert")
+    v = Verdict("insert")
+    _telemetry(v.action, "passed all gates", kind, text)
+    return v

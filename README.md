@@ -32,10 +32,13 @@ before anything irreversible.
 > channels, local-first model routing, the meeting layer, and the
 > browser/desktop/phone agents all work today, behind a hardened trust layer
 > (hash-bound approvals, source policies, evidence-verified outcomes).
-> ~2,400 tests pass. Recent work: a swappable ASR engine seam with per-engine
-> ingest calibration, pixel-level browser control for canvas pages, a Linux
-> body for the desktop agent, stage-level latency measurement, and a trained
-> classifier rung below the local LLM (shadow-only). Some pieces remain
+> ~2,400 tests pass. Recent work: the pilot erasure path (stop-everything,
+> "delete everything" with a receipt, and an egress view that reads the
+> machine's own logs), a resumable model pre-download, a swappable ASR engine
+> seam with per-engine ingest calibration, pixel-level browser control for
+> canvas pages, a Linux body for the desktop agent, stage-level latency
+> measurement, and a trained classifier rung below the local LLM
+> (shadow-only). Some pieces remain
 > feature-flagged — see [Known gaps & roadmap](#known-gaps--roadmap). Not
 > production software.
 
@@ -881,6 +884,9 @@ GET  /facts · /facts/open_tasks · POST /facts/{id}/approve|dismiss|done|edit
 POST /reflect/run · GET /reflections*
 POST /chat · GET /chat/poll · GET /chat/stream · POST /chat/answer · POST /chat/new
 GET  /capture/status  (per-source support + reason on this platform)
+POST /privacy/stop  (revoke consent AND halt the running pipelines)
+GET  /privacy/egress  (spend cap + what has actually left this machine)
+GET  /privacy/wipe/preview · POST /privacy/wipe  (erase + deletion receipt)
 POST /desktop · POST /phone
 GET  /onboarding* · GET /ui · POST /speak · GET /speakers
 ```
@@ -1193,11 +1199,26 @@ The timeline reloads from `data/quill.db` on startup. `/artifact` is
 git-ignored except checked-in config tables (`model_prices.json`,
 `source_policies.json`).
 
+**Erasure.** Captured content lands in three places, not one — `data/`, the
+browser agent's `sessions/`, and `desktop_agent/sessions/` — so "delete
+`data/`" leaves page captures behind.
+[app/services/wipe.py](app/services/wipe.py) is the single enumeration of all
+three (it reads each agent's own `SESSIONS_ROOT`, both of which are
+env-relocatable), and three doors lead to it: **Privacy controls → Delete
+everything** in the app, `scripts/uninstall.py` (`uninstall.bat` /
+`uninstall.command`) with the server closed, and the Inno uninstaller's wipe
+checkbox. Capture is stopped and the SQLite handles closed *before* the walk —
+otherwise the delete races a live writer, and on Windows an open connection is
+simply undeletable. Each run writes a **deletion receipt** beside the install
+(never inside the directory it emptied) recording per-target counts and
+anything that survived; shipped config is kept unless `--all` / `full=True`.
+
 ---
 
 ## Project layout
 
 ```
+desktop_app.py           packaged desktop build: window (pywebview) + tray
 run_all.py               launch everything (capture in-process + agent as child)
 run_audio.py             live transcription
 run_vision.py            live webcam understanding
@@ -1206,6 +1227,7 @@ exec_webapp.py           browser agent standalone (with Mnemos memory bridge)
 
 app/
   config.py              central settings (frozen dataclasses, env-driven)
+  runtime.py             frozen-build paths (bundle vs per-user writable dir)
   events.py              Event schema + EventBus
   main.py                FastAPI app + startup wiring
   storage.py             SQLite: events, facts, people, relations, …
@@ -1239,8 +1261,12 @@ app/
     extractor.py · resolution.py · reflector.py · onboarding.py
     first_run.py · exhaust_ingest.py · mcp_tools.py · trust.py
     external_capture.py · crash_report.py · meeting_capture.py
+    export.py            backup / takeout · wipe.py  erase + deletion receipt
+    model_fetch.py       resumable weight download (CLI + packaged first run)
 mcp_server/              read-only stdio MCP adapter (HTTP to localhost)
-docs/mcp.md · trust-layer.md · macos-meeting.md
+docs/mcp.md · trust-layer.md · macos-meeting.md · key-vending.md ·
+     pilot-agreement.md  what the pilot cohort is promised, in writing
+uninstall.bat · uninstall.command  offline erase (scripts/uninstall.py)
 packaging/               PyInstaller + Inno Setup for tester builds
     agent_planner.py · agent_bridge.py · readiness.py · multitask.py
     model_router.py · ollama_text.py · escalate_log.py · few_shot.py
@@ -1255,7 +1281,8 @@ desktop_agent/           guarded OS control
                          app_promotion.py · app_templates.py (remember_app)
 org_coordinator/         Hybrid Org AI Network coordinator (roles/goals/digests)
 tests/                   ~2,400 unit tests
-scripts/                 download_models · enroll_speaker · eval_* · distill_* ·
+scripts/                 download_models (resumable) · uninstall · restore_backup ·
+                         enroll_speaker · eval_* · distill_* ·
                          calibrate_asr_confidence · bench_* · feature_smoke ·
                          diagnose_today · fetch_ui_static · sync_ui_static ·
                          train_lora · kg_cutover_soak · org_network_smoke · phone_link/ …
@@ -1391,10 +1418,21 @@ doesn't raise, it quietly changes what becomes a memory.
   memory.
 - **Desktop agent on Wayland** — X11 only; the ghost-window path declines
   rather than half-working.
+- **The desktop build is unsigned.** `MnemosSetup.exe` triggers SmartScreen
+  ("Windows protected your PC") on first launch, and the macOS bundle is not
+  notarized. Code signing is the last gate before handing the installer to
+  anyone outside the team. The packaged build also omits the browser agent and
+  Org Coordinator — both spawn `[sys.executable, "script.py"]` children, which
+  re-executes `Mnemos.exe` when frozen.
 - `/chat/stream`'s generator isn't bounded by response close, so its route test
   is skipped rather than driven (it wedges `TestClient` lifespan teardown).
 
-Closed recently: local TTS (`voice.py`), Personal Agent Layer on by default,
+Closed recently: a packaged desktop build that actually runs (windowed shell,
+per-user data, `--self-test`, and a CI job that launches what it built),
+one-click erasure with a deletion receipt (`wipe.py`, `scripts/uninstall.py`)
+and the `/privacy/egress` view behind it, resumable model pre-download, an
+unattended install mode plus the `clean-install` CI job that runs the real
+installer end-to-end on fresh Windows/macOS runners, local TTS (`voice.py`), Personal Agent Layer on by default,
 desktop-agent guard tests, verdict → few-shot/LoRA learning loop, idle LoRA
 scheduler, the ASR engine seam + per-engine ingest calibration, browser pixel
 control for canvas pages, the desktop agent's Linux body and app promotion,

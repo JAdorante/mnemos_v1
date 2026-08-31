@@ -249,3 +249,58 @@ class VerdictShapeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HygieneTelemetryTests(unittest.TestCase):
+    """fact_hygiene is a PASS rate: telemetry used to fire only on the
+    drop/dedup/review paths, so the numerator could never increment and the
+    console pinned the metric at 0% forever. Inserts must record a hit."""
+
+    def _capture(self):
+        calls: list[tuple[str, bool, dict]] = []
+        from app.services import cog_telemetry as ct
+
+        def rec(metric, hit, **meta):
+            calls.append((metric, hit, meta))
+        return calls, patch.object(ct.cog_telemetry, "record", rec)
+
+    def test_insert_records_a_hit_when_dedup_is_off(self):
+        calls, cap = self._capture()
+        with patch.object(fact_gate, "settings",
+                          _cfg(min_conf=0.0, span_gate=False, dedup=False)), cap:
+            v = gate_fact("task", "send the deck", 0.9, "", "")
+        self.assertEqual(v.action, "insert")
+        self.assertEqual(calls, [("fact_hygiene", True,
+                                  {"action": "insert",
+                                   "reason": "dedup disabled",
+                                   "kind": "task",
+                                   "text": "send the deck"})])
+
+    def test_insert_records_a_hit_when_all_gates_pass(self):
+        calls, cap = self._capture()
+        with patch.object(fact_gate, "settings",
+                          _cfg(min_conf=0.0, span_gate=False)), \
+                patch.object(fact_gate, "_similar_active", return_value=[]), cap:
+            v = gate_fact("task", "send the deck", 0.9, "", "")
+        self.assertEqual(v.action, "insert")
+        self.assertEqual([(m, h) for m, h, _ in calls],
+                         [("fact_hygiene", True)])
+        self.assertEqual(calls[0][2]["reason"], "passed all gates")
+
+    def test_drop_still_records_a_miss(self):
+        calls, cap = self._capture()
+        with patch.object(fact_gate, "settings",
+                          _cfg(min_conf=0.5, span_gate=False, dedup=False)), cap:
+            v = gate_fact("task", "send the deck", 0.1, "", "")
+        self.assertEqual(v.action, "drop")
+        self.assertEqual([(m, h) for m, h, _ in calls],
+                         [("fact_hygiene", False)])
+
+    def test_empty_text_drop_is_no_longer_silent(self):
+        calls, cap = self._capture()
+        with patch.object(fact_gate, "settings",
+                          _cfg(min_conf=0.0, span_gate=False, dedup=False)), cap:
+            v = gate_fact("task", "   ", 0.9, "", "")
+        self.assertEqual(v.action, "drop")
+        self.assertEqual([(m, h) for m, h, _ in calls],
+                         [("fact_hygiene", False)])

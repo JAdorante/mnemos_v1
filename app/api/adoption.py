@@ -453,6 +453,102 @@ def usage_ping_consent(body: UsageConsentIn) -> dict:
     return {"ok": True, **usage_ledger.ping_status()}
 
 
+# --- privacy legibility & erasure -----------------------------------------
+# Two questions a non-technical tester must be able to answer in 60 seconds:
+# "what left this machine?" and "how do I make all of it stop and go away?".
+# /privacy/egress answers the first from the model-call trail rather than from
+# a promise; /privacy/stop and /privacy/wipe answer the second.
+
+
+class WipeIn(BaseModel):
+    confirm: str = ""
+    full: bool = False
+    credentials: bool = False
+
+
+@router.get("/privacy/egress")
+def privacy_egress(recent: int = 12) -> dict:
+    """Everything that has left this machine, and the cap that bounds it.
+
+    Assembled from what already exists — the spend ledger, the model-call
+    trail, the usage-ping state and the update check — because a privacy claim
+    the tester cannot audit against real records is just marketing.
+    """
+    out: dict[str, Any] = {"ok": True}
+    try:
+        from app.perception.spend_cap import spend_cap
+        out["spend"] = spend_cap.status()
+    except Exception as exc:
+        out["spend"] = {"ok": False, "error": str(exc)}
+    try:
+        from app.services.model_log import model_log
+        inv = model_log.egress_inventory(recent=max(0, min(int(recent), 50)))
+        out["cloud"] = {
+            "ok": bool(inv.get("ok", False)),
+            "recent": inv.get("recent", []),
+            "by_class": inv.get("by_class", {}),
+            "max_seen": inv.get("max_seen"),
+            "refused": inv.get("refused", 0),
+        }
+    except Exception as exc:
+        out["cloud"] = {"ok": False, "error": str(exc)}
+    try:
+        from app.services import usage_ledger
+        ping = usage_ledger.ping_status()
+        out["usage_ping"] = {
+            "consented": bool(ping.get("consented")),
+            "url_configured": bool(ping.get("url_configured")),
+            "will_ping": bool(ping.get("will_ping")),
+            "last_ping_at": ping.get("last_ping_at"),
+            "last_error": ping.get("last_error"),
+        }
+    except Exception as exc:
+        out["usage_ping"] = {"ok": False, "error": str(exc)}
+    try:
+        from app.services import update_check
+        st = update_check.status()
+        out["update_check"] = {
+            "enabled": bool(st.get("enabled")),
+            "url_configured": bool(st.get("url_configured")),
+            "checked_at": st.get("checked_at"),
+            "state": st.get("state"),
+        }
+    except Exception as exc:
+        out["update_check"] = {"ok": False, "error": str(exc)}
+    return out
+
+
+@router.post("/privacy/stop")
+def privacy_stop() -> dict:
+    """Stop everything now — revoke the allow-list and halt the pipelines.
+
+    One click, no confirmation: a tester reaching for this wants recording to
+    have already stopped, and re-enabling costs one checkbox.
+    """
+    from app.services import wipe
+    return wipe.stop_capture()
+
+
+@router.get("/privacy/wipe/preview")
+def privacy_wipe_preview() -> dict:
+    """What a wipe would delete, per directory, before anything is confirmed."""
+    from app.services import wipe
+    return wipe.preview()
+
+
+@router.post("/privacy/wipe")
+def privacy_wipe(body: WipeIn) -> dict:
+    """Delete every captured byte on this machine and return the receipt."""
+    from app.services import wipe
+    try:
+        return wipe.wipe(body.confirm, full=bool(body.full),
+                         credentials=bool(body.credentials))
+    except wipe.WipeRefused as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(500, f"wipe failed: {exc}") from exc
+
+
 @router.post("/capture/external")
 def capture_external(
     body: ExternalIn,
@@ -562,32 +658,62 @@ _bootstrap_lock = threading.Lock()
 _bootstrap_state: dict[str, Any] = {"running": False, "log": [], "ok": None}
 
 
-def _bootstrap_worker():
+def _bootstrap_log(line: str) -> None:
+    with _bootstrap_lock:
+        _bootstrap_state["log"].append(line)
+
+
+def _bootstrap_models() -> bool:
+    """Fetch the speech/embedding weights, in-process.
+
+    Deliberately not `[sys.executable, "scripts/download_models.py"]`: in a
+    frozen build `sys.executable` is `Mnemos.exe`, so that spawns a second copy
+    of the whole app instead of running the script — and `scripts/` is not in
+    the bundle to run anyway. Importing the same module works in both builds.
+    """
+    from app.services.model_fetch import fetch_models
+    return fetch_models(log=_bootstrap_log)
+
+
+def _bootstrap_chromium() -> bool:
+    """Playwright's browser download. Skipped in a frozen build.
+
+    The packaged app does not ship the browser agent (see desktop_app.py), and
+    Playwright's installer shells out to its own Node driver, which is not in
+    the bundle. Pretending to try would just write a confusing error into a
+    first-run progress log.
+    """
+    from app.runtime import is_frozen
+    if is_frozen():
+        _bootstrap_log("chromium: skipped (not part of the desktop build)")
+        return True
     import subprocess
     import sys
-    from pathlib import Path
-    root = Path(__file__).resolve().parents[2]
+    from app.runtime import bundle_root
+    try:
+        r = subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"],
+                           cwd=str(bundle_root()), capture_output=True,
+                           text=True, timeout=3600)
+        _bootstrap_log(f"chromium: exit {r.returncode} "
+                       f"{(r.stdout or r.stderr or '')[-400:]}")
+        return r.returncode == 0
+    except Exception as exc:
+        _bootstrap_log(f"chromium failed: {exc}")
+        return False
+
+
+def _bootstrap_worker():
     with _bootstrap_lock:
         _bootstrap_state.update({"running": True, "log": [], "ok": None})
-    steps = [
-        ([sys.executable, str(root / "scripts" / "download_models.py")], "models"),
-        ([sys.executable, "-m", "playwright", "install", "chromium"], "chromium"),
-    ]
     ok = True
-    for cmd, label in steps:
-        with _bootstrap_lock:
-            _bootstrap_state["log"].append(f"starting {label}…")
+    for label, fn in (("models", _bootstrap_models),
+                      ("chromium", _bootstrap_chromium)):
+        _bootstrap_log(f"starting {label}…")
         try:
-            r = subprocess.run(cmd, cwd=str(root), capture_output=True, text=True,
-                               timeout=3600)
-            tail = (r.stdout or r.stderr or "")[-400:]
-            with _bootstrap_lock:
-                _bootstrap_state["log"].append(f"{label}: exit {r.returncode} {tail}")
-            if r.returncode != 0:
+            if not fn():
                 ok = False
         except Exception as exc:
-            with _bootstrap_lock:
-                _bootstrap_state["log"].append(f"{label} failed: {exc}")
+            _bootstrap_log(f"{label} failed: {exc}")
             ok = False
     with _bootstrap_lock:
         _bootstrap_state.update({"running": False, "ok": ok})

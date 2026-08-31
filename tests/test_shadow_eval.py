@@ -290,3 +290,25 @@ class ConfirmFlowTests(_Env):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GradeLatencyTests(_Env):
+    def test_grading_calls_log_measured_latency(self) -> None:
+        # These rows used to hardcode latency_s=0.0 — the single largest
+        # zero-latency Claude population in model_calls.jsonl, which made the
+        # console's Claude latency average meaningless.
+        self._log()
+        logged: list[dict] = []
+
+        def slow_call(system, user, *, model, max_tokens):
+            import time as _t
+            _t.sleep(0.01)
+            return (json.dumps({"verdict": "agree",
+                                "reason_code": "other"}), 10, 5)
+
+        with patch("app.services.model_log.model_log.log_call",
+                   side_effect=lambda **kw: logged.append(kw) or {}):
+            se.run_nightly(call=slow_call, store=self.store)
+        rows = [r for r in logged if r.get("task") == "shadow_eval"]
+        self.assertTrue(rows)
+        self.assertGreater(rows[0]["latency_s"], 0.005)

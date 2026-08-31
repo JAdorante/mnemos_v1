@@ -3,6 +3,17 @@ name: release
 on:
   push:
     tags: ["v*"]
+  # Packaging breaks quietly and only in the packaged build — the spec once
+  # excluded torch, which removes VAD and therefore every memory, and nothing
+  # caught it because CI built the bundle and never launched it.
+  pull_request:
+    paths:
+      - "packaging/**"
+      - "desktop_app.py"
+      - "app/runtime.py"
+      - "app/services/model_fetch.py"
+      - "requirements.txt"
+      - ".github/workflows/release.yml"
   workflow_dispatch:
 
 jobs:
@@ -24,12 +35,60 @@ jobs:
         env:
           QUILL_PROFILE: tester
         run: python -m pytest tests/test_first_run.py tests/test_trust_layer.py tests/test_mcp_tools.py tests/test_exhaust_ingest.py tests/test_external_capture.py tests/test_crash_report.py tests/test_ui_tokens.py -q
+      - name: Desktop shell dependencies
+        run: pip install -r packaging/requirements-desktop.txt
       - name: PyInstaller onedir
         run: pyinstaller packaging/mnemos.spec
+
+      - name: The build can load what it needs
+        # The check that would have caught the torch exclusion on day one:
+        # silero_vad imports torch even in ONNX mode, so a bundle without it
+        # starts fine, serves /health fine, and hears nothing forever.
+        run: .\dist\Mnemos\Mnemos.exe --self-test
+
+      - name: It starts and answers on localhost
+        shell: pwsh
+        run: |
+          $p = Start-Process -PassThru -FilePath '.\dist\Mnemos\Mnemos.exe' `
+               -ArgumentList '--no-window', '--no-tray'
+          try {
+            $ok = $false
+            foreach ($i in 1..60) {
+              Start-Sleep -Seconds 5
+              try {
+                $r = Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:8000/health' -TimeoutSec 5
+                if ($r.StatusCode -eq 200) { $ok = $true; Write-Host $r.Content; break }
+              } catch { }
+            }
+            if (-not $ok) { throw 'the packaged app never answered /health' }
+          } finally {
+            taskkill /PID $p.Id /T /F 2>$null
+          }
+
+      - name: Report the bundle size
+        # A tester downloads this. Print it so a 3 GB regression is visible in
+        # the log rather than discovered by someone on a hotel connection.
+        shell: pwsh
+        run: |
+          $mb = [math]::Round((Get-ChildItem -Recurse dist\Mnemos |
+                Measure-Object -Property Length -Sum).Sum / 1MB)
+          Write-Host "bundle: $mb MB"
+
       - uses: actions/upload-artifact@v4
         with:
           name: mnemos-windows-onedir
           path: dist/Mnemos
+
+      - name: Build the installer
+        run: |
+          choco install innosetup --no-progress -y
+          # ${env:...} braces are required: PowerShell parses the "(x86)" in
+          # $env:ProgramFiles(x86) as a method call and the path comes back empty.
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" packaging\mnemos.iss
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mnemos-windows-setup
+          path: dist/MnemosSetup.exe
 
   macos-meeting:
     runs-on: macos-latest
