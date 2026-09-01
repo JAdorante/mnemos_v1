@@ -62,7 +62,12 @@ def _load_env() -> None:
 
 def _serve(host: str, port: int, log_level: str) -> None:
     import uvicorn
-    uvicorn.run("app.main:app", host=host, port=port, log_level=log_level,
+    from app.main import app
+    # Pass the app object, not "app.main:app". Uvicorn's string import uses
+    # importlib on a name PyInstaller does not expose the same way — the
+    # frozen exe then dies with "Could not import module app.main" after
+    # --self-test already passed.
+    uvicorn.run(app, host=host, port=port, log_level=log_level,
                 access_log=(log_level in ("info", "debug")))
 
 

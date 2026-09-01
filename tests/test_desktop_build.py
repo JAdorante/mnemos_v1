@@ -115,6 +115,7 @@ class SpecTests(unittest.TestCase):
 
     def test_the_entry_point_is_the_desktop_shell(self) -> None:
         self.assertIn('"desktop_app.py"', self.text)
+        self.assertIn('"app.main"', self.text)
 
     def test_it_ships_an_icon(self) -> None:
         self.assertIn("mnemos.ico", self.text)
@@ -228,6 +229,12 @@ class DesktopAppTests(unittest.TestCase):
         text = (REPO / "desktop_app.py").read_text()
         self.assertNotIn("exec_webapp.py", text)
         self.assertNotIn("Popen", text)
+
+    def test_frozen_uvicorn_does_not_reimport_the_app_by_string(self) -> None:
+        """importlib.import_module('app.main') is how the v0.4.1 CI boot died."""
+        text = (REPO / "desktop_app.py").read_text()
+        self.assertNotIn('uvicorn.run("app.main:app"', text)
+        self.assertIn("from app.main import app", text)
 
 
 class SelfTestTests(unittest.TestCase):

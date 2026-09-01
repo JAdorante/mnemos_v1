@@ -128,6 +128,7 @@ a = Analysis(  # noqa: F821
         "uvicorn", "fastapi", "anthropic", "lancedb", "sounddevice",
         "faster_whisper", "silero_vad", "torch", "torchaudio", "speechbrain",
         "sentence_transformers",
+        "app.main",
         # The desktop shell. Optional at runtime (desktop_app degrades to the
         # browser), but the packaged build is the whole reason they exist.
         # pywebview picks its platform module by string at import, so the
