@@ -326,6 +326,12 @@ class DesktopCapturePipeline:
         _conf.attach(ev, _conf.EXTRACTED, capture=cap_q,
                      model=(float(model_conf) if isinstance(model_conf, (int, float))
                             else None))
+        # WS2: verbatim identifiers from the frame text — best-effort.
+        try:
+            from app.perception import identifiers as _idents
+            _idents.stamp_event(ev)
+        except Exception as exc:
+            print(f"[desktop_capture] identifier stamp skipped ({exc}).")
         print(f"[desktop_capture] screen: {summary[:160]}")
         self._sink(ev)
 

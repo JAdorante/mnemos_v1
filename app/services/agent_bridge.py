@@ -523,7 +523,9 @@ class AgentWorker:
             pkt = packet if packet is not None else _parse_approval_packet(text)
             if kind == "ask" and pkt:
                 # Attach packet_id + payload_hash so Approve/Cancel/Edit buttons
-                # can POST a bound decide (plan 0.6).
+                # can POST a bound decide (plan 0.6). Merge pending fields so
+                # desktop write_file (path/content) lands on the folio, not just
+                # whatever the prompt parser could scrape.
                 pending = self._pending_approval_packet_unlocked()
                 if pending:
                     if pending.get("packet_id") is not None:
@@ -532,6 +534,15 @@ class AgentWorker:
                         pkt["payload_hash"] = pending["payload_hash"]
                     if pending.get("expires_at") is not None:
                         pkt["expires_at"] = pending["expires_at"]
+                    if pending.get("summary") and not pkt.get("summary"):
+                        pkt["summary"] = pending["summary"]
+                    pf = pending.get("fields") or {}
+                    if pf:
+                        merged = dict(pkt.get("fields") or {})
+                        for k, v in pf.items():
+                            if v is not None and v != "":
+                                merged[k] = v
+                        pkt["fields"] = merged
                 ev["packet"] = pkt
             # Semantic response document — presentation is a frontend concern.
             if kind == "result":

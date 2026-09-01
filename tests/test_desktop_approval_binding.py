@@ -258,5 +258,87 @@ class DesktopMakeDirHappyPathTests(unittest.TestCase):
         self.assertEqual(d._bound_packet["fields"]["action"], "make_dir")
 
 
+class DesktopAskMintsPendingTests(unittest.TestCase):
+    """Wired desktop `_approve` must mint a pending packet before the ask.
+
+    Plan 0.6 refuses Hold-to-seal / Yes without `{packet_id, payload_hash}`.
+    The old prompt-only path left write_file approvals stuck on screen.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.store = Store(db_path=self.tmp / "t.db", audio_dir=self.tmp / "audio")
+        self.rec = Recorder(store=self.store)
+        self.rec.start_run("write solitaire", surface="desktop")
+
+    def tearDown(self):
+        try:
+            self.store.close()
+        except Exception:
+            pass
+
+    def test_wired_approve_sets_pending_before_ask(self):
+        from browser_agent.orchestrator import Agent
+
+        seen = {}
+
+        def ask(prompt):
+            seen["pending"] = dict(agent._pending_approval_packet or {})
+            seen["prompt"] = prompt
+            return "approve"
+
+        agent = Agent(recorder=self.rec, on_log=lambda _s: None, on_ask=ask)
+        d = agent._desktop()
+        if d is None:
+            self.skipTest("desktop agent unavailable")
+        fields = {
+            "action": "write_file",
+            "path": str(self.tmp / "index.html"),
+            "content": "<h1>hi</h1>",
+            "bytes": 10,
+        }
+        ok = d._ask(
+            "write 10 bytes to index.html (new)",
+            "first line: <h1>hi</h1>",
+            action="write_file",
+            fields=fields,
+        )
+        self.assertTrue(ok)
+        self.assertTrue(seen.get("pending"))
+        self.assertIsNotNone(seen["pending"].get("packet_id"))
+        self.assertTrue(seen["pending"].get("payload_hash"))
+        self.assertEqual(seen["pending"]["fields"]["path"], fields["path"])
+        self.assertIn("index.html", seen.get("prompt") or "")
+
+    def test_force_ask_still_prompts_when_autonomous_ceiling_exceeded(self):
+        from browser_agent.orchestrator import Agent
+        from desktop_agent import config as dcfg
+
+        prev = dcfg.AGENT_AUTONOMY_DESKTOP
+        dcfg.AGENT_AUTONOMY_DESKTOP = "launch_only"
+        asked = {"n": 0}
+
+        def ask(_prompt):
+            asked["n"] += 1
+            return "approve"
+
+        try:
+            agent = Agent(recorder=self.rec, on_log=lambda _s: None, on_ask=ask)
+            agent._autonomous_run = True
+            d = agent._desktop()
+            if d is None:
+                self.skipTest("desktop agent unavailable")
+            ok = d._ask(
+                "write 10 bytes to index.html (new)",
+                action="write_file",
+                fields={"action": "write_file", "path": "index.html",
+                        "content": "x", "bytes": 1},
+            )
+            self.assertTrue(ok)
+            self.assertEqual(asked["n"], 1)
+        finally:
+            dcfg.AGENT_AUTONOMY_DESKTOP = prev
+
+
 if __name__ == "__main__":
     unittest.main()

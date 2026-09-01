@@ -1948,6 +1948,61 @@ class Store:
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_learning_type_time "
                 "ON learning_pairs(task_type, created_at)")
+            # Ambient-context attribution WS1c: alias-aware entity resolution.
+            # Entity-level (not event-level) state, so a real table — the
+            # entity twin of alias_rules. `confirmed=0` rows are proposals
+            # (cosine / normalized matches awaiting recurrence or a human);
+            # only confirmed aliases ever resolve or feed _entity_patterns.
+            # `seen_days` is a JSON list of distinct YYYY-MM-DD strings — the
+            # recurrence evidence behind auto-confirmation.
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS entity_aliases (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    entity_id  INTEGER NOT NULL,       -- FK -> entities.id
+                    alias      TEXT    NOT NULL,       -- as observed
+                    alias_norm TEXT    NOT NULL,       -- normalized match key
+                    source     TEXT,                   -- window_title|identifier|embedding|user|...
+                    confirmed  INTEGER NOT NULL DEFAULT 0,
+                    seen_count INTEGER NOT NULL DEFAULT 1,
+                    seen_days  TEXT,                   -- JSON list of distinct days
+                    created_at REAL,
+                    updated_at REAL,
+                    FOREIGN KEY (entity_id) REFERENCES entities(id)
+                )
+                """
+            )
+            self._conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_entity_alias "
+                "ON entity_aliases(entity_id, alias_norm)")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_entity_alias_norm "
+                "ON entity_aliases(alias_norm)")
+            # Idea provenance WS3: typed detail row for kind='idea' facts
+            # (text lives in facts.text like claims; this row carries WHO
+            # proposed it — always the turn's speaker, bound in code, never
+            # by the model — plus the meeting it was proposed in).
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ideas (
+                    fact_id                           INTEGER PRIMARY KEY,
+                    originator_person_id              INTEGER,   -- FK -> people.id
+                    originator_label                  TEXT,      -- raw speaker label
+                    originator_track_id               INTEGER,   -- unbound voice track
+                    originator_mention_id             INTEGER,
+                    originator_resolution_confidence  REAL,
+                    meeting_session_id                INTEGER,
+                    FOREIGN KEY (fact_id) REFERENCES facts(id),
+                    FOREIGN KEY (originator_person_id) REFERENCES people(id)
+                )
+                """
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ideas_originator "
+                "ON ideas(originator_person_id)")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ideas_track "
+                "ON ideas(originator_track_id)")
             self._conn.commit()
 
     def _migrate_commitment_state(self) -> None:
@@ -2303,6 +2358,57 @@ class Store:
                 (json.dumps(meta), event_id))
             self._conn.commit()
             return True
+
+    def set_event_meta_key(self, event_id: int, key: str, value) -> bool:
+        """Set one key in an event's meta JSON, atomically (read-modify-write
+        under the lock, same shape as append_provenance_correction). Used for
+        best-effort enrichment stamps (e.g. meta['context_anchor']) — returns
+        False if the event is gone; callers must treat failure as non-fatal."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT meta FROM events WHERE id = ?", (int(event_id),)).fetchone()
+            if row is None:
+                return False
+            try:
+                meta = json.loads(row["meta"] or "{}")
+            except (ValueError, TypeError):
+                meta = {}
+            meta[key] = value
+            self._conn.execute(
+                "UPDATE events SET meta = ? WHERE id = ?",
+                (json.dumps(meta, default=str), int(event_id)))
+            self._conn.commit()
+            return True
+
+    def events_with_identifiers(self, *, source: str = "desktop.screen",
+                                since: float | None = None,
+                                limit: int = 5000) -> list[dict]:
+        """Events of `source` whose meta carries stamped identifiers (WS2) —
+        the identifier-rollup / rebuild derivation input. The LIKE prefilter
+        is a cheap index-friendly guard; the JSON parse confirms."""
+        with self._lock:
+            sql = ("SELECT id, time, meta FROM events "
+                   "WHERE source = ? AND meta LIKE '%\"identifiers\"%'")
+            args: list = [source]
+            if since is not None:
+                sql += " AND time >= ?"
+                args.append(float(since))
+            sql += " ORDER BY id DESC LIMIT ?"
+            args.append(int(limit))
+            rows = self._conn.execute(sql, args).fetchall()
+        out = []
+        for r in rows:
+            try:
+                meta = json.loads(r["meta"] or "{}")
+            except (ValueError, TypeError):
+                continue
+            idents = meta.get("identifiers")
+            if not isinstance(idents, list) or not idents:
+                continue
+            out.append({"id": int(r["id"]), "time": r["time"],
+                        "identifiers": idents,
+                        "window": str(meta.get("window") or "")})
+        return out
 
     def by_ids_map(self, ids: list[int]) -> dict[int, Event]:
         """Fetch events by id, returned as an {id: Event} map."""
@@ -4583,6 +4689,43 @@ class Store:
         self.record_node_access("fact", fid, extracted_at)
         return fid
 
+    def add_idea(self, text: str, *, source_event_id: int | None = None,
+                 source_span: str = "", confidence: float | None = None,
+                 originator_person_id: int | None = None,
+                 originator_label: str | None = None,
+                 originator_track_id: int | None = None,
+                 originator_mention_id: int | None = None,
+                 originator_resolution_confidence: float | None = None,
+                 meeting_session_id: int | None = None,
+                 extracted_at: float) -> int:
+        """Insert an `idea` fact + its provenance row (WS3). Text lives in
+        facts.text (like claims); the ideas row carries WHO proposed it — the
+        turn's speaker, bound by the caller in code, never by the model —
+        plus the meeting session it was proposed in."""
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO facts (kind, text, source_event_id, source_span, "
+                "confidence, extracted_at) VALUES ('idea', ?, ?, ?, ?, ?)",
+                (text, source_event_id, source_span, confidence, extracted_at),
+            )
+            fid = int(cur.lastrowid)
+            self._conn.execute(
+                "INSERT INTO ideas (fact_id, originator_person_id, "
+                "originator_label, originator_track_id, originator_mention_id, "
+                "originator_resolution_confidence, meeting_session_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (fid, originator_person_id, originator_label,
+                 originator_track_id, originator_mention_id,
+                 originator_resolution_confidence, meeting_session_id),
+            )
+            self._conn.commit()
+        self.record_node_access("fact", fid, extracted_at)
+        self.mark_graph_dirty("fact", fid, ts=extracted_at)
+        if originator_person_id:
+            self.mark_graph_dirty("person", int(originator_person_id),
+                                  ts=extracted_at)
+        return fid
+
     def open_tasks(self, limit: int = 100) -> list[dict]:
         with self._lock:
             rows = self._conn.execute(
@@ -4681,10 +4824,23 @@ class Store:
                 sql += " WHERE COALESCE(hidden, 0) = 0"
             sql += " ORDER BY id"
             rows = self._conn.execute(sql).fetchall()
+        # CONFIRMED entity_aliases rows (WS1c) ride the aliases list so the
+        # graph rebuild / context attribution vocabulary sees them without a
+        # second lookup path. Proposals (confirmed=0) stay invisible here.
+        try:
+            extra = self.confirmed_alias_map()
+        except Exception:
+            extra = {}
         out = []
         for r in rows:
+            aliases = json.loads(r["aliases"] or "[]")
+            seen = {a.lower() for a in aliases}
+            for a in extra.get(int(r["id"]), []):
+                if a.lower() not in seen:
+                    aliases.append(a)
+                    seen.add(a.lower())
             d = {"id": int(r["id"]), "name": r["canonical_name"], "kind": r["kind"],
-                 "aliases": json.loads(r["aliases"] or "[]"),
+                 "aliases": aliases,
                  "last_seen": r["last_seen"]}
             if has_hidden:
                 d["hidden"] = bool(r["hidden"] or 0)
@@ -4745,6 +4901,121 @@ class Store:
                     "UPDATE entities SET last_seen = ? WHERE id = ?", (ts, eid))
             self._conn.commit()
 
+    # --- entity aliases (ambient-context WS1c) ---------------------------
+    @staticmethod
+    def _alias_row(r) -> dict:
+        return {
+            "id": int(r["id"]), "entity_id": int(r["entity_id"]),
+            "alias": r["alias"], "alias_norm": r["alias_norm"],
+            "source": r["source"] or "",
+            "confirmed": bool(r["confirmed"]),
+            "seen_count": int(r["seen_count"] or 0),
+            "seen_days": json.loads(r["seen_days"] or "[]"),
+            "created_at": r["created_at"], "updated_at": r["updated_at"],
+        }
+
+    def upsert_entity_alias(self, entity_id: int, alias: str, alias_norm: str,
+                            *, source: str = "", confirmed: bool = False,
+                            ts: float | None = None,
+                            day: str | None = None) -> dict | None:
+        """Insert or bump one (entity, alias) proposal. Recurrence evidence:
+        `seen_count` increments per call; `day` (YYYY-MM-DD) is added to the
+        distinct-days set. An already-confirmed row never demotes. Returns the
+        row dict after the write (so the caller can apply auto-confirm
+        policy), or None on an empty alias."""
+        a = (alias or "").strip()
+        norm = (alias_norm or "").strip()
+        if not a or not norm or not entity_id:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM entity_aliases WHERE entity_id = ? "
+                "AND alias_norm = ?", (int(entity_id), norm)).fetchone()
+            if row is None:
+                self._conn.execute(
+                    "INSERT INTO entity_aliases (entity_id, alias, alias_norm, "
+                    "source, confirmed, seen_count, seen_days, created_at, "
+                    "updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)",
+                    (int(entity_id), a, norm, source, 1 if confirmed else 0,
+                     json.dumps([day] if day else []), ts, ts))
+            else:
+                days = json.loads(row["seen_days"] or "[]")
+                if day and day not in days:
+                    days.append(day)
+                self._conn.execute(
+                    "UPDATE entity_aliases SET seen_count = seen_count + 1, "
+                    "seen_days = ?, confirmed = MAX(confirmed, ?), "
+                    "updated_at = ? WHERE id = ?",
+                    (json.dumps(days), 1 if confirmed else 0, ts,
+                     int(row["id"])))
+            self._conn.commit()
+            out = self._conn.execute(
+                "SELECT * FROM entity_aliases WHERE entity_id = ? "
+                "AND alias_norm = ?", (int(entity_id), norm)).fetchone()
+        return self._alias_row(out) if out else None
+
+    def confirm_entity_alias(self, alias_id: int,
+                             confirmed: bool = True) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE entity_aliases SET confirmed = ? WHERE id = ?",
+                (1 if confirmed else 0, int(alias_id)))
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def delete_entity_alias(self, alias_id: int) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM entity_aliases WHERE id = ?", (int(alias_id),))
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def list_entity_aliases(self, *, entity_id: int | None = None,
+                            confirmed: bool | None = None,
+                            limit: int = 500) -> list[dict]:
+        sql = "SELECT * FROM entity_aliases"
+        clauses, args = [], []
+        if entity_id is not None:
+            clauses.append("entity_id = ?")
+            args.append(int(entity_id))
+        if confirmed is not None:
+            clauses.append("confirmed = ?")
+            args.append(1 if confirmed else 0)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY updated_at DESC, id DESC LIMIT ?"
+        args.append(int(limit))
+        with self._lock:
+            rows = self._conn.execute(sql, args).fetchall()
+        return [self._alias_row(r) for r in rows]
+
+    def find_entity_by_alias_norm(self, alias_norm: str) -> int | None:
+        """Entity id for a CONFIRMED alias (normalized key), else None.
+        Proposals never resolve — that is the whole point of the review gate."""
+        norm = (alias_norm or "").strip()
+        if not norm:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT ea.entity_id FROM entity_aliases ea "
+                "JOIN entities e ON e.id = ea.entity_id "
+                "WHERE ea.alias_norm = ? AND ea.confirmed = 1 "
+                "ORDER BY ea.seen_count DESC LIMIT 1", (norm,)).fetchone()
+        return int(row["entity_id"]) if row else None
+
+    def confirmed_alias_map(self) -> dict[int, list[str]]:
+        """{entity_id: [confirmed alias, …]} — merged into all_entities()
+        aliases so graph._entity_patterns (and every consumer of the
+        name+alias vocabulary) benefits without a second lookup path."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT entity_id, alias FROM entity_aliases "
+                "WHERE confirmed = 1").fetchall()
+        out: dict[int, list[str]] = {}
+        for r in rows:
+            out.setdefault(int(r["entity_id"]), []).append(r["alias"])
+        return out
+
     # --- recency-ranked, for ASR vocabulary bias (#3/#11) ----------------
     def recent_people(self, limit: int = 25) -> list[dict]:
         """People most recently seen first (last_seen DESC), with their aliases —
@@ -4787,6 +5058,13 @@ class Store:
                         f"WHERE c.{pid} IS NOT NULL "
                         f"AND COALESCE(f.state, 'active') != 'escrowed'"):
                     out.append((int(r["fact_id"]), int(r["p"]), role))
+            # WS3: idea originators — person —proposed→ idea(fact).
+            for r in self._conn.execute(
+                    "SELECT i.fact_id, i.originator_person_id AS p "
+                    "FROM ideas i JOIN facts f ON f.id = i.fact_id "
+                    "WHERE i.originator_person_id IS NOT NULL "
+                    "AND COALESCE(f.state, 'active') != 'escrowed'"):
+                out.append((int(r["fact_id"]), int(r["p"]), "proposed"))
         return out
 
     def add_relation(self, subj_type: str, subj_id: int, predicate: str,
@@ -4814,6 +5092,29 @@ class Store:
                                   WHEN relations.origin = excluded.origin
                                   THEN weight + excluded.weight
                                   ELSE MAX(weight, excluded.weight) END,
+                              -- A stronger origin upgrades the edge (an
+                              -- explicit assertion outranks ambient context
+                              -- outranks rebuild derivation); downgrades
+                              -- never happen, so a derived re-add can't
+                              -- erase asserted/user provenance.
+                              origin = CASE WHEN
+                                  (CASE excluded.origin WHEN 'user' THEN 3
+                                        WHEN 'asserted' THEN 2
+                                        WHEN 'context' THEN 1 ELSE 0 END) >
+                                  (CASE relations.origin WHEN 'user' THEN 3
+                                        WHEN 'asserted' THEN 2
+                                        WHEN 'context' THEN 1 ELSE 0 END)
+                                  THEN excluded.origin
+                                  ELSE relations.origin END,
+                              confidence = CASE WHEN
+                                  (CASE excluded.origin WHEN 'user' THEN 3
+                                        WHEN 'asserted' THEN 2
+                                        WHEN 'context' THEN 1 ELSE 0 END) >
+                                  (CASE relations.origin WHEN 'user' THEN 3
+                                        WHEN 'asserted' THEN 2
+                                        WHEN 'context' THEN 1 ELSE 0 END)
+                                  THEN excluded.confidence
+                                  ELSE relations.confidence END,
                               source_event_id = COALESCE(relations.source_event_id,
                                                          excluded.source_event_id)
                 """,
@@ -4821,7 +5122,12 @@ class Store:
                  source_event_id, confidence, ts),
             )
             self._conn.commit()
-        if origin in ("asserted", "user"):
+        # The belief store tracks person/entity predicates; fact-anchored
+        # attribution edges (WS1 about_project / WS3 idea topics) are
+        # asserted so they survive rebuilds, but they are provenance for a
+        # single fact, not a standing belief — keep them out of KG-A.
+        if origin in ("asserted", "user") and subj_type in ("person", "entity") \
+                and obj_type in ("person", "entity"):
             try:
                 from app.services import kg_beliefs
                 kg_beliefs.record_from_relation(
@@ -6191,14 +6497,18 @@ class Store:
                c.counterparty_expects AS counterparty_expects,
                pt.canonical_name AS owner,
                pf.canonical_name AS from_person,
-               pto.canonical_name AS to_person
+               pto.canonical_name AS to_person,
+               COALESCE(po.canonical_name, i.originator_label) AS originator,
+               i.meeting_session_id AS meeting_session_id
         FROM facts f
         LEFT JOIN tasks t        ON t.fact_id = f.id
         LEFT JOIN commitments c  ON c.fact_id = f.id
+        LEFT JOIN ideas i        ON i.fact_id = f.id
         LEFT JOIN events e       ON e.id = f.source_event_id
         LEFT JOIN people pt      ON pt.id = t.owner_person_id
         LEFT JOIN people pf      ON pf.id = c.from_person_id
         LEFT JOIN people pto     ON pto.id = c.to_person_id
+        LEFT JOIN people po      ON po.id = i.originator_person_id
     """
 
     # Sources whose tasks/commitments are mined from text the user merely SAW
@@ -8304,7 +8614,8 @@ class Store:
 
     def escrow_fact(self, fact_id: int, track_id: int, *,
                     task_owner: bool = False,
-                    commitment_from: bool = False) -> None:
+                    commitment_from: bool = False,
+                    idea_originator: bool = False) -> None:
         """Mark a just-inserted fact as escrowed against a voice track. The
         state flip is what keeps the row out of every default surface
         (grounding/retrieval/scoring/constellation all filter on state)."""
@@ -8319,6 +8630,10 @@ class Store:
             if commitment_from:
                 self._conn.execute(
                     "UPDATE commitments SET from_track_id = ? WHERE fact_id = ?",
+                    (int(track_id), int(fact_id)))
+            if idea_originator:
+                self._conn.execute(
+                    "UPDATE ideas SET originator_track_id = ? WHERE fact_id = ?",
                     (int(track_id), int(fact_id)))
             self._conn.commit()
 
@@ -8363,6 +8678,12 @@ class Store:
                 "WHERE from_track_id = ? "
                 "AND (from_person_id IS NULL OR from_person_id IN (?, ?))",
                 (int(person_id), int(track_id), int(person_id), prev)).rowcount
+            n_ideas = self._conn.execute(
+                "UPDATE ideas SET originator_person_id = ? "
+                "WHERE originator_track_id = ? "
+                "AND (originator_person_id IS NULL "
+                "OR originator_person_id IN (?, ?))",
+                (int(person_id), int(track_id), int(person_id), prev)).rowcount
             n_facts = self._conn.execute(
                 "UPDATE facts SET state = 'active', updated_at = ? "
                 "WHERE speaker_track_id = ? AND state = 'escrowed'",
@@ -8374,7 +8695,33 @@ class Store:
         for f in activated:
             self.mark_graph_dirty("fact", f["id"], ts=ts)
         return {"facts": int(n_facts), "tasks": int(n_tasks),
-                "commitments": int(n_commitments), "activated": activated}
+                "commitments": int(n_commitments), "ideas": int(n_ideas),
+                "activated": activated}
+
+    def rebind_ideas_by_label(self, label: str, person_id: int, *,
+                              ts: float) -> int:
+        """Bind ideas whose originator is still an anonymous cluster label to
+        the person that label was just named as (WS3 backfill). Covers ideas
+        recorded while escrow was off (no track id, label only). Idempotent —
+        rows already bound to a person are never touched."""
+        lbl = (label or "").strip()
+        if not lbl or not person_id:
+            return 0
+        with self._lock:
+            rows = [int(r["fact_id"]) for r in self._conn.execute(
+                "SELECT fact_id FROM ideas WHERE originator_person_id IS NULL "
+                "AND originator_label = ? COLLATE NOCASE", (lbl,)).fetchall()]
+            if rows:
+                marks = ",".join("?" for _ in rows)
+                self._conn.execute(
+                    f"UPDATE ideas SET originator_person_id = ? "
+                    f"WHERE fact_id IN ({marks})", [int(person_id), *rows])
+            self._conn.commit()
+        for fid in rows:
+            self.mark_graph_dirty("fact", fid, ts=ts)
+        if rows:
+            self.mark_graph_dirty("person", int(person_id), ts=ts)
+        return len(rows)
 
     def log_escrow_rebind(self, *, track_id: int, person_id: int,
                           n_facts: int, n_tasks: int, n_commitments: int,

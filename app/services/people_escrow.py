@@ -154,6 +154,14 @@ def run_rebind_job(payload: dict | None, store=None) -> dict:
     res = store.rebind_speaker_track_rows(
         track_id, int(pid),
         previous_person_id=int(prev) if prev else None, ts=now)
+    # WS3: ideas recorded against the cluster LABEL (e.g. while escrow was
+    # off, so no track id landed on the row) follow the naming too.
+    try:
+        n_label_ideas = store.rebind_ideas_by_label(
+            str(track.get("label") or ""), int(pid), ts=now)
+        res["ideas"] = int(res.get("ideas", 0)) + n_label_ideas
+    except Exception as exc:
+        print(f"[people_escrow] idea label rebind skipped ({exc}).")
     # Reactivated facts enter the semantic index now (escrow skipped it), so
     # they surface in retrieval exactly like any other reviewed-tier fact.
     for f in res.get("activated", []):
@@ -172,7 +180,8 @@ def run_rebind_job(payload: dict | None, store=None) -> dict:
         reason=f"label={track.get('label')!r}", created_at=now)
     out = {"track_id": track_id, "person_id": int(pid),
            "facts": int(res.get("facts", 0)), "tasks": int(res.get("tasks", 0)),
-           "commitments": int(res.get("commitments", 0))}
+           "commitments": int(res.get("commitments", 0)),
+           "ideas": int(res.get("ideas", 0))}
     print(f"[people_escrow] rebind {out}")
     return out
 

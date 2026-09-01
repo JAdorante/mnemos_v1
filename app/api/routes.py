@@ -2913,6 +2913,11 @@ def _fact_view(d: dict) -> dict:
         "completion_evidence_json": d.get("completion_evidence_json"),
         "last_surfaced": d.get("last_surfaced"),
         "counterparty_expects": d.get("counterparty_expects"),
+        # WS3 — idea provenance (null for other kinds): who proposed it,
+        # in which meeting. The clip affordance above plays it.
+        "originator": d.get("originator"),
+        "meeting_session_id": d.get("meeting_session_id"),
+        "meeting_title": None,  # filled in by the route when session known
     }
 
 
@@ -2947,6 +2952,19 @@ def facts_list(kind: str | None = None, status: str | None = None,
                     "match": hit["match"],
                     "after": hit["after"],
                 }
+    # WS3: meeting chip for ideas — hydrate session titles in one pass.
+    sids = {v["meeting_session_id"] for v in views
+            if v.get("meeting_session_id")}
+    for sid in sids:
+        try:
+            ms_row = store.get_meeting_session(int(sid))
+            title = (ms_row or {}).get("title") or ""
+        except Exception:
+            title = ""
+        if title:
+            for v in views:
+                if v.get("meeting_session_id") == sid:
+                    v["meeting_title"] = title
     return {"count": len(views), "facts": views}
 
 
@@ -3621,6 +3639,33 @@ def entity_alias(entity_id: int, body: PersonAlias) -> dict:
         raise HTTPException(status_code=400, detail="alias required")
     store.touch_entity(entity_id, _time.time(), alias=alias)
     return {"ok": True, "id": entity_id, "alias": alias}
+
+
+@router.get("/entities/aliases/proposals")
+def entity_alias_proposals(limit: int = 200) -> dict:
+    """Unconfirmed alias proposals (WS1c) — cosine/context matches waiting
+    for a human verdict or recurrence auto-confirmation."""
+    from app.services import entity_alias as ea
+    store = memory._ensure_store()
+    return {"proposals": ea.proposals(store, limit=int(limit))}
+
+
+@router.post("/entities/aliases/{alias_id}/confirm")
+def entity_alias_confirm(alias_id: int) -> dict:
+    store = memory._ensure_store()
+    if not store.confirm_entity_alias(alias_id, True):
+        raise HTTPException(status_code=404, detail="no such alias")
+    return {"ok": True, "id": alias_id, "confirmed": True}
+
+
+@router.post("/entities/aliases/{alias_id}/reject")
+def entity_alias_reject(alias_id: int) -> dict:
+    """Reject (delete) a proposal — it can re-propose later only by earning
+    fresh recurrence evidence."""
+    store = memory._ensure_store()
+    if not store.delete_entity_alias(alias_id):
+        raise HTTPException(status_code=404, detail="no such alias")
+    return {"ok": True, "id": alias_id, "deleted": True}
 
 
 @router.post("/entities/{entity_id}/kind")

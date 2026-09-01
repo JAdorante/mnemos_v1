@@ -222,10 +222,22 @@ class DesktopDriver:
         }
 
     def _ask_once(self, summary: str, details: str = "",
-                  verb: str | None = None) -> bool:
+                  verb: str | None = None, fields: dict | None = None) -> bool:
+        kwargs: dict = {}
         if self._ask_wants_action:
-            return bool(self._ask(summary, details, action=verb))
-        return bool(self._ask(summary, details))
+            kwargs["action"] = verb
+        if fields is not None:
+            kwargs["fields"] = fields
+        try:
+            return bool(self._ask(summary, details, **kwargs))
+        except TypeError:
+            if "fields" in kwargs:
+                kwargs.pop("fields")
+                try:
+                    return bool(self._ask(summary, details, **kwargs))
+                except TypeError:
+                    pass
+            return bool(self._ask(summary, details))
 
     def _gate(self, tier: Tier, summary: str, details: str = "",
               verb: str | None = None, fields: dict | None = None) -> bool:
@@ -266,7 +278,7 @@ class DesktopDriver:
         if not cfg.REQUIRE_APPROVAL:
             return True
 
-        ok = self._ask_once(summary, details, verb)
+        ok = self._ask_once(summary, details, verb, fields=exec_fields)
         self._log("   approved" if ok else "   denied")
         if not ok:
             self._clear_bound_packet()
@@ -295,7 +307,7 @@ class DesktopDriver:
             f"{verb or 'action'}"
             + (f":\n{diff}" if diff else "")
         )
-        ok2 = self._ask_once(re_summary, details, verb)
+        ok2 = self._ask_once(re_summary, details, verb, fields=current)
         self._log("   approved" if ok2 else "   denied")
         if not ok2:
             return False

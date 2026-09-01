@@ -491,6 +491,13 @@ class L1Capture:
         _conf.attach(ev, _conf.EXTRACTED,
                      model=float(cap.ocr_mean_conf)
                      if cap.ocr_mean_conf is not None else None)
+        # WS2: verbatim identifiers (repo slugs / paths / URLs / tickets)
+        # mined from the OCR text ride the event — best-effort, never blocks.
+        try:
+            from app.perception import identifiers as _idents
+            _idents.stamp_event(ev)
+        except Exception as exc:
+            print(f"[perception.l1] identifier stamp skipped ({exc}).")
         try:
             self._emit_sink()(ev)
             print(f"[perception.l1] {cap.kind}/{cap.trigger}: "

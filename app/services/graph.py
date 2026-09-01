@@ -239,6 +239,16 @@ def rebuild(store: Store | None = None, *, scope: str = "full") -> dict:
                                source_event_id=sev, ts=now)
             counts["co_occurs"] += 2
 
+    # 2b) WS2: screen identifiers → entity —observed_on_screen→ event edges.
+    # Derived like the text-match edges, so the wipe/re-derive cycle keeps
+    # them idempotent and erase_event's relation cascade drops erased frames.
+    try:
+        from app.services import identifier_rollup
+        counts["observed_on_screen"] = identifier_rollup.derive_edges(
+            store, neighborhood=neighborhood, now=now)
+    except Exception as exc:
+        print(f"[graph] identifier rollup skipped ({exc}).")
+
     # 3) co-occurrence across conversational turns (people named together).
     for t in store.recent_turns(100000):
         ttext = t.get("text") or ""
@@ -315,12 +325,28 @@ def context_for_person(name: str, store: Store | None = None) -> dict:
                 fact_pred[e["obj_id"]] = e["predicate"]
     fmap = store.facts_by_ids(list(set(fact_ids))) if fact_ids else {}
     items = []
+    ideas = []
     for fid in dict.fromkeys(fact_ids):
         fr = fmap.get(fid)
         if not fr:
             continue
         if (fr.get("state") or "active") != "active":
             continue  # superseded facts: the replacement row carries the truth
+        # WS3: ideas this person proposed get their own section (dismissed
+        # ones vanish — same lifecycle filter as search).
+        if fr.get("kind") == "idea":
+            from app.services.memory import fact_is_retrievable
+            if fact_pred.get(fid) == "proposed" and fact_is_retrievable(fr):
+                ideas.append({
+                    "fact_id": fid,
+                    "text": fr.get("text") or fr.get("source_span"),
+                    "confidence": fr.get("confidence"),
+                    "source_event_id": fr.get("source_event_id"),
+                    "meeting_session_id": fr.get("meeting_session_id"),
+                    "updated_at": fr.get("updated_at")
+                                  or fr.get("extracted_at") or 0,
+                })
+            continue
         items.append({
             "fact_id": fid, "predicate": fact_pred.get(fid, "mentioned_in"),
             "kind": fr.get("kind"), "text": fr.get("text") or fr.get("source_span"),
@@ -407,9 +433,12 @@ def context_for_person(name: str, store: Store | None = None) -> dict:
                                          not a.get("asserted", True),
                                          -(a.get("weight") or 0)))
 
+    ideas.sort(key=lambda i: -(i.get("updated_at") or 0))
+
     return {
         "found": True, "person": person,
-        "items": items, "affiliations": affiliations, "discussed_with": discussed,
+        "items": items, "ideas": ideas,
+        "affiliations": affiliations, "discussed_with": discussed,
         "edge_count": len(edges["out"]) + len(edges["in"]),
     }
 

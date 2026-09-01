@@ -124,6 +124,135 @@ def _score_case(case: dict, pred: dict, *, span_is_faithful) -> dict:
   }
 
 
+# --------------------------------------------------------------------------
+# WS1 gate: context prior (QUILL_EXTRACT_CONTEXT) — two-pass off/on compare.
+# Flip-on bar (the vocab-hint bar): no precision or faithfulness regression,
+# and >= 20% of ambiguous-reference fixtures gain a correct project
+# attribution. Cases carry synthetic `anchors` (injected by patching
+# context_anchor.anchors_for_window) + `expect_about_project`.
+# --------------------------------------------------------------------------
+def _attributed(pred: dict, expect: str) -> bool:
+  want = _norm(expect)
+  for r in pred.get("relations", []):
+    if (r.get("predicate") == "about_project"
+        and want and want in _norm(r.get("object", ""))):
+      return True
+  return False
+
+
+def _faith_rate(pred: dict, transcript: str, span_is_faithful) -> tuple[int, int]:
+  ok = tot = 0
+  for f in _all_facts(pred):
+    tot += 1
+    if span_is_faithful(f.get("source_span", ""), transcript):
+      ok += 1
+  return ok, tot
+
+
+def run_context_compare(golden: list[dict], *, span_is_faithful) -> int:
+  import os
+  from unittest.mock import patch
+
+  from app.services.extractor import extractor
+
+  cases = [c for c in golden if c.get("anchors")]
+  if not cases:
+    print("[eval-ctx] no cases with synthetic anchors — nothing to gate")
+    return 1
+  agg = {"off": dict(tp=0, fp=0, fn=0, fok=0, ftot=0, attr=0),
+         "on": dict(tp=0, fp=0, fn=0, fok=0, ftot=0, attr=0)}
+  ambiguous = [c for c in cases if c.get("expect_about_project")]
+  for c in cases:
+    turn = {"text": c["transcript"], "speaker": c.get("speaker", ""),
+            "start": 1.0, "end": 2.0}
+    for mode, env in (("off", "0"), ("on", "1")):
+      with patch.dict(os.environ, {"QUILL_EXTRACT_CONTEXT": env}), \
+           patch("app.services.context_anchor.anchors_for_window",
+                 return_value=c["anchors"]):
+        try:
+          pred = extractor._extract_text(turn)
+        except Exception as exc:
+          print(f"  {c.get('id')}: LLM error ({exc}); skipping")
+          pred = {}
+      s = _score_case(c, pred, span_is_faithful=span_is_faithful)
+      a = agg[mode]
+      a["tp"] += s["tp"]; a["fp"] += s["fp"]; a["fn"] += s["fn"]
+      a["fok"] += s["faith_ok"]; a["ftot"] += s["faith_tot"]
+      if c.get("expect_about_project") and _attributed(
+          pred, c["expect_about_project"]):
+        a["attr"] += 1
+  p_off = _pr(agg["off"]["tp"], agg["off"]["tp"] + agg["off"]["fp"])
+  p_on = _pr(agg["on"]["tp"], agg["on"]["tp"] + agg["on"]["fp"])
+  f_off = _pr(agg["off"]["fok"], agg["off"]["ftot"])
+  f_on = _pr(agg["on"]["fok"], agg["on"]["ftot"])
+  gain = ((agg["on"]["attr"] - agg["off"]["attr"]) / len(ambiguous)
+          if ambiguous else 0.0)
+  print("\n=== context-prior gate (QUILL_EXTRACT_CONTEXT) ===")
+  print(f"precision     off={p_off:.2f}  on={p_on:.2f}")
+  print(f"faithfulness  off={f_off:.2f}  on={f_on:.2f}")
+  print(f"attribution   off={agg['off']['attr']}  on={agg['on']['attr']}  "
+        f"gain={gain:.0%} of {len(ambiguous)} ambiguous fixtures")
+  ok = (p_on >= p_off - 0.02) and (f_on >= f_off - 0.02) and gain >= 0.20
+  print("GATE:", "PASS — safe to flip QUILL_EXTRACT_CONTEXT=1" if ok
+        else "FAIL — keep the flag off")
+  return 0 if ok else 1
+
+
+# --------------------------------------------------------------------------
+# WS3 gate: idea extraction (QUILL_EXTRACT_IDEAS). Enable-by-default bar:
+# idea precision >= 0.8 on goldens, ZERO task/commitment double-emission,
+# no regression on existing kinds (run the standard eval alongside).
+# Cases carry `ideas` (expected keyword lists) and optionally `not_ideas`.
+# --------------------------------------------------------------------------
+def run_ideas_gate(golden: list[dict], *, span_is_faithful) -> int:
+  import os
+  from unittest.mock import patch
+
+  from app.services.extractor import extractor
+
+  cases = [c for c in golden if "ideas" in c or "not_ideas" in c]
+  if not cases:
+    print("[eval-ideas] no idea-labeled cases — nothing to gate")
+    return 1
+  tp = fp = fn = 0
+  double = 0
+  for c in cases:
+    turn = {"text": c["transcript"], "speaker": c.get("speaker", ""),
+            "start": 1.0, "end": 2.0}
+    with patch.dict(os.environ, {"QUILL_EXTRACT_IDEAS": "1"}):
+      try:
+        pred = extractor._extract_text(turn)
+      except Exception as exc:
+        print(f"  {c.get('id')}: LLM error ({exc}); skipping")
+        continue
+    idea_texts = [i.get("text", "") for i in pred.get("ideas", [])]
+    exp = c.get("ideas") or []
+    found = [kw for kw in exp if any(_has_all(t, kw) for t in idea_texts)]
+    matched = [t for t in idea_texts if any(_has_all(t, kw) for kw in exp)]
+    tp += len(found)
+    fp += len(idea_texts) - len(matched)
+    fn += len(exp) - len(found)
+    # Double-emission: an expected IDEA must not also land as a
+    # task/commitment (the boundary rule).
+    for kw in exp:
+      if any(_has_all(a, kw) for a in _actionables(pred)):
+        double += 1
+        print(f"  {c.get('id')}: DOUBLE-EMITTED idea {kw}")
+    for kw in (c.get("not_ideas") or []):
+      if any(_has_all(t, kw) for t in idea_texts):
+        fp += 1
+        print(f"  {c.get('id')}: NOT-AN-IDEA emitted as idea: {kw}")
+  prec = _pr(tp, tp + fp)
+  rec = _pr(tp, tp + fn)
+  print("\n=== ideas gate (QUILL_EXTRACT_IDEAS) ===")
+  print(f"idea precision={prec:.2f} recall={rec:.2f} (tp={tp} fp={fp} fn={fn})")
+  print(f"task/commitment double-emission: {double}")
+  ok = prec >= 0.80 and double == 0
+  print("GATE:", "PASS — safe to flip QUILL_EXTRACT_IDEAS=1" if ok
+        else "FAIL — keep the flag off")
+  return 0 if ok else 1
+
+
 def main() -> int:
     from app.services.cog_telemetry import span_is_faithful
     from app.services.extractor import EXTRACTOR_MODEL, extractor
@@ -131,7 +260,24 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run extraction golden eval.")
     parser.add_argument("--data", type=Path, default=DATA, help="Path to golden.jsonl")
     parser.add_argument("--limit", type=int, default=None, help="Run only the first N cases")
+    parser.add_argument("--context-gate", action="store_true",
+                        help="WS1: two-pass off/on compare for the context "
+                             "prior; exits nonzero if the flip-on bar fails")
+    parser.add_argument("--ideas-gate", action="store_true",
+                        help="WS3: idea precision + double-emission gate")
     args = parser.parse_args()
+
+    if args.context_gate or args.ideas_gate:
+        golden = _load_golden(args.data, limit=args.limit)
+        if not golden:
+            print(f"[eval] no cases found in {args.data}")
+            return 1
+        rc = 0
+        if args.context_gate:
+            rc |= run_context_compare(golden, span_is_faithful=span_is_faithful)
+        if args.ideas_gate:
+            rc |= run_ideas_gate(golden, span_is_faithful=span_is_faithful)
+        return rc
 
     golden = _load_golden(args.data, limit=args.limit)
     if not golden:

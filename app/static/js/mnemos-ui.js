@@ -231,6 +231,10 @@ window.MnemosHold = {
       if (ev && ev.type === 'keydown' && ev.key !== 'Enter' && ev.key !== ' ') return;
       if (ev && ev.type === 'keydown') ev.preventDefault();
       if (ev && ev.button != null && ev.button !== 0) return;
+      if (ev && ev.preventDefault) ev.preventDefault();
+      if (ev && ev.pointerId != null && el.setPointerCapture) {
+        try { el.setPointerCapture(ev.pointerId); } catch (e) {}
+      }
       if (reduce) {
         setProg(0.5);
         setTimeout(() => finish(), 40);
@@ -262,8 +266,8 @@ window.MnemosHold = {
     };
     el.addEventListener('pointerdown', start);
     el.addEventListener('pointerup', end);
-    el.addEventListener('pointerleave', end);
     el.addEventListener('pointercancel', end);
+    el.addEventListener('lostpointercapture', end);
     el.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' || e.key === ' ') {
         if (e.repeat) return;
@@ -1805,13 +1809,19 @@ window.MnemosRenderFolio = function (packet, opts) {
   opts = opts || {};
   const f = (packet && packet.fields) || {};
   const editable = !!opts.editable;
+  const preview = (f.content && String(f.content).length > 480)
+    ? String(f.content).slice(0, 480) + '\n…'
+    : (f.content || '');
   const rows = [
     ['Action', 'action', f.action],
+    ['Path', 'path', f.path],
     ['To', 'to', f.to],
     ['Subject', 'subject', f.subject],
     ['Body', 'body', f.body],
+    ['Preview', 'content', preview],
     ['Why', 'why', f.why],
     ['Source', 'source', f.source],
+    ['Details', 'details', f.details],
   ].filter(r => r[2]);
   let html = '<div class="folio approval-folio" data-folio="1">';
   html += '<div class="serif-title" style="font-size:1.35rem;margin:0 0 4px 18px">Approval</div>';

@@ -56,6 +56,33 @@ class ParseApprovalPacketTests(unittest.TestCase):
         self.assertEqual(w.events[0]["packet"]["kind"], "approval")
         self.assertEqual(w.events[0]["packet"]["summary"], "launch cursor")
 
+    def test_emit_merges_pending_desktop_fields(self):
+        from app.services.agent_bridge import AgentWorker
+
+        w = AgentWorker.__new__(AgentWorker)
+        w.lock = threading.Lock()
+        w.events = []
+        w.next_id = 1
+        w.agent = mock.Mock()
+        w.fast_agent = None
+        w.agent._pending_approval_packet = {
+            "packet_id": 42,
+            "payload_hash": "abc",
+            "summary": "write 10 bytes to index.html (new)",
+            "fields": {"action": "write_file", "path": r"C:\jail\index.html",
+                       "content": "<h1>hi</h1>"},
+        }
+        with mock.patch("app.services.voice.maybe_speak_reply"):
+            AgentWorker._emit(
+                w, "ask",
+                "APPROVAL NEEDED — write 10 bytes to index.html (new)\n"
+                "Reply 'approve' to proceed")
+        pkt = w.events[0]["packet"]
+        self.assertEqual(pkt["packet_id"], 42)
+        self.assertEqual(pkt["payload_hash"], "abc")
+        self.assertEqual(pkt["fields"]["path"], r"C:\jail\index.html")
+        self.assertEqual(pkt["fields"]["action"], "write_file")
+
 
 class ConstellationTests(unittest.TestCase):
     def test_constellation_shape(self):

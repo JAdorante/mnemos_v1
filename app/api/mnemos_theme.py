@@ -476,6 +476,7 @@ button:focus:not(:focus-visible),.btn:focus:not(:focus-visible),
   border:1px solid var(--acc-45)!important;
   background:var(--acc-08)!important;color:var(--navy)!important;
   min-width:132px;font-weight:600;
+  touch-action:none;user-select:none;-webkit-user-select:none;
 }
 .seal-btn .seal-ring,.holdable .hold-ring{
   position:absolute;right:10px;top:50%;width:22px;height:22px;

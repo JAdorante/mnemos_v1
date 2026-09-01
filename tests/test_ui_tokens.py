@@ -247,6 +247,19 @@ class UiTokenEnforcementTests(unittest.TestCase):
         self.assertNotIn("defer", THEME_SCRIPT_LINKS)
         self.assertNotIn("async", THEME_SCRIPT_LINKS)
 
+    def test_hold_captures_pointer_and_ignores_leave(self) -> None:
+        """Hold-to-seal must survive the cursor slipping off the button.
+
+        Windows precision-touchpads fire pointerleave / pointercancel on a
+        1px slip; aborting the hold there made approval look broken.
+        """
+        from app.api.mnemos_ui import UI_JS
+
+        hold_src = UI_JS.split("window.MnemosHold")[1].split("window.MnemosSeal")[0]
+        self.assertIn("setPointerCapture", hold_src)
+        self.assertIn("pointercancel", hold_src)
+        self.assertNotIn("pointerleave", hold_src)
+
     def test_responsive_pages_have_media_queries(self) -> None:
         pages = [
             API / "org_page.py",

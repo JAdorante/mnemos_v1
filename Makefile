@@ -6,7 +6,7 @@ PYTHON ?= python
 .PHONY: eval-asr eval-asr-check eval-asr-smoke eval-asr-bootstrap eval-asr-baseline
 .PHONY: listen-idle listen-idle-baseline
 .PHONY: asr-calibrate asr-calibration
-.PHONY: eval eval-live eval-people eval-people-live eval-grounding eval-planner eval-noise golden-commitments golden-entity-resolution golden-contact-attribution
+.PHONY: eval eval-live eval-people eval-people-live eval-grounding eval-planner eval-noise eval-context eval-ideas golden-commitments golden-entity-resolution golden-contact-attribution
 
 # Plan 2.2 + 2.3 + 2.4 + 3.3 + 5.2: golden thresholds (offline, no API key).
 eval: golden-commitments golden-entity-resolution golden-contact-attribution
@@ -21,6 +21,16 @@ eval: golden-commitments golden-entity-resolution golden-contact-attribution
 # (P0: numbers before knobs); run with --gate once P3/P4 flags are on.
 eval-noise:
 	$(PYTHON) scripts/eval_people_noise.py --gate
+
+# Ambient-context attribution flip-on gates (live LLM; needs an API key).
+# eval-context gates QUILL_EXTRACT_CONTEXT=1 (no precision/faithfulness
+# regression + >=20% attribution gain); eval-ideas gates QUILL_EXTRACT_IDEAS=1
+# (idea precision >= 0.8, zero task/commitment double-emission).
+CTX_GOLDEN := tests/fixtures/goldens/extraction_context_ideas.jsonl
+eval-context:
+	$(PYTHON) scripts/eval_extraction.py --data $(CTX_GOLDEN) --context-gate
+eval-ideas:
+	$(PYTHON) scripts/eval_extraction.py --data $(CTX_GOLDEN) --ideas-gate
 
 # Optional live LLM pass for commitments/ownership (needs API key).
 # Not the People-v2 gate — use eval-people / eval-people-live for that.

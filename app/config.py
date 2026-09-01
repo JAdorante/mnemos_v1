@@ -1553,6 +1553,44 @@ class HeadsConfig:
 
 
 @dataclass(frozen=True)
+class ContextAnchorConfig:
+    """Ambient context anchors — activity/meeting context flowed sideways into
+    extraction (WS1). `enabled` gates the observational stage (stamping the
+    turn's anchors onto the anchor event's meta — measurable, changes nothing
+    downstream) and the derived-edge merge into context attribution.
+    `extract_prior` (QUILL_EXTRACT_CONTEXT, default OFF) additionally injects
+    a hint-only context block into the extractor prompt and unlocks the
+    `about_project` relation — eval-gated per the QUILL_EXTRACT_VOCAB
+    precedent, since any name list in an extractor prompt can induce
+    hallucinated facts."""
+    enabled: bool = _get("QUILL_CONTEXT_ANCHOR", "1") not in ("0", "false", "False")
+    extract_prior: bool = _get("QUILL_EXTRACT_CONTEXT", "0") not in ("0", "false", "False")
+    max_apps: int = int(_get("QUILL_CONTEXT_MAX_APPS", "3"))
+    min_share: float = float(_get("QUILL_CONTEXT_MIN_SHARE", "0.15"))
+    derived_edge_min_share: float = float(
+        _get("QUILL_CONTEXT_EDGE_MIN_SHARE", "0.6"))
+    alias_cos_min: float = float(_get("QUILL_ALIAS_COS_MIN", "0.86"))
+    alias_autoconfirm_n: int = int(_get("QUILL_ALIAS_AUTOCONFIRM_N", "3"))
+
+
+@dataclass(frozen=True)
+class IdentifierConfig:
+    """Hard anchors — exact identifiers (repo slugs, paths, URLs, ticket ids,
+    mail subjects) regex-mined from already-captured OCR text (WS2). Pure
+    local extraction, no LLM, no new threads; identifiers ride Event.meta and
+    the existing privacy_class egress enforcement. Mail-derived identifiers
+    are classed `personal` by default."""
+    enabled: bool = _get("QUILL_IDENTIFIERS", "1") not in ("0", "false", "False")
+    repos: bool = _get("QUILL_IDENTIFIERS_REPOS", "1") not in ("0", "false", "False")
+    paths: bool = _get("QUILL_IDENTIFIERS_PATHS", "1") not in ("0", "false", "False")
+    urls: bool = _get("QUILL_IDENTIFIERS_URLS", "1") not in ("0", "false", "False")
+    tickets: bool = _get("QUILL_IDENTIFIERS_TICKETS", "1") not in ("0", "false", "False")
+    mail_subjects: bool = _get("QUILL_IDENTIFIERS_MAIL", "1") not in ("0", "false", "False")
+    max_per_frame: int = int(_get("QUILL_IDENTIFIERS_MAX", "24"))
+    mail_subject_privacy: str = _get("QUILL_IDENTIFIERS_MAIL_PRIVACY", "personal")
+
+
+@dataclass(frozen=True)
 class Settings:
     audio: AudioConfig = AudioConfig()
     system_audio: SystemAudioConfig = SystemAudioConfig()
@@ -1602,6 +1640,8 @@ class Settings:
     export: ExportConfig = ExportConfig()
     latency: LatencyConfig = LatencyConfig()
     heads: HeadsConfig = HeadsConfig()
+    context_anchor: ContextAnchorConfig = ContextAnchorConfig()
+    identifiers: IdentifierConfig = IdentifierConfig()
     # Bind address. 127.0.0.1 keeps the unauthenticated local trust model.
     # 0.0.0.0 (phone / Tailscale) enables LanApiAuthMiddleware — set
     # QUILL_API_TOKEN or let startup write data/.api_token, then unlock at /auth.

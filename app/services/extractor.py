@@ -49,11 +49,14 @@ EXTRACT_SCHEMA_VERSION = os.environ.get(
     "QUILL_EXTRACT_SCHEMA_VERSION", "facts-schema-v4")
 
 # LLM output arrays written to fact_candidates (kind → facts dict key).
+# "idea" only ever arrives when QUILL_EXTRACT_IDEAS is on (schema-gated);
+# listing it unconditionally is harmless — absent keys iterate empty.
 _CANDIDATE_KINDS = (
     ("task", "tasks"),
     ("commitment", "commitments"),
     ("claim", "claims"),
     ("question", "questions"),
+    ("idea", "ideas"),
     ("entity", "entities"),
     ("relation", "relations"),
 )
@@ -84,6 +87,40 @@ def _extract_vocab_enabled() -> bool:
     OFF by default (bias/hallucination guardrail — see _extract_text). Flip on
     with QUILL_EXTRACT_VOCAB=1 once eval_extraction shows no regression."""
     return os.environ.get("QUILL_EXTRACT_VOCAB", "0") not in ("0", "false", "False")
+
+
+def _extract_context_enabled() -> bool:
+    """Inject the turn's ambient context (meeting / on-screen apps / likely
+    projects) as a hint-only prior, and unlock the `about_project` relation?
+    OFF by default — same hallucination guardrail as the vocab hint: flip on
+    with QUILL_EXTRACT_CONTEXT=1 only after eval_extraction shows no
+    precision/faithfulness regression (WS1)."""
+    return os.environ.get("QUILL_EXTRACT_CONTEXT", "0") not in ("0", "false", "False")
+
+
+def _extract_ideas_enabled() -> bool:
+    """Extract speaker-attributed IDEA facts (WS3)? OFF by default until the
+    idea-precision eval bar is met (QUILL_EXTRACT_IDEAS=1)."""
+    return os.environ.get("QUILL_EXTRACT_IDEAS", "0") not in ("0", "false", "False")
+
+
+def effective_prompt_version() -> str:
+    """Prompt version actually stamped on candidates: the context prior is a
+    prompt change, so enabled builds report `extract-v2-ctx` (goldens/replay
+    can pin which prompt produced the output)."""
+    v = EXTRACT_PROMPT_VERSION
+    if _extract_context_enabled() and v == "extract-v1":
+        return "extract-v2-ctx"
+    return v
+
+
+def effective_schema_version() -> str:
+    """Schema version actually stamped: the ideas array is a schema change
+    (facts-schema-v4 when enabled)."""
+    v = EXTRACT_SCHEMA_VERSION
+    if _extract_ideas_enabled() and v == "facts-schema-v3":
+        return "facts-schema-v4"
+    return v
 
 
 # Process this many unextracted events per pass. Small batches keep each `extract`
@@ -374,6 +411,85 @@ _SYSTEM = (
     "verbatim substring of the spoken transcript, never of the note text."
 )
 
+# WS1 (attribution stage, rides QUILL_EXTRACT_CONTEXT): transcript-supported
+# project attribution. The context block is a hint; the relation must still
+# be earned by the words.
+_SYSTEM_CONTEXT_RULES = (
+    "- When a Context block is present it is a disambiguation hint ONLY. "
+    "Never extract a task/commitment/claim from the context itself, and "
+    "never rename things to match it.\n"
+    "- You may emit a relation with predicate `about_project` (subject "
+    "'this', subject_kind 'entity') linking THIS turn's stated work to a "
+    "named project — ONLY when the transcript itself supports the "
+    "attribution (the project is named, or an unambiguous reference like "
+    "'the signals thing' is resolved by the context). `source_span` must "
+    "quote the transcript words that support it. When in doubt, emit "
+    "nothing — a wrong project attribution is worse than none."
+)
+
+# WS3 (rides QUILL_EXTRACT_IDEAS): idea vs task vs commitment boundary.
+_SYSTEM_IDEAS_RULES = (
+    "- An IDEA is a proposal or suggestion for something new or a change of "
+    "plan ('what if we…', 'we could…', 'maybe we should…') that is NOT a "
+    "task (nobody owns a concrete action yet) and NOT a commitment (nobody "
+    "promised anything). The moment a proposal acquires an owner AND an "
+    "action, it is a task — emit it as a task ONLY, never both.\n"
+    "- Ideas keep the same assertion tagging: a quoted or hypothetical "
+    "brainstorm is tagged quoted/hypothetical, never laundered into a "
+    "decision.\n"
+    "- `originator` is always the labeled speaker of THIS turn — copy the "
+    "label verbatim; never infer a different originator from the content.\n"
+    "- `topic_entities`: only names literally present in the turn's words; "
+    "an empty list is correct when none are named."
+)
+
+_IDEAS_SCHEMA = {
+    "type": "array",
+    "description": "Proposals/suggestions for something new or a change of "
+    "plan — NOT tasks (no owner+action) and NOT commitments (no promise). "
+    "Only explicit proposals actually stated.",
+    "items": {
+        "type": "object",
+        "properties": {
+            "text": {"type": "string",
+                     "description": "The proposal, as a clean statement."},
+            "confidence": {"type": "number"},
+            "source_span": {"type": "string",
+                            "description": "Verbatim substring this came from."},
+            "assertion": _ASSERTION_PROP,
+            "originator": {
+                "type": "string",
+                "description": "The speaker label of THIS turn, copied "
+                "verbatim — never inferred from content."},
+            "topic_entities": {
+                "type": "array", "items": {"type": "string"},
+                "description": "Named things the idea is about — ONLY names "
+                "literally present in the turn."},
+        },
+        "required": ["text", "confidence", "source_span", "assertion",
+                     "originator", "topic_entities"],
+        "additionalProperties": False,
+    },
+}
+
+
+def _schema() -> dict:
+    """The JSON schema for this call, honoring the eval-gated flags: ideas
+    (facts-schema-v4) and the about_project relation (context builds).
+    Flags off → byte-identical to _SCHEMA."""
+    if not (_extract_ideas_enabled() or _extract_context_enabled()):
+        return _SCHEMA
+    import copy
+    schema = copy.deepcopy(_SCHEMA)
+    if _extract_ideas_enabled():
+        schema["properties"]["ideas"] = copy.deepcopy(_IDEAS_SCHEMA)
+        schema["required"] = list(schema["required"]) + ["ideas"]
+    if _extract_context_enabled():
+        preds = schema["properties"]["relations"]["items"]["properties"][
+            "predicate"]
+        preds["enum"] = list(preds["enum"]) + ["about_project"]
+    return schema
+
 
 class Extractor:
     def __init__(self, store: Store | None = None) -> None:
@@ -437,6 +553,33 @@ class Extractor:
                     system = system + "\n\n" + hint
             except Exception:
                 pass
+        # WS1 (opt-in, eval-gated): the turn's ambient context as a hint-only
+        # prior — active meeting, on-screen apps, likely projects. Same
+        # guardrail posture as the vocab hint (context can induce hallucinated
+        # attribution, so the block is bounded and worded never-invent, and
+        # the flag stays off until eval_extraction clears it).
+        if _extract_context_enabled():
+            try:
+                from app.services import context_anchor as _ca
+                t0 = t1 = None
+                if isinstance(turn_or_text, Turn):
+                    t0 = getattr(turn_or_text, "start", None)
+                    t1 = getattr(turn_or_text, "end", None)
+                elif isinstance(turn_or_text, dict):
+                    t0 = turn_or_text.get("start")
+                    t1 = turn_or_text.get("end")
+                if t0 is not None:
+                    anchors = _ca.anchors_for_window(
+                        self._ensure_store(), float(t0),
+                        float(t1 if t1 is not None else t0))
+                    block = _ca.prompt_block(anchors)
+                    if block:
+                        system = (system + "\n" + _SYSTEM_CONTEXT_RULES
+                                  + "\n\n" + block)
+            except Exception:
+                pass
+        if _extract_ideas_enabled():
+            system = system + "\n" + _SYSTEM_IDEAS_RULES
         # Tier 4 (opt-in): add the user's DISMISSED facts as dynamic negatives, so
         # the extractor learns their bar for "worth keeping" from their own verdicts.
         try:
@@ -469,7 +612,7 @@ class Extractor:
         return router.complete_json(
             "extract", system=system,
             messages=[{"role": "user", "content": user_content}],
-            schema=_SCHEMA, max_tokens=1024, model=EXTRACTOR_MODEL,
+            schema=_schema(), max_tokens=1024, model=EXTRACTOR_MODEL,
         )
 
     # --- turn selection ---------------------------------------------------
@@ -650,7 +793,9 @@ class Extractor:
 
     def _persist_entities(self, facts: dict[str, Any], anchor: int | None,
                           now: float, *, event_source: str = "",
-                          window: str = "", text: str = "") -> tuple[int, int]:
+                          window: str = "", text: str = "",
+                          fact_ids: list[int] | None = None,
+                          turn_text: str = "") -> tuple[int, int]:
         """Persist entity nodes + asserted relation edges. Idempotent: entity
         resolution dedupes by name, edge insert upserts. Shared by the live
         extractor and the backfill (which persists ONLY these, not facts).
@@ -711,9 +856,36 @@ class Extractor:
             return ("entity", eid) if eid else None
 
         for r in facts.get("relations", []):
+            pred = r.get("predicate")
+            if pred == "about_project":
+                # WS1 attribution stage: subject is 'this' (the turn's own
+                # work) — attach fact→entity `about` edges to the facts this
+                # turn materialized. Transcript-supported only: the span must
+                # quote the turn, and the object resolves BIND-ONLY through
+                # the alias resolver (never mints).
+                if not fact_ids:
+                    continue
+                span = (r.get("source_span") or "").strip()
+                if not span or (turn_text and span not in turn_text):
+                    continue
+                try:
+                    from app.services import entity_alias as _ealias
+                    obj_eid = _ealias.resolve(r.get("object", ""),
+                                              store=store, ts=now)
+                except Exception:
+                    obj_eid = None
+                if not obj_eid:
+                    continue
+                for fid in fact_ids:
+                    store.add_relation(
+                        "fact", int(fid), "about", "entity", int(obj_eid),
+                        origin="asserted", source_event_id=anchor,
+                        confidence=r.get("confidence"), ts=now,
+                        quote=span[:400], source_class=source_class)
+                    nr += 1
+                continue
             subj = _node(r.get("subject", ""), r.get("subject_kind"))
             obj = _node(r.get("object", ""), r.get("object_kind"))
-            pred = r.get("predicate")
             if subj and obj and pred and subj != obj:
                 span = (r.get("source_span") or "")[:400]
                 store.add_relation(subj[0], subj[1], pred, obj[0], obj[1],
@@ -814,8 +986,8 @@ class Extractor:
                         speaker=speaker, assertion=assertion,
                         confidence=float(conf) if conf is not None else None,
                         model=EXTRACTOR_MODEL,
-                        prompt_version=EXTRACT_PROMPT_VERSION,
-                        schema_version=EXTRACT_SCHEMA_VERSION,
+                        prompt_version=effective_prompt_version(),
+                        schema_version=effective_schema_version(),
                         status="pending",
                         source_event_id=anchor, correlation_id=correlation_id,
                         created_at=now,
@@ -900,7 +1072,37 @@ class Extractor:
             _ctx_entities = []
             print(f"[extract] context attribution skipped ({exc}).")
 
+        # WS1 context anchors — observational stage (default on): stamp the
+        # turn's ambient context onto the anchor event so the signal is
+        # measurable and replayable, and merge STRONG anchors (dominant app,
+        # name-resolved entity) into the context stamp above. Best-effort:
+        # a failed lookup must never block persistence.
+        try:
+            from app.services import context_anchor as _canchor
+            if _canchor.enabled() and getattr(turn, "start", None) is not None:
+                _anchors = _canchor.anchors_for_window(
+                    store, float(turn.start),
+                    float(getattr(turn, "end", None) or turn.start))
+                if anchor and (_anchors.get("apps")
+                               or _anchors.get("meeting")
+                               or _anchors.get("entities")):
+                    store.set_event_meta_key(anchor, "context_anchor",
+                                             _anchors)
+                known = {int(h["id"]) for h in _ctx_entities}
+                for hit in _canchor.derived_context_entities(_anchors):
+                    if int(hit["id"]) not in known:
+                        _ctx_entities.append(hit)
+                        known.add(int(hit["id"]))
+        except Exception as exc:
+            print(f"[extract] context anchors skipped ({exc}).")
+
+        # Every ACTIVE fact materialized from this turn (escrowed rows stay
+        # out) — the target set for transcript-supported `about_project`
+        # relations (WS1 attribution stage).
+        made_fact_ids: list[int] = []
+
         def _stamp_context(fid: int) -> None:
+            made_fact_ids.append(int(fid))
             if not _ctx_entities:
                 return
             try:
@@ -1162,6 +1364,108 @@ class Extractor:
             self._record_faithfulness(q, turn.text)
             n += 1
 
+        # WS3: speaker-attributed ideas. The model proposes the text; the
+        # ORIGINATOR is bound in code to the turn's labeled speaker — the
+        # model's originator field is overwritten, never trusted.
+        for idea in facts.get("ideas", []) or []:
+            if not idea.get("text"):
+                continue
+            cand = _candidate("idea", idea)
+            if cand and cand.get("status") != "pending":
+                continue
+            cid = cand["id"] if cand else None
+            v = self._gate("idea", idea, turn)
+            reason = getattr(v, "reason", "") or ""
+            if v.action == "drop":
+                if cid:
+                    store.set_fact_candidate_status(cid, "dropped",
+                                                    verdict_reason=reason)
+                continue
+            if v.action == "review":
+                if cid:
+                    store.set_fact_candidate_status(cid, "review",
+                                                    verdict_reason=reason)
+                continue
+            if v.action == "dedup":
+                store.touch_fact(v.dup_fact_id, now, idea.get("confidence"))
+                if cid:
+                    store.set_fact_candidate_status(cid, "deduped",
+                                                    verdict_reason=reason)
+                continue
+            spk = (turn.speaker or "").strip()
+            orig_ref = self._resolve_me_relative_to_speaker(
+                spk or None, now, event_id=anchor,
+                event_source="audio.whisper", text=turn.text,
+                grammatical_role="speaker", relationship_boost=0.85)
+            orig_pid = orig_ref.person_id
+            escrowed = _escrows_to_track(spk, orig_pid)
+            # Meeting binding: the anchor event already carries the session
+            # stamp (meeting_session.stamp_event) — surface it on the row so
+            # the Console can render "proposed by X in <meeting>" with the
+            # existing play-the-clip affordance.
+            session_id = None
+            try:
+                ev_row = store.get_event(anchor) if anchor else None
+                if ev_row:
+                    _m = json.loads(ev_row.get("meta") or "{}")
+                    session_id = _m.get("meeting_session_id")
+            except Exception:
+                session_id = None
+            fid = store.add_idea(
+                idea["text"], source_event_id=anchor,
+                source_span=idea.get("source_span", ""),
+                confidence=idea.get("confidence"),
+                originator_person_id=orig_pid,
+                originator_label=spk or None,
+                originator_track_id=(escrow_track_id if escrowed else None),
+                originator_mention_id=getattr(orig_ref, "mention_id", None),
+                originator_resolution_confidence=(
+                    float(orig_ref.confidence)
+                    if spk and getattr(orig_ref, "confidence", None) is not None
+                    else None),
+                meeting_session_id=(int(session_id) if session_id else None),
+                extracted_at=now,
+            )
+            if escrowed:
+                # P3: the proposer is this turn's unbound voice track — park
+                # the idea until the rebind names it (same as tasks).
+                store.escrow_fact(fid, escrow_track_id, idea_originator=True)
+                if cid:
+                    store.set_fact_candidate_status(
+                        cid, "accepted",
+                        verdict_reason=(reason + " [escrowed to track "
+                                        f"{escrow_track_id}]").strip())
+                self._record_faithfulness(idea, turn.text)
+                n += 1
+                continue
+            _apply(v, fid)
+            if cid:
+                store.set_fact_candidate_status(cid, "accepted",
+                                                verdict_reason=reason)
+            _index_fact(store, fid, "idea", idea["text"], now)
+            _stamp_context(fid)
+            self._record_faithfulness(idea, turn.text)
+            # Topic entities: only names LITERALLY present in the turn, and
+            # bind-only through the alias resolver — unresolved topics are
+            # dropped, never minted.
+            try:
+                from app.services import entity_alias as _ealias
+                low_turn = (turn.text or "").lower()
+                for tname in idea.get("topic_entities") or []:
+                    tname = (str(tname) or "").strip()
+                    if not tname or tname.lower() not in low_turn:
+                        continue
+                    teid = _ealias.resolve(tname, store=store, ts=now)
+                    if teid:
+                        store.add_relation(
+                            "fact", fid, "about", "entity", int(teid),
+                            origin="asserted", source_event_id=anchor,
+                            confidence=idea.get("confidence"), ts=now,
+                            quote=(idea.get("source_span") or "")[:400])
+            except Exception as exc:
+                print(f"[extract] idea topics skipped ({exc}).")
+            n += 1
+
         # Plan 4.2 (a): deterministic "I sent/done" fallback when the model
         # omitted resolves_commitment — still offer-only.
         try:
@@ -1175,7 +1479,10 @@ class Extractor:
             print(f"[extractor] resolve scan skipped ({exc}).")
 
         # Entity nodes + asserted relation edges (the graph's non-person side).
-        self._persist_entities(facts, anchor, now)
+        # Materialized fact ids + the turn text ride along so about_project
+        # relations (WS1) can attach and be span-checked.
+        self._persist_entities(facts, anchor, now, fact_ids=made_fact_ids,
+                               turn_text=turn.text or "")
         # Pilot ledger (WS-A): how many facts this turn actually materialized —
         # a count, never the facts. Placed here rather than in storage's
         # add_task/add_claim so backfills and test seeding don't inflate it.
