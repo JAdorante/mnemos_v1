@@ -282,6 +282,8 @@ class ReleaseWorkflowTests(unittest.TestCase):
     def test_it_launches_what_it_built(self) -> None:
         self.assertIn("--no-window", self.text)
         self.assertIn("/health", self.text)
+        self.assertIn("HF_HUB_OFFLINE", self.text)
+        self.assertIn("HasExited", self.text)
 
     def test_it_builds_the_installer_not_just_the_folder(self) -> None:
         self.assertIn("ISCC.exe", self.text)

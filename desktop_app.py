@@ -37,8 +37,9 @@ import threading
 import time
 from urllib.error import URLError
 from urllib.request import urlopen
+from pathlib import Path
 
-from app.runtime import apply_env_defaults, bundle_root, env_file, is_frozen
+from app.runtime import apply_env_defaults, bundle_root, env_file, is_frozen, user_data_root
 
 # Must happen before anything imports app.config: its dataclasses freeze at
 # import, so a later QUILL_DATA_DIR is silently ignored.
@@ -249,8 +250,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.self_test:
         return self_test()
 
+    log_file = os.environ.get("QUILL_LOG_FILE")
+    if not log_file and is_frozen():
+        log_file = str(user_data_root() / "mnemos.log")
+    if log_file:
+        Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+        fp = open(log_file, "a", encoding="utf-8", buffering=1)
+        sys.stdout = fp
+        sys.stderr = fp
+
     _load_env()
     os.environ["QUILL_AUTOSTART"] = "1"
+    if args.no_window:
+        os.environ.setdefault("QUILL_AUTOSTART_NOTIFICATIONS", "0")
     for key, value in _APPLIED.items():
         print(f"[desktop] {key}={value}", flush=True)
     if is_frozen():

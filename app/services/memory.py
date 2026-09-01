@@ -199,18 +199,20 @@ class MemoryEngine:
         if self._events:
             print(f"[memory] loaded {len(self._events)} event(s) from {store.db_path}")
         self._backfill()
-        # Warm the embedder on THIS (startup) thread, before capture threads
-        # spin up. Its first-ever import must complete before SpeechBrain loads
-        # on the audio thread, or the two race and the encode fails (see
-        # Embedder.warmup). Backfill already warms it when it runs; this covers
-        # the (now common) case where backfill is skipped as already-indexed.
+        # Warm off the FastAPI startup hook. SentenceTransformer downloads
+        # MiniLM on first load; doing that here blocked /health until the
+        # weights arrived, so a frozen first launch (and CI) never reached
+        # /bootstrap. Capture stays off until consent, so the SpeechBrain
+        # import race Embedder.warmup documents cannot fire during boot.
+        # encode() still serialises on _lock if a later call wins the race.
         if self._semantic:
-            try:
-                from app.services.embeddings import embedder
-
-                embedder.warmup()
-            except Exception as exc:
-                print(f"[memory] embedder warmup skipped ({exc})")
+            def _warm() -> None:
+                try:
+                    from app.services.embeddings import embedder
+                    embedder.warmup()
+                except Exception as exc:
+                    print(f"[memory] embedder warmup skipped ({exc})")
+            threading.Thread(target=_warm, name="embed-warmup", daemon=True).start()
         bus.subscribe(self._on_event)
 
     def _backfill(self) -> None:
