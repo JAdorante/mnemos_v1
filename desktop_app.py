@@ -135,6 +135,25 @@ def start_tray(url: str, on_quit) -> "threading.Thread | None":
     return t
 
 
+def launch_url(base: str, *, frozen: bool | None = None,
+               missing_weights: list[str] | None = None) -> str:
+    """First screen. A frozen build with uncached weights opens /bootstrap."""
+    if frozen is None:
+        frozen = is_frozen()
+    if not frozen:
+        return base
+    missing = missing_weights
+    if missing is None:
+        try:
+            from app.services.model_fetch import check
+            missing = check(log=lambda _m: None)
+        except Exception:
+            missing = []
+    if missing:
+        return base.rstrip("/") + "/bootstrap"
+    return base
+
+
 def open_window(url: str) -> bool:
     """Native window via pywebview. Returns False if we had to fall back."""
     try:
@@ -237,16 +256,17 @@ def main(argv: list[str] | None = None) -> int:
     if is_frozen():
         print(f"[desktop] frozen build; bundle at {bundle_root()}", flush=True)
 
-    url = f"http://{args.host}:{args.port}"
+    base = f"http://{args.host}:{args.port}"
     server = threading.Thread(
         target=_serve, args=(args.host, args.port, args.log_level),
         name="uvicorn", daemon=True)
     server.start()
 
-    if not wait_for_health(url):
+    if not wait_for_health(base):
         print("[desktop] the server did not come up; see the log above.",
               file=sys.stderr, flush=True)
         return 1
+    url = launch_url(base)
     print(f"[desktop] ready at {url}", flush=True)
 
     if args.no_window:

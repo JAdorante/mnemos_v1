@@ -46,13 +46,23 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+; Opt-in: this product captures meetings. Default-on autostart is the wrong
+; first impression. HKCU so PrivilegesRequired=lowest still works.
+Name: "startupicon"; Description: "Start Mnemos when I log in"; GroupDescription: "Startup"; Flags: unchecked
 
 [Files]
 Source: "..\dist\Mnemos\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; OllamaSetup.exe is deliberately not here. Bundling it would require an admin
+; prompt (this installer is per-user), inflate the download, and pin a version
+; that then cannot auto-update. First launch pulls local models if ollama.exe
+; is already on PATH; otherwise the app runs cloud-only.
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+
+[Registry]
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Mnemos"; ValueData: """{app}\{#MyAppExeName}"""; Flags: uninsdeletevalue; Tasks: startupicon
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent

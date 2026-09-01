@@ -17,28 +17,36 @@ default) only when the local models aren't confident.
 
 ## Install (one time)
 
-1. Download the Mnemos ZIP from the link you were given and extract it
-   somewhere permanent (e.g. `C:\Mnemos`).
-2. Double-click **`install.bat`**.
-   It sets up Python, downloads the local models (~10 GB — the long part), then
-   asks how to connect Claude. Choose **[1] I have an invite code** and paste
-   the code we sent. Safe to re-run if anything fails.
-3. Double-click **`start.bat`** and open **http://127.0.0.1:8000** in your
-   browser.
+1. Download **[MnemosSetup.exe](https://github.com/JAdorante/mnemos_v1/releases/latest)**
+   and double-click it. No Python, no terminal.
+2. If Windows says **Windows protected your PC**, click **More info → Run anyway**.
+   (Unsigned builds show this; it is expected until the publisher signature lands.)
+3. First launch opens a window and downloads speech models. Paste the invite
+   code when Setup asks. Ollama is optional — if it is already installed,
+   local text/vision models download too; otherwise chat uses Claude.
 
 Your invite code is exchanged once, at install time, for an API key of your
-own. That key is written to `.credentials.env` in your Mnemos folder and used
+own. That key is written to `%LOCALAPPDATA%\Mnemos\.credentials.env` and used
 from there — after install, our invite service is never contacted again. If you
 reinstall and the code says it has already been used, tell us and we'll reissue
 it.
 
+### From source (developers)
+
+The ZIP + `install.bat` path still works if you are running from a checkout:
+
+1. Extract the repo somewhere permanent (e.g. `C:\Mnemos`).
+2. Double-click **`install.bat`**. It sets up Python, downloads models, then
+   asks how to connect Claude. Choose **[1] I have an invite code**.
+3. Double-click **`start.bat`** and open **http://127.0.0.1:8000**.
+
 ### Bring your own key (optional)
 
-Choose **[2] I have my own Anthropic API key** at the same prompt, or leave the
-key blank and add `ANTHROPIC_API_KEY=sk-ant-...` to `.env` afterwards. Create
-one at https://console.anthropic.com. Nothing else differs — Mnemos cannot tell
-the two paths apart. Ambient cloud spend is capped at **$2/day** either way
-(`QUILL_CLOUD_BUDGET_USD_DAY`).
+In Setup, paste your Anthropic API key instead of an invite code, or add
+`ANTHROPIC_API_KEY=sk-ant-...` to `%LOCALAPPDATA%\Mnemos\.env` afterwards.
+Create one at https://console.anthropic.com. Nothing else differs — Mnemos
+cannot tell the two paths apart. Ambient cloud spend is capped at **$2/day**
+either way (`QUILL_CLOUD_BUDGET_USD_DAY`).
 
 ## What to expect
 
@@ -46,8 +54,8 @@ the two paths apart. Ambient cloud spend is capped at **$2/day** either way
   turn on if you consent in the Privacy controls in the UI.
 - **Local only.** The app binds to 127.0.0.1 — nothing is reachable from the
   network, and your data never leaves the machine except redacted model calls.
-- A second window (the browser agent) opens alongside — that's normal.
-- First launch is slower while indexes build.
+- A tray icon (Open / Stop capture / Quit) stays in the notification area.
+- First launch is slower while models download and indexes build.
 
 ## What leaves your machine
 
@@ -111,10 +119,10 @@ leaves your old data intact.
 
 ## Updating
 
-Download the newer ZIP, extract over the same folder (or replace it, keeping
-your `data\` folder, `.env` and `.credentials.env`), and re-run `install.bat` —
-it skips anything already done. The version you're running is shown in the
-Memory Console footer; quote it in any bug report.
+Download the newer **MnemosSetup.exe** from the same Releases page and run it
+over the existing install. Your memory stays in `%LOCALAPPDATA%\Mnemos`. The
+version you're running is shown in the Memory Console footer; quote it in any
+bug report.
 
 ## Stopping capture
 

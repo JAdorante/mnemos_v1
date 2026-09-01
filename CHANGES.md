@@ -1,3 +1,9 @@
+# Click-to-install Windows path — Sept 8, September 1 2026
+
+The packaged path (PyInstaller onedir → Inno → `MnemosSetup.exe`) was already the product; three things still sat between it and a tester link. `release.yml` now publishes `MnemosSetup.exe` as the GitHub Release asset on `v*` tags, and signs `Mnemos.exe` then `MnemosSetup.exe` with Azure Trusted Signing when the Azure secrets are present (unsigned tags still publish — SmartScreen is the documented funnel leak). First launch of a frozen build with uncached weights opens `/bootstrap`; that page pulls speech weights in-process and, if `ollama.exe` is already installed, the local text/vision models — it does not bundle `OllamaSetup.exe`, because that would force an admin prompt on a per-user installer and pin a version that cannot auto-update. Start-on-login is an unchecked Inno task writing HKCU Run.
+
+---
+
 # Router hardening — cutting the infra-driven escalation share, August 31 2026
 
 The week-of-Aug-24 performance brief showed ~42% of cloud escalations were infrastructure, not judgement (local error / cooldown / unavailable), and several of the numbers behind the brief were measurement artifacts. This batch attacks both: fewer paid calls the local tier should have handled, and telemetry that stops lying.

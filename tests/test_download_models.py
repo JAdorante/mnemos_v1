@@ -227,6 +227,40 @@ class TestFrozenBootstrapPath(unittest.TestCase):
             log = list(adoption._bootstrap_state.get("log") or [])
         self.assertTrue(any("skipped" in line for line in log), log)
 
+    def test_missing_ollama_does_not_fail_first_run(self) -> None:
+        from app.api import adoption
+        with adoption._bootstrap_lock:
+            adoption._bootstrap_state["log"] = []
+        with patch.object(adoption, "_find_ollama", lambda: None):
+            self.assertTrue(adoption._bootstrap_ollama())
+        with adoption._bootstrap_lock:
+            log = list(adoption._bootstrap_state.get("log") or [])
+        self.assertTrue(any("not installed" in line for line in log), log)
+
+    def test_ollama_pull_uses_ollama_not_the_frozen_exe(self) -> None:
+        """sys.executable is Mnemos.exe when frozen — that must not be the pull."""
+        import ast
+        source = (Path(__file__).resolve().parent.parent
+                  / "app" / "api" / "adoption.py").read_text()
+        fn = next(n for n in ast.walk(ast.parse(source))
+                  if isinstance(n, ast.FunctionDef) and n.name == "_bootstrap_ollama")
+        body = fn.body[1:] if ast.get_docstring(fn) else fn.body
+        code = "\n".join(ast.unparse(node) for node in body)
+        self.assertNotIn("sys.executable", code)
+        self.assertIn("pull", code)
+
+    def test_bootstrap_worker_pulls_ollama_after_speech_weights(self) -> None:
+        import ast
+        source = (Path(__file__).resolve().parent.parent
+                  / "app" / "api" / "adoption.py").read_text()
+        fn = next(n for n in ast.walk(ast.parse(source))
+                  if isinstance(n, ast.FunctionDef) and n.name == "_bootstrap_worker")
+        text = ast.unparse(fn)
+        self.assertLess(text.index("_bootstrap_models"),
+                        text.index("_bootstrap_ollama"))
+        self.assertLess(text.index("_bootstrap_ollama"),
+                        text.index("_bootstrap_chromium"))
+
 
 if __name__ == "__main__":
     unittest.main()

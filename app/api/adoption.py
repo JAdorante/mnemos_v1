@@ -675,6 +675,71 @@ def _bootstrap_models() -> bool:
     return fetch_models(log=_bootstrap_log)
 
 
+_OLLAMA_PULLS = ("qwen2.5:7b-instruct", "minicpm-v")
+
+
+def _find_ollama() -> str | None:
+    """Locate ollama.exe without assuming it is on PATH (common on Windows)."""
+    import os
+    import shutil
+    from pathlib import Path
+
+    found = shutil.which("ollama")
+    if found:
+        return found
+    local = os.environ.get("LOCALAPPDATA") or ""
+    cand = Path(local) / "Programs" / "Ollama" / "ollama.exe"
+    if cand.is_file():
+        return str(cand)
+    for p in ("/usr/local/bin/ollama", "/opt/homebrew/bin/ollama"):
+        if Path(p).is_file():
+            return p
+    return None
+
+
+def _bootstrap_ollama() -> bool:
+    """Pull local text/vision models if Ollama is already installed.
+
+    Does not install Ollama. The desktop installer is per-user
+    (``PrivilegesRequired=lowest``), so it cannot silently run
+    ``OllamaSetup.exe /S`` without an admin prompt, and bundling the zip
+    pins a version that then cannot auto-update. Missing Ollama is a
+    valid outcome — the app runs cloud-only, same as
+    ``QUILL_INSTALL_SKIP_OLLAMA=1`` on the scripted path.
+    """
+    import subprocess
+
+    exe = _find_ollama()
+    if not exe:
+        _bootstrap_log(
+            "ollama: not installed — local text/vision skipped. "
+            "Install from https://ollama.com then re-run this page, "
+            "or continue; chat still works via Claude.")
+        return True
+    try:
+        subprocess.run([exe, "list"], capture_output=True, timeout=20)
+    except Exception:
+        pass
+    unfinished = False
+    for tag in _OLLAMA_PULLS:
+        _bootstrap_log(f"ollama: pulling {tag} …")
+        try:
+            r = subprocess.run(
+                [exe, "pull", tag],
+                capture_output=True, text=True, timeout=7200)
+            tail = (r.stdout or r.stderr or "")[-400:]
+            _bootstrap_log(f"ollama pull {tag}: exit {r.returncode} {tail}")
+            if r.returncode != 0:
+                unfinished = True
+        except Exception as exc:
+            _bootstrap_log(f"ollama pull {tag} failed: {exc}")
+            unfinished = True
+    if unfinished:
+        _bootstrap_log(
+            "ollama: pulls did not finish; Mnemos will run cloud-only.")
+    return True
+
+
 def _bootstrap_chromium() -> bool:
     """Playwright's browser download. Skipped in a frozen build.
 
@@ -707,6 +772,7 @@ def _bootstrap_worker():
         _bootstrap_state.update({"running": True, "log": [], "ok": None})
     ok = True
     for label, fn in (("models", _bootstrap_models),
+                      ("ollama", _bootstrap_ollama),
                       ("chromium", _bootstrap_chromium)):
         _bootstrap_log(f"starting {label}…")
         try:
@@ -729,8 +795,8 @@ body{font:16px/1.45 var(--font);color:var(--text);margin:32px;max-width:520px;ba
 button{font:inherit;padding:10px 16px;border-radius:10px;border:0;background:var(--navy);color:var(--paper)}
 #log{white-space:pre-wrap;color:var(--mut);margin-top:16px;font-size:13px}</style></head>
 <body>
-<h1>Download speech models</h1>
-<p>@@BRAND@@ does not ship the 460MB speech models or Chromium. This runs once, locally, and can be resumed.</p>
+<h1>Download local models</h1>
+<p>@@BRAND@@ does not ship speech weights or Ollama models. This runs once, locally, and can be resumed. If Ollama is not installed, local text/vision is skipped and chat still works via Claude.</p>
 <button id="go" type="button">Download now</button>
 <p><a href="/onboarding">Skip to setup</a> if models are already cached.</p>
 <div id="log"></div>

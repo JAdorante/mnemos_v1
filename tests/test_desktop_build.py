@@ -148,6 +148,24 @@ class InnoTests(unittest.TestCase):
     def test_it_has_an_icon(self) -> None:
         self.assertIn("SetupIconFile=mnemos.ico", self.text)
 
+    def test_start_on_login_is_opt_in_hkcu(self) -> None:
+        """Ambient capture must not autostart unless the tester ticked it."""
+        self.assertIn("startupicon", self.text)
+        self.assertIn("CurrentVersion\\Run", self.text)
+        self.assertIn("PrivilegesRequired=lowest", self.text)
+        # Default-on would start capture-capable software at login.
+        startup = self.text.split('Name: "startupicon"')[1].split("\n")[0]
+        self.assertIn("unchecked", startup)
+
+    def test_ollama_setup_is_not_bundled(self) -> None:
+        """Admin prompt + pinned version. First-run pulls if ollama is present."""
+        files = self.text.split("[Files]")[1].split("[Icons]")[0]
+        sources = [ln for ln in files.splitlines()
+                   if ln.lstrip().startswith("Source:")]
+        self.assertTrue(sources)
+        self.assertFalse(any("Ollama" in ln for ln in sources))
+        self.assertNotIn("Ollama.Ollama", self.text)
+
 
 class DesktopAppTests(unittest.TestCase):
     def test_health_wait_gives_up_rather_than_hanging(self) -> None:
@@ -187,6 +205,23 @@ class DesktopAppTests(unittest.TestCase):
         from app.services import wipe
         with patch.object(wipe, "stop_capture", lambda: {"ok": True}):
             self.assertIn("stopped", desktop_app._stop_capture())
+
+    def test_a_frozen_build_with_missing_weights_opens_bootstrap(self) -> None:
+        url = desktop_app.launch_url(
+            "http://127.0.0.1:8000", frozen=True,
+            missing_weights=["whisper 'small'"])
+        self.assertEqual(url, "http://127.0.0.1:8000/bootstrap")
+
+    def test_a_checkout_never_hijacks_the_first_screen(self) -> None:
+        url = desktop_app.launch_url(
+            "http://127.0.0.1:8000", frozen=False,
+            missing_weights=["whisper 'small'"])
+        self.assertEqual(url, "http://127.0.0.1:8000")
+
+    def test_cached_weights_open_the_app_not_bootstrap(self) -> None:
+        url = desktop_app.launch_url(
+            "http://127.0.0.1:8000", frozen=True, missing_weights=[])
+        self.assertEqual(url, "http://127.0.0.1:8000")
 
     def test_the_desktop_build_does_not_spawn_script_children(self) -> None:
         """run_all.py's browser-agent/coordinator children re-exec Mnemos.exe."""
@@ -251,6 +286,15 @@ class ReleaseWorkflowTests(unittest.TestCase):
     def test_it_builds_the_installer_not_just_the_folder(self) -> None:
         self.assertIn("ISCC.exe", self.text)
         self.assertIn("MnemosSetup.exe", self.text)
+
+    def test_a_tag_publishes_the_setup_exe_as_the_install_link(self) -> None:
+        self.assertIn("action-gh-release", self.text)
+        self.assertIn("files: dist/MnemosSetup.exe", self.text)
+
+    def test_tags_sign_with_trusted_signing_when_secrets_exist(self) -> None:
+        self.assertIn("trusted-signing-action", self.text)
+        self.assertIn("timestamp.acs.microsoft.com", self.text)
+        self.assertIn("AZURE_CLIENT_SECRET", self.text)
 
     def test_program_files_x86_is_brace_quoted(self) -> None:
         """$env:ProgramFiles(x86) without braces evaluates to an empty path."""

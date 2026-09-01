@@ -150,16 +150,32 @@ The last gate before anyone outside the team installs this. Unsigned means
 "Windows protected your PC" on first launch — for a firm evaluating a tool that
 listens to their meetings, that is the wrong first impression.
 
-- **OV certificate** — cheaper; SmartScreen reputation accrues over weeks of
-  downloads, so early testers still see the warning.
-- **EV certificate** — more expensive, usually a hardware token or cloud HSM,
-  and carries SmartScreen reputation immediately. For a pilot that starts in
-  September with a handful of installs, EV is the one that actually removes the
-  warning in time.
+**Start Azure Trusted Signing for Mnemos Labs today.** Identity verification
+takes several days and is the only item on this list that cannot be coded
+around. It is the cheapest/fastest option that still integrates with
+`signtool` (~$10/month). If it does not clear by the 8th, send testers a
+one-line "click More info → Run anyway" note and treat SmartScreen as a
+known funnel leak.
 
-Sign both the exe and the installer:
+Repo wiring is already in `.github/workflows/release.yml`:
+
+- GitHub Actions secrets: `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`,
+  `AZURE_CLIENT_SECRET`
+- GitHub Actions variables: `AZURE_TS_ENDPOINT` (e.g.
+  `https://eus.codesigning.azure.net/`), `AZURE_TS_ACCOUNT`,
+  `AZURE_TS_PROFILE`
+
+A `v*` tag with those set signs `Mnemos.exe`, rebuilds the installer around
+the signed exe, signs `MnemosSetup.exe`, and publishes it as the GitHub
+Release asset — that file is the install link. Tags without the secrets still
+publish, unsigned.
+
+OV/EV certificates via `signtool` remain a fallback if Trusted Signing is
+blocked. Timestamping (`/tr` / `timestamp.acs.microsoft.com`) matters:
+without it every signature dies when the certificate expires.
 
 ```powershell
+# local fallback only — CI uses Azure Trusted Signing
 signtool sign /tr http://timestamp.digicert.com /td sha256 /fd sha256 `
   /a dist\Mnemos\Mnemos.exe
 iscc packaging\mnemos.iss          # rebuild the installer AFTER signing the exe
@@ -167,9 +183,6 @@ signtool sign /tr http://timestamp.digicert.com /td sha256 /fd sha256 `
   /a dist\MnemosSetup.exe
 signtool verify /pa /v dist\MnemosSetup.exe
 ```
-
-Timestamping (`/tr`) matters: without it, every signature dies when the
-certificate expires. Verify current pricing directly with a CA — it moves.
 
 ## 8. Feeding fixes back
 

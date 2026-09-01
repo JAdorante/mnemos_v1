@@ -21,8 +21,14 @@ Per-user state lives in `%LOCALAPPDATA%\Mnemos` — `app/runtime.py` relocates t
 
 ### Still required before handing this to anyone
 
-- **Code signing.** Unsigned means "Windows protected your PC" on first launch. For a firm evaluating a tool that listens to their meetings, that is the wrong first impression.
+- **Code signing.** Unsigned means "Windows protected your PC" on first launch. For a firm evaluating a tool that listens to their meetings, that is the wrong first impression. Azure Trusted Signing is wired into `release.yml` on `v*` tags; start the Mnemos Labs identity verification today.
 - A run on a machine that is not the build machine.
+
+**Install link.** Tag a release (`git tag v0.4.1 && git push origin v0.4.1`). CI builds `MnemosSetup.exe`, signs it when the Azure secrets are present, and attaches it to the GitHub Release. The tester URL is:
+
+`https://github.com/JAdorante/mnemos_v1/releases/latest`
+
+Ollama is not bundled. The installer is per-user (no admin prompt). First launch pulls local text/vision models only if `ollama.exe` is already installed; otherwise the app runs cloud-only. The scripted `install.bat` path still installs Ollama via winget for developer checkouts.
 
 Uninstall: Inno removes the app. A checkbox (default off) additionally wipes every capture directory — `{userappdata}\Mnemos`, plus the runtime-created `sessions\` and `desktop_agent\sessions\` under `{app}` (Inno does not remove runtime files on its own) — and the API key. That is their memory, and there is no server copy behind it.
 
