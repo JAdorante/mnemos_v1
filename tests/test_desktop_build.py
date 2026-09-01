@@ -294,7 +294,11 @@ class ReleaseWorkflowTests(unittest.TestCase):
     def test_tags_sign_with_trusted_signing_when_secrets_exist(self) -> None:
         self.assertIn("trusted-signing-action", self.text)
         self.assertIn("timestamp.acs.microsoft.com", self.text)
+        self.assertIn("HAS_SIGNING", self.text)
         self.assertIn("AZURE_CLIENT_SECRET", self.text)
+        # secrets.* in `if:` invalidates the whole workflow (zero jobs).
+        if_lines = [ln for ln in self.text.splitlines() if ln.lstrip().startswith("if:")]
+        self.assertFalse(any("secrets." in ln for ln in if_lines), if_lines)
 
     def test_program_files_x86_is_brace_quoted(self) -> None:
         """$env:ProgramFiles(x86) without braces evaluates to an empty path."""

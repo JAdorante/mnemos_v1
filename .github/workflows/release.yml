@@ -2,7 +2,8 @@ name: release
 
 on:
   push:
-    tags: ["v*"]
+    tags:
+      - "v*"
   # Packaging breaks quietly and only in the packaged build — the spec once
   # excluded torch, which removes VAD and therefore every memory, and nothing
   # caught it because CI built the bundle and never launched it.
@@ -22,6 +23,10 @@ permissions:
 jobs:
   windows:
     runs-on: windows-latest
+    # Secret presence must not appear in `if:` — GitHub rejects the whole
+    # workflow as invalid ("No jobs were run") rather than skipping the step.
+    env:
+      HAS_SIGNING: ${{ secrets.AZURE_CLIENT_SECRET != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -83,7 +88,7 @@ jobs:
       # optional so packaging PRs still build; tags without them publish
       # unsigned and the tester note covers More info → Run anyway.
       - name: Sign Mnemos.exe (Azure Trusted Signing)
-        if: ${{ github.ref_type == 'tag' && secrets.AZURE_CLIENT_SECRET != '' }}
+        if: github.ref_type == 'tag' && env.HAS_SIGNING == 'true'
         uses: azure/trusted-signing-action@v0.5.1
         with:
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
@@ -112,7 +117,7 @@ jobs:
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" packaging\mnemos.iss
 
       - name: Sign MnemosSetup.exe (Azure Trusted Signing)
-        if: ${{ github.ref_type == 'tag' && secrets.AZURE_CLIENT_SECRET != '' }}
+        if: github.ref_type == 'tag' && env.HAS_SIGNING == 'true'
         uses: azure/trusted-signing-action@v0.5.1
         with:
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
