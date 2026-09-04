@@ -250,7 +250,7 @@ def run(seconds: float, *, engine: str | None, realtime: bool,
         "vad": vad,
         "engine": eng,
         "always_on": {
-            # What a listening Mnemos costs while nobody speaks.
+            # What a listening Sparrow costs while nobody speaks.
             "cpu_share_of_one_core": vad["vad_cpu_share"],
             "rss_mb": always_on_rss,
             "engine_rss_mb": eng.get("rss_delta_mb"),

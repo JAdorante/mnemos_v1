@@ -1,9 +1,9 @@
-# Mnemos — Tester Setup (Windows)
+# Sparrow — Tester Setup (Windows)
 
 > On a Mac? Use [TESTER_SETUP-macos.md](TESTER_SETUP-macos.md) — the
 > install steps and the capture scope are different.
 
-Mnemos is a local-first personal memory assistant. Everything it captures and
+Sparrow is a local-first personal memory assistant. Everything it captures and
 remembers stays on **your** machine; it calls a frontier model (Claude by
 default) only when the local models aren't confident.
 
@@ -17,7 +17,7 @@ default) only when the local models aren't confident.
 
 ## Install (one time)
 
-1. Download **[MnemosSetup.exe](https://github.com/JAdorante/mnemos_v1/releases/latest)**
+1. Download **[SparrowSetup.exe](https://github.com/JAdorante/mnemos_v1/releases/latest)**
    and double-click it. No Python, no terminal.
 2. If Windows says **Windows protected your PC**, click **More info → Run anyway**.
    (Unsigned builds show this; it is expected until the publisher signature lands.)
@@ -26,7 +26,7 @@ default) only when the local models aren't confident.
    local text/vision models download too; otherwise chat uses Claude.
 
 Your invite code is exchanged once, at install time, for an API key of your
-own. That key is written to `%LOCALAPPDATA%\Mnemos\.credentials.env` and used
+own. That key is written to `%LOCALAPPDATA%\Sparrow\.credentials.env` and used
 from there — after install, our invite service is never contacted again. If you
 reinstall and the code says it has already been used, tell us and we'll reissue
 it.
@@ -35,7 +35,7 @@ it.
 
 The ZIP + `install.bat` path still works if you are running from a checkout:
 
-1. Extract the repo somewhere permanent (e.g. `C:\Mnemos`).
+1. Extract the repo somewhere permanent (e.g. `C:\Sparrow`).
 2. Double-click **`install.bat`**. It sets up Python, downloads models, then
    asks how to connect Claude. Choose **[1] I have an invite code**.
 3. Double-click **`start.bat`** and open **http://127.0.0.1:8000**.
@@ -43,8 +43,8 @@ The ZIP + `install.bat` path still works if you are running from a checkout:
 ### Bring your own key (optional)
 
 In Setup, paste your Anthropic API key instead of an invite code, or add
-`ANTHROPIC_API_KEY=sk-ant-...` to `%LOCALAPPDATA%\Mnemos\.env` afterwards.
-Create one at https://console.anthropic.com. Nothing else differs — Mnemos
+`ANTHROPIC_API_KEY=sk-ant-...` to `%LOCALAPPDATA%\Sparrow\.env` afterwards.
+Create one at https://console.anthropic.com. Nothing else differs — Sparrow
 cannot tell the two paths apart. Ambient cloud spend is capped at **$2/day**
 either way (`QUILL_CLOUD_BUDGET_USD_DAY`).
 
@@ -71,7 +71,7 @@ Short version: **nothing, unless you press a button or tick a box.** In full:
 
 ### About the version check
 
-Mnemos downloads one small file to see whether a newer build exists. It is an
+Sparrow downloads one small file to see whether a newer build exists. It is an
 **unconditional download of a static file** — it carries no query parameters, no
 install ID, and not even which version you're running. Nothing is downloaded or
 installed automatically; you get a banner with a link. Turn it off in Privacy
@@ -79,7 +79,7 @@ controls or set `QUILL_UPDATE_CHECK=0` in `.env`.
 
 ### About usage stats
 
-Mnemos counts how you use it — number of searches, chat turns, meetings
+Sparrow counts how you use it — number of searches, chat turns, meetings
 captured, minutes active — **as numbers only**. It never records what you
 searched for, what was said, who was named, or what was on screen; there is no
 column in the ledger those could go in. The counts live in your own database.
@@ -101,26 +101,26 @@ Under Privacy controls:
 
 - **"Back up my memory"** downloads a complete, restorable zip of your data
   folder (your API key and access tokens are excluded). Keep it somewhere other
-  than this machine — right now `data\` is the only copy of everything Mnemos
+  than this machine — right now `data\` is the only copy of everything Sparrow
   remembers.
 - **"Export my data"** downloads a portable copy: your events, facts, people and
   relationships as plain `.jsonl` files with a README, readable in any text
-  editor without Mnemos installed.
+  editor without Sparrow installed.
 
-To restore a backup, close Mnemos first, then from the Mnemos folder:
+To restore a backup, close Sparrow first, then from the Sparrow folder:
 
 ```
 .venv\Scripts\python scripts\restore_backup.py path\to\mnemos-backup-....zip data
 ```
 
-It refuses to run while Mnemos is open (a restore under a running server would
+It refuses to run while Sparrow is open (a restore under a running server would
 corrupt the result) and swaps the folder atomically, so an interrupted restore
 leaves your old data intact.
 
 ## Updating
 
-Download the newer **MnemosSetup.exe** from the same Releases page and run it
-over the existing install. Your memory stays in `%LOCALAPPDATA%\Mnemos`. The
+Download the newer **SparrowSetup.exe** from the same Releases page and run it
+over the existing install. Your memory stays in `%LOCALAPPDATA%\Sparrow`. The
 version you're running is shown in the Memory Console footer; quote it in any
 bug report.
 
@@ -128,23 +128,23 @@ bug report.
 
 Two clicks, either of them instant:
 
-* **Stop all** on the recording bar (bottom of any Mnemos page) — halts every
+* **Stop all** on the recording bar (bottom of any Sparrow page) — halts every
   source immediately and leaves them off until you turn them back on.
 * **Privacy controls → Stop capture now** — the same thing, next to the
   explanation of what each source does.
 
 Both revoke the allow-list *and* stop the running pipelines, so nothing keeps
-recording in the background. Closing Mnemos also stops everything.
+recording in the background. Closing Sparrow also stops everything.
 
 ## Deleting your data
 
 **In the app:** Privacy controls → **Delete everything**. It shows you exactly
 how much is stored and where, asks you to type `DELETE MY MEMORY`, then empties
-every directory Mnemos writes and saves a **deletion receipt** — a small JSON
+every directory Sparrow writes and saves a **deletion receipt** — a small JSON
 file listing each directory and its size before deletion. Nothing personal is
 in the receipt; it exists so you can prove the deletion happened.
 
-**With Mnemos closed** (also the fix if a file was in use and the in-app delete
+**With Sparrow closed** (also the fix if a file was in use and the in-app delete
 reported it):
 
 ```

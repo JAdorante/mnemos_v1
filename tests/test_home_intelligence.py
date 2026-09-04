@@ -104,7 +104,7 @@ class RankPeopleTests(unittest.TestCase):
                 self.store.add_relation("person", pid, "mentioned_in", "fact",
                                         f, ts=NOW - 200 * DAY)
             late = self._person("Hugh Salva")
-            f = self.store.add_task("demo Mnemos with Hugh", extracted_at=NOW)
+            f = self.store.add_task("demo Sparrow with Hugh", extracted_at=NOW)
             self.store.add_relation("person", late, "committed", "fact", f,
                                     ts=NOW)
             ranked = rank_people(self.store, now=NOW)

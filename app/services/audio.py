@@ -173,6 +173,9 @@ class AudioPipeline:
         self._vad_ms = 0.0
         self._last_text = ""       # for consecutive-duplicate suppression
         self._last_text_ts = 0.0
+        # Lifetime utterance count: lets a remote feeder (web ingest) report
+        # "N utterances this connection" without reaching into the queue.
+        self.utterances_total = 0
         # Shared across mic + loopback so meeting names bias both sides.
         self._session = _get_shared_session()
 
@@ -199,6 +202,16 @@ class AudioPipeline:
             print(f"[audio] stream status: {status}")
         # indata: float32 (frames, channels) -> mono float32 vector
         mono = indata[:, 0].copy() if indata.ndim > 1 else indata.copy()
+        self.feed(mono)
+
+    def feed(self, mono: np.ndarray) -> None:
+        """Feed one 16 kHz mono float32 chunk into VAD framing.
+
+        Chunks must be `cfg.frame_samples` long (Silero's window). Called by
+        the sounddevice callback, the loopback reader thread, and the web
+        ingest WebSocket (`capture="remote"`) — three feeders, one framing
+        loop, so everything downstream is shared.
+        """
         # Two perf_counter reads (~100 ns) on the audio thread, which is the
         # only place Silero's cost is visible: it runs per 32 ms chunk, so it
         # cannot be timed from the worker side after the fact.
@@ -217,6 +230,7 @@ class AudioPipeline:
                     utterance = np.concatenate(self._buffer)
                     self._buffer = []
                     # Stay in-speech: next frames continue the same talk turn.
+                    self.utterances_total += 1
                     self._utterances.put(
                         (utterance, self._speech_started_ts, time.time(),
                          self._vad_ms))
@@ -237,6 +251,7 @@ class AudioPipeline:
                 # spent on this utterance) with the audio so the transcribe
                 # worker can measure end-to-end (speech-end -> published)
                 # latency for the Audio Health telemetry.
+                self.utterances_total += 1
                 self._utterances.put((utterance, self._speech_started_ts,
                                       time.time(), self._vad_ms))
                 self._vad_ms = 0.0
@@ -696,6 +711,11 @@ class AudioPipeline:
             self._reader.start()
             print(f"[audio] loopback capture starting @ {self.cfg.sample_rate} Hz "
                   f"({self.cfg.frame_ms} ms frames) -> source={self.source}")
+        elif self.capture == "remote":
+            # No local device: samples arrive via feed() from the web ingest
+            # WebSocket. VAD + ASR + the worker are already up at this point.
+            print(f"[audio] remote capture ready @ {self.cfg.sample_rate} Hz "
+                  f"({self.cfg.frame_ms} ms frames) -> source={self.source}")
         else:
             self._open_mic()
 
@@ -817,8 +837,7 @@ class AudioPipeline:
                                 else data).astype(np.float32, copy=False)
                         # Silero VAD wants fixed frame-sized pieces.
                         for i in range(0, len(mono) - frame + 1, frame):
-                            piece = mono[i:i + frame]
-                            self._on_audio(piece, len(piece), None, None)
+                            self.feed(mono[i:i + frame])
             except Exception as exc:
                 if self._stop.is_set():
                     break
@@ -829,12 +848,59 @@ class AudioPipeline:
                 self._buffer = []
                 time.sleep(2.0)
 
+    def flush(self) -> None:
+        """Finalize any in-progress speech as an utterance.
+
+        A remote feeder that stops (or pauses) mid-sentence has real speech in
+        the buffer that VAD never got to close — never silently drop it."""
+        if self._in_speech and self._buffer:
+            utterance = np.concatenate(self._buffer)
+            self.utterances_total += 1
+            self._utterances.put((utterance, self._speech_started_ts,
+                                  time.time(), self._vad_ms))
+        self._buffer = []
+        self._in_speech = False
+        self._vad_ms = 0.0
+        if self._vad is not None:
+            self._vad.reset_states()
+
+    def feed_utterance(self, utterance: np.ndarray,
+                       start_ts: float | None = None,
+                       end_ts: float | None = None) -> None:
+        """Enqueue one complete, already-segmented utterance, bypassing VAD.
+
+        The client-side-VAD path (web Phase 4): the browser ran Silero itself
+        and only ships detected speech, so framing it again would be wrong —
+        the padding around the utterance looks like silence to a second VAD."""
+        ts = time.time()
+        self.utterances_total += 1
+        self._utterances.put((utterance, start_ts or ts, end_ts or ts, None))
+
+    def queue_depth(self) -> int:
+        """Pending (untranscribed) utterances — the web ingest backpressure signal."""
+        return self._utterances.qsize()
+
+    def drain(self, timeout: float = 10.0) -> bool:
+        """Wait until the utterance queue is empty (True) or timeout (False).
+
+        stop() ends the worker loop without processing what's still queued, so
+        a remote stop that wants its final words transcribed drains first."""
+        deadline = time.time() + max(0.0, timeout)
+        while self._utterances.qsize() > 0:
+            if time.time() >= deadline:
+                return False
+            time.sleep(0.05)
+        return True
+
     def stop(self) -> None:
         try:
             from app.services.usage_ledger import usage
             usage.capture_stopped("audio")
         except Exception as exc:
             print(f"[usage] audio capture stop not counted ({exc}).")
+        if self.capture == "remote":
+            self.flush()
+            self.drain()
         self._stop.set()
         if self._stream is not None:
             self._stream.stop()

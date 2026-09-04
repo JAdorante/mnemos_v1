@@ -1,4 +1,4 @@
-"""Persistent storage for Mnemos's memory timeline.
+"""Persistent storage for Sparrow's memory timeline.
 
 * Events -> SQLite (`data/quill.db`), stdlib only.
 * Raw audio utterances -> WAV files (`data/audio/<ts>.wav`), linked from the
@@ -1422,6 +1422,9 @@ class Store:
                 ("public_figure", "INTEGER NOT NULL DEFAULT 0"),
                 ("hide_from_people", "INTEGER NOT NULL DEFAULT 0"),
                 ("interaction_strength", "REAL"),
+                # Mint-time semantic verdict (person_adjudicator): JSON
+                # {"kind","confidence","ts",...}; NULL = not yet adjudicated.
+                ("adjudication", "TEXT"),
             ):
                 if pcols and col not in pcols:
                     self._conn.execute(
@@ -4777,6 +4780,8 @@ class Store:
                          "public_figure, hide_from_people")
             if "interaction_strength" in cols:
                 extra += ", interaction_strength"
+            if "adjudication" in cols:
+                extra += ", adjudication"
             rows = self._conn.execute(
                 f"SELECT id, canonical_name, aliases, last_seen{extra} "
                 "FROM people ORDER BY id").fetchall()
@@ -4797,8 +4802,26 @@ class Store:
                 })
             if "interaction_strength" in r.keys():
                 d["interaction_strength"] = r["interaction_strength"]
+            if "adjudication" in r.keys():
+                try:
+                    d["adjudication"] = (json.loads(r["adjudication"])
+                                         if r["adjudication"] else None)
+                except Exception:
+                    d["adjudication"] = None
             out.append(d)
         return out
+
+    def set_person_adjudication(self, person_id: int, verdict: dict) -> None:
+        """Record the model's mint-time person-vs-entity verdict (JSON)."""
+        with self._lock:
+            cols = {r["name"] for r in
+                    self._conn.execute("PRAGMA table_info(people)").fetchall()}
+            if "adjudication" not in cols:
+                return
+            self._conn.execute(
+                "UPDATE people SET adjudication = ? WHERE id = ?",
+                (json.dumps(verdict), int(person_id)))
+            self._conn.commit()
 
     def set_person_interaction_strength(self, person_id: int, value: float) -> None:
         with self._lock:

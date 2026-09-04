@@ -218,7 +218,7 @@ class CleanInstallWorkflowTests(unittest.TestCase):
         self.assertIn("/health", self.text)
         self.assertIn("scripts/uninstall.py --yes --credentials", self.text)
         self.assertIn("scripts\\uninstall.py --yes --credentials", self.text)
-        self.assertIn("mnemos-deletion-receipt-", self.text)
+        self.assertIn("sparrow-deletion-receipt-", self.text)
 
     def test_it_does_not_use_force_to_dodge_the_running_server_probe(self) -> None:
         """--force here would hide a shutdown bug as a passing wipe."""

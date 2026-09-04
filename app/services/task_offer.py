@@ -1,13 +1,13 @@
 """Proactive task offers — the hear-a-task -> ask-about-it trigger.
 
 The vision to-do watcher (todo_watcher.py) offers to run to-do lists it *sees*;
-this does the same for tasks Mnemos *hears*. When the extractor mints a task fact
+this does the same for tasks Sparrow *hears*. When the extractor mints a task fact
 from speech, it calls `offer_task`, which — if the task looks actionable enough —
 surfaces a yes/no offer in the chat stream via the agent worker. 'yes' hands the
 task to the agent (with its per-commit approval gate); 'no' just leaves it on the
 Tasks board.
 
-Gated so Mnemos isn't chatty by TWO independent signals (#10) — an offer must
+Gated so Sparrow isn't chatty by TWO independent signals (#10) — an offer must
 clear BOTH before it surfaces:
 
   1. READINESS — the unified action-readiness score (services/readiness.py): a

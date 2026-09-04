@@ -1,4 +1,4 @@
-/* Mnemos shared UI — instrument, not chatbot chrome */
+/* Sparrow shared UI — instrument, not chatbot chrome */
 window.MnemosMemory = {
   ns: 'mnemos.ui.',
   get(key, fallback) {
@@ -46,15 +46,32 @@ window.MnemosMemory = {
 window.MnemosReduceMotion = () =>
   window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-/* Chrome height → --chrome-h so fixed layers never guess header size. */
+/* Chrome height → --chrome-h so fixed layers never guess header size.
+   Also measures the in-flow composer and corner dock so they cannot cover each other. */
 window.MnemosChrome = (function () {
   let _timer = null;
+  let _ro = null;
+  function _px(n) { return Math.max(0, Math.round(n || 0)) + 'px'; }
   function sync() {
     const top = document.querySelector('header.top, .top');
     let h = top ? top.offsetHeight : 0;
     const ap = document.getElementById('mnemosApproval');
     if (ap && ap.classList.contains('on')) h += ap.offsetHeight;
-    document.documentElement.style.setProperty('--chrome-h', h + 'px');
+    document.documentElement.style.setProperty('--chrome-h', _px(h));
+    const composer = document.querySelector('body > .dock');
+    const ch = composer ? composer.getBoundingClientRect().height : 0;
+    document.documentElement.style.setProperty('--composer-h', _px(ch));
+    const dock = document.getElementById('mnemosDockBR');
+    const dh = (dock && dock.children.length) ? dock.getBoundingClientRect().height : 0;
+    document.documentElement.style.setProperty('--dock-clear', _px(dh ? dh + 16 : 0));
+    if (_ro && dock && !dock._chromeObserved) {
+      dock._chromeObserved = true;
+      _ro.observe(dock);
+    }
+    if (_ro && composer && !composer._chromeObserved) {
+      composer._chromeObserved = true;
+      _ro.observe(composer);
+    }
   }
   function debounced() {
     clearTimeout(_timer);
@@ -63,11 +80,15 @@ window.MnemosChrome = (function () {
   function bind() {
     sync();
     if (typeof ResizeObserver !== 'undefined') {
-      const ro = new ResizeObserver(debounced);
+      _ro = new ResizeObserver(debounced);
       const top = document.querySelector('header.top, .top');
-      if (top) ro.observe(top);
+      if (top) _ro.observe(top);
       const ap = document.getElementById('mnemosApproval');
-      if (ap) ro.observe(ap);
+      if (ap) _ro.observe(ap);
+      const composer = document.querySelector('body > .dock');
+      if (composer) { composer._chromeObserved = true; _ro.observe(composer); }
+      const dock = document.getElementById('mnemosDockBR');
+      if (dock) { dock._chromeObserved = true; _ro.observe(dock); }
     }
     window.addEventListener('resize', debounced);
   }
@@ -110,6 +131,7 @@ window.MnemosDock = {
     const kids = Array.from(dock.children);
     kids.sort((a, b) => (+a.dataset.dockPriority || 0) - (+b.dataset.dockPriority || 0));
     kids.forEach((k) => dock.appendChild(k));
+    try { window.MnemosChrome && MnemosChrome.sync(); } catch (e) {}
   },
 };
 
@@ -1950,8 +1972,7 @@ window.MnemosResponse = {
   },
   groundingHtml(g) {
     if (!g || !g.total) return '';
-    let html = '<details class="rd-grounding"><summary>Grounded in '
-      + g.total + ' memory source' + (g.total === 1 ? '' : 's') + '</summary>';
+    let html = '<details class="rd-grounding"><summary>Sources</summary>';
     (g.groups || []).forEach((grp) => {
       html += '<div class="rd-g-group"><div class="rd-g-label">'
         + esc(grp.label || 'Source')
@@ -2371,7 +2392,7 @@ window.MnemosCapture = {
       + '<div class="pv-ret" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line)">'
       + '<b style="font-size:13px;color:var(--navy)">Your data</b>'
       + '<p style="font-size:12px;color:var(--mut);margin:6px 0 8px;line-height:1.45">'
-      + 'Everything Mnemos remembers lives in this folder. Take a copy whenever you like.</p>'
+      + 'Everything Sparrow remembers lives in this folder. Take a copy whenever you like.</p>'
       + '<div style="display:flex;gap:8px;flex-wrap:wrap">'
       + '<button type="button" class="pv-btn" id="pvBackup">Back up my memory</button>'
       + '<button type="button" class="pv-btn" id="pvTakeout">Export my data</button>'
@@ -2409,7 +2430,7 @@ window.MnemosCapture = {
       + '<div class="pv-ret" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line)">'
       + '<b style="font-size:13px;color:var(--navy)">Leave nothing behind</b>'
       + '<p style="font-size:12px;color:var(--mut);margin:6px 0 8px;line-height:1.45">'
-      + 'Stop every source instantly, or delete everything Mnemos has recorded '
+      + 'Stop every source instantly, or delete everything Sparrow has recorded '
       + 'here. Deleting cannot be undone &mdash; back up first if you might want it back.</p>'
       + '<div style="display:flex;gap:8px;flex-wrap:wrap">'
       + '<button type="button" class="pv-btn" id="pvStopAll">Stop capture now</button>'
@@ -2584,7 +2605,7 @@ window.MnemosCapture = {
       + '<span><b style="color:var(--navy);font-weight:600">' + MnemosEsc(r[0])
       + '</b> — ' + MnemosEsc(r[1]) + '</span></div>').join('')
       + '<div style="margin-top:6px;padding-top:6px;border-top:1px dashed var(--line)">'
-      + 'Nothing else leaves. There is no Mnemos server holding your memory.</div>';
+      + 'Nothing else leaves. There is no Sparrow server holding your memory.</div>';
   },
   async openWipe() {
     const box = document.getElementById('pvWipeBox');
@@ -2636,10 +2657,10 @@ window.MnemosCapture = {
         note.innerHTML = d.complete
           ? ('<b style="color:var(--navy)">Deleted.</b> Receipt: '
              + MnemosEsc(d.receipt_path || '(not written)')
-             + '. You can close Mnemos and delete its folder.')
+             + '. You can close Sparrow and delete its folder.')
           : ('<b style="color:#8c1d18">Partly deleted.</b> Some files were in '
              + 'use: ' + MnemosEsc((d.failures || []).slice(0, 3).join('; '))
-             + '. Close Mnemos and run the uninstall script.');
+             + '. Close Sparrow and run the uninstall script.');
       }
       this._state = await this.status();
       this.render();
@@ -2708,7 +2729,7 @@ window.MnemosCapture = {
           + '<span>Stop all</span><span class="act">stop</span></button>';
       }
       html += '<button type="button" class="rec-chip paused" id="recOpenPrivacy" '
-        + 'title="Privacy controls"><span class="act">privacy</span></button>';
+        + 'title="Privacy controls"><span>Privacy</span></button>';
       html += '</div>';
     }
     html += this._voiceChipHtml();

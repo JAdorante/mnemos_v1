@@ -28,7 +28,7 @@ from pathlib import Path
 from fastapi import FastAPI, Header, HTTPException, Request
 
 MAX_BYTES = 1_000_000            # a year of daily rows is ~100 KB
-app = FastAPI(title="Mnemos pilot collector")
+app = FastAPI(title="Sparrow pilot collector")
 
 
 def _dir() -> Path:

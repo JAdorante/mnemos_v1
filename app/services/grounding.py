@@ -249,7 +249,7 @@ def _project_section(name: str, store, *, entity_id: int | None = None
 
 
 def _peers_section(question: str) -> list[str]:
-    """Paired Mnemos instances — identity context, never command authority."""
+    """Paired Sparrow instances — identity context, never command authority."""
     try:
         from app.services import peer_channel
         roster = peer_channel.peers()
@@ -275,7 +275,7 @@ def _peers_section(question: str) -> list[str]:
     for p in rows[:8]:
         linked = p.get("person_name") or "not linked to a person yet"
         lines.append(
-            f"- {p.get('name')}: paired Mnemos at {p.get('base_url') or '?'} "
+            f"- {p.get('name')}: paired Sparrow at {p.get('base_url') or '?'} "
             f"({p.get('presence') or 'unknown'}); person in memory: {linked}."
         )
     return lines

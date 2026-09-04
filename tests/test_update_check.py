@@ -227,7 +227,7 @@ class PrivacyTests(_Base):
         self.assertNotIn("?", captured["url"])
         blob = json.dumps(captured).lower()
         from app.services.usage_ledger import install_id
-        for leak in (install_id().lower(), __version__, "mnemos"):
+        for leak in (install_id().lower(), __version__, "mnemos", "sparrow"):
             self.assertNotIn(leak.lower(), blob)
 
 

@@ -43,7 +43,7 @@ th { color: var(--mut); font-weight: 600; }
 <h1>Weekly check-in</h1>
 <p id="due"></p>
 <form id="f">
-  <fieldset><legend>Did Mnemos lighten your mental load this week?</legend>
+  <fieldset><legend>Did Sparrow lighten your mental load this week?</legend>
     <div class="scale" data-name="load"></div>
     <div class="ends"><span>made it heavier</span><span>much lighter</span></div>
   </fieldset>

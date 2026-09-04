@@ -1,7 +1,7 @@
 """WS-D Tier 1 — invite-code onboarding.
 
 The point of this tier is that it removes a funnel stop *without* changing what
-Mnemos is: the vended key lands in the tester's own credentials file and is
+Sparrow is: the vended key lands in the tester's own credentials file and is
 used exactly like a pasted one. So the tests check both halves — redemption
 works and fails legibly, and the bring-your-own-key path is untouched.
 """

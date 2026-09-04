@@ -1,7 +1,7 @@
 """Tier-1 invite-code onboarding (WS-D) — remove the API-key funnel stop.
 
 Today a tester must create an Anthropic account, add a payment method, mint a
-key and paste it in before Mnemos runs at all. That is fine for an engineer and
+key and paste it in before Sparrow runs at all. That is fine for an engineer and
 a hard stop for the dealmaker persona this pilot is for.
 
 Tier 1 keeps the local-first story intact and changes almost nothing: the

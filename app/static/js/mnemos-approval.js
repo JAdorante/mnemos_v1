@@ -18,7 +18,7 @@ window.MnemosApprovals = {
     const sum = bar.querySelector('.ap-sum');
     const age = bar.querySelector('.ap-age');
     const more = bar.querySelector('.ap-more');
-    if (sum) sum.textContent = s.summary || 'Mnemos needs your decision.';
+    if (sum) sum.textContent = s.summary || 'Sparrow needs your decision.';
     if (age) age.textContent = s.age_label || '';
     if (more) {
       const n = s.queued || 0;

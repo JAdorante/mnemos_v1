@@ -143,7 +143,7 @@ class EndToEndTests(_Env, unittest.TestCase):
         r._local_ok = True
         r._distill = lambda **kw: None            # keep the test off disk
         text, _, _ = r._local_first(
-            "chat", system="You are Mnemos.",
+            "chat", system="You are Sparrow.",
             messages=[{"role": "user",
                        "content": "when is my meeting with sarah?"}],
             max_tokens=256, schema=None, model=None)
@@ -152,7 +152,7 @@ class EndToEndTests(_Env, unittest.TestCase):
         # argument so the static prefix can lead. The guarantee is unchanged —
         # the local model sees the exemplar, the task prompt stays clean — but
         # it now reads off the block rather than off `system`.
-        self.assertEqual(seen["system"], "You are Mnemos.")
+        self.assertEqual(seen["system"], "You are Sparrow.")
         self.assertIn("Wednesday at 2pm with Sarah Kane", seen["exemplars"])
         self.assertIn("VERIFIED EXAMPLES", seen["exemplars"])
 

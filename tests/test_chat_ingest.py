@@ -60,7 +60,7 @@ class IngestTests(unittest.TestCase):
         with patch.object(storage_mod, "get_store", return_value=_FakeStore()), \
              patch.object(worker_mod, "worker", _FakeWorker()), \
              patch("app.services.attachments._index_event", lambda *a: None):
-            eid = chat_ingest.ingest("Hugh and I decided to demo Mnemos Friday")
+            eid = chat_ingest.ingest("Hugh and I decided to demo Sparrow Friday")
         self.assertEqual(eid, 41)
         ev = stored["ev"]
         self.assertEqual(ev.modality.value, "text")
@@ -168,11 +168,11 @@ class RunJobTests(unittest.TestCase):
         """Chat commitment with to_person=Andy Karos should mint a people row
         under direct_message policy (the bug that kept Andy off You → People)."""
         queued: list[str] = []
-        text = "I have a meeting with Andy Karos today at 8:30 pm about Mnemos"
+        text = "I have a meeting with Andy Karos today at 8:30 pm about Sparrow"
         self._run(
             text,
             {"tasks": [], "commitments": [{
-                "text": "meeting with Andy Karos today at 8:30 pm about Mnemos",
+                "text": "meeting with Andy Karos today at 8:30 pm about Sparrow",
                 "from_person": "me",
                 "to_person": "Andy Karos",
                 "source_span": "meeting with Andy Karos today at 8:30 pm",
@@ -193,7 +193,7 @@ class RunJobTests(unittest.TestCase):
         """Even if the LLM returns no from/to, multi-word names in the chat
         turn itself must still land on People."""
         queued: list[str] = []
-        text = "Remember I have a meeting with Andy Karos today at 8:30 pm about Mnemos."
+        text = "Remember I have a meeting with Andy Karos today at 8:30 pm about Sparrow."
         self._run(
             text,
             {"tasks": [], "commitments": [], "claims": [],

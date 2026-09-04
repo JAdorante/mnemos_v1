@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -69,11 +70,15 @@ def hf_base_for(tag: str) -> str | None:
     return HF_BASES.get((tag or "").strip().lower())
 
 
-def default_tag(base: str, date: str | None = None) -> str:
+def default_tag(base: str, date: str | None = None,
+                suffix: str | None = None) -> str:
     """qwen2.5:7b-instruct -> qwen2.5-mnemos-YYYYMMDD (dated; prior tags stay
-    installed, so rollback is pointing config back)."""
+    installed, so rollback is pointing config back). `suffix` scopes the tag
+    to one user on a SHARED Ollama (hosted: many containers, one model
+    server): qwen2.5-mnemos-user1-YYYYMMDD."""
     stem = (base or "model").split(":")[0].replace("/", "-")
-    return f"{stem}-mnemos-{date or time.strftime('%Y%m%d')}"
+    mid = f"{suffix}-" if suffix else ""
+    return f"{stem}-mnemos-{mid}{date or time.strftime('%Y%m%d')}"
 
 
 def build_modelfile(gguf_name: str, template: str, params_text: str) -> str:
@@ -116,7 +121,18 @@ def cleanup_merged(out_dir: Path) -> int:
     return freed
 
 
-_MNEMOS_TAG_RE = re.compile(r"-mnemos-\d{8}")
+# Any fine-tune tag, per-user suffixed or not (retention + run-dir matching).
+_MNEMOS_TAG_RE = re.compile(r"-mnemos-(?:[A-Za-z0-9_.]+-)?\d{8}")
+
+
+def _scope_re(suffix: str | None) -> re.Pattern:
+    """Tags THIS install may prune. On a shared Ollama (hosted), each user
+    container trains under its own --tag-suffix; retention must never reach
+    across users, and an unsuffixed desktop install must never touch suffixed
+    tags (or vice versa) — so the scope match is exact, not substring."""
+    if suffix:
+        return re.compile(rf"-mnemos-{re.escape(suffix)}-\d{{8}}$")
+    return re.compile(r"-mnemos-\d{8}$")
 
 
 def parse_ollama_list(text: str) -> list[str]:
@@ -129,23 +145,27 @@ def parse_ollama_list(text: str) -> list[str]:
     return out
 
 
-def tags_to_prune(tags: list[str], live: str, keep: int = 2) -> list[str]:
+def tags_to_prune(tags: list[str], live: str, keep: int = 2,
+                  suffix: str | None = None) -> list[str]:
     """Which -mnemos- tags to `ollama rm`. Each fine-tune tag is a ~4.7GB blob
     in Ollama's store, so scheduled retraining accumulates them without bound
     unless pruned. Keep the `keep` newest (by date suffix) plus whatever tag is
-    live in config; everything else matching -mnemos-YYYYMMDD goes. Non-mnemos
-    tags (the base, vision models…) are never touched. Pure — testable."""
+    live in config; everything else IN THIS INSTALL'S SCOPE (see _scope_re)
+    goes. Non-mnemos tags (the base, vision models…) and other users' tags are
+    never touched. Pure — testable."""
     norm = lambda t: (t or "").removesuffix(":latest")
-    mnemos = [t for t in tags if _MNEMOS_TAG_RE.search(norm(t))]
+    scope = _scope_re(suffix)
+    mnemos = [t for t in tags if scope.search(norm(t))]
     newest = sorted(mnemos, key=norm, reverse=True)[:max(0, keep)]
     kept = {norm(t) for t in newest} | {norm(live)}
     return [t for t in mnemos if norm(t) not in kept]
 
 
-def prune_ollama_tags(live: str, keep: int = 2) -> list[str]:
+def prune_ollama_tags(live: str, keep: int = 2,
+                      suffix: str | None = None) -> list[str]:
     """Remove superseded fine-tune tags from Ollama's blob store. Best-effort."""
     tags = parse_ollama_list(_capture(["ollama", "list"]))
-    doomed = tags_to_prune(tags, live, keep=keep)
+    doomed = tags_to_prune(tags, live, keep=keep, suffix=suffix)
     removed = []
     for t in doomed:
         r = subprocess.run(["ollama", "rm", t], capture_output=True)
@@ -220,13 +240,19 @@ def _run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
 
 
 def _capture(cmd: list[str]) -> str:
-    r = subprocess.run(cmd, capture_output=True)
+    try:
+        r = subprocess.run(cmd, capture_output=True)
+    except OSError:
+        return ""    # binary absent (e.g. no wsl/ollama in a container)
     out = r.stdout or b""
     try:
         text = out.decode("utf-8")
     except UnicodeDecodeError:
         text = out.decode("utf-16-le", errors="replace")   # wsl.exe quirk
     return text if r.returncode == 0 else ""
+
+
+IS_WINDOWS = sys.platform == "win32"
 
 
 def pick_distro(preferred: str | None) -> str | None:
@@ -247,6 +273,18 @@ def wsl_python(distro: str) -> str:
     have = _capture(["wsl", "-d", distro, "--", "sh", "-c",
                      f"test -x {WSL_VENV}/bin/python && echo yes"])
     return f"{WSL_VENV}/bin/python" if "yes" in have else "python3"
+
+
+# --- native Linux (hosted trainer: container/VM with the NVIDIA runtime) -----
+def native_gpu() -> bool:
+    """The GPU is visible to THIS process — no WSL hop needed."""
+    return "GPU" in _capture(["nvidia-smi", "-L"])
+
+
+def native_python() -> str:
+    """The --setup venv when present, else the running interpreter."""
+    venv_py = Path.home() / ".mnemos-lora" / "bin" / "python"
+    return str(venv_py) if venv_py.is_file() else sys.executable
 
 
 def run_bench(model: str, *, pct: int, exemplars: bool = False) -> dict | None:
@@ -286,14 +324,19 @@ def stage_curate(args) -> int:
     print(f"[curate] source: {source} ({len(rows)} rows)")
     stats = dc.curate(rows, holdout_pct=args.holdout_pct,
                       dedupe_sim=args.dedupe_sim,
-                      upweight_edited=args.upweight_edited)
+                      upweight_edited=args.upweight_edited,
+                      synthetic_rows=dc.load_synthetic(args.synthetic),
+                      synthetic_cap=args.synthetic_cap)
     n = stats["train_pairs"]
-    print(f"[curate] {n} train pairs (holdout {stats['holdout_n']} excluded, "
+    n_syn = int(stats.get("synthetic_pairs") or 0)
+    print(f"[curate] {n} train pairs + {n_syn} synthetic "
+          f"(holdout {stats['holdout_n']} excluded — real rows only, "
           f"readiness: {stats['readiness']})")
-    if n < args.min_pairs and not args.force:
+    if n + n_syn < args.min_pairs and not args.force:
         raise SystemExit(
-            f"[curate] {n} < --min-pairs {args.min_pairs}: keep labeling "
-            "(every chat verdict adds a pair) or rerun with --force for a "
+            f"[curate] {n}+{n_syn} < --min-pairs {args.min_pairs}: keep "
+            "labeling (every chat verdict adds a pair), add synthetic "
+            "(scripts/synthetic_pairs.py), or rerun with --force for a "
             "small-data experiment.")
     TRAIN_JSONL.parent.mkdir(parents=True, exist_ok=True)
     dc.write_jsonl(TRAIN_JSONL, stats["weighted"])
@@ -315,27 +358,37 @@ def free_gpu_from_ollama() -> None:
         time.sleep(3)          # give the driver a beat to release VRAM
 
 
-def stage_train(args, distro: str, out_dir: Path, *,
+def stage_train(args, distro: str | None, out_dir: Path, *,
                 skip_train: bool = False) -> Path:
-    """Train (unless resuming) and export — SEPARATE WSL processes: the
+    """Train (unless resuming) and export — SEPARATE processes: the
     4-bit -> 16-bit merge needs a fresh CUDA context (in-process merge after
     training died with cudaErrorUnknown). GPU is re-freed before each stage —
     the app may have reloaded Ollama models in between. With `skip_train`,
     resume from whatever exists: a GGUF skips everything; a saved adapter
-    skips straight to export."""
+    skips straight to export.
+
+    `distro=None` = native Linux (hosted container/VM): same trainer script,
+    same stages, just no `wsl -d` wrapper and no /mnt/c path translation."""
     def base_cmd() -> list[str]:
+        script = ROOT / "scripts" / "lora_train_wsl.py"
+        train_args = ["--base-hf", args.base_hf,
+                      "--epochs", str(args.epochs), "--lr", str(args.lr),
+                      "--rank", str(args.rank), "--max-seq", str(args.max_seq),
+                      "--batch", str(args.batch),
+                      "--grad-accum", str(args.grad_accum),
+                      "--quant", args.quant]
+        if distro is None:
+            return ["env", "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True",
+                    native_python(), str(script),
+                    "--train", str(TRAIN_JSONL), "--out", str(out_dir),
+                    *train_args]
         py = wsl_python(distro)
         return ["wsl", "-d", distro, "--",
                 "env", "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True", py,
-                wsl_path(ROOT / "scripts" / "lora_train_wsl.py"),
+                wsl_path(script),
                 "--train", wsl_path(TRAIN_JSONL),
                 "--out", wsl_path(out_dir),
-                "--base-hf", args.base_hf,
-                "--epochs", str(args.epochs), "--lr", str(args.lr),
-                "--rank", str(args.rank), "--max-seq", str(args.max_seq),
-                "--batch", str(args.batch),
-                "--grad-accum", str(args.grad_accum),
-                "--quant", args.quant]
+                *train_args]
 
     def ggufs() -> list[Path]:
         # Also check unsloth's sibling "<out>_gguf" dir, and ignore partial
@@ -355,7 +408,7 @@ def stage_train(args, distro: str, out_dir: Path, *,
     else:
         free_gpu_from_ollama()
         if _run(base_cmd() + ["--stage", "train"]).returncode != 0:
-            raise SystemExit("[train] WSL training failed — see output above "
+            raise SystemExit("[train] training failed — see output above "
                              "(missing deps? run --setup first).")
     free_gpu_from_ollama()
     if _run(base_cmd() + ["--stage", "export"]).returncode != 0:
@@ -423,14 +476,21 @@ def stage_gate(args, tag: str) -> tuple[bool, list[str]]:
 
 # --- preflight / setup -------------------------------------------------------
 def cmd_check(args) -> None:
-    distro = pick_distro(args.distro)
-    print(f"WSL GPU distro : {distro or 'NONE FOUND (install/repair WSL2 + '}"
-          f"{'' if distro else 'NVIDIA driver)'}")
-    if distro:
-        py = wsl_python(distro)
-        print(f"WSL python     : {py}")
-        uns = _capture(["wsl", "-d", distro, "--", "sh", "-c",
-                        f"{py} -c 'import unsloth' 2>/dev/null && echo yes"])
+    if IS_WINDOWS:
+        distro = pick_distro(args.distro)
+        print(f"WSL GPU distro : {distro or 'NONE FOUND (install/repair WSL2 + '}"
+              f"{'' if distro else 'NVIDIA driver)'}")
+        if distro:
+            py = wsl_python(distro)
+            print(f"WSL python     : {py}")
+            uns = _capture(["wsl", "-d", distro, "--", "sh", "-c",
+                            f"{py} -c 'import unsloth' 2>/dev/null && echo yes"])
+            print(f"unsloth        : {'installed' if 'yes' in uns else 'MISSING — run --setup'}")
+    else:
+        print(f"native GPU     : {'visible' if native_gpu() else 'NONE (needs the NVIDIA runtime)'}")
+        py = native_python()
+        print(f"python         : {py}")
+        uns = _capture([py, "-c", "import unsloth; print('yes')"])
         print(f"unsloth        : {'installed' if 'yes' in uns else 'MISSING — run --setup'}")
     ollama = _capture(["ollama", "--version"])
     print(f"ollama         : {ollama.strip() or 'MISSING'}")
@@ -447,6 +507,19 @@ def cmd_check(args) -> None:
 
 
 def cmd_setup(args) -> None:
+    if not IS_WINDOWS:
+        venv = Path.home() / ".mnemos-lora"
+        print(f"[setup] creating venv + installing unsloth in {venv} "
+              "(first run downloads several GB)…")
+        r = _run(["sh", "-c",
+                  f"python3 -m venv {venv} && "
+                  f"{venv}/bin/pip install -U pip && "
+                  f"{venv}/bin/pip install unsloth"])
+        if r.returncode != 0:
+            raise SystemExit("[setup] failed — install python3-venv/pip and "
+                             "rerun --setup.")
+        print("[setup] done — run --check to verify.")
+        return
     distro = pick_distro(args.distro)
     if not distro:
         raise SystemExit("no GPU-visible WSL distro found.")
@@ -476,6 +549,12 @@ def main() -> None:
                     help="HF model for training (default: mapped from --base)")
     ap.add_argument("--tag", default=None,
                     help="challenger tag (default: <base>-mnemos-<date>)")
+    ap.add_argument("--tag-suffix",
+                    default=os.environ.get("QUILL_LORA_TAG_SUFFIX") or None,
+                    help="per-user scope for tags on a SHARED Ollama (hosted: "
+                         "one suffix per container, e.g. user1 -> "
+                         "<base>-mnemos-user1-<date>; retention pruning stays "
+                         "inside this scope). Default: QUILL_LORA_TAG_SUFFIX.")
     ap.add_argument("--distro", default=None, help="WSL distro override")
     ap.add_argument("--epochs", type=float, default=3.0)
     ap.add_argument("--lr", type=float, default=2e-4)
@@ -492,6 +571,16 @@ def main() -> None:
     ap.add_argument("--upweight-edited", type=int, default=2)
     ap.add_argument("--dedupe-sim", type=float, default=0.95)
     ap.add_argument("--min-pairs", type=int, default=100)
+    _synth_default = (Path(os.environ["QUILL_LORA_SYNTHETIC"])
+                      if os.environ.get("QUILL_LORA_SYNTHETIC")
+                      else ROOT / "data" / "lora" / "synthetic.jsonl")
+    ap.add_argument("--synthetic", type=Path,
+                    default=_synth_default if _synth_default.is_file() else None,
+                    help="synthetic pairs JSONL (scripts/synthetic_pairs.py); "
+                         "train-only, capped, never holdout. Default: "
+                         "QUILL_LORA_SYNTHETIC, else data/lora/synthetic.jsonl "
+                         "when it exists (curate caps + reports it loudly).")
+    ap.add_argument("--synthetic-cap", type=float, default=3.0)
     ap.add_argument("--force", action="store_true",
                     help="train below --min-pairs (experiment)")
     ap.add_argument("--skip-train", action="store_true",
@@ -527,15 +616,21 @@ def main() -> None:
     if not args.base_hf:
         raise SystemExit(f"no HF base known for '{args.base}' — pass --base-hf "
                          "(e.g. unsloth/Qwen2.5-7B-Instruct).")
-    tag = args.tag or default_tag(args.base)
+    tag = args.tag or default_tag(args.base, suffix=args.tag_suffix)
     out_dir = RUNS_DIR / tag
     out_dir.mkdir(parents=True, exist_ok=True)
 
     stage_curate(args)
 
-    distro = pick_distro(args.distro)
-    if not distro:
-        raise SystemExit("no GPU-visible WSL distro (run --check).")
+    if IS_WINDOWS:
+        distro = pick_distro(args.distro)
+        if not distro:
+            raise SystemExit("no GPU-visible WSL distro (run --check).")
+    else:
+        distro = None                     # hosted/native Linux path
+        if not native_gpu() and not args.skip_train:
+            raise SystemExit("no GPU visible to this process (nvidia-smi) — "
+                             "run with the NVIDIA runtime (see --check).")
     gguf = stage_train(args, distro, out_dir, skip_train=args.skip_train)
 
     stage_package(args, gguf, tag)
@@ -579,7 +674,8 @@ def main() -> None:
     if not args.no_prune:
         from app.config import settings
         live = settings.text_local.local_model
-        removed = prune_ollama_tags(live, keep=args.keep_tags)
+        removed = prune_ollama_tags(live, keep=args.keep_tags,
+                                    suffix=args.tag_suffix)
         surviving = set(parse_ollama_list(_capture(["ollama", "list"])))
         prune_run_dirs(RUNS_DIR, surviving)
         if removed:

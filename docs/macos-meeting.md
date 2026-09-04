@@ -45,7 +45,7 @@ the permission dialogs.
 
 ```bash
 pyinstaller packaging/mnemos.spec
-# then wrap Dist/Mnemos.app in a DMG (unsigned is OK for a hand-distributed cohort)
+# then wrap Dist/Sparrow.app in a DMG (unsigned is OK for a hand-distributed cohort)
 ```
 
 Gatekeeper: testers right-click → Open the first time. Notarization is a fast-follow.

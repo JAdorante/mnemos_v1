@@ -66,7 +66,7 @@ body{margin:0;min-height:100vh;font:15px/1.55 var(--font);color:var(--text);
   <span class="spacer"></span></div>
 <div id="orgErr" class="fetch-err" hidden role="alert" style="max-width:860px;margin:12px auto 0;padding:0 22px">
   <span style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:10px 14px;border-radius:10px;background:rgba(154,63,63,.08);border:1px solid rgba(154,63,63,.25);color:var(--danger);font-size:13px;width:100%">
-    <span>Couldn't reach Mnemos — retrying…</span>
+    <span>Couldn't reach Sparrow — retrying…</span>
     <button type="button" id="orgRetry">Retry now</button>
   </span>
 </div>

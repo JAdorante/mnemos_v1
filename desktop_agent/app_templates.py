@@ -20,10 +20,10 @@ TEMPLATES: dict[str, dict] = {
             "network": True,
             "risk": "medium",
             "demo_safe": True,
-            "notes": "Opens web pages and local HTML/PDF files from your Mnemos folder.",
+            "notes": "Opens web pages and local HTML/PDF files from your Sparrow folder.",
         },
         "summary": (
-            "It can open web pages and local HTML/PDF files from your Mnemos folder. "
+            "It can open web pages and local HTML/PDF files from your Sparrow folder. "
             "It cannot run commands or control other apps."
         ),
     },
@@ -38,10 +38,10 @@ TEMPLATES: dict[str, dict] = {
             "network": False,
             "risk": "low",
             "demo_safe": True,
-            "notes": "Plain-text and notes files inside your Mnemos folder.",
+            "notes": "Plain-text and notes files inside your Sparrow folder.",
         },
         "summary": (
-            "It can open text and notes files (.txt, .md, …) from your Mnemos folder. "
+            "It can open text and notes files (.txt, .md, …) from your Sparrow folder. "
             "It cannot browse the rest of your computer."
         ),
     },
@@ -56,10 +56,10 @@ TEMPLATES: dict[str, dict] = {
             "network": False,
             "risk": "medium",
             "demo_safe": True,
-            "notes": "Word-processor and document files from your Mnemos folder.",
+            "notes": "Word-processor and document files from your Sparrow folder.",
         },
         "summary": (
-            "It can open document files from your Mnemos folder. "
+            "It can open document files from your Sparrow folder. "
             "It cannot run commands or reach outside that folder."
         ),
     },
@@ -74,10 +74,10 @@ TEMPLATES: dict[str, dict] = {
             "network": False,
             "risk": "low",
             "demo_safe": True,
-            "notes": "Shows a folder inside your Mnemos workspace.",
+            "notes": "Shows a folder inside your Sparrow workspace.",
         },
         "summary": (
-            "It can open folders inside your Mnemos workspace. "
+            "It can open folders inside your Sparrow workspace. "
             "It cannot edit files unless you also allow a separate editor."
         ),
     },
@@ -93,10 +93,10 @@ TEMPLATES: dict[str, dict] = {
             "network": False,
             "risk": "medium",
             "demo_safe": True,
-            "notes": "Audio, video, and project files from your Mnemos folder.",
+            "notes": "Audio, video, and project files from your Sparrow folder.",
         },
         "summary": (
-            "It can open media and project files from your Mnemos folder. "
+            "It can open media and project files from your Sparrow folder. "
             "It cannot run commands or control other apps."
         ),
     },

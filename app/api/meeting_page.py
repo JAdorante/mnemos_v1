@@ -221,7 +221,7 @@ async function load() {
     note.period_end ? ('– ' + fmtWhen(note.period_end)) : '',
     note.model ? ('· ' + note.model) : '',
   ].filter(Boolean).join(' ');
-  document.title = (note.title || 'Meeting') + ' · Mnemos';
+  document.title = (note.title || 'Meeting') + ' · Sparrow';
   const rid = note.id;
   document.getElementById('askPanel').hidden = !rid;
   document.getElementById('draftPanel').hidden = !rid;

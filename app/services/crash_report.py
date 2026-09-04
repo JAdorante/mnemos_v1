@@ -71,6 +71,6 @@ def write_report(*, note: str = "") -> dict[str, Any]:
                 p.read_text(encoding="utf-8", errors="replace")[-200_000:]))
             included.append(p.name)
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    out = logs_dir() / f"mnemos-report-{stamp}.zip"
+    out = logs_dir() / f"sparrow-report-{stamp}.zip"
     out.write_bytes(buf.getvalue())
     return {"ok": True, "path": str(out), "files": included}

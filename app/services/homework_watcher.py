@@ -32,8 +32,8 @@ _HW_MARKERS = re.compile(
     re.I,
 )
 _SELF_WINDOW = re.compile(
-    r"mnemos(?:\.ai)?|memory console|exec\.ai|/onboarding|nexus_v1\s*-\s*cursor|"
-    r"/ui\b|localhost:\d+",
+    r"sparrow|ravenry|mnemos(?:\.ai)?|memory console|exec\.ai|"
+    r"/onboarding|nexus_v1\s*-\s*cursor|/ui\b|localhost:\d+",
     re.I,
 )
 _SCHEMA_JUNK = frozenset({
@@ -71,7 +71,8 @@ def _is_self_ui(ev) -> bool:
         str(vision.get("ocr_text") or "")[:300],
         str(ev.summary or "")[:300],
     ]).lower()
-    if "mnemos" in blob and ("homework help" in blob or "study mode" in blob):
+    if any(b in blob for b in ("mnemos", "sparrow", "ravenry")) and (
+            "homework help" in blob or "study mode" in blob):
         return True
     return False
 

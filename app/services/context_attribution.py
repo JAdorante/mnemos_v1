@@ -15,7 +15,7 @@ Design constraints:
   * stable across rebuilds: graph.rebuild clears origin="derived" only, and
     add_relation's cross-origin conflict takes MAX(weight), so a nightly
     rebuild can neither wipe nor inflate a context edge.
-  * self-suppressed: the app's own windows ("Mnemos — Chat") are not context
+  * self-suppressed: the app's own windows ("Sparrow — Chat") are not context
     (surface_filters.is_self_window), and browser suffixes are stripped so
     "… - Google Chrome" can't bind a Chrome tool entity from every tab.
 

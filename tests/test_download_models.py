@@ -6,7 +6,7 @@ cancel the ones after it, the caller still learns something is missing, and
 --check never opens a connection.
 
 Also guarded: the packaged build must call this code by *import*. Shelling out
-to `[sys.executable, "scripts/download_models.py"]` re-executes `Mnemos.exe` in
+to `[sys.executable, "scripts/download_models.py"]` re-executes `Sparrow.exe` in
 a frozen build and the script is not in the bundle either — the first-run page
 looked fine and could never have worked.
 """
@@ -238,7 +238,7 @@ class TestFrozenBootstrapPath(unittest.TestCase):
         self.assertTrue(any("not installed" in line for line in log), log)
 
     def test_ollama_pull_uses_ollama_not_the_frozen_exe(self) -> None:
-        """sys.executable is Mnemos.exe when frozen — that must not be the pull."""
+        """sys.executable is Sparrow.exe when frozen — that must not be the pull."""
         import ast
         source = (Path(__file__).resolve().parent.parent
                   / "app" / "api" / "adoption.py").read_text()

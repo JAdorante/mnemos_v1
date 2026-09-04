@@ -1,4 +1,4 @@
-# Building the Mnemos desktop app on Windows
+# Building the Sparrow desktop app on Windows
 
 Everything here has been verified on Linux except the parts marked **Windows-only
 — unverified**. Those are the ones that need your machine: the spec was written
@@ -71,7 +71,7 @@ not working — see §6.
 ~5–10 minutes. Then, before anything else:
 
 ```powershell
-.\dist\Mnemos\Mnemos.exe --self-test
+.\dist\Sparrow\Sparrow.exe --self-test
 ```
 
 This is the whole safety net. It is how the missing-torch and missing-speechbrain
@@ -81,13 +81,13 @@ bundle is broken even though the app will start and serve pages normally.
 Check the size — expect roughly 1.5–2.5 GB:
 
 ```powershell
-"{0:N0} MB" -f ((Get-ChildItem -Recurse dist\Mnemos | Measure-Object Length -Sum).Sum/1MB)
+"{0:N0} MB" -f ((Get-ChildItem -Recurse dist\Sparrow | Measure-Object Length -Sum).Sum/1MB)
 ```
 
 Then launch it:
 
 ```powershell
-.\dist\Mnemos\Mnemos.exe
+.\dist\Sparrow\Sparrow.exe
 ```
 
 Window opens, tray icon appears, no console window behind it.
@@ -95,7 +95,7 @@ Window opens, tray icon appears, no console window behind it.
 ## 5. Installer
 
 ```powershell
-iscc packaging\mnemos.iss        # -> dist\MnemosSetup.exe
+iscc packaging\mnemos.iss        # -> dist\SparrowSetup.exe
 ```
 
 Install it on **a machine that is not the build machine** — a VM snapshot is
@@ -105,11 +105,11 @@ ideal, because you can roll back and repeat. What to check:
 - [ ] Start-menu entry and icon look right at 16px in the taskbar
 - [ ] First launch shows `/bootstrap` and the models download with progress
 - [ ] Onboarding asks for the API key **in the app**, not a terminal
-- [ ] Data lands in `%LOCALAPPDATA%\Mnemos`, *not* under Program Files
+- [ ] Data lands in `%LOCALAPPDATA%\Sparrow`, *not* under Program Files
 - [ ] Mic capture works after consenting in the Privacy sheet
 - [ ] Tray → Stop capture actually stops it
 - [ ] Add/Remove Programs → uninstall, tick the wipe box, then confirm
-      `%LOCALAPPDATA%\Mnemos` is gone
+      `%LOCALAPPDATA%\Sparrow` is gone
 
 ## 6. Windows-only — unverified, and where it will break
 
@@ -150,7 +150,7 @@ The last gate before anyone outside the team installs this. Unsigned means
 "Windows protected your PC" on first launch — for a firm evaluating a tool that
 listens to their meetings, that is the wrong first impression.
 
-**Start Azure Trusted Signing for Mnemos Labs today.** Identity verification
+**Start Azure Trusted Signing for Ravenry today.** Identity verification
 takes several days and is the only item on this list that cannot be coded
 around. It is the cheapest/fastest option that still integrates with
 `signtool` (~$10/month). If it does not clear by the 8th, send testers a
@@ -165,8 +165,8 @@ Repo wiring is already in `.github/workflows/release.yml`:
   `https://eus.codesigning.azure.net/`), `AZURE_TS_ACCOUNT`,
   `AZURE_TS_PROFILE`
 
-A `v*` tag with those set signs `Mnemos.exe`, rebuilds the installer around
-the signed exe, signs `MnemosSetup.exe`, and publishes it as the GitHub
+A `v*` tag with those set signs `Sparrow.exe`, rebuilds the installer around
+the signed exe, signs `SparrowSetup.exe`, and publishes it as the GitHub
 Release asset — that file is the install link. Tags without the secrets still
 publish, unsigned.
 
@@ -177,11 +177,11 @@ without it every signature dies when the certificate expires.
 ```powershell
 # local fallback only — CI uses Azure Trusted Signing
 signtool sign /tr http://timestamp.digicert.com /td sha256 /fd sha256 `
-  /a dist\Mnemos\Mnemos.exe
+  /a dist\Sparrow\Sparrow.exe
 iscc packaging\mnemos.iss          # rebuild the installer AFTER signing the exe
 signtool sign /tr http://timestamp.digicert.com /td sha256 /fd sha256 `
-  /a dist\MnemosSetup.exe
-signtool verify /pa /v dist\MnemosSetup.exe
+  /a dist\SparrowSetup.exe
+signtool verify /pa /v dist\SparrowSetup.exe
 ```
 
 ## 8. Feeding fixes back

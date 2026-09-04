@@ -1,4 +1,4 @@
-"""Mnemos FastAPI entrypoint.  Run:  uvicorn app.main:app --reload"""
+"""Sparrow FastAPI entrypoint.  Run:  uvicorn app.main:app --reload"""
 from __future__ import annotations
 
 import asyncio
@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api.routes import router, start_all, stop_all
 from app.api.adoption import router as adoption_router
+from app.api.web_ingest import router as web_ingest_router
 from app.config import settings
 from app.events import bus
 from app.services.api_auth import (
@@ -21,16 +22,17 @@ from app.services.api_auth import (
 )
 from app.services.memory import memory
 
-app = FastAPI(title="Mnemos", version="0.1.0")
+app = FastAPI(title="Sparrow", version="0.1.0")
 app.add_middleware(LanApiAuthMiddleware)
 # Outer: CSRF runs first (plan 6.4) — cross-origin POSTs rejected.
 app.add_middleware(CsrfProtectMiddleware)
 app.include_router(router)
 app.include_router(adoption_router)
+app.include_router(web_ingest_router)
 
 
 # --- active-minute marker (WS-A) --------------------------------------------
-# "Active" means the human was in front of Mnemos, not that a process was up.
+# "Active" means the human was in front of Sparrow, not that a process was up.
 # A request to chat / search / the Console / an approval marks the current UTC
 # minute; the ledger dedupes minute-stamps, so a polling page still counts as
 # one minute. Nothing about the request is recorded — no path, no query, no
@@ -116,6 +118,32 @@ async def _startup() -> None:
                       name="ollama-warmup", daemon=True).start()
     except Exception as exc:
         print(f"[ollama_text] warmup hook skipped ({exc}).")
+    # Web Perceive Phase 3: pre-warm the ASR engine so the FIRST WebSocket
+    # capture doesn't stall behind a model download/load (a GPU box pulling
+    # large-v3 is multi-GB; even 'small' costs seconds). Default on for
+    # headless (hosted) instances where /ingest/audio is the only feeder;
+    # QUILL_ASR_WARMUP=1/0 overrides either way. Own thread — boot and
+    # /health never wait on it.
+    try:
+        import os as _os
+        _warm = _os.environ.get("QUILL_ASR_WARMUP", "")
+        _headless = _os.environ.get("QUILL_HEADLESS") in ("1", "true", "True")
+        if _warm in ("1", "true", "True") or (
+                _headless and _warm not in ("0", "false", "False")):
+            import threading as _t
+
+            def _warm_asr() -> None:
+                try:
+                    from app.services import asr as _asr
+                    _asr.get_engine()
+                    print("[asr] warmup complete.")
+                except Exception as exc:
+                    print(f"[asr] warmup failed ({exc}).")
+
+            _t.Thread(target=_warm_asr, name="asr-warmup",
+                      daemon=True).start()
+    except Exception as exc:
+        print(f"[asr] warmup hook skipped ({exc}).")
     # Version manifest check (WS-C): one unconditional GET of a static file,
     # off with QUILL_UPDATE_CHECK=0. Notification only — never downloads.
     try:
@@ -377,8 +405,20 @@ async def _startup() -> None:
                         project_rollup.run()
                 except Exception as exc:
                     print(f"[project_rollup] skipped ({exc}).")
+                # Freshly minted candidate people get one semantic look from
+                # the model (person vs org/tool/junk) now that their edges
+                # exist. Best-effort; the job itself no-ops when nothing new.
+                try:
+                    from app.services import person_adjudicator
+                    if person_adjudicator.enabled():
+                        worker.enqueue("person_adjudicate", unique=True)
+                except Exception as exc:
+                    print(f"[person_adjudicate] enqueue skipped ({exc}).")
 
             worker.register("graph", _graph_job)
+            from app.services import person_adjudicator
+            worker.register("person_adjudicate",
+                            lambda _p: person_adjudicator.run_job())
             # Typed chat -> memory: /chat stores a TEXT event + queues this.
             from app.services import chat_ingest
             worker.register("chat_ingest", chat_ingest.run_job)
@@ -632,7 +672,7 @@ async def _shutdown() -> None:
 def api_stub() -> dict:
     """Machine-readable service stub (formerly served at `/`)."""
     return {
-        "name": "Mnemos",
+        "name": "Sparrow",
         "milestone": "Personal Intelligence Platform",
         "endpoints": [
             "GET /", "GET /welcome", "GET /welcome/status",

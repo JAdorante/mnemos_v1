@@ -27,3 +27,6 @@ test_full_suite_out.txt
 
 # Claude Code agent worktrees (local orchestration state)
 /.claude/
+
+# Unsloth JIT-compiled kernels (regenerated per training run)
+/unsloth_compiled_cache/

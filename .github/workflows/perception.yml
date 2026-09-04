@@ -8,7 +8,7 @@
 #
 # Two jobs, split by what each platform is for. Unit tests run on Linux for
 # fast feedback and load no models at all. The harness runs a real engine on
-# Windows, because Windows is the platform Mnemos ships on and the audio stack
+# Windows, because Windows is the platform Sparrow ships on and the audio stack
 # there is where the surprises live.
 name: perception
 

@@ -1,6 +1,6 @@
 """Parent model — the cloud tier is a user choice, not a hardcoded vendor.
 
-Mnemos runs local-first (Ollama) and escalates hard questions to a "parent"
+Sparrow runs local-first (Ollama) and escalates hard questions to a "parent"
 cloud model. Until now that parent was Anthropic by construction. This module
 makes the parent a configured account: the user connects THEIR provider —
 Anthropic, OpenAI, Google (Gemini), or xAI (Grok) — during setup, key

@@ -1,4 +1,4 @@
-# Mnemos PyInstaller spec (onedir) — the desktop build.
+# Sparrow PyInstaller spec (onedir) — the desktop build.
 #
 #   pyinstaller packaging/mnemos.spec
 #
@@ -6,7 +6,7 @@
 # windowed app with a tray icon, and run_all.py is the console launcher for the
 # scripted install. See desktop_app.py for what the desktop build deliberately
 # leaves out (browser agent, Org Coordinator — both spawn
-# `[sys.executable, "some_script.py"]` children, which re-executes Mnemos.exe
+# `[sys.executable, "some_script.py"]` children, which re-executes Sparrow.exe
 # when frozen).
 #
 # torch is BUNDLED, not excluded. It is ~900 MB and it is not optional:
@@ -159,7 +159,7 @@ pyz = PYZ(a.pure)  # noqa: F821
 exe = EXE(  # noqa: F821
     pyz, a.scripts, [],
     exclude_binaries=True,
-    name="Mnemos",
+    name="Sparrow",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -171,21 +171,21 @@ exe = EXE(  # noqa: F821
 )
 coll = COLLECT(  # noqa: F821
     exe, a.binaries, a.datas,
-    strip=False, upx=False, name="Mnemos",
+    strip=False, upx=False, name="Sparrow",
 )
 if sys.platform == "darwin":
     app = BUNDLE(  # noqa: F821
-        coll, name="Mnemos.app",
+        coll, name="Sparrow.app",
         icon=str(ROOT / "packaging" / "mnemos.ico"),
-        bundle_identifier="local.mnemos",
+        bundle_identifier="app.ravenry.sparrow",
         info_plist={
             # macOS refuses the capture the product exists for unless the app
             # says why, and the refusal is silent — the prompt simply never
             # appears and the mic returns zeros.
             "NSMicrophoneUsageDescription":
-                "Mnemos transcribes meetings you explicitly start recording.",
+                "Sparrow transcribes meetings you explicitly start recording.",
             "NSCameraUsageDescription":
-                "Mnemos uses the camera only for capture sources you turn on.",
+                "Sparrow uses the camera only for capture sources you turn on.",
             "LSMinimumSystemVersion": "13.0",
         },
     )

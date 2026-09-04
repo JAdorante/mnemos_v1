@@ -48,7 +48,7 @@ pynput>=1.7.6; sys_platform == "win32" or sys_platform == "linux"   # passive mo
 pyarrow>=14.0                   # perception Parquet export (Phase D)
 psutil>=5.9                     # criterion-9 CPU/RSS harness (bench_perception_overhead)
 
-# --- M4: text-to-speech, Mnemos speaks back (see services/voice.py) ---------
+# --- M4: text-to-speech, Sparrow speaks back (see services/voice.py) ---------
 edge-tts>=6.1               # free neural (online) voices — the "human" default
 pyttsx3>=2.90               # offline TTS (non-Windows fallback)
 pywin32>=306; sys_platform == "win32"   # Windows SAPI5 SpVoice (offline backend)

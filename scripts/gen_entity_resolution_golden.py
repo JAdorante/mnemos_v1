@@ -141,7 +141,7 @@ def build_cases() -> list[dict]:
 
     # --- reject junk / non-persons ---
     for junk in ("My Contacts", "My Files", "QA and CTO", "set it to",
-                 "Mnemos", "C:/Users"):
+                 "Sparrow", "C:/Users"):
         slug = junk.lower().replace(" ", "-").replace("/", "-")[:24]
         cases.append(_case(
             f"reject-{slug}",

@@ -12,7 +12,7 @@ participation. Two shapes, deliberately different:
   ``scripts/restore_backup.py``.
 
 * **Takeout** (:func:`takeout_stream`) — portable JSONL a human can read
-  without Mnemos installed: events, facts, people, relations, one file each,
+  without Sparrow installed: events, facts, people, relations, one file each,
   plus a README. ``redact=True`` runs the text fields through the crash-report
   redactor for a share-safe variant.
 
@@ -364,16 +364,16 @@ def write_backup(dest: Path, root: Path | None = None, *, store=None,
 
 
 # --------------------------------------------------------------------------
-# takeout — portable JSONL a human can read without Mnemos
+# takeout — portable JSONL a human can read without Sparrow
 # --------------------------------------------------------------------------
-_README = """Mnemos takeout
+_README = """Sparrow takeout
 ==============
 
-This is your memory, in plain files. Nothing here needs Mnemos to read.
+This is your memory, in plain files. Nothing here needs Sparrow to read.
 
   events.jsonl     one JSON object per line: every captured moment
                    (time is UTC epoch seconds; audio_path points into media/)
-  facts.jsonl      what Mnemos extracted: tasks, commitments, claims, questions
+  facts.jsonl      what Sparrow extracted: tasks, commitments, claims, questions
   people.jsonl     the people it knows about, with aliases
   relations.jsonl  the graph edges between them
   media/           the referenced audio and frame files, kept at the same
@@ -388,7 +388,7 @@ REDACTED note: if this export was made with redact=true, API keys and
 personal-class lines have been scrubbed from the text fields. That variant is
 for sharing; take an unredacted one for yourself.
 
-This is an export, not a backup. To restore a working Mnemos, use the backup
+This is an export, not a backup. To restore a working Sparrow, use the backup
 zip (Privacy controls -> "Back up my memory") with scripts/restore_backup.py.
 """
 

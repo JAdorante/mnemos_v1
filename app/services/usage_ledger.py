@@ -175,7 +175,7 @@ def _day_offset(day: str, base: str) -> int:
 
 
 def day_is_active(row: dict[str, Any]) -> bool:
-    """An *active day* is a day the human actually used Mnemos.
+    """An *active day* is a day the human actually used Sparrow.
 
     Defined as at least one active minute — a minute in which a request hit
     chat, search, the Console or an approval. A bare app start does not count:

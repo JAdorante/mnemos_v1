@@ -1,4 +1,4 @@
-"""Unit tests for app.services.phone_channel — the direct phone -> Mnemos
+"""Unit tests for app.services.phone_channel — the direct phone -> Sparrow
 channel (pairing, per-device tokens, authenticated ingest).
 
 Pin the trust model: codes are single-use, expiring, and brute-force-limited;
@@ -131,7 +131,7 @@ class IngestTests(PhoneChannelBase):
         ev = self.events[-1]
         self.assertEqual(ev.source, "phone.note")
         self.assertEqual(ev.modality, Modality.SYSTEM)
-        self.assertEqual(ev.epistemic, "accepted")   # user told Mnemos directly
+        self.assertEqual(ev.epistemic, "accepted")   # user told Sparrow directly
         self.assertEqual(ev.meta["origin"], "phone")
         self.assertEqual(ev.meta["device"], "Test iPhone")
 
@@ -297,7 +297,7 @@ class OutboxTests(PhoneChannelBase):
         self.assertFalse(pc.queue_outbox("notify", "one too many")["ok"])
 
     def test_query_roundtrip(self) -> None:
-        # Mnemos asks; the phone drains the query and answers with kind="data",
+        # Sparrow asks; the phone drains the query and answers with kind="data",
         # linking back via meta.reply_to — the pseudo-read loop.
         q = pc.queue_outbox("query", "battery")
         self.assertTrue(q["ok"], q)

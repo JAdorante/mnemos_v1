@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Full-system feature smoke — tiered orchestrator.
 
-Exercises Mnemos the way a tester would: seed memory, hit APIs, load UI pages,
+Exercises Sparrow the way a tester would: seed memory, hit APIs, load UI pages,
 and (optionally) run deeper eval harnesses.
 
     python scripts/feature_smoke.py              # Tier 1: API (~30s, no API key)
@@ -714,7 +714,7 @@ def _print_report(report: Report) -> None:
         by_tier.setdefault(c.tier, []).append(c)
 
     print("=" * 62)
-    print("  Mnemos feature smoke")
+    print("  Sparrow feature smoke")
     print(f"  scratch: {report.scratch}")
     print("=" * 62)
     for tier, checks in by_tier.items():
@@ -735,7 +735,7 @@ def _print_report(report: Report) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="Mnemos full-system feature smoke")
+    ap = argparse.ArgumentParser(description="Sparrow full-system feature smoke")
     ap.add_argument("--ui", action="store_true", help="Tier 2: Playwright UI pages")
     ap.add_argument("--live", action="store_true",
                     help="Tier 3: browser-agent routing eval (needs API key)")

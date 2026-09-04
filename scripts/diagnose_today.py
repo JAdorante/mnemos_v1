@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Diagnose the /today "Couldn't reach Mnemos" banner.
+"""Diagnose the /today "Couldn't reach Sparrow" banner.
 
 Run it while `python run_all.py` is up, then paste the output:
 

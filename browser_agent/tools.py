@@ -135,9 +135,9 @@ ACTION_TOOLS = [
             "form, purchasing, deleting, or changing a saved record. Present a "
             "structured, source-grounded approval packet: WHAT will happen, the "
             "exact content to review, WHY you are doing it, and the SOURCE in "
-            "Mnemos's memory that prompted it. Fill `why`/`source` from the "
+            "Sparrow's memory that prompted it. Fill `why`/`source` from the "
             "RELEVANT MEMORIES / conversation context when the task came from "
-            "something Mnemos heard or a promise the user made — approval should "
+            "something Sparrow heard or a promise the user made — approval should "
             "be grounded, not just 'Can I send this?'. Only perform the action "
             "if it is approved; if declined, do not retry it."
         ),
@@ -161,7 +161,7 @@ ACTION_TOOLS = [
                          "description": "the full content to review — email body, "
                          "form field values, the record being changed"},
                 "why": {"type": "string",
-                        "description": "why this is being done, grounded in what Mnemos "
+                        "description": "why this is being done, grounded in what Sparrow "
                         "knows, e.g. 'You promised this follow-up after today's meeting.'"},
                 "source": {"type": "string",
                            "description": "the memory this came from, e.g. "
@@ -445,7 +445,7 @@ DESKTOP_TOOLS = [
     },
 ]
 
-# The Mnemos intent/action-router envelope (PRD "Planner LLM Service" output).
+# The Sparrow intent/action-router envelope (PRD "Planner LLM Service" output).
 # Produced once per user request, before step planning, to decide whether a web
 # action is even needed and whether it would require user approval.
 ROUTE_SCHEMA = {

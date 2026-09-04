@@ -93,7 +93,7 @@ _SCHEMA = {
 }
 
 _SYSTEM = (
-    "You are Mnemos's reflection engine. You are given a packet of facts Mnemos "
+    "You are Sparrow's reflection engine. You are given a packet of facts Sparrow "
     "learned over a period (each tagged with a [fact_id]), the currently open "
     "loops (tasks/commitments, some aging), and the prior reflection's summary. "
     "Produce a grounded reflection: what changed, what matters, what is "
@@ -269,7 +269,7 @@ class Reflector:
         return {"reflection_id": rid, "summary": summary, "items": n,
                 "grounded_citations": kept, **counts}
 
-    # --- scheduling helper (time trigger; Mnemos has no cron yet) -----------
+    # --- scheduling helper (time trigger; Sparrow has no cron yet) -----------
     def due_for(self, scope: str = "daily", max_age_h: float = 20.0) -> bool:
         """True if no reflection of this scope exists within `max_age_h` — the
         cheap 'is a nightly run due?' check used to auto-enqueue on startup."""

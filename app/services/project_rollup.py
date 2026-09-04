@@ -2,7 +2,7 @@
 
 The graph knows which facts each entity appears in (fact→entity `about` edges
 from the rebuild's text match and context_attribution's room stamping), but
-nothing ever rolls that up into "LanceDB belongs to Mnemos" — so the entities
+nothing ever rolls that up into "LanceDB belongs to Sparrow" — so the entities
 page is a flat list where tools and ideas float free. This computes, for each
 non-project entity, how its facts co-attribute across project entities and
 mints a single entity→project `associated_project` edge when one project

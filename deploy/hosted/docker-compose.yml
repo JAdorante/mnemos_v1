@@ -1,0 +1,49 @@
+# Sparrow hosted pilot — per-user instances (Web Perceive Phase 3).
+#
+# One service block per user; every single-user assumption in the app holds
+# because each container IS one user. Copy the block, change the name, volume
+# and token. Route /u/<user>/ (or a per-user subdomain) to that container's
+# port at the reverse proxy — TLS is MANDATORY there: getUserMedia and
+# getDisplayMedia only run in a secure context, so the /capture page is dead
+# on plain http.
+#
+#   docker compose -f deploy/hosted/docker-compose.yml up -d
+#
+# Scale note (plan): one GPU serves many users' ASR because utterances are
+# bursty, but each container loads its own model. Fine to ~20 pilot users;
+# past that, break ASR out into a shared sidecar service.
+
+services:
+  sparrow-user1:
+    build:
+      context: ../..
+      dockerfile: deploy/hosted/Dockerfile
+    image: sparrow-hosted
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8001:8000"   # reverse proxy only; never exposed directly
+    volumes:
+      - sparrow-user1-data:/srv/sparrow/data
+    environment:
+      QUILL_API_TOKEN: "${SPARROW_USER1_TOKEN:?set a per-user token}"
+      # --- GPU ASR (uncomment with the nvidia runtime + CUDA base image) ---
+      # QUILL_WHISPER_DEVICE: cuda
+      # QUILL_WHISPER_COMPUTE: float16
+      # QUILL_WHISPER_MODEL: large-v3
+      # --- local text tier (Ollama on the host GPU) ---
+      # QUILL_TEXT_LOCAL: "1"
+      # QUILL_OLLAMA_URL: http://host.docker.internal:11434
+      # --- per-user LoRA (idle trainer, hosted posture; see README) ---
+      # QUILL_IDLE_TRAIN: "1"
+      # QUILL_LORA_TAG_SUFFIX: user1        # scopes tags + pruning per user
+      # OLLAMA_HOST: host.docker.internal:11434   # ollama CLI -> shared server
+    # deploy:                       # GPU passthrough (compose >= 2.3)
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+volumes:
+  sparrow-user1-data:

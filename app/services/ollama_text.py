@@ -110,6 +110,26 @@ def split_confidence(text: str) -> tuple[str, float | None]:
     return t[:m.start()].rstrip(), conf
 
 
+def training_contract(system: str, target: str,
+                      conf: float = 0.9) -> tuple[str, str]:
+    """The (system, target) a fine-tune pair must carry to match this module's
+    INFERENCE contract for plain-text tasks: the system prompt ends with the
+    confidence-trailer instruction, and the answer ends with a parseable
+    `CONFIDENCE: 0.NN` line. Pairs trained WITHOUT this taught the adapter to
+    omit the trailer even when instructed — every answer then parsed as
+    confidence None ("unsure") and auto-escalated, which is exactly the
+    regression the Aug 18 bench caught. Verified gold targets default to 0.9:
+    the trailer's job here is preserving the FORMAT; calibration stays with
+    the router's effective-confidence layer. Idempotent on both halves."""
+    system = (system or "").rstrip()
+    if system and _CONF_TRAILER.strip() not in system:
+        system = system + _CONF_TRAILER
+    target = (target or "").rstrip()
+    if target and not _CONF_RE.search(target):
+        target = f"{target}\n\nCONFIDENCE: {max(0.0, min(1.0, conf)):.2f}"
+    return system, target
+
+
 def with_confidence(schema: dict) -> tuple[dict, bool]:
     """Return (schema', injected): schema' always carries a `confidence`
     property. injected=True means the caller's schema lacked one, so the field

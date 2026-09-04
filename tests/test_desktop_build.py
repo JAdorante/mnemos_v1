@@ -62,6 +62,28 @@ class RuntimeTests(unittest.TestCase):
     def test_windows_uses_local_not_roaming(self) -> None:
         self.assertIn("Local", str(runtime.user_data_root()))
 
+    def test_keeps_a_legacy_mnemos_data_dir(self) -> None:
+        """Rebrand must not orphan Local\\Mnemos memory from an earlier install."""
+        import tempfile
+        import shutil
+        tmp = Path(tempfile.mkdtemp(prefix="quill_legacy_"))
+        old = tmp / runtime.LEGACY_APP_DIR_NAME
+        old.mkdir()
+        env = {"LOCALAPPDATA": str(tmp)}
+        try:
+            with patch.object(runtime.sys, "platform", "win32"), \
+                    patch.dict(os.environ, env, clear=False):
+                os.environ.pop("QUILL_USER_DATA_ROOT", None)
+                self.assertEqual(runtime.user_data_root(), old)
+            (tmp / runtime.APP_DIR_NAME).mkdir()
+            with patch.object(runtime.sys, "platform", "win32"), \
+                    patch.dict(os.environ, env, clear=False):
+                os.environ.pop("QUILL_USER_DATA_ROOT", None)
+                self.assertEqual(runtime.user_data_root(),
+                                 tmp / runtime.APP_DIR_NAME)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
 
 class FrozenWriteTargetTests(unittest.TestCase):
     """Nothing the tester creates may land inside the bundle."""
@@ -79,8 +101,8 @@ class FrozenWriteTargetTests(unittest.TestCase):
 
     def test_install_root_follows_the_bundle(self) -> None:
         from app.services import wipe
-        with patch.object(runtime, "bundle_root", lambda: Path("/opt/Mnemos")):
-            self.assertEqual(wipe.install_root(), Path("/opt/Mnemos"))
+        with patch.object(runtime, "bundle_root", lambda: Path("/opt/Sparrow")):
+            self.assertEqual(wipe.install_root(), Path("/opt/Sparrow"))
 
 
 class SpecTests(unittest.TestCase):
@@ -120,6 +142,8 @@ class SpecTests(unittest.TestCase):
     def test_it_ships_an_icon(self) -> None:
         self.assertIn("mnemos.ico", self.text)
         self.assertTrue((REPO / "packaging" / "mnemos.ico").is_file())
+        self.assertTrue((REPO / "app" / "static" / "ravenry-logo.png").is_file())
+        self.assertTrue((REPO / "app" / "static" / "ravenry-mark.png").is_file())
 
     def test_the_fail_closed_config_tables_are_bundled(self) -> None:
         for name in ("source_policies.json", "model_prices.json",
@@ -138,8 +162,8 @@ class InnoTests(unittest.TestCase):
     def test_the_wipe_targets_local_appdata(self) -> None:
         """Must match runtime.user_data_root(); Roaming would also replicate
         gigabytes of meeting audio to a corporate file server."""
-        self.assertIn("{localappdata}\\Mnemos", self.text)
-        self.assertNotIn("DelTree(ExpandConstant('{userappdata}\\Mnemos')",
+        self.assertIn("{localappdata}\\Sparrow", self.text)
+        self.assertNotIn("DelTree(ExpandConstant('{userappdata}\\Sparrow')",
                          self.text)
 
     def test_it_still_clears_the_runtime_session_dirs(self) -> None:
@@ -225,7 +249,7 @@ class DesktopAppTests(unittest.TestCase):
         self.assertEqual(url, "http://127.0.0.1:8000")
 
     def test_the_desktop_build_does_not_spawn_script_children(self) -> None:
-        """run_all.py's browser-agent/coordinator children re-exec Mnemos.exe."""
+        """run_all.py's browser-agent/coordinator children re-exec Sparrow.exe."""
         text = (REPO / "desktop_app.py").read_text()
         self.assertNotIn("exec_webapp.py", text)
         self.assertNotIn("Popen", text)
@@ -294,11 +318,11 @@ class ReleaseWorkflowTests(unittest.TestCase):
 
     def test_it_builds_the_installer_not_just_the_folder(self) -> None:
         self.assertIn("ISCC.exe", self.text)
-        self.assertIn("MnemosSetup.exe", self.text)
+        self.assertIn("SparrowSetup.exe", self.text)
 
     def test_a_tag_publishes_the_setup_exe_as_the_install_link(self) -> None:
         self.assertIn("action-gh-release", self.text)
-        self.assertIn("files: dist/MnemosSetup.exe", self.text)
+        self.assertIn("files: dist/SparrowSetup.exe", self.text)
 
     def test_tags_sign_with_trusted_signing_when_secrets_exist(self) -> None:
         self.assertIn("trusted-signing-action", self.text)

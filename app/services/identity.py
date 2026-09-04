@@ -5,7 +5,7 @@ retrieval: "what are you?" and "who am I?". Before this, both fell through to
 fuzzy timeline search, so "who am I?" could miss the very fact that defines the
 user. This resolves both deterministically:
 
-  * the ASSISTANT's identity is a product constant (Mnemos) — general, the
+  * the ASSISTANT's identity is a product constant (Sparrow) — general, the
     same on every install;
   * the USER's identity is read from THIS install's own onboarding profile /
     accepted memory at call time, never hardcoded — so on another person's
@@ -45,7 +45,7 @@ def brand() -> str:
         from app.api.mnemos_theme import BRAND
         return BRAND
     except Exception:
-        return "Mnemos"
+        return "Sparrow"
 
 
 def assistant_identity() -> dict:

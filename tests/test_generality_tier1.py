@@ -72,7 +72,7 @@ class A2ExampleTermsTests(unittest.TestCase):
                 + props["relations"]["description"]
                 + appr["input_schema"]["properties"]["summary"]["description"])
         for banned in ("Justin", "Marc", "Abby", "Chris", "TechCorp",
-                       "Dell Capital", "'Mnemos's"):
+                       "Dell Capital", "'Sparrow's"):
             self.assertNotIn(banned, blob)
 
     def test_opt_in_pulls_user_vocabulary(self) -> None:

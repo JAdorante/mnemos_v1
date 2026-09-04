@@ -144,7 +144,7 @@ class AttachedContextDoesNotPickTheSurfaceTests(unittest.TestCase):
         self.assertIsNone(self._sent("what is open with Justin?", None)["surface"])
 
     def test_the_attach_header_carries_no_fast_lane_trigger_word(self) -> None:
-        # The header Mnemos prepends to an upload is itself part of the goal on
+        # The header Sparrow prepends to an upload is itself part of the goal on
         # any path that still scans it — it must not read as an instruction.
         # (Aug 26 2026: "Answer from ITS text below" matched \btext\b.)
         from app.services import attachments

@@ -59,7 +59,7 @@ KEEP_NAMES = ("model_prices.json", "source_policies.json", "score_config.json")
 # should not have to redeem a second invite code.
 CREDENTIAL_NAMES = (".credentials.env", ".env")
 
-RECEIPT_PREFIX = "mnemos-deletion-receipt"
+RECEIPT_PREFIX = "sparrow-deletion-receipt"
 
 
 class WipeRefused(RuntimeError):
@@ -121,7 +121,7 @@ def targets() -> list[dict[str, Any]]:
 
 
 def _guard(path: Path) -> None:
-    """Refuse a path that is obviously not a Mnemos data directory.
+    """Refuse a path that is obviously not a Sparrow data directory.
 
     ``QUILL_DATA_DIR`` is operator-settable, so a typo (``/`` or ``~``) must be
     refused here rather than discovered afterwards.
@@ -393,12 +393,12 @@ def wipe(confirm: str, *, full: bool = False, credentials: bool = False,
         "failures": failures,
         "complete": not failures,
         "statement": (
-            "Every Mnemos capture directory on this machine was emptied at the "
-            "time above. Mnemos holds no copy elsewhere: there is no server, "
+            "Every Sparrow capture directory on this machine was emptied at the "
+            "time above. Sparrow holds no copy elsewhere: there is no server, "
             "no sync, and no backup outside this machine."
             if not failures else
             "Deletion ran but some paths could not be removed — see failures. "
-            "Close Mnemos and re-run to clear them."),
+            "Close Sparrow and re-run to clear them."),
     }
     path = _receipt_dir() / f"{RECEIPT_PREFIX}-{int(stamp)}.json"
     try:

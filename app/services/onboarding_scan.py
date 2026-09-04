@@ -208,7 +208,7 @@ def _project_roots() -> list[Path]:
              "repos", "git", "workspace", "Documents", "Desktop")
     roots = [home / n for n in names]
     # Siblings of the current working directory surface the active project's
-    # neighbors (e.g. the folder Mnemos itself lives in).
+    # neighbors (e.g. the folder Sparrow itself lives in).
     try:
         roots.append(Path.cwd().parent)
     except Exception:

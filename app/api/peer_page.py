@@ -1,4 +1,4 @@
-"""Team page (/peer): pair two Mnemos instances, set each peer's disclosure
+"""Team page (/peer): pair two Sparrow instances, set each peer's disclosure
 policy, and decide the approval queue. The page only renders state and calls
 the /peer/* endpoints — every rule (single-use codes, personal-never-auto,
 offer-by-default) lives in services/peer_channel.py, not here."""
@@ -72,7 +72,7 @@ td{border-top:1px solid var(--line);padding:9px 8px;vertical-align:top}
   <span class="spacer"></span></div>
 <div class="wrap">
   <div id="peerErr" class="fetch-err" hidden role="alert" style="margin-bottom:18px;padding:10px 14px;border-radius:10px;background:rgba(154,63,63,.08);border:1px solid rgba(154,63,63,.25);color:var(--danger);font-size:13px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-    <span>Couldn't reach Mnemos — retrying…</span>
+    <span>Couldn't reach Sparrow — retrying…</span>
     <button type="button" id="peerRetry">Retry now</button>
   </div>
   <h1>Team</h1>

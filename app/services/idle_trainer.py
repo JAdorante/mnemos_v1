@@ -21,6 +21,12 @@ on at 3am Sunday, and retraining without new data is pure waste. The decision
 function is pure (`should_run`) — every environmental fact arrives via a
 `probes` dict so tests need no OS, GPU, or clock.
 
+Hosted posture (QUILL_HEADLESS=1): the keyboard/battery probes are replaced —
+"idle" becomes capture-quiet (seconds since the last ingested event) and the
+AC check always passes. Training runs natively (train_lora's Linux path, no
+WSL) and publishes a per-user tag on the shared Ollama via
+QUILL_LORA_TAG_SUFFIX.
+
 Storage stays O(1) across runs: train_lora.py itself deletes merge/GGUF
 intermediates and prunes superseded Ollama tags + run dirs after the gate.
 
@@ -80,9 +86,22 @@ def should_run(state: dict, probes: dict) -> tuple[bool, str]:
     last = float(state.get("last_run_ts") or 0)
     if now - last < wait_days * 86400:
         return False, f"rate cap: {wait_days:.0f}d between runs not yet reached"
-    new_pairs = int(probes.get("pairs") or 0) - int(state.get("pairs_at_last_run") or 0)
+    # Cold-start bootstrap: a NEVER-trained profile whose ORGANIC pairs are
+    # still short of the organic bar, but whose real + synthetic total
+    # reaches the green light, gets its FIRST run without waiting for
+    # min_new_pairs labels or exemplar saturation — the automatic-at-signup
+    # path. Installs with enough organic signal take the normal path even on
+    # their first run; every later run needs organic growth like before; and
+    # the promotion gate (real-holdout bench) still decides what ships.
+    organic = int(probes.get("pairs") or 0)
     min_new = int(probes.get("min_new_pairs", 150))
-    if new_pairs < min_new:
+    total = organic + int(probes.get("synth_pairs") or 0)
+    never_trained = not (state.get("last_run_ts")
+                         or state.get("pairs_at_last_run"))
+    bootstrap = (never_trained and organic < min_new
+                 and total >= int(probes.get("bootstrap_min", 100)))
+    new_pairs = organic - int(state.get("pairs_at_last_run") or 0)
+    if new_pairs < min_new and not bootstrap:
         return False, f"only {new_pairs} new labeled pairs (need {min_new})"
     if float(probes.get("idle_s") or 0) < float(probes.get("min_idle_s", 1200)):
         return False, "user is active"
@@ -95,10 +114,16 @@ def should_run(state: dict, probes: dict) -> tuple[bool, str]:
     # E.2: LoRA is the graduation path — it fires when a task_type has
     # saturated the exemplar store, not on raw pair count alone. Probes that
     # don't supply the fact (older callers/tests) default to permissive.
-    if not probes.get("lora_saturated", True):
+    # The cold-start bootstrap run skips this: its pairs are parent-distilled,
+    # not exemplar-derived, so saturation has nothing to measure yet.
+    if not probes.get("lora_saturated", True) and not bootstrap:
         return False, ("no task type at LoRA saturation "
                        "(exemplar retrieval still improving — see "
                        "data/exemplar_ab_report.json)")
+    if bootstrap:
+        return True, (f"cold-start bootstrap: {total} pairs "
+                      f"({probes.get('synth_pairs') or 0} synthetic); "
+                      f"idle, {free:.0f} GB free")
     return True, f"{new_pairs} new pairs; idle, AC power, {free:.0f} GB free"
 
 
@@ -119,6 +144,30 @@ def idle_seconds() -> float:
         return max(0.0, (ctypes.windll.kernel32.GetTickCount() - lii.dwTime) / 1000.0)
     except Exception:
         return 0.0   # unknown -> "active": never train over the user
+
+
+def capture_idle_seconds() -> float:
+    """Hosted-instance idleness: seconds since the last INGESTED event.
+
+    A headless container has no keyboard, mouse, or battery — the desktop
+    probes are meaningless there. What "don't train over the user" means in
+    that posture is "don't train while capture is flowing": the browser mic /
+    tab stream is the user's presence signal. Store failure or an empty
+    events table reads as active (0.0) — never train on an unknown."""
+    try:
+        from app.storage import get_store
+        rows = get_store().recent_events(limit=1)
+        if not rows:
+            return 0.0
+        return max(0.0, time.time() - float(rows[0].get("time") or 0))
+    except Exception:
+        return 0.0
+
+
+def hosted_mode() -> bool:
+    """Headless instances (QUILL_HEADLESS=1) swap the desktop probes for
+    capture-quiet idleness and skip the battery check entirely."""
+    return _env("QUILL_HEADLESS", "0") not in ("0", "false", "False")
 
 
 def on_ac_power() -> bool:
@@ -222,6 +271,62 @@ def lora_saturated_probe() -> bool:
         return True              # probe failure → legacy gates only
 
 
+def synth_path() -> Path:
+    """Where the parent-distilled synthetic pairs live (train-only merge)."""
+    raw = os.environ.get("QUILL_LORA_SYNTHETIC")
+    return Path(raw) if raw else _ROOT / "data" / "lora" / "synthetic.jsonl"
+
+
+def synth_pair_count() -> int:
+    try:
+        p = synth_path()
+        if not p.is_file():
+            return 0
+        return sum(1 for ln in p.read_text(encoding="utf-8-sig").splitlines()
+                   if ln.strip())
+    except Exception:
+        return 0
+
+
+def fact_count(limit: int = 200) -> int:
+    """How much memory exists to ground synthetic questions in (capped scan)."""
+    try:
+        from app.storage import get_store
+        return len(get_store().list_facts(limit=limit))
+    except Exception:
+        return 0
+
+
+def synth_bootstrap_due(state: dict, probes: dict) -> tuple[bool, str]:
+    """Go/no-go for the automatic synthetic bootstrap, pure. Fires once per
+    install (state['synth_done']), only while organic pairs are short of the
+    green light, only once the memory graph has enough substance to ground
+    questions in, only on the same idle window as training, and at most once
+    a day after a failure."""
+    if not probes.get("synth_enabled", True):
+        return False, "synthetic bootstrap disabled"
+    if not probes.get("enabled"):
+        return False, "idle training disabled"
+    if state.get("synth_done"):
+        return False, "bootstrap already completed"
+    bootstrap_min = int(probes.get("bootstrap_min", 100))
+    pairs = int(probes.get("pairs") or 0)
+    if pairs >= bootstrap_min:
+        return False, f"{pairs} organic pairs — no bootstrap needed"
+    if int(probes.get("synth_pairs") or 0) + pairs >= bootstrap_min:
+        return False, "synthetic already fills the gap"
+    facts = int(probes.get("facts_n") or 0)
+    if facts < int(probes.get("min_facts", 10)):
+        return False, (f"only {facts} facts in memory — too little to "
+                       "ground questions in yet")
+    if float(probes.get("idle_s") or 0) < float(probes.get("min_idle_s", 1200)):
+        return False, "user is active"
+    now = float(probes.get("now") or time.time())
+    if now - float(state.get("synth_last_ts") or 0) < 86400:
+        return False, "bootstrap attempted in the last day"
+    return True, f"{pairs} organic pairs + {facts}+ facts — generating"
+
+
 def _notify_chat(msg: str) -> None:
     try:
         from app.services import agent_bridge
@@ -236,12 +341,13 @@ class IdleTrainer:
         self._last_reason = ""
 
     def _probes(self) -> dict:
+        hosted = hosted_mode()
         return {
             "enabled": _env("QUILL_IDLE_TRAIN", "0") not in ("0", "false", "False"),
             "now": time.time(),
             "pairs": pair_count(),
-            "idle_s": idle_seconds(),
-            "on_ac": on_ac_power(),
+            "idle_s": capture_idle_seconds() if hosted else idle_seconds(),
+            "on_ac": True if hosted else on_ac_power(),
             "free_gb": free_gb(),
             "min_new_pairs": int(_env("QUILL_IDLE_TRAIN_MIN_NEW_PAIRS", "150")),
             "min_idle_s": float(_env("QUILL_IDLE_TRAIN_IDLE_MIN", "20")) * 60,
@@ -249,6 +355,13 @@ class IdleTrainer:
             "min_days": float(_env("QUILL_IDLE_TRAIN_MIN_DAYS", "7")),
             "max_fails": int(_env("QUILL_IDLE_TRAIN_MAX_FAILS", "3")),
             "lora_saturated": lora_saturated_probe(),
+            # Cold-start bootstrap (synthetic_pairs.py) — automatic-at-signup.
+            "synth_enabled": _env("QUILL_SYNTH_BOOTSTRAP", "1")
+            not in ("0", "false", "False"),
+            "synth_pairs": synth_pair_count(),
+            "bootstrap_min": int(_env("QUILL_LORA_BOOTSTRAP_MIN", "100")),
+            "min_facts": int(_env("QUILL_SYNTH_MIN_FACTS", "10")),
+            "facts_n": fact_count(),
         }
 
     def tick(self) -> str:
@@ -274,6 +387,15 @@ class IdleTrainer:
                 escalation_router.maybe_retrain()
         except Exception as exc:
             print(f"[idle_trainer] router retrain skipped ({exc}).")
+        # Cold-start bootstrap: a new profile short of the green light gets
+        # its synthetic pairs generated here — once, on the idle window —
+        # so the personal-model path is automatic from signup onward. After
+        # this fills the gap, should_run's bootstrap branch fires the first
+        # training run on the next green tick.
+        try:
+            probes = self._maybe_synth_bootstrap(state, probes)
+        except Exception as exc:
+            print(f"[idle_trainer] synth bootstrap skipped ({exc}).")
         go, reason = should_run(state, probes)
         if reason != self._last_reason:
             print(f"[idle_trainer] {reason}")
@@ -281,6 +403,35 @@ class IdleTrainer:
         if go:
             self._train(state)
         return reason
+
+    def _maybe_synth_bootstrap(self, state: dict, probes: dict) -> dict:
+        """Run the one-time synthetic generation when due; returns probes
+        (refreshed with the new synthetic count on success). Failures back
+        off a day via synth_last_ts; success sets synth_done."""
+        due, reason = synth_bootstrap_due(state, probes)
+        if not due:
+            return probes
+        print(f"[idle_trainer] synthetic bootstrap: {reason}")
+        state["synth_last_ts"] = time.time()
+        save_state(state)
+        try:
+            sys.path.insert(0, str(_ROOT / "scripts"))
+            import synthetic_pairs as sp
+            need = int(probes["bootstrap_min"]) - int(probes.get("pairs") or 0)
+            n = min(max(need, 10), int(_env("QUILL_SYNTH_N", "45")))
+            res = sp.generate_pairs(n=n, out=synth_path(), append=True)
+        except Exception as exc:
+            print(f"[idle_trainer] synthetic generation failed ({exc}); "
+                  "retrying tomorrow.")
+            return probes
+        if res.get("generated"):
+            state["synth_done"] = True
+            save_state(state)
+            _notify_chat(
+                f"I generated {res['generated']} practice examples from your "
+                "memory graph to bootstrap your personal model — training "
+                "will start automatically during a quiet window.")
+        return {**probes, "synth_pairs": synth_pair_count()}
 
     def _train(self, state: dict) -> None:
         started = time.time()

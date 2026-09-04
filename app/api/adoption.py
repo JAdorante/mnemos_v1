@@ -286,7 +286,7 @@ def export_backup():
 
 @router.api_route("/export/takeout", methods=["GET", "POST"])
 def export_takeout(redact: bool = False):
-    """Portable JSONL export a human can read without Mnemos installed.
+    """Portable JSONL export a human can read without Sparrow installed.
 
     `redact=true` runs text fields through the crash-report redactor for a
     share-safe variant — take an unredacted one for yourself.
@@ -667,7 +667,7 @@ def _bootstrap_models() -> bool:
     """Fetch the speech/embedding weights, in-process.
 
     Deliberately not `[sys.executable, "scripts/download_models.py"]`: in a
-    frozen build `sys.executable` is `Mnemos.exe`, so that spawns a second copy
+    frozen build `sys.executable` is `Sparrow.exe`, so that spawns a second copy
     of the whole app instead of running the script — and `scripts/` is not in
     the bundle to run anyway. Importing the same module works in both builds.
     """
@@ -736,7 +736,7 @@ def _bootstrap_ollama() -> bool:
             unfinished = True
     if unfinished:
         _bootstrap_log(
-            "ollama: pulls did not finish; Mnemos will run cloud-only.")
+            "ollama: pulls did not finish; Sparrow will run cloud-only.")
     return True
 
 

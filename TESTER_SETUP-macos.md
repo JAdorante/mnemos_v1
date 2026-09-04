@@ -1,6 +1,6 @@
-# Mnemos — Tester Setup (macOS)
+# Sparrow — Tester Setup (macOS)
 
-Mnemos is a local-first personal memory assistant. Everything it captures and
+Sparrow is a local-first personal memory assistant. Everything it captures and
 remembers stays on **your** Mac; it calls a frontier model (Claude by default)
 only when the local models aren't confident.
 
@@ -20,7 +20,7 @@ only when the local models aren't confident.
 
 ## Install (one time)
 
-1. Download the Mnemos ZIP from the link you were given and move the extracted
+1. Download the Sparrow ZIP from the link you were given and move the extracted
    folder somewhere permanent (e.g. your home folder). **Do not run it from
    Downloads** — macOS treats that folder specially and it will fight you.
 2. Open the folder and **double-click `install.command`**.
@@ -49,7 +49,7 @@ is used. All of them are optional except the first:
 | **Camera** | Only if you turn on the optional webcam source | Nothing else changes |
 
 If you dismissed a prompt by accident: **System Settings → Privacy & Security →
-Microphone**, and enable the entry for Terminal (or Mnemos, if you started it
+Microphone**, and enable the entry for Terminal (or Sparrow, if you started it
 from the app bundle).
 
 ### Bring your own key (optional)
@@ -112,13 +112,13 @@ Under Privacy controls: **"Back up my memory"** (restorable zip, secrets
 excluded) and **"Export my data"** (portable `.jsonl` readable in any editor).
 Keep a backup somewhere other than this Mac — `data/` is the only copy.
 
-To restore, quit Mnemos first, then from the Mnemos folder:
+To restore, quit Sparrow first, then from the Sparrow folder:
 
 ```bash
 .venv/bin/python scripts/restore_backup.py ~/Downloads/mnemos-backup-....zip data
 ```
 
-It refuses to run while Mnemos is open and swaps the folder atomically, so an
+It refuses to run while Sparrow is open and swaps the folder atomically, so an
 interrupted restore leaves your old data intact.
 
 ## Updating
@@ -126,7 +126,7 @@ interrupted restore leaves your old data intact.
 Download the newer ZIP, replace the folder (keeping your `data/`, `.env` and
 `.credentials.env`), and re-run `install.command` — it skips anything already
 done. If macOS complains after an update, run this once in Terminal from the
-Mnemos folder:
+Sparrow folder:
 
 ```bash
 xattr -dr com.apple.quarantine .
@@ -139,25 +139,25 @@ bug report.
 
 Two clicks, either of them instant:
 
-* **Stop all** on the recording bar (bottom of any Mnemos page) — halts every
+* **Stop all** on the recording bar (bottom of any Sparrow page) — halts every
   source immediately and leaves them off until you turn them back on.
 * **Privacy controls → Stop capture now** — the same thing, next to the
   explanation of what each source does.
 
-Both revoke the allow-list *and* stop the running pipelines. Closing Mnemos
+Both revoke the allow-list *and* stop the running pipelines. Closing Sparrow
 also stops everything. Revoking the microphone in System Settings → Privacy &
-Security works too, and Mnemos will say the source is unavailable rather than
+Security works too, and Sparrow will say the source is unavailable rather than
 failing silently.
 
 ## Deleting your data
 
 **In the app:** Privacy controls → **Delete everything**. It shows you how much
 is stored and where, asks you to type `DELETE MY MEMORY`, then empties every
-directory Mnemos writes and saves a **deletion receipt** — a small JSON file
+directory Sparrow writes and saves a **deletion receipt** — a small JSON file
 listing each directory and its size before deletion. Nothing personal is in the
 receipt; it exists so you can prove the deletion happened.
 
-**With Mnemos closed** (also the fix if a file was in use and the in-app delete
+**With Sparrow closed** (also the fix if a file was in use and the in-app delete
 reported it):
 
 ```bash
@@ -189,6 +189,6 @@ Your data lives in three places inside the folder, which is why deleting
 
 `uninstall.command` clears all three. Deleting the whole folder also does it.
 
-macOS also remembers the permissions you granted. To clear those, remove Mnemos
+macOS also remembers the permissions you granted. To clear those, remove Sparrow
 (or Terminal) from System Settings → Privacy & Security → Microphone / Screen
 Recording.

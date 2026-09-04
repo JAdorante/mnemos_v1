@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Restore a Mnemos backup zip into a data directory (WS-B).
+"""Restore a Sparrow backup zip into a data directory (WS-B).
 
 Offline and deliberate: this is the "my disk died" path, not a button in the
 app. In-app restore is out of scope for the Sept 8 pilot — a half-restored
@@ -10,7 +10,7 @@ step.
 
 What it does, in order:
 
-1. **Refuses while Mnemos is running.** Probes ``/health`` on the configured
+1. **Refuses while Sparrow is running.** Probes ``/health`` on the configured
    host/port; a live server would keep writing into the directory being
    swapped out. ``--force`` overrides (you are on your own).
 2. **Validates the manifest** — kind, backup schema version, and the app
@@ -43,7 +43,7 @@ SUPPORTED_SCHEMAS = (1,)
 
 
 def server_is_up(host: str, port: int, timeout: float = 1.5) -> bool:
-    """True when something answers /health — i.e. Mnemos is probably running."""
+    """True when something answers /health — i.e. Sparrow is probably running."""
     from urllib.error import URLError
     from urllib.request import urlopen
     try:
@@ -59,7 +59,7 @@ def read_manifest(zf: zipfile.ZipFile) -> dict[str, Any]:
     try:
         return json.loads(zf.read(MANIFEST_NAME).decode("utf-8"))
     except KeyError as exc:
-        raise ValueError("no manifest.json at the zip root — not a Mnemos "
+        raise ValueError("no manifest.json at the zip root — not a Sparrow "
                          "backup (a takeout export cannot be restored)") from exc
     except Exception as exc:
         raise ValueError(f"unreadable manifest.json: {exc}") from exc
@@ -70,7 +70,7 @@ def validate(manifest: dict[str, Any], *, current_version: str,
     """Return a list of problems; empty means safe to restore."""
     problems = []
     if manifest.get("kind") != "mnemos.backup":
-        problems.append(f"not a Mnemos backup (kind={manifest.get('kind')!r}); "
+        problems.append(f"not a Sparrow backup (kind={manifest.get('kind')!r}); "
                         "takeout exports are portable copies, not restorable")
     schema = manifest.get("schema")
     if schema not in SUPPORTED_SCHEMAS:
@@ -82,7 +82,7 @@ def validate(manifest: dict[str, Any], *, current_version: str,
         try:
             if made_with and Version(str(made_with)) > Version(current_version):
                 problems.append(
-                    f"backup was made by Mnemos {made_with}, newer than this "
+                    f"backup was made by Sparrow {made_with}, newer than this "
                     f"build ({current_version}) — install the newer build "
                     "first, or re-run with --force")
         except InvalidVersion:
@@ -183,8 +183,8 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     if not args.force and server_is_up(args.host, args.port):
-        print(f"Mnemos is still running on {args.host}:{args.port}.\n"
-              "Stop it first (close start.bat / the Mnemos window), then re-run.\n"
+        print(f"Sparrow is still running on {args.host}:{args.port}.\n"
+              "Stop it first (close start.bat / the Sparrow window), then re-run.\n"
               "A restore while the server is writing would corrupt the result.",
               file=sys.stderr)
         return 1
@@ -197,13 +197,13 @@ def main(argv: list[str] | None = None) -> int:
     made = out["manifest"].get("created_at")
     when = time.strftime("%Y-%m-%d %H:%M", time.localtime(made)) if made else "?"
     print(f"Restored {out['files']} file(s) into {out['data_dir']}")
-    print(f"  backup taken {when} by Mnemos {out['manifest'].get('app_version')}")
+    print(f"  backup taken {when} by Sparrow {out['manifest'].get('app_version')}")
     counts = out["manifest"].get("counts") or {}
     if counts:
         print("  " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
     if out["previous_kept_at"]:
         print(f"  previous data kept at {out['previous_kept_at']}")
-    print("Start Mnemos again — the timeline and search should be intact.")
+    print("Start Sparrow again — the timeline and search should be intact.")
     return 0
 
 

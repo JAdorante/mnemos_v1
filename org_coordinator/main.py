@@ -20,7 +20,7 @@ from org_coordinator import rollup as rollup_mod
 from org_coordinator import store
 from org_coordinator.auth import hash_token, require_node
 
-app = FastAPI(title="Mnemos Org Coordinator", version="0.1.0")
+app = FastAPI(title="Sparrow Org Coordinator", version="0.1.0")
 
 
 class RegisterIn(BaseModel):
@@ -65,22 +65,22 @@ def root() -> str:
     g = len([x for x in store.list_goals() if x.get("active")])
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<title>Mnemos Org Coordinator</title>
+<title>Sparrow Org Coordinator</title>
 <style>
 body{{font:16px/1.5 system-ui,sans-serif;max-width:40rem;margin:3rem auto;padding:0 1.25rem;color:#1a1a1a}}
 h1{{font-weight:600;font-size:1.5rem}} a{{color:#0b3d5c}} code{{background:#f0f0f0;padding:.1em .35em;border-radius:4px}}
 .muted{{color:#666}} ul{{padding-left:1.2rem}}
 </style></head><body>
-<h1>Mnemos Org Coordinator</h1>
+<h1>Sparrow Org Coordinator</h1>
 <p class="muted">Hybrid org intelligence — roles, goals, digests, escalation.
-Raw employee memory stays on each Mnemos node.</p>
+Raw employee memory stays on each Sparrow node.</p>
 <p><b>{n}</b> nodes · <b>{g}</b> active goals</p>
 <ul>
   <li><a href="/health">/health</a> — liveness JSON</li>
   <li><a href="/docs">/docs</a> — interactive API</li>
-  <li><code>POST /register</code> — enroll a Mnemos node</li>
+  <li><code>POST /register</code> — enroll a Sparrow node</li>
 </ul>
-<p class="muted">Register and operate from Mnemos at
+<p class="muted">Register and operate from Sparrow at
 <code>http://127.0.0.1:8000/org-network</code> (with
 <code>QUILL_ORG_NETWORK=1</code>).</p>
 </body></html>"""

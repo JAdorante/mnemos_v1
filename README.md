@@ -1,8 +1,8 @@
-# Mnemos
+# Sparrow
 
 **A local-first personal memory system: it captures what happens around you, builds a living network of people and work, connects to teammates on your terms, and — with your approval — acts.**
 
-> The product and in-app assistant are **Mnemos** (Mnemos Labs). Env vars and
+> The product and in-app assistant are **Sparrow** (Ravenry). Env vars and
 > the database keep the `QUILL_` prefix — see the
 > [naming note](#configuration-reference).
 
@@ -12,10 +12,10 @@
 ![local-first](https://img.shields.io/badge/inference-local--first-brightgreen)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 
-Mnemos runs on your laptop and turns everyday signal — speech, camera, optional
+Sparrow runs on your laptop and turns everyday signal — speech, camera, optional
 screen, phone notifications — into a **searchable, provenance-linked memory**.
 From that stream it grows a **people and org network** (who you work with, what
-you owe them, what’s still open), and can **connect** to another Mnemos instance
+you owe them, what’s still open), and can **connect** to another Sparrow instance
 or a paired phone so assistants can ask each other questions without shipping
 raw memory off your machine. When you want something done, it can drive a
 browser, desktop app, or Phone Link — always pausing at a human approval gate
@@ -46,7 +46,7 @@ before anything irreversible.
 
 ## Table of contents
 
-- [What Mnemos does](#what-mnemos-does)
+- [What Sparrow does](#what-sparrow-does)
 - [How it works — the short version](#how-it-works--the-short-version)
 - [Memory](#memory)
 - [People & org network](#people--org-network)
@@ -78,7 +78,7 @@ before anything irreversible.
 
 ---
 
-## What Mnemos does
+## What Sparrow does
 
 Four capabilities sit on top of the same local store:
 
@@ -86,7 +86,7 @@ Four capabilities sit on top of the same local store:
 |---|---|
 | **Memory** | A durable timeline of what was said and seen, searchable by meaning, every fact linked back to the clip or frame it came from. |
 | **Network** | People, orgs, commitments, and open loops as a traversable graph — *who is Justin, what’s open with him, who else comes up with him?* |
-| **Connection** | Pair with a teammate’s Mnemos (or a phone) so their assistant can ask yours a question. Answers are composed from *your* memory, behind *your* disclosure policy. Raw memory never leaves the machine. |
+| **Connection** | Pair with a teammate’s Sparrow (or a phone) so their assistant can ask yours a question. Answers are composed from *your* memory, behind *your* disclosure policy. Raw memory never leaves the machine. |
 | **Action** | Browser, desktop, and phone agents that ground drafts in memory and stop for **Approve / Edit / Cancel** before send, buy, or mutate. |
 
 Everything stays on your machine by default. Local models handle VAD, ASR,
@@ -97,7 +97,7 @@ stakes or confidence warrant it, with spend caps and privacy redaction.
 
 ## How it works — the short version
 
-Mnemos is a stack of five layers. Each layer only depends on the one below it,
+Sparrow is a stack of five layers. Each layer only depends on the one below it,
 and everything between them travels as a single `Event` on an in-process bus:
 
 ```
@@ -165,7 +165,7 @@ at `/memory`. Your living self-view is at `/profile`.
 [app/services/graph.py](app/services/graph.py) ·
 [app/services/resolution.py](app/services/resolution.py)
 
-Mnemos doesn’t just store transcripts — it grows a **network of people and
+Sparrow doesn’t just store transcripts — it grows a **network of people and
 organizations** tied to evidence:
 
 - **People Intelligence (v2)** resolves names and aliases into person records
@@ -191,14 +191,14 @@ API surface: `GET /graph/context` · `POST /graph/rebuild` · `GET /people/*` ·
 
 ## Connections — peers and phone
 
-Mnemos is personal by default, but it can **connect** without becoming a shared
+Sparrow is personal by default, but it can **connect** without becoming a shared
 cloud memory.
 
 ### Team peer channel (`/peer`)
 
 **File:** [app/services/peer_channel.py](app/services/peer_channel.py)
 
-Two people each run their own Mnemos. They pair with a short-lived code; after
+Two people each run their own Sparrow. They pair with a short-lived code; after
 that, one assistant can ask the other a question. The answer is composed from
 the **answerer’s** memory by **their** models, then redacted and returned.
 Raw timeline rows never cross the wire.
@@ -446,7 +446,7 @@ select_context → decompose → compile steps → classify_risk
 Route → plan → execute → verify over Playwright. Source-grounded approval
 packets (Action / To / Subject / Body / **Why / Source**). Mode policies, dry-run
 levels (`plan / navigate / draft / approval / full`), failure taxonomy,
-procedural memory per `intent@site`, and semantic search over Mnemos’s own
+procedural memory per `intent@site`, and semantic search over Sparrow’s own
 timeline for grounding.
 
 **Perception beyond the DOM.** A pointer-cursor sweep plus CDP listener ground
@@ -652,7 +652,7 @@ outright. And the same label pool trains the **classifier heads** described
 above — a fifth mechanism, still `off` by default, that decides whether the
 local model runs at all rather than which rung answers.
 
-**What it is not:** nothing here changes what Mnemos is *allowed* to do —
+**What it is not:** nothing here changes what Sparrow is *allowed* to do —
 learning affects the quality of proposals, never the authority to act (risk
 stays a lookup table, enforced by tests). Nothing personal-classed leaves
 the machine through shadow eval. Promotion is always an offer with a
@@ -680,7 +680,7 @@ timeline / activity). See the whole loop run end-to-end on a fixture DB:
 | **Tasks** | Fact review: approve / done / edit / dismiss + source quote |
 | **Reflection** | Daily insights with convert-to-task |
 | **Audio Health / Low-confidence** | Capture quality and unsure items |
-| **Learning** | Every harvested verdict pair (deletable), exemplars ("what Mnemos has learned", with a pause switch), shadow-eval agreement rates, one-click confirm for shadow-found corrections |
+| **Learning** | Every harvested verdict pair (deletable), exemplars ("what Sparrow has learned", with a pause switch), shadow-eval agreement rates, one-click confirm for shadow-found corrections |
 
 Related surfaces: `/today` · `/chat` · `/ui` · `/profile` · `/org/{id}` ·
 `/meetings` · `/triggers` · `/peer` · `/desktop-access` · `/onboarding` ·
@@ -823,7 +823,7 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/chat/answer `
 curl -s "http://127.0.0.1:8000/memory/search?q=whiteboard%20series%20A"
 ```
 
-### Ask a teammate's Mnemos (after pairing on `/peer`)
+### Ask a teammate's Sparrow (after pairing on `/peer`)
 
 ```bash
 # Chat shorthand once a Person is linked to a peer:
@@ -904,7 +904,7 @@ GET  /onboarding* · GET /ui · POST /speak · GET /speakers
 | **Vision** | OpenCV + Ollama `minicpm-v` → Claude | frame understanding |
 | **Local text** | Ollama (opt-in) → Claude | chat / extract / reflect |
 | **Phone** | winsdk toasts · PowerShell Phone Link · QR phone channel | notify / SMS / pair |
-| **Peers** | HTTP + mutual tokens | Mnemos↔Mnemos asks |
+| **Peers** | HTTP + mutual tokens | Sparrow↔Sparrow asks |
 | **Embeddings** | sentence-transformers MiniLM | semantic vectors |
 | **Stores** | SQLite + LanceDB | timeline + meaning search |
 | **Browser agent** | Playwright + Claude tiers | web actions |
@@ -920,10 +920,10 @@ All settings are read from the environment / `.env` with sane defaults (see
 [browser_agent/config.py](browser_agent/config.py)). A `.credentials.env` is
 loaded after `.env` with override, for secrets.
 
-> **Naming note:** the product and UI brand are **Mnemos**
-> ([app/api/mnemos_theme.py](app/api/mnemos_theme.py)). Env vars and the SQLite
-> file keep the `QUILL_` / `quill.db` prefix from an earlier name — deliberately,
-> so existing configs and data keep working.
+> **Naming note:** the company is **Ravenry**; the product and in-app assistant
+> are **Sparrow** ([app/api/mnemos_theme.py](app/api/mnemos_theme.py)). Env vars
+> and the SQLite file keep the `QUILL_` / `quill.db` prefix from an earlier
+> name — deliberately, so existing configs and data keep working.
 
 ### Core / server
 
@@ -1188,7 +1188,7 @@ planner/escalation = Opus, verifier = Haiku.
 | First-run / capture-opt-in state | `data/first_run.json` |
 | Exhaust ingest ledger | `data/exhaust_ledger.json` |
 | MCP bearer token | `data/mcp_token` |
-| Tester crash zips | `data/logs/mnemos-report-*.zip` |
+| Tester crash zips | `data/logs/sparrow-report-*.zip` |
 | Source policy table (checked in) | `data/source_policies.json` |
 | Peer / phone channel state | under `data/` (peer + phone registries) |
 | Browser-agent sessions & profiles | `./sessions/` |
@@ -1223,7 +1223,7 @@ run_all.py               launch everything (capture in-process + agent as child)
 run_audio.py             live transcription
 run_vision.py            live webcam understanding
 run_desktop.py           desktop-agent standalone driver
-exec_webapp.py           browser agent standalone (with Mnemos memory bridge)
+exec_webapp.py           browser agent standalone (with Sparrow memory bridge)
 
 app/
   config.py              central settings (frozen dataclasses, env-driven)
@@ -1249,7 +1249,7 @@ app/
     research_ingest.py   research answers → memory · fact_titles.py display titles
     people_pipeline.py   People Intelligence v2
     graph.py             knowledge graph rebuild + context_for_person
-    peer_channel.py      Mnemos↔Mnemos asks + disclosure policy
+    peer_channel.py      Sparrow↔Sparrow asks + disclosure policy
     org_client.py        Org Coordinator HTTP client
     org_digest.py        Upward redacted status digests
     org_priority.py      Downward company priority guidance
@@ -1418,12 +1418,12 @@ doesn't raise, it quietly changes what becomes a memory.
   memory.
 - **Desktop agent on Wayland** — X11 only; the ghost-window path declines
   rather than half-working.
-- **The desktop build is unsigned.** `MnemosSetup.exe` triggers SmartScreen
+- **The desktop build is unsigned.** `SparrowSetup.exe` triggers SmartScreen
   ("Windows protected your PC") on first launch, and the macOS bundle is not
   notarized. Code signing is the last gate before handing the installer to
   anyone outside the team. The packaged build also omits the browser agent and
   Org Coordinator — both spawn `[sys.executable, "script.py"]` children, which
-  re-executes `Mnemos.exe` when frozen.
+  re-executes `Sparrow.exe` when frozen.
 - `/chat/stream`'s generator isn't bounded by response close, so its route test
   is skipped rather than driven (it wedges `TestClient` lifespan teardown).
 
@@ -1443,11 +1443,11 @@ tiered feature smoke harness.
 
 ## Org AI Network (experimental)
 
-Hybrid company intelligence on top of personal Mnemos — **does not replace**
+Hybrid company intelligence on top of personal Sparrow — **does not replace**
 capture, memory, peer consent, or approval gates.
 
 ```
-  Employee Mnemos (local)          Org Coordinator (:8100)
+  Employee Sparrow (local)          Org Coordinator (:8100)
   ───────────────────────          ───────────────────────
   capture → memory → digest ──►    directory (roles, reports_to)
   priority injection ◄──────────   goals + cascade
@@ -1463,7 +1463,7 @@ capture, memory, peer consent, or approval gates.
 | `QUILL_ORG_MANAGER_PEER_ID` | Paired peer id for digest/escalate delivery |
 | `QUILL_ORG_DIGEST_MODEL` etc. | Anthropic parent models for org tasks |
 
-**Run with Mnemos** (`QUILL_ORG_NETWORK=1` in `.env`):
+**Run with Sparrow** (`QUILL_ORG_NETWORK=1` in `.env`):
 
 ```powershell
 python run_all.py
@@ -1498,6 +1498,8 @@ escalation is logged separately in `data/org_escalations.jsonl` (not
 
 **Status:** experimental research prototype under active development — not
 production software; APIs and schemas may change without notice.
+
+**Copyright:** Copyright 2026 Ravenry LLC.
 
 **License:** MIT — see [LICENSE](LICENSE). The Phone Link PowerShell scripts
 under [scripts/phone_link/](scripts/phone_link/) are adapted from the

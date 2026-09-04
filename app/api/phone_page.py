@@ -63,7 +63,7 @@ td{border-top:1px solid var(--line);padding:9px 8px}
   <span class="spacer"></span></div>
 <div class="wrap">
   <div id="phoneErr" class="fetch-err" hidden role="alert" style="margin-bottom:18px;padding:10px 14px;border-radius:10px;background:rgba(154,63,63,.08);border:1px solid rgba(154,63,63,.25);color:var(--danger);font-size:13px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-    <span>Couldn't reach Mnemos — retrying…</span>
+    <span>Couldn't reach Sparrow — retrying…</span>
     <button type="button" id="phoneRetry">Retry now</button>
   </div>
   <h1>Connect a phone</h1>
@@ -100,7 +100,7 @@ td{border-top:1px solid var(--line);padding:9px 8px}
   <div class="panel">
     <h2>Send to your phone</h2>
     <p class="muted">Queue something for the phone to pick up. Nothing is pushed —
-    the phone pulls when you run the <b>Check Mnemos</b> shortcut (by Siri, a tap,
+    the phone pulls when you run the <b>Check Sparrow</b> shortcut (by Siri, a tap,
     or an iOS automation like "when I arrive home").</p>
     <div style="display:flex;gap:10px;flex-wrap:wrap;margin:10px 0">
       <select id="outKind" style="font:inherit;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:var(--bg-elev)">
@@ -116,7 +116,7 @@ td{border-top:1px solid var(--line);padding:9px 8px}
     <div id="outMsg" class="muted"></div>
     <div id="outPending" class="muted" style="margin-top:8px"></div>
     <details id="recipeDetails" style="margin-top:14px">
-      <summary style="cursor:pointer;font-weight:600">The one "mnemos" shortcut (does send + receive)</summary>
+      <summary style="cursor:pointer;font-weight:600">The one "@@BRAND@@" shortcut (does send + receive)</summary>
       <p class="muted" style="margin-top:8px">One shortcut covers both directions
       via a single call to <span class="url" id="syncUrlD" style="display:inline"></span>.
       The exact steps — with your device key already filled in — are shown on the
@@ -243,7 +243,7 @@ async function queueOut(){
     const r=await (await fetch("/phone/outbox/queue",{method:"POST",
       headers:{"Content-Type":"application/json"},
       body:JSON.stringify({kind, text})})).json();
-    msg.textContent = r.ok ? "Queued — run \"Check Mnemos\" on the phone to receive it."
+    msg.textContent = r.ok ? "Queued — run \"Check Sparrow\" on the phone to receive it."
                            : (r.detail||"Could not queue");
     if(r.ok) document.getElementById("outText").value="";
   }catch(e){ msg.textContent="Network error."; }

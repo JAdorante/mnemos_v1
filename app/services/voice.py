@@ -1,4 +1,4 @@
-"""M4 — speaking. Local, offline text-to-speech so Mnemos can talk back.
+"""M4 — speaking. Local, offline text-to-speech so Sparrow can talk back.
 
 Memory/agent -> text -> TTS -> laptop speaker. Local-first, in keeping with the
 rest of the stack: no API key, no network, runs on the CPU. On Windows it drives

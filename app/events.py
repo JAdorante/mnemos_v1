@@ -1,6 +1,6 @@
 """The common event shape that every modality feeds into the Memory Engine.
 
-Everything Mnemos perceives — a spoken utterance, a captured frame, an OCR
+Everything Sparrow perceives — a spoken utterance, a captured frame, an OCR
 result — is normalized into an `Event` and pushed onto the in-process
 `EventBus`. Later milestones (memory, knowledge graph, agents) subscribe to
 this bus instead of talking to each modality directly.

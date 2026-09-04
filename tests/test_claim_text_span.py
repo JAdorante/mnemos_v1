@@ -95,7 +95,7 @@ class ClaimMigrationTests(unittest.TestCase):
             """)
         conn.execute(
             "INSERT INTO facts (kind, source_span, confidence, extracted_at) "
-            "VALUES ('claim', 'Mnemos demo went well', 0.8, ?)", (NOW,))
+            "VALUES ('claim', 'Sparrow demo went well', 0.8, ?)", (NOW,))
         conn.execute(
             "INSERT INTO facts (kind, source_span, confidence, extracted_at) "
             "VALUES ('task', 'send the deck', 0.9, ?)", (NOW,))
@@ -105,10 +105,10 @@ class ClaimMigrationTests(unittest.TestCase):
         store = Store(db_path=db, audio_dir=tmp / "audio")
         rows = {r["kind"]: dict(r) for r in store._conn.execute(
             "SELECT kind, text, source_span FROM facts").fetchall()}
-        self.assertEqual(rows["claim"]["text"], "Mnemos demo went well")
+        self.assertEqual(rows["claim"]["text"], "Sparrow demo went well")
         # Span is left as-is: for old rows we can't know whether it was a real
         # quote or the substituted paraphrase, and text is now authoritative.
-        self.assertEqual(rows["claim"]["source_span"], "Mnemos demo went well")
+        self.assertEqual(rows["claim"]["source_span"], "Sparrow demo went well")
         # Non-claim kinds keep their text in the typed tables — no backfill.
         self.assertIsNone(rows["task"]["text"])
 

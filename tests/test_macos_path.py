@@ -93,7 +93,7 @@ class InstallerParityTests(unittest.TestCase):
         self.assertIn("run install.command first", sh)
 
     def test_start_script_clears_the_gatekeeper_quarantine(self) -> None:
-        """Otherwise every tester files the same 'Mnemos is damaged' report."""
+        """Otherwise every tester files the same 'Sparrow is damaged' report."""
         self.assertIn("com.apple.quarantine", START.read_text(encoding="utf-8"))
 
 

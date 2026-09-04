@@ -6,7 +6,7 @@ transient local error, truncations mislabeled as low_confidence, and every
 escalation — however mundane — paying the accurate-tier price. Covered here:
 
   * availability probe: a NEGATIVE result expires after local_probe_ttl_s
-    (Ollama starting after Mnemos no longer pins the session to Claude);
+    (Ollama starting after Sparrow no longer pins the session to Claude);
     within the TTL the cached answer is used without re-probing.
   * half-open breaker: one local error triggers a cheap probe — alive means
     one free local retry; dead means mark-down (skip the timeout wait on the

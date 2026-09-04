@@ -49,7 +49,8 @@ _REQUIRED_PROVENANCE = ("asserted", "document", "asr", "unknown")
 
 # Speaker labels that are diarization bookkeeping, never a dialogue partner.
 _NON_PARTNER_SPEAKERS = {"user", "you", "me", "self", "unknown", "speaker",
-                         "speaker 1", "speaker 2", "assistant", "mnemos"}
+                         "speaker 1", "speaker 2", "assistant",
+                         "mnemos", "sparrow", "ravenry"}
 
 _attach_lock = threading.Lock()
 _timer: threading.Timer | None = None

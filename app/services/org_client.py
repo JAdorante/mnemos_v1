@@ -1,4 +1,4 @@
-"""HTTP client from a Mnemos node to the Org Coordinator."""
+"""HTTP client from a Sparrow node to the Org Coordinator."""
 from __future__ import annotations
 
 import json

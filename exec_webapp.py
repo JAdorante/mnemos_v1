@@ -25,9 +25,9 @@ from browser_agent import config as cfg
 from browser_agent.orchestrator import Agent
 
 
-# --- Mnemos memory bridge ---------------------------------------------------
-# Give the browser agent read access to Mnemos's timeline so a task like
-# "follow up on what Marc said about pricing" is grounded in what Mnemos actually
+# --- Sparrow memory bridge ---------------------------------------------------
+# Give the browser agent read access to Sparrow's timeline so a task like
+# "follow up on what Marc said about pricing" is grounded in what Sparrow actually
 # heard/saw — without the user re-explaining. Semantic search over the shared
 # SQLite + LanceDB store (the same one the capture process writes to).
 def make_memory_provider(limit=5, min_score=0.15):
@@ -36,7 +36,7 @@ def make_memory_provider(limit=5, min_score=0.15):
 
         qmem = MemoryEngine()  # read-only view onto the shared store; no attach()
     except Exception as exc:
-        print(f"[bridge] Mnemos memory unavailable ({exc}); agent runs unaided.")
+        print(f"[bridge] Sparrow memory unavailable ({exc}); agent runs unaided.")
         return None
 
     def provider(goal: str) -> str:
@@ -45,7 +45,7 @@ def make_memory_provider(limit=5, min_score=0.15):
         kept = [h for h in hits if (h.get("score") is None or h["score"] >= min_score)]
         if not kept:
             return ""
-        lines = ["RELEVANT MEMORIES FROM Mnemos (things you have already seen or "
+        lines = ["RELEVANT MEMORIES FROM Sparrow (things you have already seen or "
                  "heard — use them to complete the task without asking the user to "
                  "repeat context; ignore any that aren't relevant):"]
         for h in kept:

@@ -367,7 +367,7 @@ class DesktopCapturePipeline:
         win = _foreground_window()
         window_title = str(win.get("window") or "")
         # Same intake filters as screen frames — don't flood memory with
-        # clicks on the Mnemos console / credential surfaces.
+        # clicks on the Sparrow console / credential surfaces.
         from app.services.surface_filters import is_console_window
         if is_console_window(window_title):
             print(f"[desktop_capture] skip console click: {window_title[:80]!r}")

@@ -20,7 +20,7 @@ class RollupBase(unittest.TestCase):
     def setUp(self):
         tmp = Path(tempfile.mkdtemp())
         self.store = Store(db_path=tmp / "t.db", audio_dir=tmp / "audio")
-        self.mnemos = self.store.resolve_entity("Mnemos Build", "project", ts=NOW)
+        self.mnemos = self.store.resolve_entity("Sparrow Build", "project", ts=NOW)
         self.pulse = self.store.resolve_entity("VenturePulse", "project", ts=NOW)
         self.lance = self.store.resolve_entity("LanceDB", "tool", ts=NOW)
 
@@ -65,7 +65,7 @@ class ComputeTests(RollupBase):
         self.assertEqual(pr.compute(self.store), [])
 
     def test_context_edges_count_double(self):
-        # 3 room-born facts with Mnemos Build (weight 2 each = 6) vs 4 plain
+        # 3 room-born facts with Sparrow Build (weight 2 each = 6) vs 4 plain
         # text matches with VenturePulse (4): context wins the dominance vote
         # despite fewer facts.
         for _ in range(3):

@@ -54,15 +54,15 @@ class EntityEndpointTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def test_list_ranks_by_evidence(self):
-        hot = self.store.resolve_entity("Mnemos", kind="project", ts=NOW)
+        hot = self.store.resolve_entity("Sparrow", kind="project", ts=NOW)
         self.store.resolve_entity("Stale Corp", kind="org", ts=NOW - 200 * 86400)
-        f = self.store.add_claim("Mnemos demo went well", extracted_at=NOW)
+        f = self.store.add_claim("Sparrow demo went well", extracted_at=NOW)
         self.store.add_relation("fact", f, "about", "entity", hot, ts=NOW)
         import time as _time
         with patch.object(_time, "time", return_value=NOW):
             d = self.client.get("/entities/list").json()
         names = [x["name"] for x in d["entities"]]
-        self.assertEqual(names[0], "Mnemos")
+        self.assertEqual(names[0], "Sparrow")
         self.assertGreater(d["entities"][0]["weight"],
                            d["entities"][-1]["weight"])
 

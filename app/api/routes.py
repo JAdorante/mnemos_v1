@@ -137,6 +137,15 @@ def _l0():
         return None
 
 
+def _headless() -> bool:
+    """QUILL_HEADLESS=1 — hosted instance with no local devices. Capture
+    arrives over WS /ingest/audio; the consent classes keep their meaning
+    (web mic rides "mic", tab audio rides "system_audio") but must never
+    open sounddevice / soundcard / camera / screen on the server box."""
+    import os
+    return os.environ.get("QUILL_HEADLESS", "") in ("1", "true", "True")
+
+
 def start_all(audio: bool = False, vision: bool = False, notifications: bool = True,
               desktop_capture: bool = False, system_audio: bool = False) -> dict:
     """Start capture pipelines in-process (launcher / consent apply).
@@ -145,6 +154,8 @@ def start_all(audio: bool = False, vision: bool = False, notifications: bool = T
     """
     global _audio_running, _system_audio_running, _vision_running, \
         _notifications_running, _desktop_capture_running
+    if _headless():
+        audio = vision = notifications = desktop_capture = system_audio = False
     if audio and not _audio_running:
         try:
             _audio.start()
@@ -255,6 +266,11 @@ def _resume_source(source: str) -> dict:
     HTTP 503 — never an unhandled ASGI exception from the Privacy toggles.
     """
     _require_consent(source)
+    if _headless():
+        raise HTTPException(
+            status_code=503,
+            detail=("This instance is headless — no local devices. "
+                    "Capture from your browser at /capture instead."))
     global _audio_running, _system_audio_running, _vision_running, \
         _desktop_capture_running
     try:
@@ -313,7 +329,8 @@ def _apply_consent_runtime(sources: dict) -> dict:
     else:
         _pause_source("webcam")
     # Screen frames and/or mouse clicks share the desktop capture pipeline.
-    want_desktop = bool(sources.get("screen") or sources.get("clicks"))
+    want_desktop = (bool(sources.get("screen") or sources.get("clicks"))
+                    and not _headless())
     if want_desktop:
         # Restart so screen/clicks sub-flags from consent take effect.
         if _desktop_capture_running:
@@ -417,6 +434,35 @@ def meeting_session_decide(body: MeetingSessionDecideBody) -> dict:
     """Per-meeting consent without going through the yes/no offer queue."""
     from app.services import meeting_session as _ms
     return _ms.decide(body.choice, session_id=body.session_id)
+
+
+class MeetingSessionStartBody(BaseModel):
+    title: str = ""
+    consent: str = "transcript_only"  # transcript_only | keep_receipts
+    duration_min: float = 120.0
+
+
+@router.get("/meeting/session/status")
+def meeting_session_status() -> dict:
+    from app.services import meeting_session as _ms
+    return _ms.status()
+
+
+@router.post("/meeting/session/start")
+def meeting_session_start(body: MeetingSessionStartBody) -> dict:
+    """Explicit "Start meeting" (web capture page) — manual session + consent."""
+    from app.services import meeting_session as _ms
+    out = _ms.start_manual(title=body.title, consent=body.consent,
+                           duration_min=body.duration_min)
+    if not out.get("ok") and "already live" not in (out.get("error") or ""):
+        raise HTTPException(status_code=400, detail=out.get("error"))
+    return out
+
+
+@router.post("/meeting/session/end")
+def meeting_session_end() -> dict:
+    from app.services import meeting_session as _ms
+    return _ms.end(reason="manual")
 
 
 @router.get("/capture/consent")
@@ -754,7 +800,7 @@ def memory_search(q: str = "", limit: int = 20, modality: str | None = None) -> 
 # A read-only window onto the timeline: recent captures, search, speaker labels,
 # confidence, and — critically — a link from every memory back to its source
 # audio clip or frame (provenance). This is the trust/training layer: you can
-# see what Mnemos heard and saw, and judge what's good, low-confidence, or junk.
+# see what Sparrow heard and saw, and judge what's good, low-confidence, or junk.
 
 def _console_row(d: dict) -> dict:
     """Flatten an event dict into the compact shape the console renders."""
@@ -903,7 +949,7 @@ def console_escalate(recent: int = 20) -> dict:
 @router.get("/learning/pairs")
 def learning_pairs_list(task_type: str = "", limit: int = 200) -> dict:
     """Recent learning pairs, newest first, optionally filtered by task_type.
-    This is the Learning tab's table — what Mnemos harvested and from where."""
+    This is the Learning tab's table — what Sparrow harvested and from where."""
     store = memory._ensure_store()
     rows = store.list_learning_pairs(
         task_type=task_type or None, limit=max(1, min(int(limit), 500)))
@@ -968,7 +1014,7 @@ def learning_shadow_run() -> dict:
 
 @router.get("/learning/exemplars")
 def learning_exemplars(task_type: str = "", limit: int = 200) -> dict:
-    """'What Mnemos has learned' — exemplars by type, with use counts (C.6)."""
+    """'What Sparrow has learned' — exemplars by type, with use counts (C.6)."""
     from app.services.exemplar_store import exemplar_store
     return {"stats": exemplar_store.stats(),
             "rows": exemplar_store.list_rows(
@@ -2722,8 +2768,10 @@ def _adoption_console_chrome() -> str:
   const toast=document.getElementById('mnemosToast');
   let _toastHome=toast?toast.parentNode:null;
   function slotVisible(slot){
-    // offsetParent is null when the margin rail is display:none (narrow viewports).
-    return !!(slot&&slot.getClientRects().length);
+    // The empty slot is display:none (#mnemosToastSlot:empty), so measure the
+    // margin rail that holds it — the rail is display:none on narrow viewports.
+    const rail=slot&&slot.parentElement;
+    return !!(rail&&rail.getClientRects().length);
   }
   function place(){
     // Prefer the Memory margin rail when it is on-screen — keeps First brief /
@@ -2800,7 +2848,7 @@ def _adoption_console_chrome() -> str:
       +'queries).\nCopy this path and email it to the pilot operator:', j.path);
   };
   // Update banner (WS-C). Notification only — the link opens the download
-  // page in a browser; nothing is fetched or run by Mnemos.
+  // page in a browser; nothing is fetched or run by Sparrow.
   const DISMISS_KEY='mnemosUpdateDismissed';
   async function updateBanner(){
     const bar=document.getElementById('mnemosUpdateBar');
@@ -2808,7 +2856,7 @@ def _adoption_console_chrome() -> str:
     let d;
     try{ d=await (await fetch('/update/status')).json(); }catch(e){ return; }
     const foot=document.getElementById('mnemosVersion');
-    if(foot) foot.textContent='Mnemos '+(d.current||'?');
+    if(foot) foot.textContent='Sparrow '+(d.current||'?');
     const b=d.banner;
     // Trust `state`, not just the payload: only a live check that actually
     // found a newer build may raise this bar.
@@ -4152,7 +4200,7 @@ def _reflection_view(store, reflection: dict) -> dict:
 
 @router.post("/reflect/run")
 def reflect_run(scope: str = "daily") -> dict:
-    """Run a reflection now (manual trigger — Mnemos has no cron yet). v1 supports
+    """Run a reflection now (manual trigger — Sparrow has no cron yet). v1 supports
     the daily scope; returns the reflection so the caller can render it."""
     from app.services.reflector import reflector
 
@@ -4375,7 +4423,7 @@ def chat(body: ChatIn) -> dict:
     """Dispatch a chat turn to the browser agent (the hear -> act loop).
 
     Non-blocking: the agent routes the message (answer directly vs. drive the
-    browser), grounded in Mnemos's memory, on its own thread. Poll /chat/poll for
+    browser), grounded in Sparrow's memory, on its own thread. Poll /chat/poll for
     progress, results, and any approval/ask_human prompts. Set QUILL_AGENT=0 to
     fall back to the memory-only retriever.
 
@@ -4497,7 +4545,7 @@ def chat(body: ChatIn) -> dict:
             verb = ("Handing off to" if team.get("kind") == "handoff"
                     else "Asking")
             agent.worker._emit("result",
-                               f"{verb} {team['peer_name']}'s Mnemos…")
+                               f"{verb} {team['peer_name']}'s Sparrow…")
             return {"ok": True, "routed": "peer_ask", "since": since}
     except Exception as exc:
         print(f"[peer_intent] skipped ({exc}).")
@@ -5011,7 +5059,7 @@ def onboarding_documents() -> dict:
 
 @router.post("/onboarding/ingest")
 def onboarding_ingest(body: OnboardingIn | None = None) -> dict:
-    """Feed the profile into Mnemos's knowledge (people/entities/facts/graph).
+    """Feed the profile into Sparrow's knowledge (people/entities/facts/graph).
 
     Reads the sheet on disk unless inline answers are posted. Idempotent —
     only new/changed answers are added, so it's safe to edit and re-run."""
@@ -5020,7 +5068,7 @@ def onboarding_ingest(body: OnboardingIn | None = None) -> dict:
     return onboarding.ingest((body.profile if body else None) or None)
 
 
-# --- phone channel (direct phone -> Mnemos, no Phone Link) ------------------
+# --- phone channel (direct phone -> Sparrow, no Phone Link) ------------------
 class PhoneClaimIn(BaseModel):
     code: str
     name: str = ""
@@ -5079,11 +5127,112 @@ def auth_unlock(body: AuthUnlockIn, response: Response) -> dict:
 
 
 @router.post("/auth/logout")
-def auth_logout(response: Response) -> dict:
-    from app.services import api_auth
+def auth_logout(request: Request, response: Response) -> dict:
+    from app.services import account, api_auth
 
+    try:
+        account.revoke_session(request.cookies.get(api_auth.COOKIE_NAME))
+    except Exception:
+        pass
     api_auth.clear_session_cookie(response)
     return {"ok": True}
+
+
+class AuthRegisterIn(BaseModel):
+    password: str
+    email: str = ""
+
+
+class AuthLoginIn(BaseModel):
+    password: str
+    remember: bool = True
+
+
+class AgentBrowserSigninIn(BaseModel):
+    channel: str = ""  # "" (bundled Chromium) | chrome | msedge
+
+
+@router.get("/agent/browser/status")
+def agent_browser_status() -> dict:
+    """Installed browsers, OS default, and the agent-profile connect state."""
+    from app.services import agent_browser_setup
+    return agent_browser_setup.status()
+
+
+@router.post("/agent/browser/signin/start")
+def agent_browser_signin(body: AgentBrowserSigninIn) -> dict:
+    """Open the one-time visible sign-in window into the agent's profile.
+    The browser choice persists only after the window flow completes."""
+    from app.services import agent_browser_setup
+    out = agent_browser_setup.start_signin(body.channel)
+    if not out.get("ok"):
+        raise HTTPException(status_code=400, detail=out.get("error"))
+    return out
+
+
+@router.post("/agent/browser/disconnect")
+def agent_browser_disconnect() -> dict:
+    from app.services import agent_browser_setup
+    return agent_browser_setup.disconnect()
+
+
+@router.get("/auth/account")
+def auth_account() -> dict:
+    """Whether a password account exists (drives the /auth page form)."""
+    from app.services import account
+
+    return account.status()
+
+
+@router.post("/auth/register")
+def auth_register(body: AuthRegisterIn, request: Request,
+                  response: Response) -> dict:
+    """Create the owner password. Requires an already-authorized caller
+    (loopback, Bearer token, or an unlocked session) — the API token is the
+    bootstrap credential; the password replaces it for returning browsers."""
+    from app.services import account, api_auth
+
+    authorized = (
+        api_auth.client_is_loopback(
+            request.client.host if request.client else None)
+        or api_auth.bind_is_loopback()
+        or api_auth.request_authorized(request)
+    )
+    if not authorized:
+        raise HTTPException(
+            status_code=401,
+            detail="unlock with the API token before creating a password")
+    out = account.create(body.password, email=body.email)
+    if not out.get("ok"):
+        raise HTTPException(status_code=400, detail=out.get("error"))
+    token = account.new_session(remember=True, label="register")
+    api_auth.apply_account_cookie(response, token, remember=True)
+    csrf = api_auth.apply_csrf_cookie(response)
+    return {"ok": True, "csrf_token": csrf}
+
+
+@router.post("/auth/login")
+def auth_login(body: AuthLoginIn, request: Request,
+               response: Response) -> dict:
+    """Password sign-in for returning browsers. Sets a server-side session
+    token in the HttpOnly cookie (revocable, expiring) — never a credential."""
+    from app.services import account, api_auth
+
+    if not account.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="no password set — unlock at /auth with the API token")
+    client_key = request.client.host if request.client else "?"
+    if not account.throttle_ok(client_key):
+        raise HTTPException(
+            status_code=429, detail="too many attempts — try again later")
+    if not account.verify_password(body.password):
+        account.record_failure(client_key)
+        raise HTTPException(status_code=401, detail="wrong password")
+    token = account.new_session(remember=body.remember, label=client_key)
+    api_auth.apply_account_cookie(response, token, remember=body.remember)
+    csrf = api_auth.apply_csrf_cookie(response)
+    return {"ok": True, "csrf_token": csrf}
 
 
 @router.get("/phone", response_class=HTMLResponse)
@@ -5177,7 +5326,7 @@ async def phone_photo(request: Request, caption: str = "",
 def phone_sync(body: dict | None = None,
                authorization: str | None = Header(None)) -> dict:
     """Unified phone exchange: optionally ingest {kind,text,meta}, always drain
-    the outbox. One authenticated call powers the single "mnemos" shortcut for
+    the outbox. One authenticated call powers the single "sparrow" shortcut for
     both directions."""
     from app.services import phone_channel
 
@@ -5205,7 +5354,7 @@ class OutboxQueueIn(BaseModel):
 
 @router.post("/phone/outbox/queue")
 def phone_outbox_queue(body: OutboxQueueIn) -> dict:
-    """Desktop-side enqueue (Mnemos -> phone). The phone can never call this —
+    """Desktop-side enqueue (Sparrow -> phone). The phone can never call this —
     device tokens only READ the outbox; the desktop is the decider."""
     from app.services import phone_channel
 
@@ -5232,7 +5381,7 @@ def phone_outbox_drain(peek: bool = False,
     return phone_channel.drain_outbox(device, peek=peek)
 
 
-# --- peer channel (Mnemos <-> Mnemos, teams) --------------------------------
+# --- peer channel (Sparrow <-> Sparrow, teams) --------------------------------
 class PeerClaimIn(BaseModel):
     code: str
     name: str = ""
@@ -5412,7 +5561,7 @@ def peer_ask_deny(body: PeerDecideIn) -> dict:
 
 @router.post("/peer/query")
 def peer_query(body: PeerQueryIn) -> dict:
-    """Desktop-side: ask a paired peer's Mnemos a question (or hand off a
+    """Desktop-side: ask a paired peer's Sparrow a question (or hand off a
     task). Synchronous when their side auto-answers a question; handoffs
     always wait for their human."""
     from app.services import peer_channel
@@ -5543,7 +5692,7 @@ def org_network_status() -> dict:
 
 @router.post("/org-network/register")
 def org_network_register(body: OrgRegisterIn) -> dict:
-    """Register this Mnemos with the Org Coordinator. Persists node token locally."""
+    """Register this Sparrow with the Org Coordinator. Persists node token locally."""
     from app.services import org_client
 
     res = org_client.register(
@@ -5683,7 +5832,7 @@ class CalendarEventIn(BaseModel):
 def icloud_create_event(body: CalendarEventIn) -> dict:
     """Create a personal event on the iCloud calendar (no attendees).
 
-    Human-initiated: issuing this call IS the approval. Mnemos never adds guests,
+    Human-initiated: issuing this call IS the approval. Sparrow never adds guests,
     so a write can't email or invite anyone."""
     from app.services import icloud_calendar
 

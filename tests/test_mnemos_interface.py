@@ -1,4 +1,4 @@
-"""Mnemos Defining Interface — packet emit, constellation, home intelligence."""
+"""Sparrow Defining Interface — packet emit, constellation, home intelligence."""
 from __future__ import annotations
 
 import tempfile
@@ -340,7 +340,9 @@ class ThemeApplyTests(unittest.TestCase):
         self.assertIn("/static/css/mnemos-ink.css", page)
         self.assertIn("/static/css/mnemos-chrome.css", page)
         self.assertIn("/static/js/mnemos-ui.js", page)
-        self.assertIn("Mnemos", page)
+        self.assertIn("Sparrow", page)
+        self.assertIn("/static/ravenry-mark.png", apply(
+            "<html>@@MARK@@</html>"))
 
 
 if __name__ == "__main__":

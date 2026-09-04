@@ -1,6 +1,6 @@
-"""Direct phone -> Mnemos channel — pair any phone, ingest what it sends.
+"""Direct phone -> Sparrow channel — pair any phone, ingest what it sends.
 
-Replaces the Phone Link dependency with a channel Mnemos owns end-to-end:
+Replaces the Phone Link dependency with a channel Sparrow owns end-to-end:
 the phone's own automation app (Shortcuts on iPhone, an HTTP-shortcut app on
 Android) POSTs to /phone/ingest and the payload rides the normal event bus like
 every other modality. The code is fully general — one pairing flow, one ingest
@@ -45,7 +45,7 @@ from app.services import confidence as _conf
 # (battery, calendar, location), sent by a shortcut branch the user authored.
 KINDS = ("note", "voice", "share", "clipboard", "location", "data", "other")
 
-# Kinds the user authors deliberately (typed/dictated to Mnemos) carry the
+# Kinds the user authors deliberately (typed/dictated to Sparrow) carry the
 # human-said-so tier; captured/forwarded content is merely observed.
 _ACCEPTED_KINDS = frozenset({"note", "voice"})
 
@@ -237,7 +237,7 @@ def ingest(device: dict, payload: dict) -> dict:
               "device": device.get("name", ""),
               "platform": device.get("platform", ""), "kind": kind, **meta},
     )
-    # note/voice: the user deliberately told Mnemos this — human-said-so tier.
+    # note/voice: the user deliberately told Sparrow this — human-said-so tier.
     # share/clipboard/location/other: captured content, observed only. Either
     # way it is memory CONTEXT; nothing here carries action authority.
     _conf.attach(ev, _conf.ACCEPTED if kind in _ACCEPTED_KINDS else _conf.OBSERVED)
@@ -420,12 +420,12 @@ def revoke(device_id: str) -> bool:
         return True
 
 
-# --- outbox (Mnemos -> phone, pull-based) -----------------------------------
-# The mirror image of ingest, built for a phone with NO extra apps: Mnemos
-# queues outbound items here; a native Shortcuts recipe ("Check Mnemos") drains
+# --- outbox (Sparrow -> phone, pull-based) -----------------------------------
+# The mirror image of ingest, built for a phone with NO extra apps: Sparrow
+# queues outbound items here; a native Shortcuts recipe ("Check Sparrow") drains
 # them with the same device token — via Siri, a tap, or an iOS automation — and
 # executes each with built-in actions (Show Notification, Add Reminder, ...).
-# Trust mirror: only Mnemos-side code/UI can ENQUEUE (the desktop is the
+# Trust mirror: only Sparrow-side code/UI can ENQUEUE (the desktop is the
 # decider); a device token can only READ ITS OWN queue (the phone is the
 # executor). Anything consequential must pass the normal approval gates before
 # it is ever queued. "query" asks the phone a question — the shortcut's own
@@ -527,7 +527,7 @@ def drain_outbox(device: dict, *, peek: bool = False) -> dict:
 
 
 def sync_exchange(device: dict, payload: dict | None) -> dict:
-    """One round-trip for the unified "mnemos" shortcut: optionally INGEST the
+    """One round-trip for the unified "sparrow" shortcut: optionally INGEST the
     payload (if it carries text), then always DRAIN this device's outbox.
 
     Lets a single Shortcuts action do both directions — run it empty (from an

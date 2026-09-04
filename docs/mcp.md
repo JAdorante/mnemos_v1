@@ -1,13 +1,13 @@
-# Mnemos MCP memory server
+# Sparrow MCP memory server
 
-Read-only memory tools for Claude Desktop, Claude Code, and Cursor. Mnemos stays the local substrate; those agents do not get write or action tools.
+Read-only memory tools for Claude Desktop, Claude Code, and Cursor. Sparrow stays the local substrate; those agents do not get write or action tools.
 
-**Invariant:** retrieved memory is context. It never authorizes send, buy, or mutate. Approvals still happen in Mnemos.
+**Invariant:** retrieved memory is context. It never authorizes send, buy, or mutate. Approvals still happen in Sparrow.
 
 ## Enable
 
 1. Set `QUILL_MCP=1` in `.env` (or the tester profile after you opt in).
-2. Start Mnemos (`python run_all.py` or the installer).
+2. Start Sparrow (`python run_all.py` or the installer).
 3. A token is minted at `data/mcp_token` (loopback-only).
 
 ## Claude Desktop config
@@ -17,21 +17,21 @@ Add this to `claude_desktop_config.json` (Developer → Edit Config):
 ```json
 {
   "mcpServers": {
-    "mnemos": {
+    "sparrow": {
       "command": "python",
       "args": ["-m", "mcp_server"],
       "env": {
         "QUILL_MCP": "1",
         "QUILL_HOST": "127.0.0.1",
         "QUILL_PORT": "8000",
-        "QUILL_DATA_DIR": "C:/absolute/path/to/mnemos/data"
+        "QUILL_DATA_DIR": "C:/absolute/path/to/sparrow/data"
       }
     }
   }
 }
 ```
 
-Use the same `QUILL_DATA_DIR` as the running Mnemos so the stdio process can read `data/mcp_token`.
+Use the same `QUILL_DATA_DIR` as the running Sparrow so the stdio process can read `data/mcp_token`.
 
 Ask: **“what do I owe Justin?”** — that should hit `person_context` / `open_loops` and return provenance-tagged facts.
 

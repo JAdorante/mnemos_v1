@@ -3,7 +3,7 @@
 The Personal Agent Layer sits above the browser and desktop agents; this module
 is the thin, surface-agnostic recorder both of them write through, so every run,
 every compiled action packet, and every human verdict (approve / edit / cancel)
-lands in Mnemos's canonical store (data/quill.db) next to facts, people, and the
+lands in Sparrow's canonical store (data/quill.db) next to facts, people, and the
 graph — instead of evaporating inside the browser orchestrator.
 
 Design mirrors the rest of app/services:

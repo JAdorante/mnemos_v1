@@ -1,4 +1,4 @@
-# Mnemos trust layer
+# Sparrow trust layer
 
 A spec others can implement. Every claim points at the file that enforces it. Memory informs drafts; only a **live human reply** authorizes anything irreversible.
 

@@ -278,7 +278,7 @@ class VisionConfig:
     local_cooldown_max_s: float = float(_get("QUILL_VISION_LOCAL_COOLDOWN_MAX_S", "480"))
     # A failed availability probe is re-tried after this many seconds instead
     # of pinning the whole session to Claude (the probe used to cache forever,
-    # so Ollama starting a beat after Mnemos meant paid frames all day).
+    # so Ollama starting a beat after Sparrow meant paid frames all day).
     local_probe_ttl_s: float = float(_get("QUILL_VISION_LOCAL_PROBE_TTL_S", "60"))
     # When the local VLM is down/cooling, "1" routes frames to the cheap Claude
     # tier (never miss a frame); "0" skips ambient frames entirely until local
@@ -317,7 +317,7 @@ class TextLocalConfig:
     local_timeout_s: float = float(_get("QUILL_TEXT_LOCAL_TIMEOUT_S", "45"))
     # A failed availability probe is re-tried after this many seconds. The
     # probe used to cache its answer for the life of the process, so Ollama
-    # starting a beat after Mnemos pinned every text call to Claude all day
+    # starting a beat after Sparrow pinned every text call to Claude all day
     # (the local_unavailable rows in the escalate trail).
     local_probe_ttl_s: float = float(_get("QUILL_TEXT_LOCAL_PROBE_TTL_S", "60"))
     # Escalate to Claude when the local model's self-reported confidence is below this.
@@ -576,7 +576,7 @@ class IngestConfig:
 class AudioQualityConfig:
     """Pre-ASR audio quality scoring (see services/audio_quality.py).
 
-    Scores the raw utterance waveform *before* Whisper so the rest of Mnemos can
+    Scores the raw utterance waveform *before* Whisper so the rest of Sparrow can
     tell "the audio was bad" apart from "Whisper failed", and so denoising (#2)
     and the Audio Health console (#9) have a signal to route on. Pure numpy.
     """
@@ -868,7 +868,7 @@ class DesktopCaptureConfig:
 
 @dataclass(frozen=True)
 class VoiceConfig:
-    """Text-to-speech so Mnemos can talk back (see services/voice.py).
+    """Text-to-speech so Sparrow can talk back (see services/voice.py).
 
     `auto` uses the most human voice available: a neural (online) Edge voice when
     reachable, else the offline OS voice (SAPI5 on Windows, pyttsx3 elsewhere).
@@ -1045,7 +1045,7 @@ class DocumentsConfig:
 
 @dataclass(frozen=True)
 class PhoneChannelConfig:
-    """Direct phone -> Mnemos channel (see services/phone_channel.py).
+    """Direct phone -> Sparrow channel (see services/phone_channel.py).
 
     Lets ANY phone (iPhone via the Shortcuts app, Android via an HTTP-shortcut
     app) push notes, shares, dictations, and locations straight into the event
@@ -1061,7 +1061,7 @@ class PhoneChannelConfig:
     # Photo ingest (phone -> vision pipeline). Largest accepted upload (bytes);
     # iPhone photos are a few MB, so 12 MB covers full-res while capping abuse.
     max_photo_bytes: int = int(_get("QUILL_PHONE_MAX_PHOTO_BYTES", "12000000"))
-    # Outbox (Mnemos -> phone): pending ceiling per target, and how much
+    # Outbox (Sparrow -> phone): pending ceiling per target, and how much
     # delivered history the file keeps for the audit trail.
     max_outbox_pending: int = int(_get("QUILL_PHONE_MAX_OUTBOX", "50"))
     outbox_history: int = int(_get("QUILL_PHONE_OUTBOX_HISTORY", "200"))
@@ -1084,7 +1084,7 @@ class PhoneChannelConfig:
 
 @dataclass(frozen=True)
 class PeerChannelConfig:
-    """Mnemos <-> Mnemos peer channel for teams (see services/peer_channel.py).
+    """Sparrow <-> Sparrow peer channel for teams (see services/peer_channel.py).
 
     Pairs two instances (mutual per-peer bearer tokens, phone-channel trust
     model) so one user's assistant can ask another's a question, answered from
@@ -1148,7 +1148,7 @@ class OrgNodeConfig:
     """Hybrid Org AI Network node (see org_coordinator/ + services/org_*.py).
 
     OFF by default — existing personal capture/memory/peer behaviour is
-    unchanged until QUILL_ORG_NETWORK=1. When on, this Mnemos registers with
+    unchanged until QUILL_ORG_NETWORK=1. When on, this Sparrow registers with
     a lightweight Org Coordinator, ships redacted upward digests, receives
     downward priority packets, and can escalate strategic blockers. Raw
     memory never leaves the machine; Claude remains the parent model via

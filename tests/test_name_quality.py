@@ -30,7 +30,7 @@ class PlausiblePersonTests(unittest.TestCase):
     def test_junk_people_rejected(self):
         for n in ["she", "us", "you", "user", "new user", "curator", "founder",
                   "board", "not specified", "autonomous browser agent",
-                  "Mnemos", "QUILL_AGENT", "QA and CTO review", "set it to 0",
+                  "Sparrow", "Mnemos", "QUILL_AGENT", "QA and CTO review", "set it to 0",
                   "vision classifies a page as todo_list"]:
             self.assertFalse(nq.is_plausible_person(n), n)
 
@@ -62,7 +62,7 @@ class PlausibleEntityTests(unittest.TestCase):
 
     def test_junk_entities_rejected(self):
         for n in ["app/services/memory.py", "data/quill.db", "scripts/phone_link/",
-                  "Mnemos", "Quill", "QUILL_AGENT", "www.dell.com",
+                  "Sparrow", "Mnemos", "Quill", "QUILL_AGENT", "www.dell.com",
                   "$49/mo", "X", "free neural (online) voices",
                   "Windows (primary)"]:
             self.assertFalse(nq.is_plausible_entity(n), n)

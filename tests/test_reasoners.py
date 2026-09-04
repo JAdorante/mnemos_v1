@@ -134,7 +134,7 @@ class SchedulingReasonerTests(unittest.TestCase):
                 due = time.strftime("%Y-%m-%dT%H:%M:%S",
                                     time.localtime(now + 0.5 * 86400))
                 fid = store.add_task(
-                    "I have a meeting with Andy Karos today at 8:30 pm about Mnemos",
+                    "I have a meeting with Andy Karos today at 8:30 pm about Sparrow",
                     confidence=0.9, extracted_at=now - 3600, due=due)
                 props = scheduling.propose(store, now=now)
                 self.assertFalse(any(p.fact_id == fid for p in props))

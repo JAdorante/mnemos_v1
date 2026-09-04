@@ -1,6 +1,6 @@
-"""Peer channel — Mnemos <-> Mnemos, for teams (Phase 1 walking skeleton).
+"""Peer channel — Sparrow <-> Sparrow, for teams (Phase 1 walking skeleton).
 
-Everyone on a team runs their own Mnemos. This channel lets two instances pair
+Everyone on a team runs their own Sparrow. This channel lets two instances pair
 and exchange bounded, typed messages so one user's assistant can ask another's
 a question — answered from the OTHER user's memory, by THEIR models, behind
 THEIR consent. Raw memory never crosses the wire; only composed, redacted
@@ -709,7 +709,7 @@ def handle_ask(peer: dict, payload: dict) -> dict:
     elif kind == "org_escalate":
         _notify_chat(f"{who} escalated a strategic issue — review on Team (/peer).")
     else:
-        _notify_chat(f"{who}'s Mnemos asks: “{question[:200]}” — approve or "
+        _notify_chat(f"{who}'s Sparrow asks: “{question[:200]}” — approve or "
                      "decline on the Team page (/peer).")
     return {"ok": True, "status": "pending", "ask_id": ask_id}
 
@@ -1016,7 +1016,7 @@ def _record_answer(peer_rec: dict, peer_id: str, ask_id: str,
             _ingest_answer(name, peer_id, ask_id, answer_text)
         else:
             _publish_event("peer.answer",
-                           f"[from {name}'s Mnemos] {answer_text}",
+                           f"[from {name}'s Sparrow] {answer_text}",
                            {"peer_id": peer_id, "peer": name, "ask_id": ask_id})
 
 
@@ -1036,7 +1036,7 @@ def handle_answer(peer: dict, payload: dict) -> dict:
         return {"ok": False, "error": "no matching outstanding ask"}
     if payload.get("declined"):
         _record_answer(peer, peer["peer_id"], ask_id, None, declined=True)
-        _notify_chat(f"{peer.get('name', 'A teammate')}'s Mnemos declined "
+        _notify_chat(f"{peer.get('name', 'A teammate')}'s Sparrow declined "
                      f"to answer: “{item.get('question', '')[:120]}”")
         _after_answer(item, declined=True)
         return {"ok": True, "status": "declined"}
@@ -1046,7 +1046,7 @@ def handle_answer(peer: dict, payload: dict) -> dict:
     answer_text = answer_text[: settings.peer.max_text_chars]
     _record_answer(peer, peer["peer_id"], ask_id, answer_text)
     print(f"[peer] answer from {peer.get('name', '?')}: {answer_text[:80]}")
-    _notify_chat(f"{peer.get('name', 'A teammate')}'s Mnemos answered: "
+    _notify_chat(f"{peer.get('name', 'A teammate')}'s Sparrow answered: "
                  f"“{answer_text[:400]}”")
     _after_answer(item, declined=False)
     return {"ok": True, "status": "recorded"}
@@ -1089,7 +1089,7 @@ def _ingest_answer(name: str, peer_id: str, ask_id: str,
         from app.services.attachments import _index_event
         from app.storage import get_store
 
-        text = f"[from {name}'s Mnemos] {answer_text}"
+        text = f"[from {name}'s Sparrow] {answer_text}"
         ev = Event(
             time=time.time(), modality=Modality.TEXT, raw=text,
             summary=f"[peer.answer] {text[:120]}", source="peer.answer",
@@ -1235,19 +1235,19 @@ def _chat_ask_run(peer_id: str, question: str, kind: str = "question") -> None:
     name = res.get("peer") or "the teammate"
     status = res.get("status")
     if status == "answered":
-        _notify_chat(f"{name}'s Mnemos answered: “{res.get('answer', '')}”")
+        _notify_chat(f"{name}'s Sparrow answered: “{res.get('answer', '')}”")
     elif status == "pending" and kind == "handoff":
         _notify_chat(f"Handed off to {name} — waiting for them to accept.")
     elif status == "pending":
-        _notify_chat(f"Asked {name}'s Mnemos — it's waiting for their "
+        _notify_chat(f"Asked {name}'s Sparrow — it's waiting for their "
                      "approval; I'll surface the answer when it arrives.")
     elif status == "queued":
-        _notify_chat(f"{name}'s Mnemos isn't reachable — queued until "
+        _notify_chat(f"{name}'s Sparrow isn't reachable — queued until "
                      "they're online.")
     elif status == "declined":
-        _notify_chat(f"{name}'s Mnemos declined to answer that.")
+        _notify_chat(f"{name}'s Sparrow declined to answer that.")
     else:
-        _notify_chat(f"I couldn't reach {name}'s Mnemos "
+        _notify_chat(f"I couldn't reach {name}'s Sparrow "
                      f"({res.get('error', 'unknown error')}).")
 
 

@@ -5,7 +5,7 @@ Parakeet, and anything after it — is decided by `scripts/eval_asr.py` run agai
 this directory, on the Windows reference machine.
 
 The reason this exists rather than a leaderboard number: published ASR WER is
-measured on read speech recorded close to a good microphone. Mnemos hears a
+measured on read speech recorded close to a good microphone. Sparrow hears a
 laptop mic in a room with a fan, two people talking over each other, and a
 meeting coming back through WASAPI loopback. An engine can win LibriSpeech and
 lose here. **If Parakeet loses on these fixtures, we keep Whisper** — and this

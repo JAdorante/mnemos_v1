@@ -102,7 +102,7 @@ try:
     from fastapi import FastAPI, Request
     from fastapi.responses import JSONResponse
 
-    app = FastAPI(title="Mnemos invite vending")
+    app = FastAPI(title="Sparrow invite vending")
 
     @app.get("/health")
     def health() -> dict:

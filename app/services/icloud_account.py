@@ -9,7 +9,7 @@ QUILL_CREDENTIALS_FILE app/config.py loads at boot). The password is write-only
 from the UI's perspective: status reports a masked account name, never secrets.
 
 Revocation is Apple-side and instant: deleting the app-specific password at
-appleid.apple.com cuts Mnemos off, whatever state the file is in.
+appleid.apple.com cuts Sparrow off, whatever state the file is in.
 """
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Cognition telemetry — the measurement layer over Mnemos's *judgement*.
+"""Cognition telemetry — the measurement layer over Sparrow's *judgement*.
 
 `model_log` measures the model calls (latency/tokens/cost) and `audio_telemetry`
 measures the capture pipeline (SNR / drop reasons). Neither measures whether the

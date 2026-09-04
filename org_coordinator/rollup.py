@@ -7,7 +7,7 @@ from typing import Any
 
 
 def _claude_json(system: str, user: str, *, model: str | None = None) -> dict:
-    """Direct Anthropic call — coordinator may run without full Mnemos."""
+    """Direct Anthropic call — coordinator may run without full Sparrow."""
     try:
         import anthropic
     except ImportError:

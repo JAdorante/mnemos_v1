@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-# User→Mnemos instructions that wrap the real commitment ("can you make note of…").
+# User→Sparrow instructions that wrap the real commitment ("can you make note of…").
 _META_NOTE = re.compile(
     r"^(?:"
     r"you asked (?:me )?to\s+"
@@ -125,7 +125,7 @@ def meeting_title(
         if m:
             return _meet_from_body(m.group("body"))
 
-    # Structured person + topic still buried in raw ("…about Mnemos").
+    # Structured person + topic still buried in raw ("…about Sparrow").
     if who and not top and raw:
         about = re.split(r"\babout\b", raw, maxsplit=1, flags=re.I)
         if len(about) == 2 and about[1].strip():

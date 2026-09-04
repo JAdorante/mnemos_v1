@@ -1,13 +1,13 @@
 """#6 — utterance router: what KIND of speech was this?
 
 The mic pipeline treats every utterance the same — transcribe, extract, maybe
-offer. But "Mnemos, text Abby I'll be late" (a COMMAND to act), "note to self:
+offer. But "Sparrow, text Abby I'll be late" (a COMMAND to act), "note to self:
 buy cabernet" (DICTATION to store verbatim), and "yeah the demo went well"
 (CONVERSATION to remember) want different handling. This classifies each
 transcript into one of four types so the rest of the pipeline can route on it:
 
-    command       a direct instruction to Mnemos to DO something now. Wake-word
-                  addressed ("Mnemos, …") or an assistant-directed frame ("can
+    command       a direct instruction to Sparrow to DO something now. Wake-word
+                  addressed ("Sparrow, …") or an assistant-directed frame ("can
                   you email …", "please book …"). -> the agent / offer path.
     dictation     verbatim content to capture, flagged by an explicit trigger
                   ("note to self", "take this down"). -> store as a note, and
@@ -38,8 +38,8 @@ DICTATION = "dictation"
 CONVERSATION = "conversation"
 NOISE = "noise"
 
-# Wake words that address Mnemos directly. QUILL heritage kept (env-overridable).
-_WAKE = {w for w in os.environ.get("QUILL_WAKE_WORDS", "mnemos,Mnemos,quill").lower()
+# Wake words that address Sparrow directly. QUILL heritage kept (env-overridable).
+_WAKE = {w for w in os.environ.get("QUILL_WAKE_WORDS", "mnemos,Sparrow,quill").lower()
          .split(",") if w.strip()}
 # Optional politeness lead-ins before the wake word ("hey mnemos", "ok quill").
 _WAKE_LEADS = ("hey", "ok", "okay", "yo", "hi", "hello")
@@ -70,7 +70,7 @@ _NONWORD = re.compile(r"[^a-z0-9' ]+")
 _WS = re.compile(r"\s+")
 
 # Min words below which an all-filler utterance is noise (real short commands like
-# "Mnemos stop" are caught by the wake-word branch before this).
+# "Sparrow stop" are caught by the wake-word branch before this).
 _NOISE_MAX_WORDS = int(os.environ.get("QUILL_NOISE_MAX_WORDS", "3"))
 
 
@@ -114,7 +114,7 @@ def _action_verbs() -> set[str]:
 
 
 def _strip_wake(raw: str, norm_words: list[str]) -> tuple[bool, str]:
-    """Does the utterance open by addressing Mnemos? Returns (is_wake, content)
+    """Does the utterance open by addressing Sparrow? Returns (is_wake, content)
     with the lead-in + wake word stripped from the ORIGINAL text."""
     i = 0
     if norm_words and norm_words[0] in _WAKE_LEADS:
@@ -171,7 +171,7 @@ def classify(text: str) -> RouteResult:
     is_wake, wake_content = _strip_wake(raw, words)
     if is_wake:
         return RouteResult(COMMAND, 0.95, ["wake_word"],
-                           "addressed Mnemos directly", content=wake_content)
+                           "addressed Sparrow directly", content=wake_content)
 
     # 2) DICTATION — explicit verbatim-capture trigger at the start.
     dctx = _dictation_content(norm, raw)

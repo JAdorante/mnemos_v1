@@ -403,7 +403,8 @@ class GeneralityTests(unittest.TestCase):
         self.assertIn("dana okonkwo", blob)
         self.assertIn("coral restoration", blob)
         # No developer data leaked in from anywhere.
-        for leak in ("justin", "adorante", "alpaca", "dtc", "villanova", "mnemos"):
+        for leak in ("justin", "adorante", "alpaca", "dtc", "villanova",
+                     "mnemos", "sparrow"):
             self.assertNotIn(leak, blob)
 
     def test_source_has_no_personal_literals(self) -> None:

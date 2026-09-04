@@ -1,6 +1,6 @@
 """Chat-first trigger authoring — "whenever X, do Y" → an approved trigger row.
 
-Mnemos is a public product: authoring is a chat sentence, never a config file.
+Sparrow is a public product: authoring is a chat sentence, never a config file.
 The flow mirrors calendar_intent.py: a deterministic `looks_like_*` gate on the
 chat route, then a local-first LLM compile (heuristic fallback when no model is
 reachable), then — the validate-live-then-persist move — a BACKTEST over the

@@ -19,9 +19,19 @@ class NavChromeTests(unittest.TestCase):
         self.assertIn("/peer", html)
         self.assertIn("Setup", html)
         self.assertIn("nav-profile", html)
+        self.assertIn("Copyright 2026 Ravenry LLC", html)
         self.assertNotIn(">You</a>", html)
         # Meetings lives under More, not primary strip
         self.assertLess(html.index("Chat"), html.index('href="/meetings"'))
+
+    def test_profile_control_has_chrome_css(self) -> None:
+        from app.api.mnemos_theme import CHROME_CSS
+
+        self.assertIn(".nav-profile{", CHROME_CSS)
+        self.assertIn(".nav-profile-dot{", CHROME_CSS)
+        self.assertIn("order:20", CHROME_CSS)
+        self.assertIn(".nav-more[open] > .nav-more-menu", CHROME_CSS)
+        self.assertIn(".nav-more-copy{", CHROME_CSS)
 
     def test_tester_hides_desktop_phone_org(self) -> None:
         with patch.dict(os.environ, {"QUILL_PROFILE": "tester"}, clear=False):
@@ -37,6 +47,8 @@ class NavChromeTests(unittest.TestCase):
         self.assertNotIn("@@NAV@@", out)
         self.assertIn('id="mnemosNav"', out)
         self.assertIn("nav-profile", out)
+        self.assertIn("Copyright 2026 Ravenry LLC", out)
+        self.assertEqual(apply("@@COPYRIGHT@@"), "Copyright 2026 Ravenry LLC")
 
 
 if __name__ == "__main__":

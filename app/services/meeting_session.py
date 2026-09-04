@@ -269,7 +269,9 @@ def asr_extra_terms() -> list[str]:
 
 def _channel_of(source: str) -> str:
     src = (source or "")
-    if src.startswith("audio.system"):
+    # web_tab is the browser's getDisplayMedia tab audio — the far side of a
+    # meeting, same role as WASAPI loopback, so it diarizes as "remote".
+    if src.startswith("audio.system") or src.startswith("audio.web_tab"):
         return "remote"
     if src.startswith("audio.") or src in ("audio.whisper", "audio.skipped"):
         return "mic"
@@ -477,6 +479,42 @@ def decide(
     except Exception:
         pass
     return {"ok": True, "consent": choice, "status": STATUS_ACTIVE, "session": row}
+
+
+def start_manual(
+    *,
+    title: str = "",
+    consent: str = CONSENT_TRANSCRIPT,
+    duration_min: float = 120.0,
+    store: Store | None = None,
+) -> dict[str, Any]:
+    """Explicit user-initiated meeting (web "Start meeting" button).
+
+    Spawns a SOURCE_MANUAL session and applies the retention choice in one
+    step — no calendar anchor, no offer queue. Refuses while another session
+    is live so a button mash cannot orphan an active recording.
+    """
+    if consent not in RECORD_CONSENT:
+        return {"ok": False, "error": f"invalid consent: {consent}"}
+    st = current()
+    if st and st.get("status") in (STATUS_ACTIVE, STATUS_OFFERED):
+        return {"ok": False, "error": "a meeting session is already live",
+                "session": st}
+    store = _store(store)
+    now = time.time()
+    duration_min = max(5.0, min(600.0, float(duration_min or 120.0)))
+    spawn(
+        store,
+        title=(title or "").strip()[:200] or "Meeting",
+        source=SOURCE_MANUAL,
+        provider="unknown",
+        t_start=now,
+        t_end=now + duration_min * 60.0,
+    )
+    out = decide(consent, store=store, remember=False)
+    if out.get("ok"):
+        out["started"] = True
+    return out
 
 
 def end(*, reason: str = "manual", store: Store | None = None) -> dict[str, Any]:

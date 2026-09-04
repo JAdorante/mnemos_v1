@@ -98,7 +98,7 @@ class ChatOutcomeTests(unittest.TestCase):
 
     def test_live_browser_result_not_downgraded_against_memory(self) -> None:
         # Live hands answers cite people/places from the page the agent just
-        # read. Those tokens are not expected to appear in Mnemos memory.
+        # read. Those tokens are not expected to appear in Sparrow memory.
         # Passing the retrieval block into answer_check would rewrite any
         # such summary into Confirmed/Missing + unrelated memory evidence.
         # Emit path must omit context so the done-result text stays intact.
@@ -111,7 +111,7 @@ class ChatOutcomeTests(unittest.TestCase):
             "@market_wire: Regulator preparing continuous trading hours."
         )
         memory = (
-            "You are Mnemos, the user's personal AI memory assistant.\n"
+            "You are Sparrow, the user's personal AI memory assistant.\n"
             "The user works on portfolio company tooling.\n"
             "Open commitment: follow up with the vendor about the invoice."
         )

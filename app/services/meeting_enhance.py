@@ -327,7 +327,7 @@ def build_packet(store: Store, session: dict, *, template: str) -> tuple[str, se
 
 
 _SYSTEM = (
-    "You are Mnemos's meeting-note enhancer. You receive a settled meeting: "
+    "You are Sparrow's meeting-note enhancer. You receive a settled meeting: "
     "speaker-labeled transcript turns, the user's live notepad jots, and facts "
     "already extracted from those turns (each tagged [fact_id]).\n\n"
     "Produce a structured meeting note. Rules:\n"

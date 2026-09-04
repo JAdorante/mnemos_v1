@@ -116,7 +116,7 @@ def _self_title_re() -> re.Pattern:
     truth), so a rebrand keeps this correct without touching filter code."""
     global _SELF_TITLE_RE
     if _SELF_TITLE_RE is None:
-        brand_words = {"mnemos", "quill"}
+        brand_words = {"mnemos", "quill", "sparrow", "ravenry"}
         try:
             from app.api.mnemos_theme import BRAND
             brand_words.add((BRAND or "").split(".")[0].strip().lower())

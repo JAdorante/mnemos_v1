@@ -110,6 +110,31 @@ class RetentionTests(unittest.TestCase):
         self.assertNotIn("llava:7b", doomed)
         self.assertNotIn("minicpm-v:latest", doomed)
 
+    def test_default_tag_with_user_suffix(self) -> None:
+        self.assertEqual(
+            tl.default_tag("qwen2.5:7b-instruct", "20260904", suffix="user1"),
+            "qwen2.5-mnemos-user1-20260904")
+
+    def test_suffixed_prune_scope_never_crosses_users(self) -> None:
+        """Shared-Ollama retention (hosted): user1's prune touches only
+        user1's tags — never user2's, never unsuffixed desktop tags."""
+        tags = ["qwen2.5-mnemos-user1-20260801:latest",
+                "qwen2.5-mnemos-user1-20260810:latest",
+                "qwen2.5-mnemos-user1-20260820:latest",
+                "qwen2.5-mnemos-user2-20260101:latest",
+                "qwen2.5-mnemos-20260101:latest",
+                "qwen2.5:7b-instruct"]
+        doomed = tl.tags_to_prune(tags, live="qwen2.5:7b-instruct", keep=2,
+                                  suffix="user1")
+        self.assertEqual(doomed, ["qwen2.5-mnemos-user1-20260801:latest"])
+
+    def test_unsuffixed_prune_ignores_suffixed_tags(self) -> None:
+        tags = ["qwen2.5-mnemos-20260101:latest",
+                "qwen2.5-mnemos-20260201:latest",
+                "qwen2.5-mnemos-user1-20250101:latest"]
+        doomed = tl.tags_to_prune(tags, live="x", keep=1)
+        self.assertEqual(doomed, ["qwen2.5-mnemos-20260101:latest"])
+
     def test_prune_run_dirs_mirrors_tag_retention(self) -> None:
         import tempfile
         with tempfile.TemporaryDirectory() as td:

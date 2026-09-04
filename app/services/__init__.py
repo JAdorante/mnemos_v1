@@ -1,1 +1,1 @@
-"""Mnemos modality services. Each is independent and feeds the EventBus."""
+"""Sparrow modality services. Each is independent and feeds the EventBus."""

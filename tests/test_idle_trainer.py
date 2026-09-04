@@ -110,5 +110,109 @@ class ProbeSafetyTests(unittest.TestCase):
         self.assertGreaterEqual(it.pair_count(), 0)
 
 
+class ColdStartBootstrapTests(unittest.TestCase):
+    """Automatic-at-signup: the FIRST run may fire on real+synthetic volume,
+    bypassing the organic-growth and saturation gates exactly once."""
+
+    def test_first_run_fires_on_synthetic_volume(self) -> None:
+        p = probes(pairs=20, synth_pairs=80, bootstrap_min=100,
+                   min_new_pairs=150, lora_saturated=False)
+        go, reason = it.should_run({}, p)
+        self.assertTrue(go, reason)
+        self.assertIn("cold-start bootstrap", reason)
+
+    def test_bootstrap_needs_the_green_light_total(self) -> None:
+        go, reason = it.should_run(
+            {}, probes(pairs=20, synth_pairs=30, bootstrap_min=100,
+                       min_new_pairs=150))
+        self.assertFalse(go)
+        self.assertIn("new labeled pairs", reason)
+
+    def test_second_run_needs_organic_growth_again(self) -> None:
+        state = {"last_run_ts": NOW - 30 * DAY, "pairs_at_last_run": 20}
+        go, reason = it.should_run(
+            state, probes(pairs=25, synth_pairs=80, bootstrap_min=100,
+                          min_new_pairs=150))
+        self.assertFalse(go)
+        self.assertIn("new labeled pairs", reason)
+
+    def test_bootstrap_still_respects_idle_and_disk(self) -> None:
+        p = probes(pairs=20, synth_pairs=80, bootstrap_min=100,
+                   min_new_pairs=150, idle_s=10)
+        go, _ = it.should_run({}, p)
+        self.assertFalse(go)
+
+    def test_synth_due_when_green(self) -> None:
+        p = probes(pairs=19, synth_pairs=0, bootstrap_min=100,
+                   facts_n=50, min_facts=10, synth_enabled=True)
+        due, reason = it.synth_bootstrap_due({}, p)
+        self.assertTrue(due, reason)
+
+    def test_synth_not_due_after_done_or_backoff_or_thin_graph(self) -> None:
+        base = dict(pairs=19, synth_pairs=0, bootstrap_min=100,
+                    facts_n=50, min_facts=10, synth_enabled=True)
+        self.assertFalse(it.synth_bootstrap_due(
+            {"synth_done": True}, probes(**base))[0])
+        self.assertFalse(it.synth_bootstrap_due(
+            {"synth_last_ts": NOW - 3600}, probes(**base))[0])
+        self.assertFalse(it.synth_bootstrap_due(
+            {}, probes(**{**base, "facts_n": 3}))[0])
+        self.assertFalse(it.synth_bootstrap_due(
+            {}, probes(**{**base, "pairs": 150}))[0])
+        self.assertFalse(it.synth_bootstrap_due(
+            {}, probes(**{**base, "synth_pairs": 90}))[0])
+        self.assertFalse(it.synth_bootstrap_due(
+            {}, probes(**{**base, "idle_s": 10}))[0])
+        self.assertFalse(it.synth_bootstrap_due(
+            {}, probes(**{**base, "synth_enabled": False}))[0])
+
+
+class HostedProbeTests(unittest.TestCase):
+    """QUILL_HEADLESS=1 (hosted container): idle = capture-quiet, AC = moot."""
+
+    def test_hosted_mode_swaps_probes(self) -> None:
+        from unittest import mock
+        with mock.patch.dict("os.environ", {"QUILL_HEADLESS": "1"}), \
+                mock.patch.object(it, "capture_idle_seconds",
+                                  return_value=2400.0) as cap, \
+                mock.patch.object(it, "idle_seconds") as kb, \
+                mock.patch.object(it, "on_ac_power") as ac, \
+                mock.patch.object(it, "pair_count", return_value=0), \
+                mock.patch.object(it, "lora_saturated_probe",
+                                  return_value=True):
+            p = it.IdleTrainer()._probes()
+        self.assertEqual(p["idle_s"], 2400.0)
+        self.assertTrue(p["on_ac"])
+        cap.assert_called_once()
+        kb.assert_not_called()      # keyboard probe never consulted
+        ac.assert_not_called()      # battery probe never consulted
+
+    def test_capture_idle_reads_newest_event(self) -> None:
+        from unittest import mock
+
+        class _FakeStore:
+            def recent_events(self, *, limit):
+                import time as _t
+                return [{"time": _t.time() - 900}]
+
+        with mock.patch("app.storage.get_store", return_value=_FakeStore()):
+            idle = it.capture_idle_seconds()
+        self.assertGreaterEqual(idle, 890)
+        self.assertLess(idle, 1000)
+
+    def test_capture_idle_fails_safe_to_active(self) -> None:
+        from unittest import mock
+
+        class _EmptyStore:
+            def recent_events(self, *, limit):
+                return []
+
+        with mock.patch("app.storage.get_store", return_value=_EmptyStore()):
+            self.assertEqual(it.capture_idle_seconds(), 0.0)
+        with mock.patch("app.storage.get_store",
+                        side_effect=RuntimeError("db gone")):
+            self.assertEqual(it.capture_idle_seconds(), 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()

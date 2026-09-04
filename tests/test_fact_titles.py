@@ -14,10 +14,10 @@ from app.services.fact_titles import (
 
 class TitleizeTests(unittest.TestCase):
     def test_meeting_chat_becomes_meet_title(self):
-        raw = "I have a meeting with Andy Karos today at 8:30 pm about Mnemos"
+        raw = "I have a meeting with Andy Karos today at 8:30 pm about Sparrow"
         self.assertEqual(
             titleize_work_item(raw),
-            "Meet Andy Karos about Mnemos",
+            "Meet Andy Karos about Sparrow",
         )
 
     def test_make_note_of_meeting(self):
@@ -29,8 +29,8 @@ class TitleizeTests(unittest.TestCase):
         self.assertEqual(titleize_work_item(raw), "Meet Michael Saad")
 
     def test_remember_prefix_stripped(self):
-        raw = "Can you remember I have a meeting with Andy Karos about Mnemos"
-        self.assertEqual(titleize_work_item(raw), "Meet Andy Karos about Mnemos")
+        raw = "Can you remember I have a meeting with Andy Karos about Sparrow"
+        self.assertEqual(titleize_work_item(raw), "Meet Andy Karos about Sparrow")
 
     def test_promise_keeps_imperative(self):
         self.assertEqual(
@@ -40,8 +40,8 @@ class TitleizeTests(unittest.TestCase):
 
     def test_idempotent(self):
         self.assertEqual(
-            titleize_work_item("Meet Andy Karos about Mnemos"),
-            "Meet Andy Karos about Mnemos",
+            titleize_work_item("Meet Andy Karos about Sparrow"),
+            "Meet Andy Karos about Sparrow",
         )
 
     def test_short_label_word_boundary(self):
@@ -70,8 +70,8 @@ class MeetingFormTests(unittest.TestCase):
             "Meet Michael Saad",
         )
         self.assertEqual(
-            meeting_title(counterparty="Andy Karos", topic="Mnemos"),
-            "Meet Andy Karos about Mnemos",
+            meeting_title(counterparty="Andy Karos", topic="Sparrow"),
+            "Meet Andy Karos about Sparrow",
         )
 
     def test_commitment_title_prefers_to_person_for_meetings(self):

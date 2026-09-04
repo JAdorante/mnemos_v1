@@ -1,4 +1,4 @@
-# Mnemos tester installer (Windows 10/11).
+# Sparrow tester installer (Windows 10/11).
 #
 # Run via install.bat (double-click) or:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install.ps1
@@ -24,7 +24,7 @@ function Warn($msg)  { Write-Host "    $msg" -ForegroundColor Yellow }
 function Fail($msg)  { Write-Host "`nERROR: $msg" -ForegroundColor Red; exit 1 }
 
 if (-not (Test-Path (Join-Path $root 'run_all.py'))) {
-    Fail "Run this from inside the Mnemos folder (run_all.py not found)."
+    Fail "Run this from inside the Sparrow folder (run_all.py not found)."
 }
 
 # Unattended installs: CI on a clean runner, a scripted rollout, or anything
@@ -45,7 +45,7 @@ if ($nonInteractive) {
     Warn "Unattended install - no prompts. Model account from QUILL_INVITE_CODE or ANTHROPIC_API_KEY."
 }
 
-Write-Host "Mnemos tester install" -ForegroundColor White
+Write-Host "Sparrow tester install" -ForegroundColor White
 Write-Host "Needs ~20 GB free disk (models + dependencies) and a while on first run."
 
 $winget = Get-Command winget -ErrorAction SilentlyContinue
@@ -129,7 +129,7 @@ if ($skipOllama) {
     $ollamaOk = ($t -and $LASTEXITCODE -eq 0)
 }
 if ($ollamaOk) { Ok "Local models ready (text: qwen2.5:7b-instruct, vision: minicpm-v)." }
-else { Warn "Ollama models unavailable - Mnemos will run cloud-only (higher API usage). Install Ollama from ollama.com, run 'ollama pull qwen2.5:7b-instruct' and 'ollama pull minicpm-v', then set QUILL_TEXT_LOCAL=1 in .env." }
+else { Warn "Ollama models unavailable - Sparrow will run cloud-only (higher API usage). Install Ollama from ollama.com, run 'ollama pull qwen2.5:7b-instruct' and 'ollama pull minicpm-v', then set QUILL_TEXT_LOCAL=1 in .env." }
 
 # --- 5. Speech / embedding models ---------------------------------------------
 Step "Pre-downloading speech + embedding models (Whisper, VAD, speaker, MiniLM)"
@@ -137,7 +137,7 @@ Write-Host "    ~700 MB on a fresh machine. Each model retries and resumes, so a
 Write-Host "    dropped connection costs the remainder, not the whole download."
 & $venvPy (Join-Path $root 'scripts\download_models.py') --retries 5
 if ($LASTEXITCODE -ne 0) {
-  Warn "Some models did not finish downloading. Re-run install.bat when you have a steady connection - what already downloaded is kept and partial files continue where they stopped. Mnemos still starts; it fetches whatever is missing on first use."
+  Warn "Some models did not finish downloading. Re-run install.bat when you have a steady connection - what already downloaded is kept and partial files continue where they stopped. Sparrow still starts; it fetches whatever is missing on first use."
 } else { Ok "Speech + embedding models cached." }
 
 # --- 6. .env + Anthropic API key -----------------------------------------------
@@ -199,7 +199,7 @@ if ($nonInteractive) {
 } elseif ($inviteUrl) {
     $env:QUILL_INVITE_URL = $inviteUrl.Trim()
     Write-Host ""
-    Write-Host "  How do you want to connect Mnemos to Claude?"
+    Write-Host "  How do you want to connect Sparrow to Claude?"
     Write-Host "    [1] I have an invite code  (recommended - nothing to sign up for)"
     Write-Host "    [2] I have my own Anthropic API key"
     Write-Host "    [3] Skip for now"
@@ -219,7 +219,7 @@ if ($nonInteractive) {
 if ((-not $nonInteractive) -and (-not $invited)) {
     while ($true) {
         $key = Read-Host "Paste YOUR Anthropic API key (sk-ant-..., from console.anthropic.com) or press Enter to add it to .env later"
-        if (-not $key) { Warn "Skipped - Mnemos needs ANTHROPIC_API_KEY in .env before chat works."; break }
+        if (-not $key) { Warn "Skipped - Sparrow needs ANTHROPIC_API_KEY in .env before chat works."; break }
         & $venvPy -c $keyCheck $key.Trim()
         if ($LASTEXITCODE -eq 0) { $key = $key.Trim(); break }
         Warn "That key didn't validate. Try again, or press Enter to skip."
@@ -238,7 +238,7 @@ Ok ".env written (never share this file - it holds your key)."
 # --- Done ----------------------------------------------------------------------
 Write-Host ""
 Write-Host "=============================================================" -ForegroundColor Green
-Write-Host "  Mnemos is installed." -ForegroundColor Green
+Write-Host "  Sparrow is installed." -ForegroundColor Green
 Write-Host "  Start it:   double-click start.bat"
 Write-Host "  Then open:  http://127.0.0.1:8000"
 Write-Host ""

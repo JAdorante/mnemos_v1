@@ -1,9 +1,9 @@
 """Perception Phase 0 — the ASR acceptance harness.
 
-`eval_voice.py` (#8) answers "did a *pipeline* change make Mnemos better?" on a
+`eval_voice.py` (#8) answers "did a *pipeline* change make Sparrow better?" on a
 synthetic golden set. This answers a different question, the one the perception
 upgrade turns on: **does a different ASR *engine* win on our audio?** Leaderboard
-WER is measured on read speech; Mnemos hears laptop mics in rooms with fans.
+WER is measured on read speech; Sparrow hears laptop mics in rooms with fans.
 
 So this harness is deliberately engine-agnostic. Every engine implements the
 `ASREngine` protocol from `app/services/asr.py` — the same objects the live path

@@ -220,7 +220,7 @@ _SCHEMA = {
                     "topic": {
                         "type": "string",
                         "description":
-                        "For form=meeting only: short subject ('Mnemos', 'pricing'). "
+                        "For form=meeting only: short subject ('Sparrow', 'pricing'). "
                         "Empty string when unstated or for promises.",
                     },
                     "from_person": {"type": "string", "description": "Who made the promise — a name or 'me' for the speaker. For meetings, usually 'me'."},
@@ -345,7 +345,7 @@ _SCHEMA = {
 }
 
 _SYSTEM = (
-    "You are Mnemos's fact extractor. You receive a short passage of transcribed "
+    "You are Sparrow's fact extractor. You receive a short passage of transcribed "
     "speech (one conversational turn) labeled with who spoke, and pull out the "
     "structured facts it contains: tasks, commitments, notable claims, and open "
     "questions.\n\n"

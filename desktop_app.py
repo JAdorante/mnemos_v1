@@ -1,4 +1,4 @@
-"""Mnemos as a desktop app — the packaged build's entry point.
+"""Sparrow as a desktop app — the packaged build's entry point.
 
 `run_all.py` is the developer/scripted-install launcher: a console, uvicorn in
 the foreground, and "now open a browser tab". That is the wrong first
@@ -20,7 +20,7 @@ This is the same server with a shell around it:
 
 Deliberately **not** started here, unlike `run_all.py`: the browser agent and
 the Org Coordinator. Both are launched as `[sys.executable, "some_script.py"]`
-children, which in a frozen build re-executes `Mnemos.exe` instead of running
+children, which in a frozen build re-executes `Sparrow.exe` instead of running
 the script. Rather than half-fix that, the desktop build ships the memory
 product — capture, memory, people, chat, review — and leaves the agents to the
 scripted install until they are packaged deliberately.
@@ -45,7 +45,7 @@ from app.runtime import apply_env_defaults, bundle_root, env_file, is_frozen, us
 # import, so a later QUILL_DATA_DIR is silently ignored.
 _APPLIED = apply_env_defaults()
 
-WINDOW_TITLE = "Mnemos"
+WINDOW_TITLE = "Sparrow"
 HEALTH_TIMEOUT_S = 180.0
 
 
@@ -89,7 +89,7 @@ def _icon_image():
     """The tray image, from the same logo the web UI uses."""
     try:
         from PIL import Image
-        return Image.open(bundle_root() / "app" / "static" / "mnemos-logo.png")
+        return Image.open(bundle_root() / "app" / "static" / "ravenry-mark.png")
     except Exception as exc:
         print(f"[desktop] tray icon image unavailable ({exc}).")
         return None
@@ -130,12 +130,12 @@ def start_tray(url: str, on_quit) -> "threading.Thread | None":
 
     image = _icon_image()
     menu = pystray.Menu(
-        pystray.MenuItem("Open Mnemos", _open, default=True),
+        pystray.MenuItem("Open Sparrow", _open, default=True),
         pystray.MenuItem("Stop capture", _stop),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Quit", _quit),
     )
-    icon = pystray.Icon("mnemos", image, WINDOW_TITLE, menu)
+    icon = pystray.Icon("sparrow", image, WINDOW_TITLE, menu)
     t = threading.Thread(target=icon.run, name="tray", daemon=True)
     t.start()
     return t
@@ -239,7 +239,7 @@ def self_test() -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="Mnemos desktop app")
+    ap = argparse.ArgumentParser(description="Sparrow desktop app")
     ap.add_argument("--self-test", action="store_true",
                     help="check this build can load what it needs, then exit")
     ap.add_argument("--no-window", action="store_true",
@@ -257,7 +257,7 @@ def main(argv: list[str] | None = None) -> int:
 
     log_file = os.environ.get("QUILL_LOG_FILE")
     if not log_file and is_frozen():
-        log_file = str(user_data_root() / "mnemos.log")
+        log_file = str(user_data_root() / "sparrow.log")
     if log_file:
         Path(log_file).parent.mkdir(parents=True, exist_ok=True)
         fp = open(log_file, "a", encoding="utf-8", buffering=1)

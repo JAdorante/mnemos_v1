@@ -132,7 +132,7 @@ def is_meeting_first() -> bool:
 
 
 def meeting_listen_ok() -> bool:
-    """Wizard confirmed Mnemos may listen inside calendar windows."""
+    """Wizard confirmed Sparrow may listen inside calendar windows."""
     return bool(load().get("meeting_listen_consent"))
 
 
@@ -297,7 +297,7 @@ def unlock_card() -> dict[str, Any] | None:
         "completed": int(cur.get("briefs_completed") or 0),
         "sources": list(AMBIENT_SOURCES),
         "copy": (
-            "Mnemos can keep listening between meetings — mic, camera, and "
+            "Sparrow can keep listening between meetings — mic, camera, and "
             "screen stay off until you turn each one on. Nothing is enabled "
             "by this card alone."
         ),

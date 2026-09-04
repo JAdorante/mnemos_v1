@@ -6,7 +6,7 @@ REAL user to-do list, this:
   1. Upserts clean items into open tasks (deduped).
   2. Offers (in chat) to run the *actionable* ones — debounced.
 
-Ignores Mnemos's own UI, VLM schema leakage, anticipation text, and other
+Ignores Sparrow's own UI, VLM schema leakage, anticipation text, and other
 garbage that the model sometimes stuffs into `items`. Disable with
 QUILL_TODO_WATCH=0 (or QUILL_AGENT=0).
 """
@@ -60,9 +60,10 @@ _ACTION_CUE = re.compile(
     r"https?://|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
     re.I,
 )
-# Don't treat Mnemos's own chrome / memory UI as a user to-do page.
+# Don't treat Sparrow's own chrome / memory UI as a user to-do page.
 _SELF_WINDOW = re.compile(
-    r"mnemos(?:\.ai)?|mnemos|memory console|exec\.ai|/onboarding|nexus_v1\s*-\s*cursor",
+    r"sparrow|ravenry|mnemos(?:\.ai)?|mnemos|memory console|exec\.ai|"
+    r"/onboarding|nexus_v1\s*-\s*cursor",
     re.I,
 )
 # Real list surfaces we trust on desktop capture.
@@ -111,21 +112,23 @@ def _hash(items: list[str]) -> str:
 
 
 def _is_self_ui(ev) -> bool:
-    """True when the frame is Mnemos/Cursor-on-Mnemos — never a user notepad list."""
+    """True when the frame is Sparrow/Cursor-on-Sparrow — never a user notepad list."""
     meta = ev.meta or {}
     win = str(meta.get("window") or "")
     if _SELF_WINDOW.search(win):
         return True
-    # Webcam frames describing the Mnemos UI via OCR/summary.
+    # Webcam frames describing the Sparrow UI via OCR/summary.
     vision = meta.get("vision") if isinstance(meta.get("vision"), dict) else {}
     blob = " ".join([
         str(vision.get("title") or ""),
         str(vision.get("ocr_text") or "")[:400],
         str(ev.summary or "")[:400],
     ]).lower()
-    if "mnemos" in blob and ("checklist for mnemos" in blob
-                             or "memory console" in blob
-                             or "reply 'yes'" in blob):
+    if any(b in blob for b in ("sparrow", "ravenry", "mnemos")) and (
+            "checklist for mnemos" in blob
+            or "checklist for sparrow" in blob
+            or "memory console" in blob
+            or "reply 'yes'" in blob):
         return True
     return False
 
@@ -296,8 +299,9 @@ def _todo_payload(ev) -> dict | None:
     inferred = (not explicit) and _looks_like_todo(title, ocr, summary)
     notes_doc = _is_notes_document(title, ocr)
     # Explicit todo_list from the model still needs to look sane; if the title
-    # is clearly Mnemos meta, drop it.
-    if "mnemos" in title.lower() and "checklist" in title.lower():
+    # is clearly Sparrow meta, drop it.
+    if any(b in title.lower() for b in ("mnemos", "sparrow", "ravenry")) \
+            and "checklist" in title.lower():
         return None
     if _BAD_TITLE.search(title):
         return None

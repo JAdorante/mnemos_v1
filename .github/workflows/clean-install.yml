@@ -1,6 +1,6 @@
 # "A Boost Run employee must succeed with zero help from us: clean machine,
 # double-click, done." GitHub's windows-latest / macos-latest runners are the
-# closest thing we have to that clean machine: wiped for every run, no Mnemos
+# closest thing we have to that clean machine: wiped for every run, no Sparrow
 # state, and not ours. So this job runs the installer a *tester* runs — not a
 # `pip install -r requirements.txt` — then boots the app, proves /health
 # answers on localhost, and proves the uninstaller leaves nothing behind.
@@ -109,7 +109,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'uninstall reported an incomplete wipe' }
           if (Test-Path 'data\quill.db')   { throw 'data\quill.db survived the wipe' }
           if (Test-Path '.credentials.env'){ throw 'the API key survived the wipe' }
-          $receipt = Get-ChildItem -Filter 'mnemos-deletion-receipt-*.json' | Select-Object -First 1
+          $receipt = Get-ChildItem -Filter 'sparrow-deletion-receipt-*.json' | Select-Object -First 1
           if (-not $receipt) { throw 'no deletion receipt was written' }
           Get-Content $receipt.FullName
 
@@ -156,6 +156,6 @@ jobs:
             || { echo "uninstall reported an incomplete wipe"; exit 1; }
           test ! -f data/quill.db     || { echo "data/quill.db survived the wipe"; exit 1; }
           test ! -f .credentials.env  || { echo "the API key survived the wipe"; exit 1; }
-          receipt="$(ls mnemos-deletion-receipt-*.json 2>/dev/null | head -n 1)"
+          receipt="$(ls sparrow-deletion-receipt-*.json 2>/dev/null | head -n 1)"
           [ -n "$receipt" ] || { echo "no deletion receipt was written"; exit 1; }
           cat "$receipt"

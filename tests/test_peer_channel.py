@@ -1,4 +1,4 @@
-"""Unit tests for app.services.peer_channel — the Mnemos <-> Mnemos team
+"""Unit tests for app.services.peer_channel — the Sparrow <-> Sparrow team
 channel (mutual pairing, per-peer tokens, disclosure-gated ask/answer).
 
 Pin the trust model: codes are single-use, expiring, brute-force-limited;
@@ -359,7 +359,7 @@ class ChatIntentTests(PeerChannelBase):
         for text in ("ask Sarah: are the slides done?",
                      "Ask sarah, are the slides done",
                      "ask Sarah Chen: slides done?",
-                     "ask Sarah's Mnemos: are the slides done?",
+                     "ask Sarah's Sparrow: are the slides done?",
                      "ask sarah whether the slides are done"):
             got = pch.parse_team_ask(text)
             self.assertIsNotNone(got, text)
@@ -407,7 +407,7 @@ class ChatIntentTests(PeerChannelBase):
                                              "answer": "Friday Aug 7."}):
             pch.ask(self.pid, "when?")
         ev = [e for e in self.events if e.source == "peer.answer"][0]
-        self.assertTrue(ev.raw.startswith("[from Sarah Chen's Mnemos]"), ev.raw)
+        self.assertTrue(ev.raw.startswith("[from Sarah Chen's Sparrow]"), ev.raw)
 
 
 class PeerIngestTests(PeerChannelBase):
@@ -443,7 +443,7 @@ class PeerIngestTests(PeerChannelBase):
             pch.ask(self.pid, "when?")
         ev = store.insert.call_args[0][0]
         self.assertEqual(ev.source, "peer.answer")
-        self.assertTrue(ev.raw.startswith("[from Sarah Chen's Mnemos]"))
+        self.assertTrue(ev.raw.startswith("[from Sarah Chen's Sparrow]"))
         self.assertEqual(ev.meta.get("peer"), "Sarah Chen")
         wk.enqueue.assert_called_once()
         name, = wk.enqueue.call_args[0]

@@ -102,8 +102,8 @@ class SpokenRegistryTests(unittest.TestCase):
 
 class SelfWindowTests(unittest.TestCase):
     def test_own_ui_titles_are_self(self) -> None:
-        for title in ("Mnemos — Chat - Google Chrome",
-                      "Mnemos — Memory Console",
+        for title in ("Sparrow — Chat - Google Chrome",
+                      "Sparrow — Memory Console",
                       "Memory changes - Chromium",
                       "Weekly check-in",
                       "localhost:8000/console — Profile"):

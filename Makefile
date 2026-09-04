@@ -1,4 +1,4 @@
-# Mnemos / nexus_v1 — local + CI targets
+# Sparrow / nexus_v1 — local + CI targets
 # Prefer the project venv when present.
 PYTHON ?= python
 

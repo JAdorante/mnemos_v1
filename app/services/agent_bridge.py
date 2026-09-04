@@ -1,9 +1,9 @@
 """M4 — the act half of the Brain: dispatch a chat turn to the browser agent.
 
-Mnemos's `/chat` retrieves memory; this bridge lets it *act* on it. A single
+Sparrow's `/chat` retrieves memory; this bridge lets it *act* on it. A single
 persistent `browser_agent.orchestrator.Agent` runs on its own thread (sync
-Playwright must live on one thread), grounded in Mnemos's own timeline via a
-memory provider, so "draft the follow-up Justin promised" pulls what Mnemos
+Playwright must live on one thread), grounded in Sparrow's own timeline via a
+memory provider, so "draft the follow-up Justin promised" pulls what Sparrow
 heard and hands the task to the agent — the full hear -> act loop.
 
 The web layer never touches the Agent directly: it enqueues goals and reads an
@@ -12,7 +12,7 @@ and human approval (ask_human / irreversible-step gates) surface as `ask` events
 answered back through `submit_answer`, instead of blocking the HTTP request.
 
 The Agent (and its real browser window) is created lazily on the first goal, so
-importing Mnemos — or running it purely for capture — never opens a browser.
+importing Sparrow — or running it purely for capture — never opens a browser.
 """
 from __future__ import annotations
 
@@ -216,7 +216,7 @@ _EMAILISH_GOAL = re.compile(
 
 
 def _make_memory_provider(limit: int = 5, min_score: float = 0.15, sink=None):
-    """Read-only view onto Mnemos's structured memory for grounding agent tasks.
+    """Read-only view onto Sparrow's structured memory for grounding agent tasks.
 
     Delegates to grounding.compose — knowledge-graph person context and the
     reviewed facts table FIRST, raw-timeline semantic search as fallback, plus
@@ -230,7 +230,7 @@ def _make_memory_provider(limit: int = 5, min_score: float = 0.15, sink=None):
     try:
         from app.services import grounding as _grounding
     except Exception as exc:  # pragma: no cover - defensive
-        print(f"[agent] Mnemos memory unavailable ({exc}); agent runs unaided.")
+        print(f"[agent] Sparrow memory unavailable ({exc}); agent runs unaided.")
         return None
 
     def provider(goal: str) -> str:
@@ -246,7 +246,7 @@ def _make_memory_provider(limit: int = 5, min_score: float = 0.15, sink=None):
         if not block:
             return ""
         lines = [
-            "RELEVANT MEMORIES FROM Mnemos (things you have already seen or "
+            "RELEVANT MEMORIES FROM Sparrow (things you have already seen or "
             "heard — use them to complete the task without asking the user to "
             "repeat context; ignore any that aren't relevant):"]
         if emailish:
@@ -266,7 +266,7 @@ def _make_source_provider():
 
     Closes the fact_id -> Source gap: instead of a model-written 'source', the
     packet cites the exact stored quote, capture time, and clip pulled from
-    Mnemos's DB — so the agent can only cite a fact that actually exists. Injected
+    Sparrow's DB — so the agent can only cite a fact that actually exists. Injected
     into the Agent like the memory provider; best-effort (returns None when a fact
     can't be resolved, so the packet simply omits an authoritative source)."""
     import time as _time
@@ -359,7 +359,7 @@ def _should_plan(text: str, fact_id: int | None, surface: str | None) -> bool:
 
 
 def _make_recorder():
-    """Build the Mnemos agent-run recorder (Phase 5). Best-effort: if the app
+    """Build the Sparrow agent-run recorder (Phase 5). Best-effort: if the app
     store isn't importable, the agent falls back to running unrecorded rather
     than failing to start."""
     try:
@@ -1091,7 +1091,7 @@ class AgentWorker:
 
     def propose_task(self, text: str, fact_id: int | None = None,
                      confidence: float | None = None) -> bool:
-        """Offer to action a single task Mnemos heard in speech. Same yes/no
+        """Offer to action a single task Sparrow heard in speech. Same yes/no
         chat flow as a to-do list — 'yes' hands it to the agent as a goal."""
         conf = f" · {round(confidence * 100)}% sure" if confidence else ""
         via = " via Phone Link" if _guess_surface(text) else ""
@@ -1159,7 +1159,7 @@ class AgentWorker:
     def propose_calendar(self, event: dict) -> bool:
         """Offer to add a parsed calendar event (yes/no in chat). On 'yes' it
         writes to iCloud via icloud_calendar.create_event — the human 'yes' IS
-        the approval, and Mnemos never adds attendees."""
+        the approval, and Sparrow never adds attendees."""
         cal = event.get("calendar", "Home")
         when = event.get("when_text", "")
         loc = event.get("location") or ""
@@ -1971,7 +1971,7 @@ class AgentWorker:
         # Live hands results (browser/desktop/phone) are evidence from the
         # world the agent just observed. Do NOT pass the memory retrieval
         # block as answer_check context: that gate is for claims grounded in
-        # Mnemos memory, and would mark every live proper noun as "missing"
+        # Sparrow memory, and would mark every live proper noun as "missing"
         # then rewrite the answer into an unrelated memory dump. Memories
         # still ground the *task* via memory_provider during the run; only
         # the post-hoc token check is skipped. Sources stay attached for the
@@ -2265,16 +2265,14 @@ class AgentWorker:
 
         with self.lock:
             self.url, self.ready = self.agent.current_url(), True
-        # Browser is lazy-started on first web goal; desktop/phone use the fast lane.
+        # Browser is lazy-started on first web goal; desktop/phone use the fast
+        # lane. Ready state lives in /chat/poll — do not dump a heartbeat into
+        # the conversation. Local-only is the one startup line people need.
         if local_only:
             self._emit("system",
                        "Local-only mode — no ANTHROPIC_API_KEY, so chat runs on "
                        "the local model and web/desktop/phone agent tasks stay "
                        "off. Add a key to .env for full agent capability.")
-        else:
-            self._emit("system",
-                       "Agent ready — browser starts when a web task needs it "
-                       f"({self.url or 'no page yet'}).")
 
         while True:
             cmd = self.cmd_q.get()
@@ -2332,8 +2330,6 @@ class AgentWorker:
 
         with self.lock:
             self.ready_fast = True
-        self._emit("system",
-                   "Fast lane ready — desktop/phone won't wait on the browser.")
 
         while True:
             cmd = self.fast_q.get()

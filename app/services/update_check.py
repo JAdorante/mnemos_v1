@@ -16,7 +16,7 @@ and ``QUILL_UPDATE_CHECK=0`` (or the Privacy controls toggle) removes it.
 
 The manifest the operator hosts::
 
-    {"latest": "0.4.2", "url": "https://…/Mnemos-0.4.2.zip",
+    {"latest": "0.4.2", "url": "https://…/Sparrow-0.4.2.zip",
      "notes": "…", "min_supported": "0.3.0"}
 
 The answer is cached in ``data/update_check.json`` and served from there for
@@ -158,7 +158,7 @@ def banner(manifest: dict[str, Any] | None,
             f"This build ({current}) is below the minimum supported version "
             f"{manifest.get('min_supported')}. Update to {latest}."
             if unsupported else
-            f"Mnemos {latest} is available (you have {current})."),
+            f"Sparrow {latest} is available (you have {current})."),
     }
 
 

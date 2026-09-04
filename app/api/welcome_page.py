@@ -140,8 +140,8 @@ h1{
 <body>
   <main class="stage" id="stage">
     <div class="brand-row">
-      <img class="brand-logo" src="/static/mnemos-logo.png" width="340" height="88"
-           alt="@@BRAND@@ Labs" decoding="async">
+      <img class="brand-logo" src="/static/ravenry-logo.png" width="340" height="88"
+           alt="@@COMPANY@@" decoding="async">
     </div>
     <div class="rule" aria-hidden="true"></div>
     <h1 id="headline">Your memory starts here</h1>
@@ -164,7 +164,7 @@ h1{
     </section>
   </main>
   <footer class="foot">
-    Local-first · <a href="/onboarding">Setup</a> · <a href="/today">Today</a> · <a href="/chat">Chat</a>
+    @@COPYRIGHT@@ · Local-first · <a href="/onboarding">Setup</a> · <a href="/today">Today</a> · <a href="/chat">Chat</a>
   </footer>
 @@UI_JS@@
 <script>

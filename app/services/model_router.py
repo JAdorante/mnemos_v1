@@ -66,6 +66,10 @@ MODELS: dict[str, str] = {
                                                  "claude-opus-4-8")),
     # Meeting Layer P3 — session enhance (quality over cost; Sonnet-class).
     "enhance": os.environ.get("QUILL_ENHANCE_MODEL", "claude-sonnet-4-6"),
+    # Mint-time person-vs-entity adjudication — rare (only brand-new person
+    # candidates), small classification; Haiku-class is plenty.
+    "person_adjudicate": os.environ.get("QUILL_PERSON_ADJUDICATE_MODEL",
+                                        "claude-haiku-4-5"),
     # Org AI Network — Anthropic parent for rollups / escalation / cascade.
     "org_digest": os.environ.get("QUILL_ORG_DIGEST_MODEL", "claude-sonnet-4-6"),
     "org_rollup": os.environ.get("QUILL_ORG_ROLLUP_MODEL", "claude-sonnet-4-6"),
@@ -429,7 +433,7 @@ class ModelRouter:
         """Availability of the local tier. A positive probe is cached for the
         process (a later failure escalates as local_error and re-marks it); a
         NEGATIVE probe is only cached for local_probe_ttl_s — the old
-        cache-forever behavior meant Ollama starting a beat after Mnemos
+        cache-forever behavior meant Ollama starting a beat after Sparrow
         pinned every call of the session to the paid parent."""
         ttl = float(getattr(_text_cfg(), "local_probe_ttl_s", 60) or 0)
         stale = (self._local_ok is False

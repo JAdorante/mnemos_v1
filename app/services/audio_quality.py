@@ -2,7 +2,7 @@
 
 The ingest filter (ingest_filter.py) judges the *transcript* after Whisper. This
 module judges the *audio* first, from the raw utterance waveform alone — pure
-numpy, no model, no network, sub-millisecond. It gives the rest of Mnemos a
+numpy, no model, no network, sub-millisecond. It gives the rest of Sparrow a
 reason to trust, flag, or skip a transcript, and — crucially for debugging — lets
 us tell "the audio was bad" apart from "Whisper failed".
 

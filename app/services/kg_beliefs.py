@@ -26,7 +26,7 @@ _SOURCE_W = {
     "email": 3.0,
     "calendar": 2.5,
     "user_authored_document": 1.8,
-    "peer_answer": 1.5,   # a teammate's Mnemos said so — sturdier than a shared
+    "peer_answer": 1.5,   # a teammate's Sparrow said so — sturdier than a shared
                           # doc, weaker than hearing the teammate directly
     "shared_document": 1.2,
     "unknown": 1.0,

@@ -1,4 +1,4 @@
-"""Two-instance team sim — watch two Mnemos instances talk peer-to-peer.
+"""Two-instance team sim — watch two Sparrow instances talk peer-to-peer.
 
 Boots TWO full app instances on one machine (isolated QUILL_DATA_DIR + port
 each), seeds each with different memories, pairs them over the real peer
@@ -215,7 +215,7 @@ def main() -> int:
         dt1 = time.time() - t0
         if r1.get("status") != "answered":
             raise RuntimeError(f"expected policy auto-answer, got: {r1}")
-        say(f"  [Justin's Mnemos: classified as allowed, answered in {dt1:.1f}s "
+        say(f"  [Justin's Sparrow: classified as allowed, answered in {dt1:.1f}s "
             f"from HIS memory, HIS model]\n    {r1['answer']}")
 
         say("\n== exchange 2: the leak probe (Sarah asks something personal) ==")
@@ -227,7 +227,7 @@ def main() -> int:
         dt2 = time.time() - t0
         if r2.get("status") == "answered":
             raise RuntimeError(f"GATE FAILED — personal question auto-answered: {r2}")
-        say(f"  [Justin's Mnemos in {dt2:.1f}s] classified personal -> "
+        say(f"  [Justin's Sparrow in {dt2:.1f}s] classified personal -> "
             f"status={r2['status']} — nothing left his machine")
         j_asks = http("GET", f"{a_base}/peer/asks")["asks"]
         probe = [a for a in j_asks if "salary" in a["question"]]
@@ -257,7 +257,7 @@ def main() -> int:
         dt3 = time.time() - t0
         if not dec.get("ok"):
             raise RuntimeError(f"approve failed: {dec}")
-        say(f"  [Sarah's Mnemos composes + delivers in {dt3:.1f}s]\n"
+        say(f"  [Sarah's Sparrow composes + delivers in {dt3:.1f}s]\n"
             f"    {dec['answer']}")
         got = http("GET", f"{a_base}/peer/answers")["answers"]
         mine = [g for g in got if g["ask_id"] == r3["ask_id"]]

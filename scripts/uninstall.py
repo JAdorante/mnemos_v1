@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Erase Mnemos from this machine, offline (pilot blocker: clean uninstall).
+"""Erase Sparrow from this machine, offline (pilot blocker: clean uninstall).
 
 The in-app "Delete everything" button is the path most testers will take. This
 is the one for the tester who has already stopped trusting the app enough to
@@ -10,7 +10,7 @@ still in use. Same deletion code (:mod:`app.services.wipe`), no server needed.
     python scripts/uninstall.py --yes           # no prompt (support calls)
     python scripts/uninstall.py --yes --all     # also the key, config and venv
 
-What it removes, in order: every capture directory Mnemos writes
+What it removes, in order: every capture directory Sparrow writes
 (``data/``, ``sessions/``, ``desktop_agent/sessions/``), then optionally the
 credentials and the virtualenv. What it never removes is the folder itself —
 the tester drags that to the trash, and seeing it go is the point.
@@ -36,7 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 def server_is_up(host: str, port: int, timeout: float = 1.5) -> bool:
-    """True when something answers /health — i.e. Mnemos is probably running."""
+    """True when something answers /health — i.e. Sparrow is probably running."""
     from urllib.error import URLError
     from urllib.request import urlopen
     try:
@@ -66,7 +66,7 @@ def _remove_venv(root: Path) -> str | None:
 
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(
-        description="Delete everything Mnemos captured on this machine.")
+        description="Delete everything Sparrow captured on this machine.")
     ap.add_argument("--yes", action="store_true",
                     help="skip the typed confirmation")
     ap.add_argument("--all", action="store_true",
@@ -83,14 +83,14 @@ def main(argv: list[str]) -> int:
     from app.services import wipe
 
     if not args.force and server_is_up(args.host, args.port):
-        print(f"Mnemos is still running on {args.host}:{args.port}.\n"
-              "Close it first (the Mnemos window / start.bat), then re-run.\n"
+        print(f"Sparrow is still running on {args.host}:{args.port}.\n"
+              "Close it first (the Sparrow window / start.bat), then re-run.\n"
               "Deleting while capture is writing leaves a fresh database behind.",
               file=sys.stderr)
         return 1
 
     before = wipe.preview()
-    print("This permanently deletes everything Mnemos captured here:\n")
+    print("This permanently deletes everything Sparrow captured here:\n")
     for row in before["targets"]:
         mark = "  " if row["exists"] else "  (nothing) "
         print(f"{mark}{row['label']}\n      {row['path']}"
@@ -136,7 +136,7 @@ def main(argv: list[str]) -> int:
             print(f"  {f}", file=sys.stderr)
         print("Close anything still using them and re-run.", file=sys.stderr)
         return 1
-    print("\nDone. Delete this folder to finish removing Mnemos.")
+    print("\nDone. Delete this folder to finish removing Sparrow.")
     return 0
 
 

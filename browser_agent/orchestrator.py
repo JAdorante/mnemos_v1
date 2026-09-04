@@ -294,7 +294,7 @@ def _ask(prompt):
 
 # --- structured, source-grounded approval packets (FR-SEC / approval UX) ----
 # An irreversible action is presented as an inspectable packet — what will
-# happen, the exact content, WHY (grounded in Mnemos memory), and the SOURCE —
+# happen, the exact content, WHY (grounded in Sparrow memory), and the SOURCE —
 # instead of a bare "Can I send this?". The user replies Approve / Edit / Cancel.
 
 _PACKET_FIELDS = [
@@ -410,7 +410,7 @@ def _policy_block_reason(summary="", fields=None, label=""):
 class _NullRecorder:
     """No-op stand-in so the agent runs unrecorded (standalone CLI / one-shot /
     tests) without littering call sites with None-checks. The real Recorder
-    (app.services.agent_log) is injected by the Mnemos bridge."""
+    (app.services.agent_log) is injected by the Sparrow bridge."""
 
     current_run_id = None
 
@@ -450,10 +450,10 @@ class Agent:
         # UI pushes to the page. Defaults keep run.py / chat.py unchanged.
         self._log = on_log or (lambda s: print(s))
         self._ask_fn = on_ask or (lambda q: _ask((q + "\n" if q else "") + "  your reply > "))
-        # Optional Mnemos bridge: (goal) -> a text block of relevant memories that
-        # ground the task in what Mnemos has seen/heard. None = standalone agent.
+        # Optional Sparrow bridge: (goal) -> a text block of relevant memories that
+        # ground the task in what Sparrow has seen/heard. None = standalone agent.
         self._memory_provider = memory_provider
-        # Optional Mnemos source bridge: (fact_id) -> the verbatim stored quote +
+        # Optional Sparrow source bridge: (fact_id) -> the verbatim stored quote +
         # clip that grounds an action. Lets the approval packet's Source line be the
         # real DB fact, not model-written text. Injected like memory_provider to keep
         # browser_agent decoupled from app.*; set per run via run_goal(source_fact_id=).
@@ -465,7 +465,7 @@ class Agent:
         # desktop/phone goals on SEPARATE Agents — "the message you just told
         # me" usually points at the OTHER lane's answer). None = standalone.
         self._session_replies = session_replies
-        # Optional Mnemos agent-run recorder (Phase 5). Injected like the memory
+        # Optional Sparrow agent-run recorder (Phase 5). Injected like the memory
         # provider so browser_agent stays importable without app.*; a no-op stub
         # keeps every record_* call safe when the agent runs standalone.
         self._recorder = recorder or _NullRecorder()
@@ -507,7 +507,7 @@ class Agent:
         self.step = 0          # global step counter across all goals
         self.last_steps = 0
         self.last_replans = 0
-        self.last_route = None  # the most recent Mnemos routing envelope
+        self.last_route = None  # the most recent Sparrow routing envelope
         self.last_mode = None   # the resolved agent mode for the last request
         self.last_study_mode = None  # sticky student persona {id, label, ...}
         self.last_dry_run = None
@@ -660,7 +660,7 @@ class Agent:
         return mem + session
 
     def _memory_context(self, goal):
-        """Pull relevant Mnemos memories for this goal, as a prependable block."""
+        """Pull relevant Sparrow memories for this goal, as a prependable block."""
         if not self._memory_provider:
             return ""
         try:
@@ -669,7 +669,7 @@ class Agent:
             self._log(f"   (memory lookup skipped: {exc})")
             return ""
         if block:
-            self._log("   grounded the task in relevant Mnemos memories.")
+            self._log("   grounded the task in relevant Sparrow memories.")
             return block.rstrip() + "\n\n"
         return ""
 
@@ -705,9 +705,9 @@ class Agent:
         self._log(f"   [session] resolved message body from prior reply "
                   f"({len(filled)} chars)")
 
-    # --- Mnemos intent/action router (runs once per request) ----------------
+    # --- Sparrow intent/action router (runs once per request) ----------------
     def route(self, user_request):
-        """Classify a request into the Mnemos envelope without executing it."""
+        """Classify a request into the Sparrow envelope without executing it."""
         r = self.llm.route(user_request, self._transcript_text(user_request))
         self.last_route = r
         return r
@@ -715,7 +715,7 @@ class Agent:
     # --- approval gate (P2) ------------------------------------------------
     def _grounded_fields(self, fields):
         """Return `fields` with the Source overridden by the verbatim fact from
-        Mnemos's DB for this run — so the packet can only cite a fact that
+        Sparrow's DB for this run — so the packet can only cite a fact that
         actually exists. No-op (returns a copy unchanged) when there's no fact id
         or no source provider, i.e. the standalone agent or an ungrounded goal.
 
@@ -1516,7 +1516,7 @@ class Agent:
             except Exception as exc:
                 self._log(f"   [voice] contact list unavailable ({exc})")
                 contacts = []
-            # #11: supplement the phone scrape with people Mnemos has HEARD (the
+            # #11: supplement the phone scrape with people Sparrow has HEARD (the
             # KG vocabulary). The scrape often returns the notifications feed
             # instead of real contacts; the names the user actually talks about
             # are a second candidate source, so "text Abby" can still ground to
@@ -1609,7 +1609,7 @@ class Agent:
     # --- the loop ----------------------------------------------------------
     def run_goal(self, goal, dry_run=None, surface=None, packet=None,
                  source_fact_id=None, study_mode=None, source_fact_ids=None):
-        """Bracket the run with Mnemos's agent-run log (Phase 5), then delegate.
+        """Bracket the run with Sparrow's agent-run log (Phase 5), then delegate.
 
         The heavy lifting is in _run_goal_inner; this thin wrapper opens a run
         row, records the per-run cost/steps/status on every exit path — including
@@ -2561,7 +2561,7 @@ class Agent:
             except Exception:
                 pass
 
-        # Phase 5: fold this run's steps into Mnemos's canonical agent-run log, so
+        # Phase 5: fold this run's steps into Sparrow's canonical agent-run log, so
         # the trajectory (not just the browser agent's private episodic.db) is
         # inspectable alongside facts, packets, and the human's verdicts.
         # Plan 5.1: prefer step_status (evidence-anchored); LLM-only → uncertain.

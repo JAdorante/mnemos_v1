@@ -1,4 +1,4 @@
-"""A real Mnemos server that writes continuously, meant to be SIGKILLed.
+"""A real Sparrow server that writes continuously, meant to be SIGKILLed.
 
 Used by tests/test_backup_crash.py to reproduce the WS-B acceptance case
 literally: "kill the server mid-write, back up, restore to a fresh dir, boot".

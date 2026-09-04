@@ -250,19 +250,26 @@ def dedupe_near(rows: list[dict], *, sim_threshold: float,
 
 
 def to_example(row: dict) -> dict:
-    """One training record: clean prompt + verified target."""
+    """One training record: clean prompt + verified target — carried in the
+    INFERENCE contract (ollama_text.training_contract): trailer instruction on
+    the system, `CONFIDENCE: 0.NN` on the target. The first live adapter was
+    trained without this and learned to omit the trailer, so every answer
+    parsed as confidence None and auto-escalated (the Aug 18 regression)."""
+    from app.services.ollama_text import training_contract
     meta = row.get("meta") or {}
     messages = [
         {"role": m.get("role", "user"), "content": m.get("text", "")}
         for m in meta.get("messages") or []
     ]
+    system, target = training_contract(meta.get("system") or "",
+                                       bt.gold_answer(row))
     return {
         "id": row.get("id"),
         "task": row.get("task"),
         "outcome": row.get("user_outcome"),
-        "system": meta.get("system") or "",
+        "system": system,
         "messages": messages,
-        "target": bt.gold_answer(row),
+        "target": target,
         "reason": row.get("reason"),
     }
 
@@ -278,8 +285,72 @@ def expand_upweight(examples: list[dict], upweight_edited: int) -> list[dict]:
     return out
 
 
+def load_synthetic(path: Path | None) -> list[dict]:
+    """Parent-distilled synthetic rows (scripts/synthetic_pairs.py). Kept in
+    their own file — never the learning store — so the human-confirmed trail
+    stays honest. Missing/empty path is simply no synthetic."""
+    if not path or not Path(path).is_file():
+        return []
+    out = []
+    for ln in Path(path).read_text(encoding="utf-8-sig").splitlines():
+        if not ln.strip():
+            continue
+        try:
+            row = json.loads(ln)
+        except Exception:
+            continue
+        if row.get("synthetic") and row.get("modality") == "text":
+            out.append(row)
+    return out
+
+
+def merge_synthetic(synthetic_rows: list[dict], train_examples: list[dict],
+                    holdout_rows: list[dict], *,
+                    cap_ratio: float = 3.0) -> tuple[list[dict], dict]:
+    """Fold synthetic rows into TRAIN only, quarantined three ways:
+
+    * never into holdout — the promotion gate keeps judging on real
+      human-verified rows;
+    * any synthetic whose prompt focus collides with a HOLDOUT row is dropped
+      (a paraphrase of a holdout question would leak its answer into
+      training) — same rule for collisions with real train rows (redundant);
+    * volume-capped at cap_ratio x the real train count, so accumulated
+      synthetic can never drown organic signal.
+    """
+    taken_focus = {prompt_focus(r) for r in holdout_rows}
+    train_focus = set()
+    for ex in train_examples:
+        msgs = ex.get("messages") or []
+        if msgs:
+            from app.services.few_shot import query_focus
+            train_focus.add(query_focus(msgs[0].get("content", "")))
+    cap = int(cap_ratio * max(1, len(train_examples)))
+    kept, seen, dropped_leak, dropped_dup = [], set(), 0, 0
+    for r in synthetic_rows:
+        if len(kept) >= cap:
+            break
+        if is_stub(r) or not bt.gold_answer(r):
+            continue
+        focus = prompt_focus(r)
+        if focus in taken_focus:
+            dropped_leak += 1
+            continue
+        if focus in seen or focus in train_focus:
+            dropped_dup += 1
+            continue
+        seen.add(focus)
+        kept.append(to_example(r))
+    return kept, {"synthetic_in": len(synthetic_rows),
+                  "synthetic_pairs": len(kept),
+                  "synthetic_dropped_holdout_collision": dropped_leak,
+                  "synthetic_dropped_dup": dropped_dup,
+                  "synthetic_cap": cap}
+
+
 def curate(rows: list[dict], *, holdout_pct: int, dedupe_sim: float,
-           upweight_edited: int = 1, embed_fn=None) -> dict:
+           upweight_edited: int = 1, embed_fn=None,
+           synthetic_rows: list[dict] | None = None,
+           synthetic_cap: float = 3.0) -> dict:
     """Run the full funnel. Returns stats + train/holdout example lists."""
     text_n = len(rows)
     by_outcome = Counter(str(r.get("user_outcome") or "unknown") for r in rows)
@@ -308,6 +379,13 @@ def curate(rows: list[dict], *, holdout_pct: int, dedupe_sim: float,
     train_examples = [to_example(r) for r in deduped]
     holdout_examples = [to_example(r) for r in holdout_rows]
     weighted = expand_upweight(train_examples, upweight_edited)
+
+    synth_stats: dict = {"synthetic_pairs": 0}
+    if synthetic_rows:
+        synth_examples, synth_stats = merge_synthetic(
+            synthetic_rows, train_examples, holdout_rows,
+            cap_ratio=synthetic_cap)
+        weighted = weighted + synth_examples   # train only, never holdout
 
     n_pairs = len(train_examples)
     if n_pairs >= CRITICAL_READY:
@@ -341,6 +419,7 @@ def curate(rows: list[dict], *, holdout_pct: int, dedupe_sim: float,
         "train": train_examples,
         "holdout": holdout_examples,
         "weighted": weighted,
+        **synth_stats,
     }
 
 
@@ -367,6 +446,12 @@ def print_report(stats: dict) -> None:
     print(f"  by outcome                {stats['by_train_outcome']}")
     print(f"  flagged perishable        {stats['flagged_perishable']} "
           "(form/behavior preferred; not dropped)")
+    if stats.get("synthetic_pairs"):
+        print(f"  SYNTHETIC PAIRS           {stats['synthetic_pairs']} "
+              f"(of {stats.get('synthetic_in', 0)} offered; cap "
+              f"{stats.get('synthetic_cap')}; train-only, never holdout; "
+              f"{stats.get('synthetic_dropped_holdout_collision', 0)} dropped "
+              "for holdout-focus collision)")
     print()
     label = {
         "accumulating": f"ACCUMULATING - need ~{need} more pairs to hit "
@@ -402,13 +487,21 @@ def main() -> None:
     ap.add_argument("--json", action="store_true", help="machine-readable stats")
     ap.add_argument("--no-dedupe-embed", action="store_true",
                     help="force exact-focus dedupe (skip loading the embedder)")
+    ap.add_argument("--synthetic", type=Path, default=None,
+                    help="parent-distilled synthetic pairs JSONL "
+                         "(scripts/synthetic_pairs.py) — merged into TRAIN "
+                         "only, capped, never into holdout")
+    ap.add_argument("--synthetic-cap", type=float, default=3.0,
+                    help="max synthetic as a multiple of real train pairs")
     args = ap.parse_args()
 
     from app.config import settings
     rows = load_all_text(Path(settings.escalate_log.path))
     dedupe_sim = 1.0 if args.no_dedupe_embed else args.dedupe_sim
     stats = curate(rows, holdout_pct=args.holdout_pct, dedupe_sim=dedupe_sim,
-                   upweight_edited=args.upweight_edited)
+                   upweight_edited=args.upweight_edited,
+                   synthetic_rows=load_synthetic(args.synthetic),
+                   synthetic_cap=args.synthetic_cap)
 
     if args.write:
         write_jsonl(args.write, stats["weighted"])

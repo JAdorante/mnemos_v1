@@ -83,7 +83,7 @@ class Memory:
 
     def log_event(self, session_id, input_text, route, source="user_request",
                   status="routed"):
-        """The Mnemos event record (PRD data model): one row per user request,
+        """The Sparrow event record (PRD data model): one row per user request,
         capturing the router's intent/approval decision before execution."""
         self.conn.execute(
             "INSERT INTO events(session_id, ts, source, input_text, intent, "

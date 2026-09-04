@@ -3,7 +3,7 @@
 A PyInstaller build is not a checkout, and every frozen bug in this repo so far
 came from code that assumed it was:
 
-* ``sys.executable`` is ``Mnemos.exe``, not a Python interpreter, so
+* ``sys.executable`` is ``Sparrow.exe``, not a Python interpreter, so
   ``[sys.executable, "scripts/foo.py"]`` relaunches the whole app.
 * ``__file__`` points inside the bundle, and ``parents[2]`` from a service
   module is no longer the repo root.
@@ -25,7 +25,8 @@ import os
 import sys
 from pathlib import Path
 
-APP_DIR_NAME = "Mnemos"
+APP_DIR_NAME = "Sparrow"
+LEGACY_APP_DIR_NAME = "Mnemos"
 
 
 def is_frozen() -> bool:
@@ -57,7 +58,13 @@ def user_data_root() -> Path:
     else:
         base = Path(os.environ.get("XDG_DATA_HOME")
                     or Path.home() / ".local" / "share")
-    return base / APP_DIR_NAME
+    new = base / APP_DIR_NAME
+    old = base / LEGACY_APP_DIR_NAME
+    # Keep using an existing Mnemos data dir so a rebranded build does not
+    # orphan a tester's memory.
+    if not new.exists() and old.exists():
+        return old
+    return new
 
 
 def default_data_dir() -> Path:

@@ -1,6 +1,6 @@
-"""Onboarding — seed Mnemos's knowledge of a new user from a one-time profile.
+"""Onboarding — seed Sparrow's knowledge of a new user from a one-time profile.
 
-Mnemos normally learns who "Justin" is, which names are projects, and what a
+Sparrow normally learns who "Justin" is, which names are projects, and what a
 day looks like only by observing for weeks. A new user therefore starts cold:
 ASR misspells names, entity resolution has no targets, and chat grounding is
 empty. This module shortcuts that with a one-time PROFILE SHEET — a plain JSON
@@ -282,7 +282,7 @@ class _Ingestor:
 
     def _provenance(self, section: str, text: str) -> int:
         """One SYSTEM event per answer — the anchor every seeded fact points
-        back to, so 'where did Mnemos learn this?' has a real answer."""
+        back to, so 'where did Sparrow learn this?' has a real answer."""
         ev = Event(time=self.now, modality=Modality.SYSTEM, raw=text,
                    summary=f"[onboarding] {text}", source=SOURCE,
                    meta={"section": section})
@@ -340,7 +340,7 @@ class _Ingestor:
 
 
 def ingest(profile: dict | None = None, store: Store | None = None) -> dict:
-    """Feed a profile (dict, or the sheet on disk) into Mnemos's knowledge.
+    """Feed a profile (dict, or the sheet on disk) into Sparrow's knowledge.
 
     Idempotent and delta-aware via per-answer content keys in the state file.
     Marks onboarding completed on the first successful pass; later calls still
@@ -495,7 +495,7 @@ def startup_check(store: Store | None = None) -> None:
         res = ingest(store=store)
         if res.get("ok") and any(res.get(k) for k in
                                  ("claims", "people", "entities", "relations")):
-            print(f"[onboarding] profile ingested from {p} — Mnemos now knows "
+            print(f"[onboarding] profile ingested from {p} — Sparrow now knows "
                   "the basics. Edit the sheet and POST /onboarding/ingest to "
                   "add more later.")
         return
@@ -505,6 +505,6 @@ def startup_check(store: Store | None = None) -> None:
         _save_state(state)
         if out.get("created"):
             print("[onboarding] new here? Open http://127.0.0.1:8000/onboarding "
-                  "to tell Mnemos about your day-to-day (every field optional). "
+                  "to tell Sparrow about your day-to-day (every field optional). "
                   "Asked once — not again. JSON sheet also at "
                   f"{p} if you prefer.")

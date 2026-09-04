@@ -36,6 +36,7 @@ CSRF_HEADER = "x-csrf-token"
 _UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 _CSRF_EXACT_EXEMPT = frozenset({
     "/auth/unlock",          # establishes session; no prior CSRF cookie
+    "/auth/login",           # ditto — password is the auth
     "/phone/pair/claim",     # single-use pairing code is the auth
     "/peer/pair/claim",
 })
@@ -44,6 +45,8 @@ _CSRF_EXACT_EXEMPT = frozenset({
 _EXACT_EXEMPT = frozenset({
     "/auth",
     "/auth/unlock",
+    "/auth/login",
+    "/auth/account",
     "/auth/status",
     "/auth/logout",
     "/welcome/status",
@@ -89,6 +92,7 @@ _HTML_EXEMPT = frozenset({
     "/onboarding",
     "/auth",
     "/desktop-access",
+    "/capture",         # web capture page; the /ingest/audio WS gates itself
     "/capture/pwa",
     "/bootstrap",
     "/help/mcp",
@@ -202,11 +206,18 @@ def session_token(api_token: str | None = None, *, salt: str | None = None) -> s
 
 
 def session_matches(candidate: str | None) -> bool:
-    """True when `candidate` is the derived session token (cookie path)."""
-    expected = session_token()
-    if not expected or not candidate:
+    """True when `candidate` is the derived session token (cookie path)
+    or a live server-side account session (password sign-in)."""
+    if not candidate:
         return False
-    return hmac.compare_digest(candidate.strip(), expected)
+    expected = session_token()
+    if expected and hmac.compare_digest(candidate.strip(), expected):
+        return True
+    try:
+        from app.services import account
+        return account.session_valid(candidate)
+    except Exception:
+        return False
 
 
 def apply_session_cookie(response: Response, api_token: str | None = None) -> str:
@@ -221,6 +232,21 @@ def apply_session_cookie(response: Response, api_token: str | None = None) -> st
         path="/",
     )
     return value
+
+
+def apply_account_cookie(
+    response: Response, token: str, *, remember: bool = True,
+) -> None:
+    """Set the session cookie to a server-side account session token."""
+    from app.services.account import SESSION_TTL_REMEMBER_S, SESSION_TTL_SHORT_S
+    response.set_cookie(
+        key=COOKIE_NAME,
+        value=token,
+        httponly=True,
+        samesite="strict",
+        max_age=SESSION_TTL_REMEMBER_S if remember else SESSION_TTL_SHORT_S,
+        path="/",
+    )
 
 
 def clear_session_cookie(response: Response) -> None:
@@ -353,6 +379,29 @@ def request_authorized(request: Request) -> bool:
         return True
     # Cookie: derived session token only (plan 6.3) — never the raw token.
     return session_matches(request.cookies.get(COOKIE_NAME))
+
+
+def ws_request_authorized(ws) -> bool:
+    """LAN gate for WebSocket connections.
+
+    `LanApiAuthMiddleware` is a `BaseHTTPMiddleware` — Starlette only routes
+    the `http` scope through it, so WebSocket upgrades NEVER hit the gate.
+    Every WS endpoint must call this before `accept()`. Same policy as the
+    middleware: loopback client or loopback bind stays open; otherwise Bearer
+    raw token, session cookie, or `?token=` (raw or derived — browsers cannot
+    set an Authorization header on `new WebSocket()`).
+    """
+    client_host = ws.client.host if ws.client else None
+    if client_is_loopback(client_host):
+        return True
+    if bind_is_loopback():
+        return True
+    if token_matches(_bearer_token(ws.headers.get("authorization"))):
+        return True
+    qtoken = (ws.query_params.get("token") or "").strip()
+    if qtoken and (token_matches(qtoken) or session_matches(qtoken)):
+        return True
+    return session_matches(ws.cookies.get(COOKIE_NAME))
 
 
 def path_is_exempt(path: str, method: str) -> bool:

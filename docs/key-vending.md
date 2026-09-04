@@ -1,6 +1,6 @@
 # Onboarding the model account (WS-D)
 
-Every tester needs Mnemos talking to a frontier model. How they get there is a
+Every tester needs Sparrow talking to a frontier model. How they get there is a
 funnel decision, not a technical one, so the tiers below are ordered by how much
 the operator absorbs on the tester's behalf — and the higher tiers are strictly
 more operator liability, not more product.

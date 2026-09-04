@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Mnemos tester installer (macOS 13+, Intel or Apple Silicon).
+# Sparrow tester installer (macOS 13+, Intel or Apple Silicon).
 #
 # Double-click in Finder, or run:  bash install.command
 #
@@ -45,7 +45,7 @@ case "${QUILL_INSTALL_SKIP_OLLAMA:-0}" in 0|""|false|False|no|No) ;; *) SKIP_OLL
 hold() { [ "$NONINTERACTIVE" = "1" ] || read -r -p "Press return to close." _; }
 fail() { printf '\n%sERROR: %s%s\n' "$RED" "$1" "$RESET"; hold; exit 1; }
 
-[ -f "$ROOT/run_all.py" ] || fail "Run this from inside the Mnemos folder (run_all.py not found)."
+[ -f "$ROOT/run_all.py" ] || fail "Run this from inside the Sparrow folder (run_all.py not found)."
 
 printf '%sMnemos tester install (macOS)%s\n' "$BOLD" "$RESET"
 echo "Needs ~20 GB free disk (models + dependencies) and a while on first run."
@@ -108,7 +108,7 @@ else
 fi
 
 # --- 5. Ollama (optional) -----------------------------------------------------
-# Optional on macOS by design: without it Mnemos runs cloud-only, which costs
+# Optional on macOS by design: without it Sparrow runs cloud-only, which costs
 # more per day but works. Never installed silently — it is a 10 GB decision.
 step "Checking for Ollama (optional local models)"
 OLLAMA_OK=0
@@ -125,7 +125,7 @@ fi
 if [ "$OLLAMA_OK" = "1" ]; then
     ok "Local models ready (text: qwen2.5:7b-instruct, vision: minicpm-v)."
 else
-    warn "Ollama not set up - Mnemos will run cloud-only (higher API usage)."
+    warn "Ollama not set up - Sparrow will run cloud-only (higher API usage)."
     warn "Optional: install from ollama.com, run 'ollama pull qwen2.5:7b-instruct',"
     warn "then set QUILL_TEXT_LOCAL=1 in .env."
 fi
@@ -137,7 +137,7 @@ echo "    dropped connection costs the remainder, not the whole download."
 if "$VENV_PY" "$ROOT/scripts/download_models.py" --retries 5; then
     ok "Speech + embedding models cached."
 else
-    warn "Some models did not finish downloading. Re-run install.command when you have a steady connection - what already downloaded is kept and partial files continue where they stopped. Mnemos still starts; it fetches whatever is missing on first use."
+    warn "Some models did not finish downloading. Re-run install.command when you have a steady connection - what already downloaded is kept and partial files continue where they stopped. Sparrow still starts; it fetches whatever is missing on first use."
 fi
 
 # --- 7. .env + model account --------------------------------------------------
@@ -193,7 +193,7 @@ PYCODE
 elif [ -n "$INVITE_URL" ]; then
     export QUILL_INVITE_URL="$INVITE_URL"
     echo ""
-    echo "  How do you want to connect Mnemos to Claude?"
+    echo "  How do you want to connect Sparrow to Claude?"
     echo "    [1] I have an invite code  (recommended - nothing to sign up for)"
     echo "    [2] I have my own Anthropic API key"
     echo "    [3] Skip for now"
@@ -229,7 +229,7 @@ if [ "$NONINTERACTIVE" != "1" ] && [ "$INVITED" = "0" ]; then
     while :; do
         read -r -p "Paste YOUR Anthropic API key (sk-ant-..., from console.anthropic.com) or press return to add it to .env later: " key
         if [ -z "$key" ]; then
-            warn "Skipped - Mnemos needs ANTHROPIC_API_KEY in .env before chat works."
+            warn "Skipped - Sparrow needs ANTHROPIC_API_KEY in .env before chat works."
             break
         fi
         if "$VENV_PY" - "$key" <<'PYCODE'
@@ -259,7 +259,7 @@ ok ".env written (never share this file - it holds your key)."
 chmod +x "$ROOT/start.command" 2>/dev/null
 
 printf '\n%s=============================================================%s\n' "$GREEN" "$RESET"
-printf '%s  Mnemos is installed.%s\n' "$GREEN" "$RESET"
+printf '%s  Sparrow is installed.%s\n' "$GREEN" "$RESET"
 echo "  Start it:   double-click start.command"
 echo "  Then open:  http://127.0.0.1:8000"
 echo ""

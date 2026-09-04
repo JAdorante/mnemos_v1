@@ -90,7 +90,7 @@ class DesktopDriver:
         self._log = on_log or (lambda s: print(s))
         self._ask = on_approve or _default_ask
         self._ask_wants_action = _wants_action(self._ask)
-        # Optional Mnemos packet recorder (plan 0.5). Standalone desktop
+        # Optional Sparrow packet recorder (plan 0.5). Standalone desktop
         # runs bind in-memory when these are None.
         self._record_packet = on_record_packet
         self._get_packet = on_get_packet

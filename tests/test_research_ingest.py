@@ -24,7 +24,7 @@ class IngestableTests(unittest.TestCase):
     def test_memory_only_status_skipped(self):
         text = (
             "From memory, you have a meeting with Andy Karos today at 8:30 PM "
-            "about Mnemos."
+            "about Sparrow."
         )
         self.assertIsNone(
             research_ingest.ingestable(text, status="answered_no_browser"))
@@ -32,7 +32,7 @@ class IngestableTests(unittest.TestCase):
     def test_memory_only_route_skipped(self):
         text = (
             "From memory, you have a meeting with Andy Karos today at 8:30 PM "
-            "about Mnemos."
+            "about Sparrow."
         )
         self.assertIsNone(research_ingest.ingestable(
             text, status="success",
@@ -118,7 +118,7 @@ class IngestTests(unittest.TestCase):
     def test_answered_no_browser_does_not_write(self):
         text = (
             "From memory, you have a meeting with Andy Karos today at 8:30 PM "
-            "about Mnemos."
+            "about Sparrow."
         )
         with patch("app.storage.get_store", return_value=self.store) as gs:
             self.assertIsNone(

@@ -2,7 +2,7 @@
 
 The claims under test are the ones a tester's data depends on:
 a hot database survives the copy, secrets never enter a zip, the takeout is
-readable without Mnemos, and a backup round-trips through the restore script
+readable without Sparrow, and a backup round-trips through the restore script
 to the same rows.
 """
 from __future__ import annotations
@@ -362,7 +362,7 @@ class RestoreRoundTripTests(_Base):
             rb.restore(t, self.root / "nope")
         # A takeout carries a manifest too — the refusal is on `kind`, and the
         # message has to tell the user which zip they actually want.
-        self.assertIn("not a Mnemos backup", str(ctx.exception))
+        self.assertIn("not a Sparrow backup", str(ctx.exception))
         self.assertIn("mnemos.takeout", str(ctx.exception))
 
     def test_restore_refuses_a_newer_backup_unless_forced(self) -> None:

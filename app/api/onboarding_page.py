@@ -194,7 +194,7 @@ textarea{min-height:96px;resize:vertical}
     </div>
     <div class="hero-rule" aria-hidden="true"></div>
     <h1>Your first meeting, remembered</h1>
-    <p>Connect a calendar. Mnemos listens to the next meeting and writes a brief you can play back. Always-on capture stays off until you turn it on.</p>
+    <p>Connect a calendar. Sparrow listens to the next meeting and writes a brief you can play back. Always-on capture stays off until you turn it on.</p>
     <div class="cta-row">
       <button class="btn btn-primary" id="startBtn" type="button">Get started</button>
       <a class="skip" href="/today">Skip to Today</a>
@@ -205,7 +205,7 @@ textarea{min-height:96px;resize:vertical}
   <section class="wizard" id="wizard">
     <div class="top-mini"><span class="nm">@@MARK@@ @@BRAND@@</span><span id="stepLabel">Step 1 of 4</span></div>
     <div class="progress" id="progress" aria-hidden="true">
-      <i class="on"></i><i></i><i></i><i></i>
+      <i class="on"></i><i></i><i></i><i></i><i></i>
     </div>
 
     <!-- 0 You -->
@@ -303,7 +303,7 @@ textarea{min-height:96px;resize:vertical}
     <!-- 1 Calendar -->
     <div class="panel step" data-step="1" hidden>
       <h2>Calendar</h2>
-      <p class="lead">Mnemos reads event titles, times, and attendees — never email bodies. This seeds who you work with before any audio exists.</p>
+      <p class="lead">Sparrow reads event titles, times, and attendees — never email bodies. This seeds who you work with before any audio exists.</p>
       <div id="exStatus" class="muted">Checking Google connection…</div>
       <button type="button" class="btn btn-primary" id="exBtn" style="margin-top:10px">Connect Google (Gmail + Calendar metadata)</button>
       <div class="err" id="exMsg"></div>
@@ -324,7 +324,7 @@ textarea{min-height:96px;resize:vertical}
     <!-- 2 Next meeting -->
     <div class="panel step" data-step="2" hidden>
       <h2>Your next meeting</h2>
-      <p class="lead" id="nextMeetLead">Once a calendar is connected, Mnemos will listen inside that window and write a brief with playable clips.</p>
+      <p class="lead" id="nextMeetLead">Once a calendar is connected, Sparrow will listen inside that window and write a brief with playable clips.</p>
       <div id="nextMeetBox" class="ok-banner" hidden>
         <h3 id="nextMeetTitle">Meeting</h3>
         <p class="muted" id="nextMeetWhen"></p>
@@ -352,6 +352,21 @@ textarea{min-height:96px;resize:vertical}
         <input type="checkbox" id="ambDesk" style="width:auto;margin-top:3px">
         <span><b>Screen</b> — window titles and frames in <span style="font-family:var(--mono)">data/</span>. No keystrokes. Off by default.</span>
       </label>
+    </div>
+
+    <!-- 4 Browser (agent sign-in) -->
+    <div class="panel step" data-step="4" hidden>
+      <h2>Browser for the assistant</h2>
+      <p class="lead">Optional. When @@BRAND@@ acts on the web for you it uses
+      its <b>own</b> browser profile — separate from your everyday browser.
+      Sign in once here so it works as <b>you</b> (your Google account, your
+      sites), on this computer only. Nothing is shared with anyone else.</p>
+      <div id="abList" style="margin-top:6px"></div>
+      <button type="button" class="btn btn-ghost" id="abGo">Open sign-in window</button>
+      <p class="muted" id="abStatus" style="margin-top:12px"></p>
+      <p class="muted">Skippable — without this the assistant browses signed
+      out. You can connect or disconnect later from this page
+      (<span style="font-family:var(--mono)">/onboarding?step=browser</span>).</p>
     </div>
 
     <!-- 10 People (optional, not in primary wizard) -->
@@ -442,7 +457,7 @@ const state = {
   notes: "",
 };
 
-const STEPS = ["You","Calendar","Next meeting","Capture"];
+const STEPS = ["You","Calendar","Next meeting","Capture","Browser"];
 
 function el(tag, attrs={}, kids=[]){
   const n=document.createElement(tag);
@@ -763,6 +778,74 @@ async function startPhonePair(){
   },3000);
 }
 document.getElementById("phonePairBtn").onclick=startPhonePair;
+
+// --- browser step (4): pick a browser, one-time agent-profile sign-in ------
+let abPoll=null;
+async function abStatus(){
+  try{ return await (await fetch("/agent/browser/status")).json(); }
+  catch(e){ return null; }
+}
+function abRender(s){
+  const list=document.getElementById("abList"),
+        go=document.getElementById("abGo"),
+        st=document.getElementById("abStatus");
+  if(!s){ st.textContent="Could not read browser status."; return; }
+  if(!s.available){
+    list.innerHTML=""; go.hidden=true;
+    st.textContent="This instance has no display — the sign-in window needs the desktop app. The assistant will browse signed out.";
+    return;
+  }
+  if(s.configured && !(s.signin&&s.signin.running)){
+    list.innerHTML=""; go.textContent="Sign in again / switch browser";
+    st.innerHTML='<span style="color:var(--ok);font-weight:600">✓ Connected'+
+      (s.channel?(" — "+(s.channel==="msedge"?"Microsoft Edge":"Google Chrome")):" — built-in browser")+
+      '.</span> The assistant browses as you on this computer. '+
+      '<a href="#" id="abDisc">Disconnect</a>';
+    const d=document.getElementById("abDisc");
+    if(d) d.onclick=async e=>{e.preventDefault();
+      await fetch("/agent/browser/disconnect",{method:"POST"});
+      abRender(await abStatus());};
+    if(s.configured) return;
+  }
+  const sel=s.channels.filter(c=>c.installed);
+  const def=sel.find(c=>c.default)||sel[sel.length-1]||sel[0];
+  list.innerHTML=sel.map(c=>
+    '<label style="display:flex;gap:8px;align-items:center;margin-top:8px;text-transform:none;letter-spacing:0;font-weight:400;font-size:.95rem;color:var(--text);cursor:pointer">'+
+    '<input type="radio" name="abCh" value="'+c.id+'" style="width:auto;margin:0"'+
+    (def&&c.id===def.id?" checked":"")+'>'+c.label+
+    (c.default?' <span class="muted">(your default browser)</span>':"")+
+    "</label>").join("");
+}
+async function abGoClick(){
+  const st=document.getElementById("abStatus");
+  const pick=document.querySelector('input[name="abCh"]:checked');
+  st.textContent="Opening the sign-in window on this computer…";
+  let r;
+  try{
+    const resp=await fetch("/agent/browser/signin/start",{method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({channel:pick?pick.value:""})});
+    r=await resp.json();
+    if(!resp.ok) throw new Error(r.detail||"could not start");
+  }catch(e){ st.textContent=e.message; return; }
+  st.textContent="Sign in inside the window that just opened, then close it. Waiting…";
+  if(abPoll) clearInterval(abPoll);
+  abPoll=setInterval(async ()=>{
+    const s=await abStatus();
+    if(!s) return;
+    if(s.signin && s.signin.error){
+      st.textContent="Sign-in failed: "+s.signin.error;
+      clearInterval(abPoll); abPoll=null;
+    }else if(s.configured && s.signin && s.signin.done){
+      clearInterval(abPoll); abPoll=null; abRender(s);
+    }
+  },2000);
+}
+document.getElementById("abGo").onclick=abGoClick;
+(function(){
+  const orig=showStep;
+  showStep=function(n){ orig(n); if(n===4) abStatus().then(abRender); };
+})();
 
 async function icRefreshOb(){
   try{

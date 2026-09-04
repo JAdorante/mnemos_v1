@@ -1,6 +1,6 @@
-# Mnemos pilot — mutual understanding
+# Sparrow pilot — mutual understanding
 
-**Between:** Mnemos Labs ("we") and Boost Run ("you")
+**Between:** Ravenry LLC ("we") and Boost Run ("you")
 **Covers:** the 4-week single-user pilot beginning mid-September 2026
 **Status:** plain-language understanding between two parties who want to work
 together. It is not a contract and has not been reviewed by a lawyer — if
@@ -21,7 +21,7 @@ thing works on your hardware until we have seen it work on your hardware.
 
 ## 2. What we collect
 
-**Centrally: nothing.** There is no Mnemos server holding anyone's memory.
+**Centrally: nothing.** There is no Sparrow server holding anyone's memory.
 Recording, transcription, and memory all happen on the tester's own machine,
 and the app is not reachable from the network. We cannot read a tester's
 memory, and neither can their colleagues or their employer — not because we
@@ -54,10 +54,10 @@ Any tester, at any time, without telling us:
   Privacy controls → "Stop capture now". It revokes the allow-list *and* halts
   the running pipelines, so nothing is recorded until they turn it back on.
 - **Take their data out** — Privacy controls → "Back up my memory" (restorable)
-  or "Export my data" (readable JSONL, no Mnemos needed).
+  or "Export my data" (readable JSONL, no Sparrow needed).
 - **Delete everything** — Privacy controls → "Delete everything", or
   `uninstall.bat` / `uninstall.command` with the app closed. It empties every
-  directory Mnemos writes and produces a **deletion receipt**: a small JSON
+  directory Sparrow writes and produces a **deletion receipt**: a small JSON
   file naming each directory, its size before, and anything that could not be
   removed. Nothing personal is in the receipt.
 
@@ -75,7 +75,7 @@ session — is confidential. We will not repeat it, publish it, or use it in
 marketing. If we want to name Boost Run as a pilot customer anywhere public, we
 ask Andy first and take "no" as the answer.
 
-**Yours to ours.** Mnemos, its roadmap, its pricing, and anything in this
+**Yours to ours.** Sparrow, its roadmap, its pricing, and anything in this
 document are confidential to Boost Run and not to be shared outside the firm
 during the pilot.
 
@@ -105,5 +105,5 @@ your data stays yours, our software stays ours.
 
 ---
 
-*Mnemos Labs · Justin Adorante · [`README.md`](../README.md) for what the
+*Copyright 2026 Ravenry LLC · Justin Adorante · [`README.md`](../README.md) for what the
 system actually does · [`TESTER_SETUP.md`](../TESTER_SETUP.md) for install.*

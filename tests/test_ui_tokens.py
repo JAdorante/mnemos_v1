@@ -137,6 +137,14 @@ class UiTokenEnforcementTests(unittest.TestCase):
         self.assertIn("katex.min.js", CONSOLE_PAGE)
         self.assertNotIn("katex.min.js", AUTH_PAGE)
 
+    def test_chat_hides_operational_noise(self) -> None:
+        from app.api.chat_page import CHAT_PAGE
+
+        self.assertIn("kind==='progress'", CHAT_PAGE)
+        self.assertIn("Agent ready|Fast lane ready|Offer expired", CHAT_PAGE)
+        self.assertIn("Sources", CHAT_PAGE)
+        self.assertNotIn("Remembered", CHAT_PAGE)
+
     def test_mnemos_chat_stream_in_ui_bundle(self) -> None:
         from app.api.mnemos_ui import UI_JS
         from pathlib import Path
@@ -319,7 +327,7 @@ class UiTokenEnforcementTests(unittest.TestCase):
         for name in (
             "--z-base", "--z-raised", "--z-rail", "--z-banner",
             "--z-float", "--z-popover", "--z-system", "--z-modal",
-            "--chrome-h",
+            "--chrome-h", "--composer-h", "--dock-clear",
         ):
             self.assertIn(name, ROOT_TOKENS)
 

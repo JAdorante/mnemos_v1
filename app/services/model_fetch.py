@@ -15,7 +15,7 @@ is the half of it that arrives before a hotel wifi drop. Two properties:
 
 It lives under ``app/services`` rather than in ``scripts/`` because the
 packaged desktop build has to run it too: ``scripts/`` is not in the bundle,
-and a frozen ``sys.executable`` is ``Mnemos.exe``, so the first-run
+and a frozen ``sys.executable`` is ``Sparrow.exe``, so the first-run
 ``/bootstrap`` page cannot shell out to a script. One implementation, imported
 by both the CLI and the server.
 """

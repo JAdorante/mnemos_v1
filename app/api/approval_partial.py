@@ -31,13 +31,15 @@ APPROVAL_CSS = """\
 }
 #mnemosApproval .ap-more{
   font:11px var(--mono);color:var(--acc);border:1px solid var(--acc-35);
-  border-radius:999px;padding:2px 8px;text-decoration:none;white-space:nowrap;
+  border-radius:var(--radius-full);padding:2px 8px;text-decoration:none;white-space:nowrap;
 }
 #mnemosApproval .ap-actions{display:flex;gap:8px;flex-wrap:wrap;margin-left:auto}
 #mnemosApproval .ap-actions button,#mnemosApproval .ap-actions a{
-  border-radius:10px;padding:7px 12px;font:500 13px var(--font);cursor:pointer;
+  border-radius:var(--radius-sm);padding:7px 12px;min-height:32px;
+  font:500 13px/1.2 var(--font);letter-spacing:var(--track-snug);cursor:pointer;
   border:1px solid var(--line);background:var(--panel);color:var(--navy);
   text-decoration:none;display:inline-flex;align-items:center;
+  box-shadow:0 1px 2px rgba(11,19,32,.03);
 }
 #mnemosApproval .ap-actions .go{background:var(--navy);color:#F8F6F1;border:none}
 #mnemosApproval .ap-actions .quiet{background:transparent;color:var(--mut)}
@@ -58,7 +60,7 @@ APPROVAL_CSS = """\
 .action-detail[open] > summary::before{content:"▾ "}
 .action-detail .detail-card{
   margin-top:8px;padding:12px 14px;border:1px solid var(--acc-22);
-  border-radius:12px;background:linear-gradient(180deg,#FFFCF7 0%,var(--surface) 100%);
+  border-radius:var(--radius-sm);background:linear-gradient(180deg,#FFFCF7 0%,var(--surface) 100%);
   border-left:3px solid var(--acc);
 }
 .action-detail .intent{font-size:14px;margin:0 0 10px;color:var(--text)}
@@ -95,7 +97,7 @@ window.MnemosApprovals = {
     const sum = bar.querySelector('.ap-sum');
     const age = bar.querySelector('.ap-age');
     const more = bar.querySelector('.ap-more');
-    if (sum) sum.textContent = s.summary || 'Mnemos needs your decision.';
+    if (sum) sum.textContent = s.summary || 'Sparrow needs your decision.';
     if (age) age.textContent = s.age_label || '';
     if (more) {
       const n = s.queued || 0;
@@ -254,9 +256,9 @@ def collect_state(agent_worker=None) -> dict[str, Any]:
 
     if packet and packet.get("kind") == "approval":
         kind = "approval"
-        summary = intent or (packet.get("summary") or "Mnemos needs approval to act.")
-        if not summary.lower().startswith("mnemos"):
-            summary = f"Mnemos wants to {summary[0].lower() + summary[1:]}" if summary else summary
+        summary = intent or (packet.get("summary") or "Sparrow needs approval to act.")
+        if not summary.lower().startswith("sparrow"):
+            summary = f"Sparrow wants to {summary[0].lower() + summary[1:]}" if summary else summary
         if fields.get("to"):
             steps.append(f"Compose to {fields['to']}")
         if fields.get("subject"):
@@ -271,7 +273,7 @@ def collect_state(agent_worker=None) -> dict[str, Any]:
         msg = (offer.get("message") or "").strip()
         title = (offer.get("title") or "").strip()
         items = list(offer.get("items") or [])
-        summary = msg or title or (items[0] if items else "Mnemos has an offer waiting.")
+        summary = msg or title or (items[0] if items else "Sparrow has an offer waiting.")
         if len(summary) > 140:
             summary = summary[:137] + "…"
         created = offer.get("created_at")
@@ -280,7 +282,7 @@ def collect_state(agent_worker=None) -> dict[str, Any]:
         intent = summary
         queued = max(queued, int(offer.get("queued_behind") or 0))
     else:
-        summary = (state.get("waiting_on") or question or "Mnemos needs your decision.")[:160]
+        summary = (state.get("waiting_on") or question or "Sparrow needs your decision.")[:160]
         intent = summary
 
     outbound = bool(
@@ -330,7 +332,7 @@ def render_banner_html(state: dict[str, Any] | None = None, *, next_url: str = "
     s = state or {"pending": False}
     on = " on" if s.get("pending") else ""
     aria = "false" if s.get("pending") else "true"
-    summary = _esc(s.get("summary") or "Mnemos needs your decision.")
+    summary = _esc(s.get("summary") or "Sparrow needs your decision.")
     age = _esc(s.get("age_label") or "")
     queued = int(s.get("queued") or 0)
     more_hidden = "" if queued > 0 else " hidden"

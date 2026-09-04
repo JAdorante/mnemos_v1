@@ -1,4 +1,4 @@
-"""Pre-download Mnemos's models so the first live run starts instantly.
+"""Pre-download Sparrow's models so the first live run starts instantly.
 
     python scripts/download_models.py            # downloads the configured model
     python scripts/download_models.py base small # downloads specific sizes
@@ -14,7 +14,7 @@ Safe to re-run, and *designed* to be re-run: retries resume from the partial
 file rather than restarting. The logic lives in `app.services.model_fetch` so
 the packaged desktop build's first-run page can call the same code — it cannot
 shell out to this script, because `scripts/` is not in the bundle and a frozen
-`sys.executable` is `Mnemos.exe`. This file is the CLI over it.
+`sys.executable` is `Sparrow.exe`. This file is the CLI over it.
 
 Exit codes: 0 everything cached, 1 something still missing after retries.
 """
@@ -38,7 +38,7 @@ def _print(msg: str) -> None:
 
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(
-        description="Pre-download (or check) Mnemos's local models.")
+        description="Pre-download (or check) Sparrow's local models.")
     ap.add_argument("sizes", nargs="*",
                     help="whisper sizes (default: the configured model)")
     ap.add_argument("--retries", type=int, default=DEFAULT_RETRIES,

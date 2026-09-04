@@ -52,7 +52,7 @@ jobs:
         # The check that would have caught the torch exclusion on day one:
         # silero_vad imports torch even in ONNX mode, so a bundle without it
         # starts fine, serves /health fine, and hears nothing forever.
-        run: .\dist\Mnemos\Mnemos.exe --self-test
+        run: .\dist\Sparrow\Sparrow.exe --self-test
 
       - name: It starts and answers on localhost
         # Frozen console=False prints nowhere. QUILL_LOG_FILE is the only
@@ -60,11 +60,11 @@ jobs:
         # on a first-run download (weights are a tester /bootstrap step).
         shell: pwsh
         env:
-          QUILL_LOG_FILE: ${{ github.workspace }}\mnemos-boot.log
+          QUILL_LOG_FILE: ${{ github.workspace }}\sparrow-boot.log
           QUILL_AUTOSTART_NOTIFICATIONS: "0"
           HF_HUB_OFFLINE: "1"
         run: |
-          $p = Start-Process -PassThru -FilePath '.\dist\Mnemos\Mnemos.exe' `
+          $p = Start-Process -PassThru -FilePath '.\dist\Sparrow\Sparrow.exe' `
                -ArgumentList '--no-window', '--no-tray', '--log-level', 'info'
           try {
             $ok = $false
@@ -72,7 +72,7 @@ jobs:
               Start-Sleep -Seconds 5
               if ($p.HasExited) {
                 if (Test-Path $env:QUILL_LOG_FILE) { Get-Content $env:QUILL_LOG_FILE }
-                throw "Mnemos.exe exited $($p.ExitCode) before /health"
+                throw "Sparrow.exe exited $($p.ExitCode) before /health"
               }
               try {
                 $r = Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:8000/health' -TimeoutSec 5
@@ -94,16 +94,16 @@ jobs:
         # the log rather than discovered by someone on a hotel connection.
         shell: pwsh
         run: |
-          $mb = [math]::Round((Get-ChildItem -Recurse dist\Mnemos |
+          $mb = [math]::Round((Get-ChildItem -Recurse dist\Sparrow |
                 Measure-Object -Property Length -Sum).Sum / 1MB)
           Write-Host "bundle: $mb MB"
 
-      # Sign Mnemos.exe BEFORE the installer wraps it, then sign MnemosSetup.exe
+      # Sign Sparrow.exe BEFORE the installer wraps it, then sign SparrowSetup.exe
       # after iscc. Unsigned means SmartScreen "Windows protected your PC" — the
       # funnel leak for a cohort evaluating a meeting recorder. Secrets are
       # optional so packaging PRs still build; tags without them publish
       # unsigned and the tester note covers More info → Run anyway.
-      - name: Sign Mnemos.exe (Azure Trusted Signing)
+      - name: Sign Sparrow.exe (Azure Trusted Signing)
         if: github.ref_type == 'tag' && env.HAS_SIGNING == 'true'
         uses: azure/trusted-signing-action@v0.5.1
         with:
@@ -113,8 +113,8 @@ jobs:
           endpoint: ${{ vars.AZURE_TS_ENDPOINT }}
           trusted-signing-account-name: ${{ vars.AZURE_TS_ACCOUNT }}
           certificate-profile-name: ${{ vars.AZURE_TS_PROFILE }}
-          files-folder: ${{ github.workspace }}\dist\Mnemos
-          files-folder-filter: Mnemos.exe
+          files-folder: ${{ github.workspace }}\dist\Sparrow
+          files-folder-filter: Sparrow.exe
           files-folder-recurse: false
           file-digest: SHA256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
@@ -122,8 +122,8 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: mnemos-windows-onedir
-          path: dist/Mnemos
+          name: sparrow-windows-onedir
+          path: dist/Sparrow
 
       - name: Build the installer
         run: |
@@ -132,7 +132,7 @@ jobs:
           # $env:ProgramFiles(x86) as a method call and the path comes back empty.
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" packaging\mnemos.iss
 
-      - name: Sign MnemosSetup.exe (Azure Trusted Signing)
+      - name: Sign SparrowSetup.exe (Azure Trusted Signing)
         if: github.ref_type == 'tag' && env.HAS_SIGNING == 'true'
         uses: azure/trusted-signing-action@v0.5.1
         with:
@@ -143,7 +143,7 @@ jobs:
           trusted-signing-account-name: ${{ vars.AZURE_TS_ACCOUNT }}
           certificate-profile-name: ${{ vars.AZURE_TS_PROFILE }}
           files-folder: ${{ github.workspace }}\dist
-          files-folder-filter: MnemosSetup.exe
+          files-folder-filter: SparrowSetup.exe
           files-folder-recurse: false
           file-digest: SHA256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
@@ -151,14 +151,14 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: mnemos-windows-setup
-          path: dist/MnemosSetup.exe
+          name: sparrow-windows-setup
+          path: dist/SparrowSetup.exe
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/MnemosSetup.exe
+          files: dist/SparrowSetup.exe
           generate_release_notes: true
           fail_on_unmatched_files: true
         env:
