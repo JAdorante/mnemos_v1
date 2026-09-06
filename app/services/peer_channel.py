@@ -455,6 +455,39 @@ def _touch(peer_id: str, counter: str | None = None) -> None:
         pass  # bookkeeping only
 
 
+def refresh_peer_base_url(peer_id: str, base_url: str | None) -> bool:
+    """Update a peer's callback URL when they advertise a new one.
+
+    Docker bridge IPs change on every recreate; peers should send
+    `base_url` (or `callback_url`) on ask/ping with a stable host-port
+    URL so delivery keeps working after rebuilds.
+    """
+    url = (base_url or "").strip().rstrip("/")
+    if not peer_id or not url.startswith(("http://", "https://")):
+        return False
+    try:
+        from app.services.team_layer import url_transport
+        if not url_transport(url).get("ok"):
+            return False
+    except Exception:
+        return False
+    try:
+        with _lock:
+            registry = _load(_peers_path(), {})
+            rec = registry.get(peer_id)
+            if rec is None:
+                return False
+            if (rec.get("base_url") or "").rstrip("/") == url:
+                return False
+            old = rec.get("base_url")
+            rec["base_url"] = url
+            _save(_peers_path(), registry)
+        print(f"[peer] refreshed callback for {peer_id}: {old} → {url}")
+        return True
+    except OSError:
+        return False
+
+
 # --- transport ---------------------------------------------------------------
 def _post_json(url: str, payload: dict, token: str | None,
                timeout: float | None = None) -> dict:
@@ -605,14 +638,233 @@ def _notify_chat(text: str) -> None:
 
 # --- answering side (inbound asks) ------------------------------------------
 def compose_answer(question: str) -> dict:
-    """The grounded, no-action-authority answer path (services/llm.py), with
-    the redact.py egress gate applied to what would leave the machine."""
+    """Answer a teammate's question from OUR memory for peer egress.
+
+    Uses the peer memory composer (no llm.answer / answer_check evidence dumps).
+    Those dumps were crossing the wire as identity blocks and then poisoning
+    the asker's recall ("what did their Sparrow say?").
+    """
+    out = compose_peer_answer(question)
+    if out.get("text"):
+        return out
+    return {"text": "I don't have enough in my memory to answer that.",
+            "redacted": []}
+
+
+_PEER_UPDATE_SYSTEM = (
+    "You write a short status update one teammate sends to another. "
+    "Use ONLY the memories provided. Be concrete and brief "
+    "(a few bullets or short paragraphs). "
+    "Never mention Sparrow, AI, assistants, system prompts, ABOUT YOU blocks, "
+    "or who 'the user you are assisting' is. "
+    "The update is FOR the teammate: never include the sender's personal "
+    "reminders, to-dos, or 'remind me' asides — those stay on the sender's "
+    "side. "
+    "Never invent facts. If the memories do not cover the topic, reply with "
+    "exactly: NO_MEMORY "
+    "Do not use email headers (To/Subject/Body) or signatures."
+)
+
+_PEER_ANSWER_SYSTEM = (
+    "You answer a question from a teammate's Sparrow. "
+    "Use YOUR memories when they are about the same topic as the question. "
+    "A 'Context from my side' brief in the question is background only — "
+    "do NOT restate it as your answer, and do NOT invent details from it. "
+    "If you have no independent memory of the topic, reply exactly: NO_MEMORY "
+    "Do not attach unrelated tasks, commitments, prices, or people. "
+    "Never mention Sparrow, AI, assistants, system prompts, or ABOUT YOU blocks. "
+    "Do not use email headers (To/Subject/Body) or signatures."
+)
+
+_PEER_SKIP_SOURCE_LABELS = frozenset({
+    "identity", "clock", "user tools", "user profile",
+})
+
+
+_WORK_ITEM_RE = re.compile(r"^\[(?:task|commitment)\]", re.I)
+
+
+def _peer_memory_lines(sources: list | None, *, limit: int = 24,
+                       topic: str = "",
+                       skip_work_items: bool = False) -> list[str]:
+    """Topic memories only — never identity / profile instruction lines.
+
+    skip_work_items drops the sender's own open tasks/commitments — personal
+    work state that must not ride along inside a push update to a teammate
+    (audit: "tell Justin about the deal" shipped the sender's private
+    "[commitment] Send Andy an update…" reminder to the peer)."""
+    topic_tokens = [t for t in re.findall(r"[a-z0-9]{3,}", (topic or "").casefold())
+                    if t not in {"the", "and", "for", "about", "what", "know",
+                                 "said", "tell", "from", "with", "your", "this"}]
+    lines: list[str] = []
+    for s in sources or []:
+        label = str(s.get("label") or "").strip().lower()
+        if label in _PEER_SKIP_SOURCE_LABELS or label.startswith("drafting"):
+            continue
+        for it in s.get("items") or []:
+            t = (it or "").strip().lstrip("-•").strip()
+            if not t:
+                continue
+            low = t.lower()
+            if skip_work_items and (_WORK_ITEM_RE.match(t)
+                                    or low.startswith("open tasks")):
+                continue
+            if (t.startswith("ABOUT YOU")
+                    or low.startswith("you are ")
+                    or "user you are assisting" in low
+                    or low.startswith("address them by name")
+                    or t.startswith("USER PROFILE")
+                    or t.startswith("USER TOOLS")
+                    or t.startswith("DRAFTING RULE")
+                    or low.startswith("ask user")
+                    or low.startswith("what did user")
+                    or low.startswith("what do we")):
+                continue
+            # Drop chatty assistant hedges from prior answers.
+            # Keep each phrase as `… in low` — a bare string is always truthy.
+            if ("i can make a note" in low
+                    or "i don't have more specific" in low
+                    or "as of now, i don't" in low):
+                continue
+            if topic_tokens:
+                blob = low
+                if not any(tok in blob for tok in topic_tokens):
+                    continue
+            if t not in lines:
+                lines.append(t)
+            if len(lines) >= limit:
+                return lines
+    if topic_tokens and not lines:
+        # Nothing topic-tagged — fall back to non-identity lines rather than
+        # returning an empty brief (tests + sparse graphs).
+        return _peer_memory_lines(sources, limit=limit, topic="",
+                                  skip_work_items=skip_work_items)
+    return lines
+
+
+def _compose_peer_memory_text(topic: str, *, system: str,
+                              user_preamble: str,
+                              allow_empty_memories: bool = False,
+                              skip_work_items: bool = False) -> dict:
+    """Shared grounding + generate + leak-strip for peer egress."""
     from app.services import redact
-    from app.services.llm import answer as _answer
-    res = _answer(question)
-    text = (res.get("answer") or "").strip()[: settings.peer.max_text_chars]
+    topic = (topic or "").strip()
+    if not topic:
+        return {"text": "", "redacted": []}
+
+    sources: list = []
+    ground_q = topic
+    marker = "(Context from my side"
+    if marker in topic:
+        ground_q = topic.split(marker, 1)[0].strip() or topic
+    try:
+        from app.services.grounding import compose
+        # Ground on the bare ask when a context brief is attached.
+        g = compose(ground_q, semantic_limit=8)
+        sources = g.get("sources") or []
+    except Exception as exc:
+        print(f"[peer] memory grounding skipped ({exc}).")
+        try:
+            from app.services.memory import memory
+            hits = memory.search(ground_q, limit=8)
+            sources = [{"label": "memories",
+                        "items": [h.get("raw") or "" for h in hits]}]
+        except Exception:
+            sources = []
+
+    mem_lines = _peer_memory_lines(sources, topic=ground_q,
+                                   skip_work_items=skip_work_items)
+    context = "\n".join(f"- {t}" for t in mem_lines)
+    text = ""
+    try:
+        from app.config import settings as _settings
+        if _settings.text_local.enabled and (context or allow_empty_memories):
+            from app.services.model_router import router
+            mem_block = context or (
+                "(none — answer only from the teammate's brief if present; "
+                "otherwise say you have no memory of this)")
+            reply = router.complete(
+                "chat",
+                system=system,
+                messages=[{"role": "user", "content":
+                           f"{user_preamble}:\n{topic}\n\n"
+                           f"Your memories:\n{mem_block}\n\n"
+                           "Respond now."}],
+                max_tokens=512,
+            ).strip()
+            if reply and not re.match(r"^\s*NO_MEMORY\b", reply, re.I):
+                text = reply
+    except Exception as exc:
+        print(f"[peer] memory generation skipped ({exc}).")
+
+    if not text and mem_lines:
+        text = "\n".join(f"- {t}" for t in mem_lines[:8])
+
+    text = _strip_notify_envelope(text)
+    text = _strip_peer_update_leaks(text)
+    text = text.strip()[: settings.peer.max_text_chars]
+    if not text:
+        return {"text": "", "redacted": []}
     kinds = redact.scan(text)
     return {"text": redact.redact_text(text), "redacted": kinds}
+
+
+def compose_peer_update(topic: str) -> dict:
+    """Compose a teammate push-update from OUR memory.
+
+    The sender's own open tasks/commitments never ride along — a push update
+    is about the topic, not the sender's personal work state."""
+    return _compose_peer_memory_text(
+        topic, system=_PEER_UPDATE_SYSTEM,
+        user_preamble="Topic to cover",
+        skip_work_items=True)
+
+
+def compose_peer_answer(question: str) -> dict:
+    """Compose an answer to a teammate's question from OUR memory.
+
+    The question may include a context brief from the asker — when we have no
+    local memories we still answer from that brief (or say we don't know)
+    instead of inventing tools/projects.
+    """
+    return _compose_peer_memory_text(
+        question, system=_PEER_ANSWER_SYSTEM,
+        user_preamble="Question from a teammate (may include their context brief)",
+        allow_empty_memories=True)
+
+
+def enrich_peer_question(question: str) -> str:
+    """Attach a short factual brief from OUR memory so the teammate isn't cold.
+
+    Uses memory bullets only (no LLM) so we don't ship chatty hedges like
+    "I can make a note of it for you" as if they were project facts.
+    """
+    q = (question or "").strip()
+    if not q or "Context from my side" in q:
+        return q
+    sources: list = []
+    try:
+        from app.services.grounding import compose
+        g = compose(q, semantic_limit=8)
+        sources = g.get("sources") or []
+    except Exception:
+        try:
+            from app.services.memory import memory
+            hits = memory.search(q, limit=8)
+            sources = [{"label": "memories",
+                        "items": [h.get("raw") or "" for h in hits]}]
+        except Exception:
+            return q
+    bullets = _peer_memory_lines(sources, limit=6, topic=q)
+    if not bullets:
+        return q
+    text = "\n".join(f"- {b}" for b in bullets)[:600]
+    enriched = (
+        f"{q}\n\n"
+        f"(Context from my side — background only; add your own knowledge or "
+        f"say you have none):\n{text}"
+    )
+    return enriched[: settings.peer.max_text_chars]
 
 
 def handle_ask(peer: dict, payload: dict) -> dict:
@@ -631,6 +883,8 @@ def handle_ask(peer: dict, payload: dict) -> dict:
     question = question[: settings.peer.max_text_chars]
     peer_id = peer.get("peer_id", "")
     _touch(peer_id, "asks")
+    refresh_peer_base_url(
+        peer_id, payload.get("base_url") or payload.get("callback_url"))
     _publish_event("peer.ask", question,
                    {"peer_id": peer_id, "peer": peer.get("name", ""),
                     "ask_id": ask_id})
@@ -638,17 +892,20 @@ def handle_ask(peer: dict, payload: dict) -> dict:
     kind = str(payload.get("kind") or "question").strip().lower()
     # Org network packets ride the peer transport as structured text; they are
     # never raw memory. org_escalate always human-offers; org_digest/priority
-    # use work-class policy (default offer).
-    _ORG_KINDS = ("org_digest", "org_priority", "org_escalate")
-    if kind not in ("question", "handoff") + _ORG_KINDS:
+    # use work-class policy (default offer). notify is a push update composed
+    # on the sender — surfaces for the human (offer) unless the sim flag.
+    if kind not in _PEER_KINDS:
         return {"ok": False, "error": f"unknown kind {kind!r}"}
 
     # A handoff is a request for THIS user to do something — action-adjacent,
     # so it ALWAYS waits for the human. No policy grant and no dev flag can
     # auto-accept work on someone's behalf. Org escalations are likewise
-    # always offer (Phase 1: exec must see them).
-    if kind in ("handoff", "org_escalate"):
+    # always offer (Phase 1: exec must see them). Notify is an inbound update
+    # from their teammate's Sparrow — also offer unless the sim flag.
+    if kind in ("handoff", "org_escalate", "notify"):
         action, topic = "offer", "work"
+        if kind == "notify" and settings.peer.auto_answer:
+            action = "auto"
     elif kind in ("org_digest", "org_priority"):
         # Treat as work-class; respect per-peer policy for "work".
         policy = peer.get("policy") or default_policy()
@@ -670,6 +927,13 @@ def handle_ask(peer: dict, payload: dict) -> dict:
         print(f"[peer] auto-accepted {kind} from {peer.get('name', '?')}")
         return {"ok": True, "status": "answered", "ask_id": ask_id,
                 "topic": topic, "answer": f"accepted {kind}",
+                "redacted": []}
+    if action == "auto" and kind == "notify":
+        _accept_notify(peer.get("name") or "a teammate", peer_id, ask_id,
+                       question)
+        print(f"[peer] auto-accepted notify from {peer.get('name', '?')}")
+        return {"ok": True, "status": "answered", "ask_id": ask_id,
+                "topic": topic, "answer": "accepted notify",
                 "redacted": []}
     if action == "auto":
         composed = compose_answer(question)
@@ -701,6 +965,9 @@ def handle_ask(peer: dict, payload: dict) -> dict:
     who = peer.get("name", "A teammate")
     if kind == "handoff":
         _notify_chat(f"{who} wants to hand you a task: “{question[:200]}” — "
+                     "accept or decline on the Team page (/peer).")
+    elif kind == "notify":
+        _notify_chat(f"{who}'s Sparrow sent an update: “{question[:200]}” — "
                      "accept or decline on the Team page (/peer).")
     elif kind == "org_digest":
         _notify_chat(f"{who} sent an org digest — review on Team (/peer).")
@@ -747,6 +1014,17 @@ def _accept_org_packet(name: str, peer_id: str, ask_id: str,
             })
     except Exception as exc:
         print(f"[peer] org packet ingest skipped ({exc}).")
+
+
+def _accept_notify(name: str, peer_id: str, ask_id: str, text: str) -> None:
+    """Inbound teammate update (kind=notify) — observed context in chat/memory."""
+    try:
+        _publish_event("peer.notify", f"[update from {name}] {text}",
+                       {"peer_id": peer_id, "peer": name, "ask_id": ask_id,
+                        "kind": "notify"})
+        _notify_chat(f"Update from {name}'s Sparrow:\n{text[:1200]}")
+    except Exception as exc:
+        print(f"[peer] notify ingest skipped ({exc}).")
 
 
 def _accept_handoff(name: str, peer_id: str, ask_id: str, task: str,
@@ -842,6 +1120,18 @@ def decide_ask(local_id: str, approve: bool) -> dict:
         return {"ok": delivered, "status": "accepted" if delivered else
                 "delivery_failed", "answer": reply}
 
+    if item.get("kind") == "notify":
+        _accept_notify(peer_rec.get("name") or "a teammate",
+                       item.get("peer_id", ""), item["ask_id"],
+                       item["question"])
+        reply = "Accepted update."
+        delivered = _deliver(peer_rec, {"ask_id": item["ask_id"],
+                                        "answer": reply})
+        _finish_ask(local_id, "accepted" if delivered else "delivery_failed",
+                    reply)
+        return {"ok": delivered, "status": "accepted" if delivered else
+                "delivery_failed", "answer": reply}
+
     if item.get("kind") in ("org_digest", "org_priority", "org_escalate"):
         _accept_org_packet(peer_rec.get("name") or "a teammate",
                            item.get("peer_id", ""), item["ask_id"],
@@ -891,12 +1181,19 @@ def ask(peer_id: str, question: str, kind: str = "question",
     """
     if not settings.peer.enabled:
         return {"ok": False, "error": "peer channel disabled"}
-    if kind not in ("question", "handoff", "org_digest", "org_priority",
-                    "org_escalate"):
+    if kind not in _PEER_KINDS:
         return {"ok": False, "error": f"unknown kind {kind!r}"}
     question = (question or "").strip()[: settings.peer.max_text_chars]
     if not question:
         return {"ok": False, "error": "empty question"}
+    # Questions carry a brief from OUR memory so the teammate can build on it
+    # instead of inventing (Venture Pulse → fake CRM). Handoffs/notifies stay
+    # as the human wrote them.
+    if kind == "question":
+        try:
+            question = enrich_peer_question(question)
+        except Exception as exc:
+            print(f"[peer] question enrich skipped ({exc}).")
     with _lock:
         registry = _load(_peers_path(), {})
         peer_rec = registry.get(peer_id)
@@ -947,7 +1244,8 @@ def retry_queued(item: dict) -> dict:
 def _dispatch_ask(peer_rec: dict, peer_id: str, ask_id: str, question: str,
                   kind: str, loop_id: str | None,
                   from_mailbox: bool = False) -> dict:
-    payload = {"ask_id": ask_id, "question": question, "kind": kind}
+    payload = {"ask_id": ask_id, "question": question, "kind": kind,
+               "base_url": my_base_url()}
     if loop_id:
         payload["loop_id"] = loop_id
     try:
@@ -1012,6 +1310,16 @@ def _record_answer(peer_rec: dict, peer_id: str, ask_id: str,
         # Attribution in the raw text: this event grounds future chat answers,
         # and a fact learned from a teammate must read as theirs, not ours.
         name = peer_rec.get("name") or "a teammate"
+        # Never mint facts from identity dumps / empty hedges — that poisoned
+        # Venture Pulse into "internal CRM" on the asker's graph.
+        if not peer_answer_usable(answer_text):
+            print(f"[peer] skip ingest of unusable answer from {name}")
+            _publish_event(
+                "peer.answer",
+                f"[from {name}'s Sparrow — not ingested] {answer_text[:500]}",
+                {"peer_id": peer_id, "peer": name, "ask_id": ask_id,
+                 "ingested": False})
+            return
         if ingest_enabled():
             _ingest_answer(name, peer_id, ask_id, answer_text)
         else:
@@ -1141,11 +1449,34 @@ def run_ingest_job(payload: dict) -> None:
 # "ask sarah's mnemos whether the slides are done". The addressee must resolve
 # to a PAIRED peer or the message is not a team ask — "ask me anything" and
 # "ask the professor about X" fall through to normal chat routing.
+#
+# Push form ("tell Justin what we did today"): compose from OUR memory, then
+# deliver as kind=notify so THEIR Sparrow surfaces the update. Distinct from
+# ask (pull from their memory) and handoff (they take a task).
 _ASK_COLON_RE = re.compile(
     r"^\s*ask\s+(?P<who>[^:,]{1,40}?)\s*[:,]\s*(?P<q>.{3,})$", re.I)
 _ASK_PLAIN_RE = re.compile(
     r"^\s*ask\s+(?P<who>[A-Za-z][\w.'-]{0,40})\s+(?P<q>.{3,})$", re.I)
-_POSSESSIVE_RE = re.compile(r"(?:'s)?\s+(?:mnemos|assistant|instance)\s*$", re.I)
+_POSSESSIVE_RE = re.compile(r"(?:'s)?\s+(?:mnemos|assistant|instance|sparrow)\s*$", re.I)
+_TELL_ME_RE = re.compile(r"^\s*tell\s+me\b", re.I)
+_TELL_RE = re.compile(
+    r"^\s*(?:tell|message|msg)\s+"
+    r"(?P<who>[A-Za-z][\w.'-]{0,40}(?:\s+[A-Za-z][\w.'-]{0,40})?)\s+"
+    r"(?:that\s+|about\s+|[:\,]\s*)?(?P<q>.{3,})$", re.I)
+_LET_KNOW_RE = re.compile(
+    r"^\s*let\s+"
+    r"(?P<who>[A-Za-z][\w.'-]{0,40}(?:\s+[A-Za-z][\w.'-]{0,40})?)\s+"
+    r"know\s+(?:that\s+|about\s+)?(?P<q>.{3,})$", re.I)
+# Explicit human-app channels win over peer notify ("email Justin…").
+_EXPLICIT_CHANNEL_RE = re.compile(
+    r"^\s*(?:email|e-mail|mail|text|sms|imessage|i-message|slack|whatsapp|"
+    r"discord|telegram|messenger|gchat|hangouts)\b", re.I)
+_EMAIL_ENVELOPE_RE = re.compile(
+    r"^\s*(?:to|subject|body|cc|bcc)\s*:\s*", re.I | re.M)
+
+_PEER_KINDS = ("question", "handoff", "notify",
+               "org_digest", "org_priority", "org_escalate")
+_ORG_KINDS = ("org_digest", "org_priority", "org_escalate")
 
 
 def _person_alias_keys(person_id: int) -> set[str]:
@@ -1198,6 +1529,11 @@ def parse_team_ask(text: str) -> dict | None:
 
     Group form (`ask #platform: …` / `ask the platform team: …`) returns
     fanout=True even when the team is unknown, so chat does not fall through.
+
+    Resolves the addressee against paired peer names with LONGEST match first
+    so "ask User 2 about Venture Pulse" keeps the question as
+    "about Venture Pulse" — not "2 about Venture Pulse" (the single-token
+    regex used to bind who=User and leave the digit in the question).
     """
     try:
         from app.services.team_layer import parse_group_ask
@@ -1206,34 +1542,403 @@ def parse_team_ask(text: str) -> dict | None:
             return group
     except Exception:
         pass
-    for pat in (_ASK_COLON_RE, _ASK_PLAIN_RE):
-        m = pat.match(text or "")
-        if not m:
+    t = (text or "").strip()
+    # "asking …" is narrative, not an imperative team ask.
+    if not t or re.match(r"^\s*asking\b", t, re.I):
+        return None
+    if not re.match(r"^\s*ask\b", t, re.I):
+        return None
+    rest = re.sub(r"^\s*ask\s+", "", t, count=1, flags=re.I).lstrip()
+    if not rest:
+        return None
+
+    candidates: list[tuple[int, dict, str]] = []
+    for p in peers():
+        name = str(p.get("name") or "").strip()
+        keys: set[str] = set()
+        if name:
+            keys.add(name)
+            keys.add(name.split()[0])
+        pid = p.get("person_id")
+        if pid is not None:
+            keys |= _person_alias_keys(int(pid))
+        for key in keys:
+            if not key or not rest.casefold().startswith(key.casefold()):
+                continue
+            after = rest[len(key):]
+            after = _POSSESSIVE_RE.sub("", after)
+            after = re.sub(r"^'s\s*", "", after, flags=re.I).lstrip()
+            after = re.sub(r"^[:,]\s*", "", after)
+            if len(after.strip()) < 3:
+                continue
+            candidates.append((len(key), p, after.strip()))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: -x[0])
+    _, peer, question = candidates[0]
+    # "ask sarah to review the slides" is a HANDOFF (do this), not a
+    # question (tell me this) — her human must accept it.
+    kind = "question"
+    hand = re.match(r"to\s+(.+)$", question, re.I | re.S)
+    if hand:
+        kind, question = "handoff", hand.group(1).strip()
+    if not question.rstrip("?").strip():
+        return None
+    return {"peer_id": peer["peer_id"], "peer_name": peer["name"],
+            "question": question, "kind": kind}
+
+
+def looks_like_team_tell(text: str) -> bool:
+    """Shape check only — true for tell/message/let-know forms (not 'tell me').
+
+    Explicit human-app verbs (email/text/sms/…) are never peer-tell shapes so
+    Writing / phone / ghost-browser paths still own those.
+    """
+    t = (text or "").strip()
+    if not t or _TELL_ME_RE.match(t) or _EXPLICIT_CHANNEL_RE.match(t):
+        return False
+    return bool(_TELL_RE.match(t) or _LET_KNOW_RE.match(t)
+                or re.match(r"^\s*(?:tell|message|msg)\s+\S+", t, re.I)
+                or re.match(r"^\s*let\s+\S+\s+know\b", t, re.I))
+
+
+_RECALL_RE = re.compile(
+    r"^\s*what\s+(?P<aux>did|does|has)\s+"
+    r"(?P<who>.+?)\s+"
+    r"(?:'s\s+)?(?:sparrow|mnemos|assistant)\s+"
+    r"(?P<verb>say|said|tell|told|answer(?:ed)?|know|known)\s+"
+    r"(?:about\s+|regarding\s+|on\s+)?(?P<topic>.+?)\s*\??\s*$",
+    re.I | re.S,
+)
+
+
+def parse_peer_recall(text: str) -> dict | None:
+    """"What did User 2's Sparrow say about Venture Pulse?" → peer + topic.
+
+    These are recall/re-ask intents, not free-form chat — without this they
+    fall through to the agent, which narrates an open task instead of
+    surfacing (or refreshing) the peer answer.
+    """
+    m = _RECALL_RE.match(text or "")
+    if not m:
+        return None
+    who = m.group("who").strip()
+    who = _POSSESSIVE_RE.sub("", who).strip()
+    who = re.sub(r"'s$", "", who, flags=re.I).strip()
+    peer = _resolve_peer_name(who)
+    if peer is None:
+        # Longest paired-name prefix (User 2, not User).
+        rest = who
+        candidates: list[tuple[int, dict]] = []
+        for p in peers():
+            name = str(p.get("name") or "").strip()
+            if name and rest.casefold().startswith(name.casefold()):
+                candidates.append((len(name), p))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda x: -x[0])
+        peer = candidates[0][1]
+    topic = (m.group("topic") or "").strip().rstrip("?").strip()
+    if len(topic) < 2:
+        return None
+    return {"peer_id": peer["peer_id"], "peer_name": peer["name"],
+            "topic": topic}
+
+
+def peer_answer_usable(answer: str, question: str = "") -> bool:
+    """True when a stored peer answer is worth showing/ingesting."""
+    text = _strip_peer_update_leaks(answer or "").strip()
+    if len(text) < 8:
+        return False
+    # Normalize curly quotes so "Here's what I found" still matches.
+    low = (text.lower()
+           .replace("\u2019", "'").replace("\u2018", "'")
+           .replace("\u201c", '"').replace("\u201d", '"'))
+    if "here's what i found" in low or ":::confirmed" in low:
+        return False
+    if "you are sparrow" in low or "user you are assisting" in low:
+        return False
+    if "would you like me to ask" in low or "want me to ask" in low:
+        return False
+    if "exact details are incomplete" in low:
+        return False
+    if "not a person" in low and "based on the context" in low:
+        return False
+    if "i would need to check the latest information" in low:
+        return False
+    if "not ingested" in low:
+        return False
+    if "make a note of it" in low or "i can make a note" in low:
+        return False
+    # Pure echo of the asker's brief — no new teammate knowledge.
+    if "based on the context" in low and (
+            "new project that you have been put on" in low
+            or "don't have more specific details" in low):
+        return False
+    if question and "Context from my side" in question:
+        brief = question.split("Context from my side", 1)[-1]
+        brief = re.sub(r"^[^:\n]*:\s*", "", brief).strip().casefold()
+        brief_toks = set(re.findall(r"[a-z0-9]{4,}", brief))
+        ans_toks = set(re.findall(r"[a-z0-9]{4,}", low))
+        if brief_toks and ans_toks:
+            overlap = len(brief_toks & ans_toks) / max(len(ans_toks), 1)
+            if overlap >= 0.7 and len(ans_toks - brief_toks) < 4:
+                return False
+    return True
+
+
+def find_peer_answers(peer_id: str | None, topic: str, *, limit: int = 5) -> list[dict]:
+    """Recent answered outbound asks (optionally one peer) that mention `topic`."""
+    topic_l = (topic or "").casefold().strip()
+    tokens = [t for t in re.findall(r"[a-z0-9]{3,}", topic_l) if t not in
+              {"the", "and", "for", "about", "what", "know", "said", "tell"}]
+    out: list[dict] = []
+    for r in _load(_sent_path(), []):
+        if peer_id and r.get("peer_id") != peer_id:
             continue
-        peer = _resolve_peer_name(m.group("who"))
+        if r.get("status") != "answered":
+            continue
+        q = str(r.get("question") or "")
+        a = str(r.get("answer") or "")
+        blob = f"{q}\n{a}".casefold()
+        if topic_l and topic_l not in blob:
+            if not tokens or not any(t in blob for t in tokens):
+                continue
+        cleaned = _strip_peer_update_leaks(a).strip()
+        out.append({
+            "ask_id": r.get("ask_id"),
+            "peer_name": r.get("peer_name") or "teammate",
+            "question": q,
+            "answer": cleaned,
+            "created_at": r.get("created_at") or r.get("answered_at") or 0,
+            "usable": peer_answer_usable(cleaned, q),
+        })
+    out.sort(key=lambda x: float(x.get("created_at") or 0))
+    return out[-limit:]
+
+
+_WHAT_WE_KNOW_RE = re.compile(
+    r"^\s*what\s+do\s+we\s+(?:now\s+)?know\s+about\s+(?P<topic>.+?)\s*\??\s*$",
+    re.I | re.S,
+)
+
+
+def parse_what_we_know(text: str) -> str | None:
+    """'What do we know about Venture Pulse now?' → topic, else None."""
+    m = _WHAT_WE_KNOW_RE.match(text or "")
+    if not m:
+        return None
+    topic = (m.group("topic") or "").strip().rstrip("?").strip()
+    topic = re.sub(r"\s+now$", "", topic, flags=re.I).strip()
+    return topic or None
+
+
+def synthesize_topic_knowledge(topic: str) -> str:
+    """Blend our facts + usable teammate answers for a topic — no re-ask."""
+    topic = (topic or "").strip()
+    if not topic:
+        return ""
+    own: list[str] = []
+    try:
+        from app.services.grounding import compose
+        g = compose(topic, semantic_limit=8)
+        own = _peer_memory_lines(g.get("sources") or [], limit=8, topic=topic)
+    except Exception:
+        pass
+    peer_bits: list[str] = []
+    for h in find_peer_answers(None, topic, limit=8):
+        if not h.get("usable"):
+            continue
+        peer_bits.append(
+            f"From {h.get('peer_name') or 'a teammate'}'s Sparrow: {h['answer']}")
+    lines: list[str] = []
+    if own:
+        lines.append("From our memory:")
+        lines.extend(f"- {x}" for x in own)
+    if peer_bits:
+        if lines:
+            lines.append("")
+        lines.append("From teammates:")
+        lines.extend(f"- {x}" for x in peer_bits)
+    if not lines:
+        return (
+            f"We only know what you've told me so far about {topic}, and no "
+            f"teammate has added usable detail yet. You can "
+            f"`ask <teammate>: what do you know about {topic}?` to pull more."
+        )
+    return "\n".join(lines)
+
+
+def parse_team_tell(text: str) -> dict | None:
+    """{"peer_id", "peer_name", "topic", "kind": "notify"} when chat is a push
+    update to a PAIRED peer ("tell Justin what we did today"), else None.
+
+    Resolves the addressee against paired peer names first (longest match)
+    so "what/about/that" never get eaten as a surname. Never guesses.
+    """
+    t = (text or "").strip()
+    if not t or _TELL_ME_RE.match(t) or _EXPLICIT_CHANNEL_RE.match(t):
+        return None
+    lower = t.casefold()
+    rest = None
+    for pref in ("tell ", "message ", "msg "):
+        if lower.startswith(pref):
+            rest = t[len(pref):].lstrip()
+            break
+    if rest is None and lower.startswith("let "):
+        # "let <who> know <topic>"
+        after = t[4:].lstrip()
+        know_m = re.match(
+            r"^(?P<who>.+?)\s+know\s+(?:that\s+|about\s+)?(?P<q>.{3,})$",
+            after, re.I | re.S)
+        if not know_m:
+            return None
+        peer = _resolve_peer_name(know_m.group("who"))
         if peer is None:
-            continue
-        question = m.group("q").strip()
-        if not question.rstrip("?").strip():
-            continue
-        # "ask sarah to review the slides" is a HANDOFF (do this), not a
-        # question (tell me this) — her human must accept it.
-        kind = "question"
-        hand = re.match(r"to\s+(.+)$", question, re.I | re.S)
-        if hand:
-            kind, question = "handoff", hand.group(1).strip()
+            return None
         return {"peer_id": peer["peer_id"], "peer_name": peer["name"],
-                "question": question, "kind": kind}
-    return None
+                "topic": know_m.group("q").strip(), "kind": "notify"}
+    if rest is None:
+        return None
+
+    # Prefer the longest paired peer name that prefixes `rest`.
+    candidates: list[tuple[int, dict, str]] = []
+    for p in peers():
+        name = str(p.get("name") or "").strip()
+        if not name:
+            continue
+        for key in {name, name.split()[0]}:
+            if rest.casefold().startswith(key.casefold()):
+                after = rest[len(key):].lstrip()
+                after = re.sub(r"^(?:that|about)\s+", "", after, flags=re.I)
+                after = re.sub(r"^[:,]\s*", "", after)
+                if len(after) >= 3:
+                    candidates.append((len(key), p, after))
+        pid = p.get("person_id")
+        if pid is not None:
+            for alias in _person_alias_keys(int(pid)):
+                if rest.casefold().startswith(alias):
+                    after = rest[len(alias):].lstrip()
+                    after = re.sub(r"^(?:that|about)\s+", "", after, flags=re.I)
+                    after = re.sub(r"^[:,]\s*", "", after)
+                    if len(after) >= 3:
+                        candidates.append((len(alias), p, after))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: -x[0])
+    _, peer, topic = candidates[0]
+    return {"peer_id": peer["peer_id"], "peer_name": peer["name"],
+            "topic": topic.strip(), "kind": "notify"}
+
+
+_REMIND_ME_SENT_RE = re.compile(
+    r"(?:^|(?<=[.!?]))\s*(?:and\s+|also\s+|then\s+)?remind me\b[^.!?]*[.!?]?",
+    re.I)
+
+
+def _strip_self_reminders(topic: str) -> str:
+    """Drop 'remind me …' sentences from a tell topic — they address Sparrow,
+    not the teammate (extraction already turned them into local tasks)."""
+    out = _REMIND_ME_SENT_RE.sub(" ", topic or "").strip()
+    return out if out else (topic or "")
+
+
+def _strip_notify_envelope(text: str) -> str:
+    """Drop To:/Subject:/Body: scaffolding models sometimes paste into updates."""
+    lines = []
+    for line in (text or "").splitlines():
+        if _EMAIL_ENVELOPE_RE.match(line):
+            # Keep content after the first Body: label; drop bare header lines.
+            if re.match(r"^\s*body\s*:\s*", line, re.I):
+                rest = re.sub(r"^\s*body\s*:\s*", "", line, flags=re.I).strip()
+                if rest:
+                    lines.append(rest)
+            continue
+        lines.append(line)
+    out = "\n".join(lines).strip()
+    # Single-line "To: X Subject: Y Body: Z" mash — keep only after Body:.
+    mashed = re.search(r"\bbody\s*:\s*(.+)$", out, re.I | re.S)
+    if mashed and re.search(r"\b(?:to|subject)\s*:", out, re.I):
+        out = mashed.group(1).strip()
+    return out
+
+
+_LEAK_LINE_RE = re.compile(
+    r"(?i)^(?:\s*[-•*]?\s*)?(?:"
+    r"about you\b|"
+    r"you are (?:sparrow|quill|mnemos|the user.?s)|"
+    r"the user you are assisting\b|"
+    r"address them by name\b|"
+    r"user profile\b|"
+    r"user tools\b|"
+    r"drafting rule\b|"
+    r"here'?s what i found,? with the evidence\b|"
+    r"retrieved memories\b|"
+    r":::(?:confirmed|likely|conflicting|missing)\b"
+    r")"
+)
+
+
+def _strip_peer_update_leaks(text: str) -> str:
+    """Remove identity / answer_check / system-prompt lines that must never
+    leave as a teammate notify body."""
+    kept: list[str] = []
+    skipping_fence = False
+    for line in (text or "").splitlines():
+        raw = line.strip()
+        if re.match(r"^:::(?:confirmed|likely|conflicting|missing)\s*$", raw, re.I):
+            skipping_fence = True
+            continue
+        if raw == ":::" and skipping_fence:
+            skipping_fence = False
+            continue
+        if skipping_fence:
+            continue
+        if _LEAK_LINE_RE.match(raw):
+            continue
+        kept.append(line)
+    out = "\n".join(kept).strip()
+    # If the model mostly echoed instructions, treat as empty.
+    low = out.lower()
+    if ("you are sparrow" in low or "user you are assisting" in low
+            or "about you (the assistant)" in low):
+        return ""
+    return out
+
+
+def _emit_peer_result(text: str) -> None:
+    """Peer outcomes as chat results (not system whispers / Takeaway email)."""
+    try:
+        from app.services import agent_bridge
+        agent_bridge.worker._emit("result", text)
+    except Exception:
+        _notify_chat(text)
 
 
 def _chat_ask_run(peer_id: str, question: str, kind: str = "question") -> None:
-    """One chat-initiated ask/handoff, end to end; every outcome lands in the
-    chat pane. Runs on a background thread — the peer's compose or approval
-    can take a while and /chat must return immediately."""
+    """One chat-initiated ask/handoff/notify, end to end; every outcome lands
+    in the chat pane. Runs on a background thread — the peer's compose or
+    approval can take a while and /chat must return immediately."""
     res = ask(peer_id, question, kind)
     name = res.get("peer") or "the teammate"
     status = res.get("status")
+    if kind == "notify":
+        if status == "answered":
+            _emit_peer_result(f"Delivered to {name}'s Sparrow.")
+        elif status == "pending":
+            _emit_peer_result(
+                f"Sent to {name}'s Sparrow — waiting for them to accept "
+                "on Team (/peer).")
+        elif status == "queued":
+            _emit_peer_result(
+                f"{name}'s Sparrow isn't reachable — queued until they're online.")
+        elif status == "declined":
+            _emit_peer_result(f"{name}'s Sparrow declined the update.")
+        else:
+            _emit_peer_result(
+                f"Couldn't reach {name}'s Sparrow "
+                f"({res.get('error', 'unknown error')}).")
+        return
     if status == "answered":
         _notify_chat(f"{name}'s Sparrow answered: “{res.get('answer', '')}”")
     elif status == "pending" and kind == "handoff":
@@ -1251,9 +1956,40 @@ def _chat_ask_run(peer_id: str, question: str, kind: str = "question") -> None:
                      f"({res.get('error', 'unknown error')}).")
 
 
+def _chat_tell_run(peer_id: str, peer_name: str, topic: str) -> None:
+    """Compose an update from OUR memory, then OFFER it — the human's 'yes'
+    is the send. Outbound peer messages are egress, so they never leave on
+    the model's own judgment (the QUILL_PEER_AUTO_ANSWER dev/sim flag keeps
+    the old compose-and-push flow for simulations)."""
+    try:
+        composed = compose_peer_update(_strip_self_reminders(topic))
+        body = (composed.get("text") or "").strip()
+        if not body:
+            _emit_peer_result(
+                f"I don't have enough in memory yet to update {peer_name} "
+                f"about “{topic[:120]}”.")
+            return
+        if settings.peer.auto_answer:
+            _emit_peer_result(
+                f"Update for {peer_name}'s Sparrow\n\n{body}")
+            _chat_ask_run(peer_id, body, kind="notify")
+            return
+        from app.services import agent_bridge
+        agent_bridge.worker.propose_peer_tell(peer_id, peer_name, body)
+    except Exception as exc:
+        _emit_peer_result(
+            f"Couldn't prepare an update for {peer_name} ({exc}).")
+
+
 def chat_ask_async(peer_id: str, question: str,
                    kind: str = "question") -> None:
     threading.Thread(target=_chat_ask_run, args=(peer_id, question, kind),
+                     daemon=True).start()
+
+
+def chat_tell_async(peer_id: str, peer_name: str, topic: str) -> None:
+    threading.Thread(target=_chat_tell_run,
+                     args=(peer_id, peer_name, topic),
                      daemon=True).start()
 
 

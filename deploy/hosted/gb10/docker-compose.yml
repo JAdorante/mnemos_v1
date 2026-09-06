@@ -50,6 +50,11 @@ services:
       <<: *sparrow-env
       QUILL_API_TOKEN: "${SPARROW_USER1_TOKEN:?set a per-user token in .env}"
       QUILL_LORA_TAG_SUFFIX: user1
+      # Public Cloudflare tunnel URL — peers (and other devices) must call us
+      # back over HTTPS. Loopback 127.0.0.1 only works on this host and shows
+      # teammates as offline from a remote browser / other containers.
+      # Quick-tunnel hostnames change on tunnel restart; refresh here + peers.json.
+      QUILL_PEER_BASE_URL: https://mac-cheapest-experiment-division.trycloudflare.com
       # Web-goal pilot: cloud routing + browser agent for this user only.
       # Optional (defaults empty) so the other users stay local-only chat.
       ANTHROPIC_API_KEY: "${SPARROW_ANTHROPIC_KEY:-}"
@@ -64,6 +69,7 @@ services:
       <<: *sparrow-env
       QUILL_API_TOKEN: "${SPARROW_USER2_TOKEN:?set a per-user token in .env}"
       QUILL_LORA_TAG_SUFFIX: user2
+      QUILL_PEER_BASE_URL: https://pastor-meant-penalty-poster.trycloudflare.com
 
   sparrow-user3:
     <<: *sparrow
@@ -75,6 +81,7 @@ services:
       <<: *sparrow-env
       QUILL_API_TOKEN: "${SPARROW_USER3_TOKEN:?set a per-user token in .env}"
       QUILL_LORA_TAG_SUFFIX: user3
+      QUILL_PEER_BASE_URL: https://beyond-fool-finances-accessibility.trycloudflare.com
 
   sparrow-user4:
     <<: *sparrow
@@ -86,6 +93,7 @@ services:
       <<: *sparrow-env
       QUILL_API_TOKEN: "${SPARROW_USER4_TOKEN:?set a per-user token in .env}"
       QUILL_LORA_TAG_SUFFIX: user4
+      QUILL_PEER_BASE_URL: https://orchestra-cement-guest-districts.trycloudflare.com
 
   sparrow-user5:
     <<: *sparrow
@@ -97,6 +105,7 @@ services:
       <<: *sparrow-env
       QUILL_API_TOKEN: "${SPARROW_USER5_TOKEN:?set a per-user token in .env}"
       QUILL_LORA_TAG_SUFFIX: user5
+      QUILL_PEER_BASE_URL: https://how-notifications-complicated-minister.trycloudflare.com
 
 volumes:
   sparrow-user1-data:

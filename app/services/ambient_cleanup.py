@@ -8,9 +8,9 @@ Also plans kind remaps (product→tool) and person-shaped project cleanup
 """
 from __future__ import annotations
 
+import json
 import re
 import time
-from typing import Any
 
 from app.services.name_quality import (
     is_person_shaped_entity_name,
@@ -24,13 +24,15 @@ _STRICT_AMBIENT = {
     "news_page", "social_feed", "browser_article", "advertisement",
 }
 
-# Lowercase-start camelCase only (extractEntities). Brands like OpenAI stay.
+# Lowercase-start camelCase only (extractEntities). Require ≥2 lowercase
+# letters before a capital+lowercase so brands like iPhone / eBay / macOS
+# stay while getUserName / xmlHttpRequest still match. OpenAI stays (Upper).
 _CODE_JUNK = re.compile(
     r"(?i:[\\/(){}<>;=]|::|_|"
     r"^(?:stack_|test-|user-)|"
     r"\.(?:py|md|json|html|gs|exe)\b|"
     r"\b(?:api key|worktree|env var|localhost)\b)|"
-    r"^[a-z]+[A-Z]"
+    r"^[a-z]{2,}[A-Z][a-z]"
 )
 
 # Legacy extractor kinds that should be remapped to the store canonical set.
@@ -44,6 +46,20 @@ def _name(row: dict) -> str:
     return (row.get("name") or row.get("canonical_name") or "").strip()
 
 
+def _event_meta(ev: dict) -> dict:
+    """Parse event meta — Store.get_event leaves JSON as a string."""
+    meta = ev.get("meta")
+    if isinstance(meta, dict):
+        return meta
+    if isinstance(meta, str) and meta.strip():
+        try:
+            parsed = json.loads(meta)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
 def _classify_event(store, event_id: int | None) -> str | None:
     if not event_id:
         return None
@@ -54,7 +70,7 @@ def _classify_event(store, event_id: int | None) -> str | None:
     if not ev:
         return None
     src = (ev.get("source") or "")
-    meta = ev.get("meta") if isinstance(ev.get("meta"), dict) else {}
+    meta = _event_meta(ev)
     try:
         from app.services import source_policy as sp
         return sp.policy_for_event(
@@ -93,13 +109,31 @@ def _person_protected(store, pid: int) -> bool:
     return False
 
 
-def _edge_classes(store, edges: list[dict]) -> list[str]:
-    classes = []
+def _edge_classes(store, edges: list[dict]) -> tuple[list[str], int]:
+    """Classify relation support edges.
+
+    Returns (classes, n_unclassified). Unclassified edges (null/missing
+    source_event_id or failed lookup) veto ambient-only hide — otherwise a
+    single news edge plus orphan edges would look ambient-only.
+    """
+    classes: list[str] = []
+    n_unclassified = 0
     for e in edges:
         cls = _classify_event(store, e.get("source_event_id"))
         if cls:
             classes.append(cls)
-    return classes
+        else:
+            n_unclassified += 1
+    return classes, n_unclassified
+
+
+def _all_edges_strict_ambient(store, edges: list[dict]) -> tuple[bool, list[str]]:
+    classes, n_unclassified = _edge_classes(store, edges)
+    if n_unclassified or not classes:
+        return False, classes
+    if all(c in _STRICT_AMBIENT for c in classes):
+        return True, classes
+    return False, classes
 
 
 def plan_people(store, *, limit: int = 500) -> list[dict]:
@@ -118,15 +152,19 @@ def plan_people(store, *, limit: int = 500) -> list[dict]:
         pid = int(p["id"])
         if self_pid is not None and pid == self_pid:
             continue
+        name = _name(p)
+        # Implausible BEFORE promotion_state — speech-act / brand junk often
+        # got auto-promoted to "recognized" and was then skipped forever.
+        if not is_plausible_person(name):
+            out.append({"id": pid, "name": name,
+                        "promotion_state": (p.get("promotion_state")
+                                           or "candidate"),
+                        "reason": "implausible_name"})
+            continue
         if pid in open_work or _person_protected(store, pid):
             continue
         state = (p.get("promotion_state") or "candidate").lower()
         if state in ("active", "recognized", "trusted"):
-            continue
-        name = _name(p)
-        if not is_plausible_person(name):
-            out.append({"id": pid, "name": name, "promotion_state": state,
-                        "reason": "implausible_name"})
             continue
 
         rel = store.relations_of("person", pid)
@@ -137,11 +175,8 @@ def plan_people(store, *, limit: int = 500) -> list[dict]:
             # too many false positives (real contacts with thin graphs).
             continue
 
-        classes = _edge_classes(store, edges)
-        if not classes:
-            continue
-        # ALL classifiable support must be strict ambient media.
-        if all(c in _STRICT_AMBIENT for c in classes):
+        ambient_only, classes = _all_edges_strict_ambient(store, edges)
+        if ambient_only:
             out.append({
                 "id": pid, "name": name, "promotion_state": state,
                 "reason": "news_social_only",
@@ -171,21 +206,20 @@ _DEBRIS_TAIL = {
     "key", "test", "utils", "suite",
 }
 
+# Filenames / media scraped off a desktop — not projects.
+_FILEISH = re.compile(
+    r"(?i)\.(mp3|wav|m4a|flac|aac|ogg|jsonl|pdf|docx?|xlsx?|pptx?|zip|csv)\b"
+)
+
 
 def _looks_like_entity_junk(name: str, kind: str | None) -> bool:
     n = (name or "").strip()
     if not n or not is_plausible_entity(n):
         return True
-    if _CODE_JUNK.search(n):
+    if _CODE_JUNK.search(n) or _FILEISH.search(n):
         return True
     words = n.split()
-    clean = [w.strip(".,") for w in words]
-    if len(words) >= 4:
-        # Corporate suffixes don't make a real org into junk.
-        if clean and clean[-1].lower() not in {
-            "llc", "inc", "ltd", "corp", "co", "plc", "corporation",
-        }:
-            return True
+    clean = [w.strip(".,+") for w in words]
     low = n.lower()
     if low in {"unknown", "not specified", "contacts", "mom",
                "environment", "readable", "login", "messages", "flight",
@@ -204,12 +238,16 @@ def _looks_like_entity_junk(name: str, kind: str | None) -> bool:
         n == n.lower() or clean[-1].lower() in _DEBRIS_TAIL
     ):
         return True
+    # Long ALL-lowercase run-ons only — Title-/sentence-case project labels
+    # like "Desktop capture + activity blocks" are real work, not junk.
+    if len(clean) >= 6 and n == n.lower():
+        return True
     # Unknown-kind long phrases only if clearly non-Title-Case debris.
     if k in ("", "?", "other") and len(clean) >= 3:
         if not all(w[:1].isupper() for w in clean if w[:1].isalpha()):
             return True
-    # Title-Case brands / orgs / tools with ≤4 words (incl. LLC) stay.
-    if n[:1].isupper() and len(clean) <= 4 and not any(c.isdigit() for c in n):
+    # Capitalized brands / orgs / tools / project labels stay.
+    if n[:1].isupper() and not any(c.isdigit() for c in n):
         return False
     return False
 
@@ -219,17 +257,31 @@ def _known_person_names(store) -> set[str]:
     people table, hidden/merged rows included (a merged-away alias is still a
     person). Space-stripped so an OCR/ASR spacing glitch ("Hugh Salv a") still
     matches its person. Short tokens (<3 chars after stripping) are dropped so
-    a junk 2-letter alias can't match a real project label."""
+    a junk 2-letter alias can't match a real project label.
+
+    Only PLAUSIBLE person names count — otherwise a mis-minted person like
+    "Venture Pulse" would cause the real project of the same name to be hidden.
+    First tokens of multi-word people (≥4 letters) are included so
+    "Justin"[project] collides with "Justin Adorante".
+    """
     names: set[str] = set()
     try:
         people = store.all_people()
     except Exception:
         return names
     for p in people:
-        for n in [p.get("name") or ""] + list(p.get("aliases") or []):
-            n = "".join((n or "").lower().split())
-            if len(n) >= 3:
-                names.add(n)
+        for raw in [p.get("name") or ""] + list(p.get("aliases") or []):
+            raw = (raw or "").strip()
+            if not raw or not is_plausible_person(raw):
+                continue
+            compact = "".join(raw.lower().split())
+            if len(compact) >= 3:
+                names.add(compact)
+            words = raw.split()
+            if len(words) >= 2:
+                first = words[0].lower()
+                if len(first) >= 4 and first.isalpha():
+                    names.add(first)
     return names
 
 
@@ -266,7 +318,19 @@ def plan_entities(store, *, limit: int = 500) -> list[dict]:
             })
             continue
 
-        # 0.5) A project/idea wearing a KNOWN person's name ("Justin"[project],
+        # 0.5) Names today's write-gate would refuse to mint (self tokens,
+        #      speech-act phrases, User N slots, paths, env vars) — before the
+        #      known-person collision check so "User 2"[project] is junk, not
+        #      a person-name collision.
+        if not is_plausible_entity(name):
+            out.append({
+                "id": eid, "name": name, "kind": kind,
+                "action": "hide",
+                "reason": "implausible_name",
+            })
+            continue
+
+        # 0.75) A project/idea wearing a KNOWN person's name ("Justin"[project],
         #      "Marc"[project]) — single tokens the shape check can't judge,
         #      but the people table can. Orgs/tools/places stay: a company may
         #      share its founder's name. The person already exists, so plain
@@ -277,18 +341,6 @@ def plan_entities(store, *, limit: int = 500) -> list[dict]:
                 "id": eid, "name": name, "kind": kind,
                 "action": "hide",
                 "reason": "known_person_name",
-            })
-            continue
-
-        # 0.75) Names today's write-gate would refuse to mint (self tokens
-        #       like the product's own name, paths, env vars) — legacy rows
-        #       that predate the gate. Junk regardless of how many edges it
-        #       accumulated; edges are how junk does damage.
-        if not is_plausible_entity(name):
-            out.append({
-                "id": eid, "name": name, "kind": kind,
-                "action": "hide",
-                "reason": "implausible_name",
             })
             continue
 
@@ -319,8 +371,8 @@ def plan_entities(store, *, limit: int = 500) -> list[dict]:
                 })
             continue
 
-        classes = _edge_classes(store, edges)
-        if classes and all(c in _STRICT_AMBIENT for c in classes):
+        ambient_only, classes = _all_edges_strict_ambient(store, edges)
+        if ambient_only:
             protected = False
             for edge in edges:
                 pred = edge.get("predicate") or ""

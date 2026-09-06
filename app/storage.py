@@ -2825,6 +2825,44 @@ class Store:
             ).fetchone()
         return int(row["id"]) if row else None
 
+    def find_entity_matching_name(
+            self, name: str,
+            kinds: tuple[str, ...] = ("org",)) -> dict | None:
+        """Entity {id, kind, canonical_name} whose canonical name, stored
+        alias, or confirmed alias-table row equals `name` (case-insensitive),
+        restricted to `kinds`. The people pipeline consults this before
+        minting a person so a name the entity linker already knows as an org
+        ("Boost Run") can never become a person node."""
+        key = (name or "").strip()
+        if not key or not kinds:
+            return None
+        ph = ",".join("?" for _ in kinds)
+        with self._lock:
+            row = self._conn.execute(
+                f"SELECT id, kind, canonical_name FROM entities "
+                f"WHERE canonical_name = ? COLLATE NOCASE AND kind IN ({ph})",
+                (key, *kinds)).fetchone()
+            if row is None:
+                row = self._conn.execute(
+                    f"SELECT e.id, e.kind, e.canonical_name "
+                    f"FROM entities e, json_each(e.aliases) a "
+                    f"WHERE e.aliases IS NOT NULL AND json_valid(e.aliases) "
+                    f"AND a.value = ? COLLATE NOCASE AND e.kind IN ({ph}) "
+                    f"LIMIT 1", (key, *kinds)).fetchone()
+            if row is None:
+                row = self._conn.execute(
+                    f"SELECT e.id, e.kind, e.canonical_name "
+                    f"FROM entity_aliases ea "
+                    f"JOIN entities e ON e.id = ea.entity_id "
+                    f"WHERE ea.alias = ? COLLATE NOCASE AND ea.confirmed = 1 "
+                    f"AND e.kind IN ({ph}) "
+                    f"ORDER BY ea.seen_count DESC LIMIT 1",
+                    (key, *kinds)).fetchone()
+        if row is None:
+            return None
+        return {"id": int(row["id"]), "kind": row["kind"],
+                "canonical_name": row["canonical_name"]}
+
     def resolve_entity(self, name: str, kind: str | None = None,
                        *, ts: float | None = None) -> int:
         key = (name or "").strip()
@@ -5196,6 +5234,31 @@ class Store:
             out.setdefault(int(r["fact_id"]), []).append(r["name"])
         return out
 
+    def recent_claims_about_entity(self, entity_id: int, *,
+                                   kind: str = "claim",
+                                   limit: int = 2) -> list[dict]:
+        """Newest still-active facts of `kind` linked (about) to one entity —
+        the entity-anchored candidate set for the supersession gate. A
+        correction often shares almost no wording with the fact it replaces
+        ("free compute … next few months" vs "only through November"), so the
+        gate anchors on the shared entity instead of cosine alone."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT f.id AS fact_id, f.text AS text
+                FROM relations r
+                JOIN facts f ON f.id = r.subj_id
+                WHERE r.subj_type = 'fact' AND r.predicate = 'about'
+                  AND r.obj_type = 'entity' AND r.obj_id = ?
+                  AND f.kind = ?
+                  AND COALESCE(f.text, '') != ''
+                  AND COALESCE(f.state, 'active') != 'superseded'
+                  AND COALESCE(f.review, '') != 'dismissed'
+                ORDER BY f.id DESC LIMIT ?
+                """, (int(entity_id), kind, int(limit))).fetchall()
+        return [{"fact_id": int(r["fact_id"]), "text": r["text"] or ""}
+                for r in rows]
+
     def entity_about_edges(self) -> list[dict]:
         """Every fact→entity `about` edge with its origin/weight, restricted to
         facts that still speak for themselves — the project-rollup input.
@@ -5918,8 +5981,10 @@ class Store:
     def rename_person(self, person_id: int, name: str) -> bool:
         """Correct a person's canonical name (the old spelling is kept as an
         alias so future mentions still resolve). False when the new name is
-        empty or already belongs to another person — that's a merge, not a
-        rename, and merging is deliberate tooling, not a silent side effect."""
+        empty or already belongs to another *live* person — that's a merge,
+        not a rename. Names held only by absorbed/hidden rows are freed so
+        correcting a misspelling (Adornetas → Adorante) works after a prior
+        soft-merge left the good spelling parked on a dead node."""
         name = (name or "").strip()
         if not name:
             return False
@@ -5929,11 +5994,42 @@ class Store:
                 (person_id,)).fetchone()
             if row is None:
                 return False
+            cols = {r["name"] for r in
+                    self._conn.execute("PRAGMA table_info(people)").fetchall()}
+            has_merge = "canonical_person_id" in cols
             clash = self._conn.execute(
-                "SELECT id FROM people WHERE canonical_name = ? AND id != ?",
+                "SELECT id"
+                + (", canonical_person_id, hide_from_people" if has_merge else "")
+                + " FROM people WHERE canonical_name = ? COLLATE NOCASE AND id != ?",
                 (name, person_id)).fetchone()
             if clash is not None:
-                return False
+                dead = False
+                if has_merge:
+                    dead = (clash["canonical_person_id"] is not None
+                            or bool(clash["hide_from_people"]))
+                if not dead:
+                    return False
+                # Free the UNIQUE slot held by the absorbed/hidden row.
+                freed = f"{name} · merged-{int(clash['id'])}"
+                n = 0
+                while self._conn.execute(
+                        "SELECT 1 FROM people WHERE canonical_name = ? "
+                        "COLLATE NOCASE", (freed,)).fetchone():
+                    n += 1
+                    freed = f"{name} · merged-{int(clash['id'])}-{n}"
+                self._conn.execute(
+                    "UPDATE people SET canonical_name = ? WHERE id = ?",
+                    (freed, int(clash["id"])))
+                # Point the freed row at this person when it had a dangling or
+                # foreign redirect — so "Justin Adorante" resolves here.
+                if has_merge and (
+                        clash["canonical_person_id"] is None
+                        or int(clash["canonical_person_id"]) != int(person_id)):
+                    self._conn.execute(
+                        "UPDATE people SET canonical_person_id = ?, "
+                        "hide_from_people = 1, promotion_state = 'archived' "
+                        "WHERE id = ?",
+                        (person_id, int(clash["id"])))
             try:
                 aliases = json.loads(row["aliases"] or "[]")
             except Exception:
@@ -5942,6 +6038,8 @@ class Store:
             if old and old.lower() != name.lower() and \
                     old.lower() not in {a.lower() for a in aliases}:
                 aliases.append(old)
+            # Drop the new spelling from aliases if it was listed there.
+            aliases = [a for a in aliases if a.lower() != name.lower()]
             self._conn.execute(
                 "UPDATE people SET canonical_name = ?, aliases = ? WHERE id = ?",
                 (name, json.dumps(aliases), person_id))

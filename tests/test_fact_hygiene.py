@@ -202,6 +202,97 @@ class GateTests(unittest.TestCase):
         self.assertEqual(v.action, "insert")
         adj.assert_not_called()
 
+
+class EntityAnchoredSupersessionTests(unittest.TestCase):
+    """Eval 2026-09-06: a correction can share an entity but almost no wording
+    with the fact it replaces, landing below adjudicate_sim — the gate must
+    reach the adjudicator via the shared entity, not cosine luck."""
+
+    OLD = ("Andy Karos, the CEO of Boost Run, is letting us use Boost Run's "
+           "compute to test Mnemos for the next few months, free")
+    NEW = "Boost Run's free compute is only through November"
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="quill_anchor_"))
+        self.store = Store(db_path=self.tmp / "t.db",
+                           audio_dir=self.tmp / "audio")
+        self.eid = self.store.resolve_entity("Boostrun", "org", ts=1.0)
+        self.store.upsert_entity_alias(self.eid, "Boost Run", "boost run",
+                                       confirmed=True, ts=1.0)
+        self.old_fid = self.store.add_claim(self.OLD, extracted_at=1.0)
+        self.store.add_relation("fact", self.old_fid, "about",
+                                "entity", self.eid, origin="asserted")
+        for p in (patch.object(fact_gate, "settings", _cfg()),
+                  patch.object(fact_gate, "_telemetry", lambda *a, **k: None)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_low_cosine_correction_supersedes_via_anchor(self):
+        with patch.object(fact_gate, "_similar_active", return_value=[]), \
+             patch.object(fact_gate, "_adjudicate",
+                          return_value="update") as adj:
+            v = gate_fact("claim", self.NEW, 0.9, self.NEW, self.NEW,
+                          store=self.store)
+        self.assertEqual((v.action, v.supersede_ids),
+                         ("supersede", (self.old_fid,)))
+        adj.assert_called_once_with("claim", self.OLD, self.NEW)
+
+    def test_anchored_duplicate_dedups(self):
+        with patch.object(fact_gate, "_similar_active", return_value=[]), \
+             patch.object(fact_gate, "_adjudicate", return_value="duplicate"):
+            v = gate_fact("claim", self.NEW, 0.9, self.NEW, self.NEW,
+                          store=self.store)
+        self.assertEqual((v.action, v.dup_fact_id), ("dedup", self.old_fid))
+
+    def test_anchored_unrelated_still_inserts(self):
+        with patch.object(fact_gate, "_similar_active", return_value=[]), \
+             patch.object(fact_gate, "_adjudicate", return_value="unrelated"):
+            v = gate_fact("claim", self.NEW, 0.9, self.NEW, self.NEW,
+                          store=self.store)
+        self.assertEqual(v.action, "insert")
+
+    def test_no_known_entity_never_adjudicates(self):
+        with patch.object(fact_gate, "_similar_active", return_value=[]), \
+             patch.object(fact_gate, "_adjudicate") as adj:
+            v = gate_fact("claim", "The Quarterly Numbers look fine", 0.9,
+                          "The Quarterly Numbers look fine",
+                          "The Quarterly Numbers look fine",
+                          store=self.store)
+        self.assertEqual(v.action, "insert")
+        adj.assert_not_called()
+
+    def test_anchor_pass_is_claims_only(self):
+        with patch.object(fact_gate, "_similar_active", return_value=[]), \
+             patch.object(fact_gate, "_adjudicate") as adj:
+            v = gate_fact("task", "Email Boost Run about the GPUs", 0.9,
+                          "Email Boost Run about the GPUs",
+                          "Email Boost Run about the GPUs",
+                          store=self.store)
+        self.assertEqual(v.action, "insert")
+        adj.assert_not_called()
+
+    def test_entity_anchors_resolve_possessive_and_alias(self):
+        self.assertEqual(
+            fact_gate._entity_anchors("Boost Run's compute is ready",
+                                      self.store),
+            [self.eid])
+        self.assertEqual(
+            fact_gate._entity_anchors("Boostrun said the GPUs are ready",
+                                      self.store),
+            [self.eid])
+        self.assertEqual(
+            fact_gate._entity_anchors("Nothing capitalized here matches",
+                                      self.store),
+            [])
+
+    def test_superseded_claims_never_anchor(self):
+        newer = self.store.add_claim(self.NEW, extracted_at=2.0)
+        self.store.add_relation("fact", newer, "about",
+                                "entity", self.eid, origin="asserted")
+        self.store.supersede_fact(self.old_fid, newer, 2.0)
+        rows = self.store.recent_claims_about_entity(self.eid, limit=4)
+        self.assertEqual([r["fact_id"] for r in rows], [newer])
+
     def test_probe_unavailable_degrades_to_insert(self):
         with patch.object(fact_gate, "_similar_active", return_value=[]):
             v = gate_fact("task", "ship the release", 0.9,

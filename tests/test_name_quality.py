@@ -31,8 +31,20 @@ class PlausiblePersonTests(unittest.TestCase):
         for n in ["she", "us", "you", "user", "new user", "curator", "founder",
                   "board", "not specified", "autonomous browser agent",
                   "Sparrow", "Mnemos", "QUILL_AGENT", "QA and CTO review", "set it to 0",
-                  "vision classifies a page as todo_list"]:
+                  "vision classifies a page as todo_list",
+                  # Peer/chat directives mis-parsed as people
+                  "Tell Justin", "Tell User", "Ask User", "Message Sarah",
+                  # Brand / media phrases — projects, not people
+                  "Venture Pulse", "Google Calendar", "Claude Code"]:
             self.assertFalse(nq.is_plausible_person(n), n)
+
+    def test_speech_act_and_slot_labels_not_entities(self):
+        for n in ["Tell Justin", "Ask User", "User 2", "User12", "new user 3"]:
+            self.assertFalse(nq.is_plausible_entity(n), n)
+            self.assertFalse(nq.should_mint_as_entity(n, "project"), n)
+        # Real projects still mint
+        self.assertTrue(nq.should_mint_as_entity("Venture Pulse", "project"))
+        self.assertTrue(nq.is_plausible_entity("Venture Pulse"))
 
     def test_diarization_placeholders_rejected(self):
         for n in ["Speaker 6", "Speaker 12", "speaker 3", "Speaker6",
@@ -76,10 +88,27 @@ class ResolverGateTests(unittest.TestCase):
         self.store = Store(db_path=self.tmp / "t.db", audio_dir=self.tmp / "audio")
         self.r = Resolver(store=self.store)
 
+    def test_resolver_refuses_speech_act_and_brand_people(self):
+        self.assertIsNone(self.r.resolve_person("Tell Justin"))
+        self.assertIsNone(self.r.resolve_person("Ask User"))
+        self.assertIsNone(self.r.resolve_person("Venture Pulse"))
+        self.assertEqual(self.r.resolve_entity("Tell Justin", "project"), 0)
+        self.assertEqual(self.r.resolve_entity("User 2", "project"), 0)
+        # Brand project still mints as a project — just not as a person.
+        eid = self.r.resolve_entity("Venture Pulse", "project")
+        self.assertGreater(eid, 0)
+        self.assertEqual(self.store.all_people(), [])
+
+    def test_resolver_refuses_known_person_as_project(self):
+        pid = self.r.resolve_person("Justin Adorante")
+        self.assertIsNotNone(pid)
+        self.store.touch_person(pid, ts=time.time(), alias="Justin")
+        self.assertEqual(self.r.resolve_entity("Justin", "project"), 0)
+
     def test_resolver_refuses_junk_person(self):
         self.assertIsNone(self.r.resolve_person("QUILL_AGENT"))
         self.assertIsNone(self.r.resolve_person("set it to 0"))
-        self.assertEqual(self.store.all_people(), [])   # nothing created
+        self.assertEqual(self.store.all_people(), [])
 
     def test_resolver_keeps_real_person(self):
         pid = self.r.resolve_person("Justin Adorante")

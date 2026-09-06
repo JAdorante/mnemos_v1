@@ -41,6 +41,23 @@ class StorePeopleTests(unittest.TestCase):
         self.assertFalse(self.store.rename_person(a, "  "))
         self.assertEqual(self.store.get_person(a)["name"], "Alice")
 
+    def test_rename_reclaims_name_from_absorbed_row(self):
+        # Good spelling parked on a hidden/absorbed row (survivor gone) still
+        # holds the UNIQUE index — "Correct the name" must reclaim it.
+        good = self.store.resolve_person("Justin Adorante", ts=NOW)
+        typo = self.store.resolve_person("Justin Adornetas", ts=NOW)
+        with self.store._lock:
+            self.store._conn.execute(
+                "UPDATE people SET canonical_person_id = ?, hide_from_people = 1, "
+                "promotion_state = 'archived' WHERE id = ?",
+                (99999, good))  # dangling redirect to a deleted survivor
+            self.store._conn.commit()
+        self.assertTrue(self.store.rename_person(typo, "Justin Adorante"))
+        p = self.store.get_person(typo)
+        self.assertEqual(p["name"], "Justin Adorante")
+        self.assertIn("Justin Adornetas", p["aliases"])
+        self.assertEqual(self.store.find_person_exact("Justin Adorante"), typo)
+
 
 class PeopleEndpointTests(unittest.TestCase):
     @classmethod

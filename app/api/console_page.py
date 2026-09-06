@@ -122,8 +122,8 @@ aside.const-card{padding:20px 22px}
 .const-tip-kind{font:11px var(--sans);color:var(--faint)}
 .const-tip-why{margin-top:4px;color:var(--mut);font-style:italic}
 .const-insight{
-  /* Top-left: the hint owns top-right, the tools own the bottom strip. */
-  position:absolute;left:12px;top:12px;z-index:var(--z-base);max-width:min(300px,70%);
+  /* Bottom-left above the tool strip — keeps prose off the star field. */
+  position:absolute;left:12px;bottom:48px;z-index:var(--z-base);max-width:min(280px,55%);
   display:flex;flex-direction:column;gap:6px;
 }
 .const-insight-btn{

@@ -145,6 +145,40 @@ def _overlap_dup(kind: str, text: str, event_range: tuple[int, int],
     return None
 
 
+# Capitalized runs up to 4 words — candidate entity anchors in a fact text.
+_ANCHOR_RE = re.compile(r"\b[A-Z][\w&.-]*(?:\s+[A-Z][\w&.-]*){0,3}")
+
+# Kinds an anchor may resolve to — junk kinds (idea/thing) never anchor.
+_ANCHOR_KINDS = ("org", "project", "tool")
+
+
+def _entity_anchors(text: str, store, limit: int = 2) -> list[int]:
+    """Entity ids for known orgs/projects/tools named in `text`.
+
+    Probes possessive-stripped capitalized n-grams (longest first) against
+    canonical names + aliases, so "Boost Run's compute" anchors to the
+    Boostrun org. Bounded and index-backed — no vocabulary scan."""
+    if store is None:
+        return []
+    seen: list[int] = []
+    for run in _ANCHOR_RE.findall(text or ""):
+        words = run.split()
+        for n in range(min(4, len(words)), 0, -1):
+            gram = " ".join(words[:n]).rstrip(".,;:")
+            if gram.endswith("'s") or gram.endswith("’s"):
+                gram = gram[:-2].rstrip()
+            if len(gram) < 3:
+                continue
+            hit = store.find_entity_matching_name(gram, kinds=_ANCHOR_KINDS)
+            if hit is not None:
+                if hit["id"] not in seen:
+                    seen.append(hit["id"])
+                break
+        if len(seen) >= limit:
+            break
+    return seen
+
+
 def _similar_active(kind: str, text: str, k: int = 4) -> list[tuple[int, float, str]]:
     """Nearest ACTIVE same-kind facts by cosine: [(fact_id, score, text)],
     best first. Empty when the vector index is unavailable."""
@@ -261,6 +295,39 @@ def gate_fact(kind: str, text: str, confidence: float | None,
             return v
         if rel == "update":
             superseded.append(fid)
+
+    # Entity-anchored pass (eval 2026-09-06): a correction can share an
+    # entity but almost no wording with the fact it replaces ("letting us
+    # use Boost Run's compute … free" vs "Boost Run's free compute is only
+    # through November" — cosine below adjudicate_sim, so the adjudicator
+    # never saw the pair and the graph kept both). When the new claim names
+    # a known org/project/tool, adjudicate its newest active claims too.
+    # Bounded: <=2 anchors, <=2 extra adjudications, claims only.
+    if kind == "claim" and not superseded and store is not None:
+        try:
+            already = {fid for fid, _, _ in cands}
+            checked = 0
+            for eid in _entity_anchors(text, store):
+                if checked >= 2:
+                    break
+                for row in store.recent_claims_about_entity(eid, limit=2):
+                    fid = int(row["fact_id"])
+                    if fid in already or checked >= 2:
+                        continue
+                    already.add(fid)
+                    checked += 1
+                    rel = _adjudicate(kind, row["text"], text)
+                    if rel == "duplicate":
+                        v = Verdict(
+                            "dedup",
+                            f"entity-anchored duplicate of fact {fid}",
+                            dup_fact_id=fid)
+                        _telemetry(v.action, v.reason, kind, text)
+                        return v
+                    if rel == "update":
+                        superseded.append(fid)
+        except Exception:
+            pass  # anchoring is best-effort; the plain verdict stands
 
     if superseded:
         v = Verdict("supersede", f"updates fact(s) {superseded}",

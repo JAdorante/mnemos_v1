@@ -442,13 +442,20 @@ def ingest(profile: dict | None = None, store: Store | None = None) -> dict:
             ing.claim("projects", f"About {name}: {note}")
 
     # --- tools (plain strings or {name, note}) ------------------------------
+    tool_names: list[str] = []
     for item in (profile.get("tools") or [])[:_MAX_ITEMS_PER_SECTION]:
         name = _clip(item.get("name")) if isinstance(item, dict) else _clip(item)
-        if not name or not ing._fresh("tools", name):
+        if not name:
+            continue
+        tool_names.append(name)
+        if not ing._fresh("tools", name):
             continue
         ent = ing.entity(name, "tool", [])
         if user_pid:
             ing.relation(("person", user_pid), "uses", ("entity", ent))
+    if tool_names and ing._fresh("tools_summary", sorted(tool_names)):
+        named = ", ".join(tool_names)
+        ing.claim("tools", f"Tools and apps the user uses include: {named}.")
 
     # --- schedule / priorities (plain strings -> accepted claims) ----------
     for section, phrase in (("schedule", "The user's routine: {}"),

@@ -57,6 +57,57 @@ class ClockTests(unittest.TestCase):
         self.assertIsNone(_due_days("next Friday", now))
 
 
+class ReconcileDueWithSpanTests(unittest.TestCase):
+    # Sunday — the day the live off-by-one was caught ("by Friday" → Thursday).
+    NOW = dt.datetime(2026, 9, 6, 16, 51, 0)
+
+    def rec(self, due, span):
+        return clock.reconcile_due_with_span(due, span, now=self.NOW)
+
+    def test_snaps_miscounted_weekday_forward(self) -> None:
+        self.assertEqual(
+            self.rec("2026-09-10", "send Andy an update by Friday"),
+            "2026-09-11")
+
+    def test_matching_weekday_untouched(self) -> None:
+        self.assertEqual(self.rec("2026-09-11", "by Friday"), "2026-09-11")
+
+    def test_deliberate_next_week_resolution_survives(self) -> None:
+        # "next Friday" resolved a week+ out still lands on a Friday → kept.
+        self.assertEqual(self.rec("2026-09-18", "next Friday"), "2026-09-18")
+
+    def test_matching_weekday_is_never_moved_even_when_ambiguous(self) -> None:
+        # "by Sunday" said on a Sunday, resolved to next Sunday: both are
+        # Sundays, so the conservative rule keeps the model's call.
+        self.assertEqual(self.rec("2026-09-13", "by Sunday"), "2026-09-13")
+
+    def test_keeps_stated_time_when_moving(self) -> None:
+        self.assertEqual(
+            self.rec("2026-09-10T15:00:00", "Friday afternoon"),
+            "2026-09-11T15:00:00")
+
+    def test_digits_in_span_leave_due_alone(self) -> None:
+        self.assertEqual(
+            self.rec("2026-09-12", "Friday the 12th"), "2026-09-12")
+
+    def test_month_name_in_span_leaves_due_alone(self) -> None:
+        self.assertEqual(
+            self.rec("2026-09-12", "Friday of September week"), "2026-09-12")
+
+    def test_last_weekday_leaves_due_alone(self) -> None:
+        self.assertEqual(
+            self.rec("2026-09-04", "we shipped it last Friday"), "2026-09-04")
+
+    def test_two_weekdays_leave_due_alone(self) -> None:
+        self.assertEqual(
+            self.rec("2026-09-10", "Thursday or Friday"), "2026-09-10")
+
+    def test_no_weekday_or_no_due_pass_through(self) -> None:
+        self.assertEqual(self.rec("2026-09-10", "by end of week"), "2026-09-10")
+        self.assertIsNone(self.rec(None, "by Friday"))
+        self.assertEqual(self.rec("soonish", "by Friday"), "soonish")
+
+
 class GroundingClockTests(unittest.TestCase):
     def test_tasks_section_shows_due(self) -> None:
         from app.services.grounding import _tasks_section

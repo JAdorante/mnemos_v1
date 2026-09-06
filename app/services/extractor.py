@@ -144,11 +144,14 @@ def _index_fact(store, fact_id: int, kind: str, text: str, ts: float) -> None:
         print(f"[extract] fact index skipped ({exc}).")
 
 
-def _coerce_due(value) -> str | None:
-    """Normalize extractor dues to ISO when possible; keep free text otherwise."""
+def _coerce_due(value, span: str | None = None) -> str | None:
+    """Normalize extractor dues to ISO when possible; keep free text otherwise.
+
+    With a source span, also snap a weekday the model miscounted back onto
+    the day the speaker actually named (see clock.reconcile_due_with_span)."""
     try:
-        from app.services.clock import coerce_due
-        return coerce_due(value)
+        from app.services.clock import coerce_due, reconcile_due_with_span
+        return reconcile_due_with_span(coerce_due(value), span)
     except Exception:
         s = (str(value).strip() if value is not None else "")
         return s or None
@@ -1169,7 +1172,8 @@ class Extractor:
                 owner_person_id=owner_pid,
                 owner_mention_id=owner_ref.mention_id,
                 owner_resolution_confidence=_attr_conf(owner_name, owner_ref),
-                due=_coerce_due(t.get("due")), extracted_at=now,
+                due=_coerce_due(t.get("due"), t.get("source_span")),
+                extracted_at=now,
             )
             if escrowed:
                 # P3: the owner is this turn's unbound voice track — keep the
@@ -1238,7 +1242,8 @@ class Extractor:
                 from_resolution_confidence=_attr_conf(from_name, from_ref),
                 to_mention_id=to_ref.mention_id,
                 to_resolution_confidence=_attr_conf(to_name, to_ref),
-                due=_coerce_due(c.get("due")), extracted_at=now,
+                due=_coerce_due(c.get("due"), c.get("source_span")),
+                extracted_at=now,
             )
             if escrowed:
                 # P3: committer is the unbound voice track — escrow (see tasks).
@@ -1526,8 +1531,16 @@ class Extractor:
         if subj_pid:
             subj_type, subj_id = "person", int(subj_pid)
         else:
-            eid = store.find_entity_exact(subj) or store.resolve_entity(
-                subj, "other", ts=now)
+            # Person gate rejected (speech-act / brand / slot label) — do NOT
+            # fall through to ungated store.resolve_entity (that minted
+            # "Tell Justin"[idea] and "User 2"[project]). Bind existing only.
+            from app.services.name_quality import (
+                is_plausible_entity, should_mint_as_entity,
+            )
+            eid = store.find_entity_exact(subj)
+            if not eid and is_plausible_entity(subj) \
+                    and should_mint_as_entity(subj, "idea"):
+                eid = store.resolve_entity(subj, "other", ts=now)
             if not eid:
                 return
             subj_type, subj_id = "entity", int(eid)

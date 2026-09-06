@@ -655,8 +655,9 @@ window.MnemosConstellation = {
       detailMode: !!(opts && opts.detailMode),
       rangeCutoff: null,
       persistKey: isThumb ? null
-        : (((opts && opts.persistKey) || 'constellation.cam') + '.v6'),
+        : (((opts && opts.persistKey) || 'constellation.cam') + '.v7'),
       mode: mode,
+      _fittedOnce: false,
     };
     const wrap = canvas.parentElement;
     let toolbar = null, panel = null, tip = null, insightEl = null, legendEl = null;
@@ -1070,6 +1071,7 @@ window.MnemosConstellation = {
       state.byId = {};
       state.nodes.forEach(n => { state.byId[n.id] = n; });
       layout(state);
+      markAmbientEdges(state);
       renderInsights();
       renderLegend();
       if (state.selected) openEvidence(state.selected);
@@ -1109,20 +1111,54 @@ window.MnemosConstellation = {
     }
 
     const clampCam = () => {
-      const maxPan = Math.min(state.w, state.h) * 0.18;
+      // Wide enough that Fit can fill sparse fields; still bounded so pan/zoom
+      // can't lose the map entirely.
+      state.cam.z = Math.max(0.55, Math.min(2.6, state.cam.z));
+      const maxPan = Math.min(state.w, state.h) * (0.42 / Math.max(0.75, state.cam.z));
       state.cam.x = Math.max(-maxPan, Math.min(maxPan, state.cam.x));
       state.cam.y = Math.max(-maxPan, Math.min(maxPan, state.cam.y));
-      state.cam.z = Math.max(0.9, Math.min(1.35, state.cam.z));
     };
     const saveCam = () => {
       clampCam();
       if (state.persistKey) window.MnemosMemory.set(state.persistKey, state.cam);
     };
     const fit = () => {
-      state.cam = { x: 0, y: 0, z: 1 };
+      // Zoom/pan to the live node bounds so a sparse field fills the frame
+      // instead of sitting as a tight cluster in empty space.
+      const nodes = (state.nodes || []).filter(n => n._x != null && n._y != null);
+      if (!nodes.length || !state.w || !state.h) {
+        state.cam = { x: 0, y: 0, z: 1 };
+        saveCam();
+        return;
+      }
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      nodes.forEach(n => {
+        const pad = (n._r || 8) + 28;
+        minX = Math.min(minX, n._x - pad);
+        minY = Math.min(minY, n._y - pad);
+        maxX = Math.max(maxX, n._x + pad);
+        maxY = Math.max(maxY, n._y + pad);
+      });
+      const bw = Math.max(40, maxX - minX);
+      const bh = Math.max(40, maxY - minY);
+      // Leave room for hint (top-right), tools (bottom), insight (bottom-left).
+      const insetL = 16, insetR = 16, insetT = 28, insetB = 56;
+      const availW = Math.max(80, state.w - insetL - insetR);
+      const availH = Math.max(80, state.h - insetT - insetB);
+      const z = Math.max(0.7, Math.min(2.35, Math.min(availW / bw, availH / bh) * 0.92));
+      const midX = (minX + maxX) / 2;
+      const midY = (minY + maxY) / 2;
+      // Screen = (world - center) * z + center + cam  → solve cam for target mid.
+      state.cam = {
+        x: (state.w / 2 - midX) * z + (insetL - insetR) / 2,
+        y: (state.h / 2 - midY) * z + (insetT - insetB) / 2,
+        z: z,
+      };
       saveCam();
     };
 
+    const saved = state.persistKey
+      ? window.MnemosMemory.get(state.persistKey, null) : null;
     const resize = () => {
       const r = canvas.getBoundingClientRect();
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -1131,13 +1167,18 @@ window.MnemosConstellation = {
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       state.w = r.width; state.h = r.height;
       layout(state);
-      clampCam();
+      markAmbientEdges(state);
+      if (!state._fittedOnce && !(saved && typeof saved.z === 'number')) {
+        fit();
+        state._fittedOnce = true;
+      } else {
+        clampCam();
+      }
     };
-    const saved = state.persistKey
-      ? window.MnemosMemory.get(state.persistKey, null) : null;
     if (saved && typeof saved.z === 'number') {
       state.cam = Object.assign(state.cam, saved);
       clampCam();
+      state._fittedOnce = true;
     }
 
     function shortLabel(s) {
@@ -1160,22 +1201,28 @@ window.MnemosConstellation = {
       const n = st.nodes.length;
       if (!n || !st.w) return;
       const cx = st.w / 2, cy = st.h / 2;
-      const pad = Math.max(22, Math.min(st.w, st.h) * 0.08);
+      // Keep nodes clear of chrome overlays; Fit then crops empty margin.
+      const pad = Math.max(36, Math.min(st.w, st.h) * 0.1);
       const maxR = Math.min(st.w, st.h) / 2 - pad;
+      // Node radius scales with the frame so a large canvas isn't a field of dots.
+      const unit = Math.max(1, Math.min(st.w, st.h) / 380);
       // People: stable polar anchors (spatial memory). Others: phyllotaxis seed,
       // then soft attract along edges so related work clusters near people.
       const people = st.nodes.filter(node => node.kind === 'person');
       const others = st.nodes.filter(node => node.kind !== 'person');
+      // Sparse fields use a slightly wider ring so Fit has structure to zoom into.
+      const sparseBoost = n <= 16 ? 0.08 : (n <= 24 ? 0.04 : 0);
       people.forEach((node) => {
         const ang = (typeof node.anchor === 'number')
           ? node.anchor
           : ((sumCodes(node.id) % 997) / 997) * Math.PI * 2;
         const gScore = Math.max(0.2, Math.min(1.1, node.gravity || 0.4));
-        const ring = node.layer === 'focus' ? (0.34 + (1 - gScore) * 0.12) : 0.55;
+        const ring = (node.layer === 'focus' ? (0.38 + (1 - gScore) * 0.14) : 0.62)
+          + sparseBoost;
         node._x = cx + Math.cos(ang) * (maxR * ring);
-        node._y = cy + Math.sin(ang) * (maxR * ring * 0.86);
+        node._y = cy + Math.sin(ang) * (maxR * ring * 0.9);
         node._fixed = true;
-        node._r = 6 + gScore * 5;
+        node._r = (7.5 + gScore * 6.5) * unit;
         node._labelDy = 0;
         node._labelSide = Math.cos(ang) >= 0 ? 1 : -1;
       });
@@ -1186,19 +1233,20 @@ window.MnemosConstellation = {
         return a.id < b.id ? -1 : 1;
       });
       rankedOthers.forEach((node, i) => {
-        const t = rankedOthers.length === 1 ? 0.45 : Math.sqrt((i + 0.55) / rankedOthers.length);
+        const t = rankedOthers.length === 1 ? 0.5 : Math.sqrt((i + 0.55) / rankedOthers.length);
         const ang = i * golden + (sumCodes(node.id) % 23) * 0.011;
-        const ring = 0.28 + t * 0.62;
+        const ring = 0.32 + t * 0.66 + sparseBoost * 0.5;
         node._x = cx + Math.cos(ang) * (maxR * ring);
-        node._y = cy + Math.sin(ang) * (maxR * ring * 0.86);
+        node._y = cy + Math.sin(ang) * (maxR * ring * 0.9);
         node._fixed = false;
         const gScore = Math.max(0.2, Math.min(1.1, node.gravity || 0.4));
-        node._r = (node.layer === 'periphery' ? 4 : 5.5) + gScore * (node.layer === 'periphery' ? 2.2 : 4);
+        node._r = ((node.layer === 'periphery' ? 5 : 6.5)
+          + gScore * (node.layer === 'periphery' ? 2.8 : 5)) * unit;
         node._labelDy = 0;
         node._labelSide = node._x >= cx ? 1 : -1;
       });
       const all = st.nodes;
-      const minGap = Math.max(26, Math.min(st.w, st.h) * 0.08);
+      const minGap = Math.max(32, Math.min(st.w, st.h) * 0.07) * Math.min(1.15, unit);
       for (let iter = 0; iter < 56; iter++) {
         // Attract non-people along edges (toward people / related nodes).
         (st.edges || []).forEach((e) => {
@@ -1241,9 +1289,10 @@ window.MnemosConstellation = {
               ? node.anchor
               : ((sumCodes(node.id) % 997) / 997) * Math.PI * 2;
             const gScore = Math.max(0.2, Math.min(1.1, node.gravity || 0.4));
-            const ring = node.layer === 'focus' ? (0.34 + (1 - gScore) * 0.12) : 0.55;
+            const ring = (node.layer === 'focus' ? (0.38 + (1 - gScore) * 0.14) : 0.62)
+              + sparseBoost;
             const hx = cx + Math.cos(ang) * (maxR * ring);
-            const hy = cy + Math.sin(ang) * (maxR * ring * 0.86);
+            const hy = cy + Math.sin(ang) * (maxR * ring * 0.9);
             node._x = node._x * 0.72 + hx * 0.28;
             node._y = node._y * 0.72 + hy * 0.28;
           }
@@ -1259,8 +1308,8 @@ window.MnemosConstellation = {
         for (let j = 0; j < i; j++) {
           const b = labeled[j];
           if (a._labelSide !== b._labelSide) continue;
-          if (Math.abs(a._x - b._x) < 100
-              && Math.abs((a._y + a._labelDy) - (b._y + b._labelDy)) < 20) {
+          if (Math.abs(a._x - b._x) < 110
+              && Math.abs((a._y + a._labelDy) - (b._y + b._labelDy)) < 22) {
             a._labelDy = b._labelDy + 18;
           }
         }
@@ -1270,14 +1319,14 @@ window.MnemosConstellation = {
 
     function drawLabel(x, y, text, side, emphasis) {
       const label = shortLabel(text);
-      ctx.font = (emphasis ? '600 ' : '500 ') + '11px "Iowan Old Style", Georgia, serif';
+      ctx.font = (emphasis ? '600 ' : '500 ') + '12px "Iowan Old Style", Georgia, serif';
       const tw = ctx.measureText(label).width;
       const padX = 6;
       const lx = side >= 0 ? x + 10 : x - 10 - tw;
       const ly = y - 4;
-      ctx.fillStyle = emphasis ? 'rgba(22,22,27,.96)' : 'rgba(22,22,27,.88)';
+      ctx.fillStyle = emphasis ? 'rgba(22,22,27,.97)' : 'rgba(22,22,27,.9)';
       ctx.beginPath();
-      const rw = tw + padX * 2, rh = 16, rx = lx - padX, ry = ly - 11;
+      const rw = tw + padX * 2, rh = 17, rx = lx - padX, ry = ly - 12;
       const rad = 7;
       ctx.moveTo(rx + rad, ry);
       ctx.arcTo(rx + rw, ry, rx + rw, ry + rh, rad);
@@ -1286,7 +1335,7 @@ window.MnemosConstellation = {
       ctx.arcTo(rx, ry, rx + rw, ry, rad);
       ctx.closePath();
       ctx.fill();
-      ctx.fillStyle = emphasis ? 'rgba(242,241,247,.92)' : 'rgba(201,200,207,.8)';
+      ctx.fillStyle = emphasis ? 'rgba(242,241,247,.95)' : 'rgba(220,219,226,.88)';
       ctx.textAlign = 'left';
       ctx.fillText(label, lx, ly);
     }
@@ -1395,15 +1444,28 @@ window.MnemosConstellation = {
       if (st.selected) {
         return e.source === st.selected || e.target === st.selected;
       }
-      return false;
+      // Ambient: keep the strongest co-appearance links so the field reads as
+      // connected without flipping Links on.
+      return !!e._ambient;
+    }
+
+    function markAmbientEdges(st) {
+      (st.edges || []).forEach(e => { e._ambient = false; });
+      const ranked = (st.edges || []).slice().sort((a, b) => {
+        const wa = (a.weight || 1) * (a.confidence != null ? a.confidence : 0.6);
+        const wb = (b.weight || 1) * (b.confidence != null ? b.confidence : 0.6);
+        return wb - wa;
+      });
+      const cap = Math.min(14, Math.max(4, Math.floor((st.nodes || []).length * 0.55)));
+      ranked.slice(0, cap).forEach(e => { e._ambient = true; });
     }
 
     function draw(st, now) {
       const w = st.w, h = st.h;
       ctx.clearRect(0, 0, w, h);
-      const g = ctx.createRadialGradient(w / 2, h / 2, 8, w / 2, h / 2, Math.min(w, h) * 0.55);
-      g.addColorStop(0, 'rgba(141,133,242,.035)');
-      g.addColorStop(0.55, 'rgba(95,179,158,.02)');
+      const g = ctx.createRadialGradient(w / 2, h / 2, 8, w / 2, h / 2, Math.min(w, h) * 0.62);
+      g.addColorStop(0, 'rgba(141,133,242,.07)');
+      g.addColorStop(0.5, 'rgba(95,179,158,.035)');
       g.addColorStop(1, 'rgba(10,10,11,0)');
       ctx.fillStyle = g;
       ctx.fillRect(0, 0, w, h);
@@ -1415,12 +1477,15 @@ window.MnemosConstellation = {
       const breath = window.MnemosReduceMotion() ? 0
         : Math.sin((now - st.t0) / 2800) * 0.006;
       const dimFocus = !!st.focusId;
+      const filamentsOn = !!(st.showFilaments || st.edit);
 
       st.edges.forEach((e) => {
         if (!edgeVisible(e, st)) return;
         const a = st.byId[e.source], b = st.byId[e.target];
         if (!a || !b) return;
         const hot = st.hover && (e.source === st.hover || e.target === st.hover);
+        const ambientOnly = e._ambient && !filamentsOn && !hot
+          && !st.focusId && !st.selected;
         ctx.beginPath();
         ctx.moveTo(a._x, a._y);
         const mx = (a._x + b._x) / 2;
@@ -1435,10 +1500,14 @@ window.MnemosConstellation = {
           ctx.setLineDash([]);
         }
         const isPromise = e.rel === 'promise' || e.rel === 'responsible_for';
+        let alpha;
+        if (hot || isPromise) alpha = 0.42 + (e.weight || 1) * 0.06;
+        else if (ambientOnly) alpha = 0.16 + conf * 0.1;
+        else alpha = 0.26 + conf * 0.2;
         ctx.strokeStyle = hot || isPromise
-          ? 'rgba(141,133,242,' + (0.28 + (e.weight || 1) * 0.05) + ')'
-          : 'rgba(242,241,247,' + (0.14 + conf * 0.14) + ')';
-        ctx.lineWidth = hot ? 1.7 : (e.manual ? 1.4 : 1.05);
+          ? 'rgba(141,133,242,' + alpha + ')'
+          : 'rgba(232,231,244,' + alpha + ')';
+        ctx.lineWidth = hot ? 2 : (ambientOnly ? 1.15 : (e.manual ? 1.7 : 1.35));
         ctx.stroke();
         ctx.setLineDash([]);
       });
@@ -1446,8 +1515,8 @@ window.MnemosConstellation = {
       st.nodes.forEach(n => {
         const gScore = Math.max(0.2, Math.min(1.2, n.gravity || 0.4));
         const peri = n.layer === 'periphery';
-        let alpha = (peri ? 0.28 : 0.55) + gScore * 0.35;
-        alpha *= (n.memory_strength != null ? (0.55 + n.memory_strength * 0.45) : 1);
+        let alpha = (peri ? 0.38 : 0.68) + gScore * 0.3;
+        alpha *= (n.memory_strength != null ? (0.6 + n.memory_strength * 0.4) : 1);
         if (dimFocus && st.focusId !== n.id) {
           const linked = st.edges.some(e =>
             (e.source === st.focusId && e.target === n.id)
@@ -1472,10 +1541,10 @@ window.MnemosConstellation = {
         const scale = 1 + breath * (n.prospective_risk >= 0.7 ? 0.9 : 0.25);
         // Soft aura — keep tight so neighbors don't melt into one blob.
         ctx.beginPath();
-        ctx.arc(n._x, n._y, r * scale * 1.35, 0, Math.PI * 2);
+        ctx.arc(n._x, n._y, r * scale * 1.45, 0, Math.PI * 2);
         ctx.fillStyle = kindColor(
-          n.kind, n.kind === 'person' ? (0.04 + alpha * 0.05)
-                                      : (0.03 + alpha * 0.04));
+          n.kind, n.kind === 'person' ? (0.06 + alpha * 0.07)
+                                      : (0.045 + alpha * 0.055));
         ctx.fill();
         // Aging halo — warm amber ring that grows with neglect (one encoding).
         const aging = Number(n.aging) || 0;
@@ -1487,12 +1556,12 @@ window.MnemosConstellation = {
           ctx.lineWidth = 1 + aging * 1.5;
           ctx.stroke();
         }
-        drawKind(n, r * scale, Math.min(0.92, alpha));
+        drawKind(n, r * scale, Math.min(0.96, alpha));
         if (st.selected === n.id || st.focusId === n.id || st.hover === n.id || n.pinned) {
           ctx.beginPath();
-          ctx.arc(n._x, n._y, r * scale + 3, 0, Math.PI * 2);
-          ctx.strokeStyle = 'rgba(141,133,242,.75)';
-          ctx.lineWidth = 1.5;
+          ctx.arc(n._x, n._y, r * scale + 3.5, 0, Math.PI * 2);
+          ctx.strokeStyle = 'rgba(141,133,242,.82)';
+          ctx.lineWidth = 1.6;
           ctx.stroke();
         }
         // Diff mode: rising/falling arrow on hover only (calm default).
@@ -1524,13 +1593,14 @@ window.MnemosConstellation = {
         }
       });
 
-      /* Label policy (UI spec §5): a sparse field (<=12 nodes) labels
-         everything; beyond that labels are hover/selection-revealed so they
-         can never collide into each other. */
-      const fewNodes = st.nodes.length <= 12;
+      /* Label policy: sparse fields and focus people stay named; denser fields
+         reveal the rest on hover/selection so labels can't collide. */
+      const fewNodes = st.nodes.length <= 18;
       st.nodes.forEach(n => {
-        const show = fewNodes || st.hover === n.id || st.selected === n.id
-          || st.focusId === n.id || n.pinned;
+        const focusPerson = n.layer === 'focus'
+          && (n.kind === 'person' || n.is_self);
+        const show = fewNodes || focusPerson || st.hover === n.id
+          || st.selected === n.id || st.focusId === n.id || n.pinned;
         if (!show) return;
         if (dimFocus && st.focusId !== n.id) {
           const linked = st.edges.some(e =>
@@ -1587,8 +1657,8 @@ window.MnemosConstellation = {
       toolbar.onclick = (e) => {
         const act = e.target && e.target.getAttribute('data-act');
         if (act === 'fit') fit();
-        else if (act === 'in') { state.cam.z = Math.min(1.45, state.cam.z * 1.1); saveCam(); }
-        else if (act === 'out') { state.cam.z = Math.max(0.9, state.cam.z / 1.1); saveCam(); }
+        else if (act === 'in') { state.cam.z = Math.min(2.6, state.cam.z * 1.12); saveCam(); }
+        else if (act === 'out') { state.cam.z = Math.max(0.55, state.cam.z / 1.12); saveCam(); }
         else if (act === 'correct') setEdit(!state.edit);
         else if (act === 'filaments') {
           state.showFilaments = !state.showFilaments;
@@ -1698,7 +1768,8 @@ window.MnemosConstellation = {
       let hit = null;
       state.nodes.forEach(n => {
         const dx = n._x - mx, dy = n._y - my;
-        if (dx * dx + dy * dy < 18 * 18) hit = n.id;
+        const hitR = Math.max(20, (n._r || 8) + 12);
+        if (dx * dx + dy * dy < hitR * hitR) hit = n.id;
       });
       state.hover = hit;
       canvas.style.cursor = hit ? 'pointer' : (drag ? 'grabbing' : 'grab');
@@ -1826,6 +1897,7 @@ window.MnemosConstellation = {
         if (state.hover && !state.byId[state.hover]) state.hover = null;
         if (state.linkFrom && !state.byId[state.linkFrom]) state.linkFrom = null;
         layout(state);
+        markAmbientEdges(state);
         nodes.forEach(n => {
           const o = oldPos[n.id];
           if (!o) return;   // newcomer: appears at its layout spot, ringed
@@ -1837,6 +1909,10 @@ window.MnemosConstellation = {
             delete n._tx; delete n._ty;
           }
         });
+        if (!state._fittedOnce) {
+          fit();
+          state._fittedOnce = true;
+        }
         renderInsights();
         renderLegend();
       },

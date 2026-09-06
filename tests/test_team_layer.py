@@ -223,6 +223,18 @@ class PingTests(TeamLayerBase):
         self.assertTrue(res["ok"])
         self.assertEqual(pch.peers()[0]["presence"], "online")
 
+    def test_ping_refreshes_stale_callback_url(self) -> None:
+        """Docker bridge IPs reshuffle — inbound ping must update base_url."""
+        start = pch.start_pairing()
+        claimed = pch.claim_pairing(start["code"], "Sarah",
+                                    "http://172.19.0.8:8000", "t" * 20)
+        peer = pch.authenticate(f"Bearer {claimed['token']}")
+        self.assertEqual(pch.peers()[0]["base_url"], "http://172.19.0.8:8000")
+        res = tl.handle_ping(peer, {"base_url": "http://127.0.0.1:8003"})
+        self.assertTrue(res["ok"])
+        self.assertEqual(pch.peers()[0]["base_url"], "http://127.0.0.1:8003")
+        self.assertEqual(res.get("base_url"), pch.my_base_url())
+
 
 class OfferTests(TeamLayerBase):
     def test_skips_self_and_paired(self) -> None:

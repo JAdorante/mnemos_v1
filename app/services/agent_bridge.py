@@ -847,6 +847,9 @@ class AgentWorker:
             return f"Waiting: yes/no for {kind.replace('reasoner_', '')} — {goal}"
         if kind == "phone":
             return "Waiting: yes/no for Phone Link offer"
+        if kind == "peer_tell":
+            who = (pend.get("peer_name") or "").strip() or "a teammate"
+            return f"Waiting: yes/no to send the update to {who}"
         if kind == "task":
             goal = items[0] if items else "heard task"
             return f"Waiting: yes/no for task — {goal}"
@@ -1158,6 +1161,45 @@ class AgentWorker:
             "surface": surface,
         })
 
+    def propose_peer_tell(self, peer_id: str, peer_name: str,
+                          body: str) -> bool:
+        """Offer to push a composed update to a paired peer (yes/no in chat).
+
+        Outbound peer messages are egress, so the default permission model
+        ("everything else → ask me") applies: the human sees the exact body
+        and their 'yes' IS the send. Nothing leaves without it."""
+        msg = (f"Send this update to {peer_name}'s Sparrow?\n\n"
+               f"{body}\n\n"
+               "Reply 'yes' to send it, or 'no' to skip.")
+        return self._add_offer({
+            "kind": "peer_tell",
+            "message": msg,
+            "peer_id": peer_id,
+            "peer_name": peer_name,
+            "body": body,
+            "title": f"Update for {peer_name}",
+            "items": [body[:120]],
+        })
+
+    def _resolve_peer_tell(self, pend: dict, accept: bool) -> dict:
+        """Send (or drop) a pending outbound peer update."""
+        name = pend.get("peer_name") or "them"
+        if not accept:
+            self._emit("system", f"Okay — I won't send it to {name}.")
+            self._advance_offers()
+            return {"ok": True, "accepted": False}
+        try:
+            from app.services import peer_channel
+            peer_channel.chat_ask_async(pend.get("peer_id", ""),
+                                        pend.get("body", ""), kind="notify")
+            self._emit("result", f"Sending to {name}'s Sparrow…")
+            out = {"ok": True, "accepted": True}
+        except Exception as exc:
+            self._emit("error", f"Couldn't send the update ({exc}).")
+            out = {"ok": False, "accepted": True, "error": str(exc)}
+        self._advance_offers()
+        return out
+
     def propose_calendar(self, event: dict) -> bool:
         """Offer to add a parsed calendar event (yes/no in chat). On 'yes' it
         writes to iCloud via icloud_calendar.create_event — the human 'yes' IS
@@ -1449,6 +1491,8 @@ class AgentWorker:
             return {"ok": False, "error": "no pending offer"}
         if pend.get("kind") == "calendar":
             return self._resolve_calendar(pend, accept)
+        if pend.get("kind") == "peer_tell":
+            return self._resolve_peer_tell(pend, accept)
         if pend.get("kind") in ("meeting_record", "meeting_mode"):
             if choice:
                 from app.services import meeting_session as _ms

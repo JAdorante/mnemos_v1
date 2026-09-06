@@ -25,6 +25,15 @@ _US_DATE_RE = re.compile(
     re.I,
 )
 
+_WEEKDAY_NAMES = ("monday", "tuesday", "wednesday", "thursday", "friday",
+                  "saturday", "sunday")
+_WEEKDAY_RE = re.compile(
+    r"\b(next|last|this)?\s*(" + "|".join(_WEEKDAY_NAMES) + r")\b", re.I)
+_MONTH_RE = re.compile(
+    r"\b(january|february|march|april|may|june|july|august|september|"
+    r"october|november|december|jan|feb|mar|apr|jun|jul|aug|sept?|oct|"
+    r"nov|dec)\b", re.I)
+
 
 def now_local() -> dt.datetime:
     return dt.datetime.now()
@@ -131,6 +140,47 @@ def coerce_due(value: str | None) -> str | None:
     if us is not None:
         return us
     return None
+
+
+def reconcile_due_with_span(due: str | None, span: str | None,
+                            now: Optional[dt.datetime] = None) -> str | None:
+    """Snap an LLM-resolved due back onto the weekday the speaker named.
+
+    Models routinely miscount weekday arithmetic ("by Friday" said on a
+    Sunday resolved to Thursday), so when the source span names exactly one
+    weekday and the resolved ISO date falls on a different one, move the due
+    to the next occurrence of the named weekday (keeping any stated time).
+
+    Deliberately conservative — the due passes through untouched when:
+    the due isn't ISO, the span has no weekday / more than one distinct
+    weekday, the span says "last <weekday>", or the span carries digits or a
+    month name (a "Friday the 12th" is not ours to second-guess). A due
+    already on the named weekday is never moved, so a correct resolution —
+    including a deliberate "next Friday" a week+ out — survives.
+    """
+    if not due or not span or not is_iso_due(due):
+        return due
+    if re.search(r"\d", span) or _MONTH_RE.search(span):
+        return due
+    hits = _WEEKDAY_RE.findall(span)
+    named = {w.lower() for _, w in hits}
+    if len(named) != 1:
+        return due
+    if any((q or "").lower() == "last" for q, _ in hits):
+        return due
+    target_wd = _WEEKDAY_NAMES.index(next(iter(named)))
+    try:
+        resolved = parse_due(due)
+    except ValueError:
+        return due
+    if resolved.weekday() == target_wd:
+        return due
+    today = (now or now_local()).date()
+    corrected = today + dt.timedelta(days=(target_wd - today.weekday()) % 7)
+    if len(due.strip()) <= 10:
+        return corrected.isoformat()
+    return dt.datetime.combine(corrected, resolved.time()).strftime(
+        "%Y-%m-%dT%H:%M:%S")
 
 
 def format_due_for_prompt(due: str | None,

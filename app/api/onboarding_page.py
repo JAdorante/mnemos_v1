@@ -155,6 +155,35 @@ textarea{min-height:96px;resize:vertical}
 .chip-in button{background:none;border:0;color:var(--mut);cursor:pointer;font-size:1rem;line-height:1}
 .tag-row{display:flex;gap:8px}
 .tag-row input{flex:1}
+.tool-group{margin:0 0 16px}
+.tool-group h3{
+  font-size:.72rem;font-weight:600;letter-spacing:.05em;text-transform:uppercase;
+  color:var(--mut);margin:0 0 8px;
+}
+.tool-pick{display:flex;flex-wrap:wrap;gap:8px}
+.tool-pick button{
+  appearance:none;cursor:pointer;font:inherit;font-size:.9rem;
+  display:inline-flex;align-items:center;gap:8px;
+  padding:8px 12px 8px 10px;border-radius:12px;border:1px solid var(--line);
+  background:var(--bg-elev);color:var(--text);
+  transition:border-color .22s var(--ease),background .22s var(--ease),
+    color .22s var(--ease),transform .18s var(--ease);
+}
+.tool-pick button:hover{border-color:var(--acc-45);transform:translateY(-1px)}
+.tool-pick button.on{
+  background:var(--acc-dim);border-color:var(--acc-45);color:var(--navy);font-weight:600;
+}
+.tool-pick button img{
+  width:18px;height:18px;border-radius:4px;flex:0 0 auto;
+  background:#fff;object-fit:contain;
+}
+.tool-pick button .tool-ico-fallback{
+  width:18px;height:18px;border-radius:4px;flex:0 0 auto;
+  display:inline-flex;align-items:center;justify-content:center;
+  font-size:.65rem;font-weight:700;letter-spacing:0;
+  background:var(--ink-08);color:var(--mut);
+}
+.tool-count{font-size:.85rem;color:var(--mut);margin:4px 0 12px}
 
 .nav-btns{display:flex;justify-content:space-between;gap:12px;margin-top:22px;flex-wrap:wrap}
 .err{color:var(--danger);font-size:.9rem;margin-top:10px;min-height:1.2em}
@@ -203,9 +232,9 @@ textarea{min-height:96px;resize:vertical}
   </section>
 
   <section class="wizard" id="wizard">
-    <div class="top-mini"><span class="nm">@@MARK@@ @@BRAND@@</span><span id="stepLabel">Step 1 of 4</span></div>
+    <div class="top-mini"><span class="nm">@@MARK@@ @@BRAND@@</span><span id="stepLabel">Step 1 of 6</span></div>
     <div class="progress" id="progress" aria-hidden="true">
-      <i class="on"></i><i></i><i></i><i></i><i></i>
+      <i class="on"></i><i></i><i></i><i></i><i></i><i></i>
     </div>
 
     <!-- 0 You -->
@@ -300,8 +329,22 @@ textarea{min-height:96px;resize:vertical}
       </div>
     </div>
 
-    <!-- 1 Calendar -->
+    <!-- 1 Tools -->
     <div class="panel step" data-step="1" hidden>
+      <h2>Your tools</h2>
+      <p class="lead">Pick what you work in day to day — so @@BRAND@@ prefers the right apps and channels.</p>
+      <div class="tool-count" id="toolCount">None selected yet — skip anytime.</div>
+      <div id="toolGroups"></div>
+      <label style="margin-top:8px">Something else?</label>
+      <div class="tag-row">
+        <input id="toolInputMain" placeholder="Type a tool and press Enter">
+        <button type="button" class="btn btn-ghost" id="addToolMain">Add</button>
+      </div>
+      <div class="chips" id="toolsCustomChips"></div>
+    </div>
+
+    <!-- 2 Calendar -->
+    <div class="panel step" data-step="2" hidden>
       <h2>Calendar</h2>
       <p class="lead">Sparrow reads event titles, times, and attendees — never email bodies. This seeds who you work with before any audio exists.</p>
       <div id="exStatus" class="muted">Checking Google connection…</div>
@@ -321,8 +364,8 @@ textarea{min-height:96px;resize:vertical}
       <div class="err" id="icMsgOb"></div>
     </div>
 
-    <!-- 2 Next meeting -->
-    <div class="panel step" data-step="2" hidden>
+    <!-- 3 Next meeting -->
+    <div class="panel step" data-step="3" hidden>
       <h2>Your next meeting</h2>
       <p class="lead" id="nextMeetLead">Once a calendar is connected, Sparrow will listen inside that window and write a brief with playable clips.</p>
       <div id="nextMeetBox" class="ok-banner" hidden>
@@ -336,8 +379,8 @@ textarea{min-height:96px;resize:vertical}
       </label>
     </div>
 
-    <!-- 3 Capture opt-ins (default OFF) -->
-    <div class="panel step" data-step="3" hidden>
+    <!-- 4 Capture opt-ins (default OFF) -->
+    <div class="panel step" data-step="4" hidden>
       <h2>Always-on capture</h2>
       <p class="lead">Optional. Each source stays off unless you check it. You can change this later in Privacy.</p>
       <label style="display:flex;gap:8px;align-items:flex-start;text-transform:none;letter-spacing:0;font-weight:400;font-size:.95rem;color:var(--text);cursor:pointer">
@@ -354,8 +397,8 @@ textarea{min-height:96px;resize:vertical}
       </label>
     </div>
 
-    <!-- 4 Browser (agent sign-in) -->
-    <div class="panel step" data-step="4" hidden>
+    <!-- 5 Browser (agent sign-in) -->
+    <div class="panel step" data-step="5" hidden>
       <h2>Browser for the assistant</h2>
       <p class="lead">Optional. When @@BRAND@@ acts on the web for you it uses
       its <b>own</b> browser profile — separate from your everyday browser.
@@ -457,7 +500,98 @@ const state = {
   notes: "",
 };
 
-const STEPS = ["You","Calendar","Next meeting","Capture","Browser"];
+const STEPS = ["You","Tools","Calendar","Next meeting","Capture","Browser"];
+
+const TOOL_GROUPS = [
+  {label:"Chat & email", tools:["Slack","Microsoft Teams","Gmail","Outlook","Intercom","Zendesk"]},
+  {label:"Meetings & calendar", tools:["Zoom","Google Meet","Google Calendar","Microsoft Calendar"]},
+  {label:"Docs & notes", tools:["Google Docs","Microsoft Word","Notion","Confluence","Obsidian"]},
+  {label:"Work tracking", tools:["Linear","Jira","Asana","Monday.com","Trello"]},
+  {label:"Files", tools:["Google Drive","Dropbox","OneDrive"]},
+  {label:"Code", tools:["GitHub","GitLab","Cursor","Visual Studio Code"]},
+  {label:"Design", tools:["Figma","Canva"]},
+  {label:"CRM & sales", tools:["Salesforce","HubSpot","Apollo","LinkedIn"]},
+  {label:"Spreadsheets & data", tools:["Excel","Google Sheets","Airtable"]},
+  {label:"AI assistants", tools:["ChatGPT","Claude","Gemini"]},
+  {label:"Automation", tools:["Zapier","Make","n8n"]},
+  {label:"Finance", tools:["QuickBooks","Ramp","Stripe"]},
+];
+const PRESET_TOOLS = TOOL_GROUPS.flatMap(g => g.tools);
+
+// Brand mark via site favicon (colored logo). Fallback letter if the fetch fails.
+const TOOL_DOMAINS = {
+  "Slack":"slack.com",
+  "Microsoft Teams":"teams.microsoft.com",
+  "Gmail":"gmail.com",
+  "Outlook":"outlook.com",
+  "Intercom":"intercom.com",
+  "Zendesk":"zendesk.com",
+  "Zoom":"zoom.us",
+  "Google Meet":"meet.google.com",
+  "Google Calendar":"calendar.google.com",
+  "Microsoft Calendar":"outlook.office.com",
+  "Google Docs":"docs.google.com",
+  "Microsoft Word":"office.com",
+  "Notion":"notion.so",
+  "Confluence":"www.atlassian.com",
+  "Obsidian":"obsidian.md",
+  "Linear":"linear.app",
+  "Jira":"www.atlassian.com",
+  "Asana":"asana.com",
+  "Monday.com":"monday.com",
+  "Trello":"trello.com",
+  "Google Drive":"drive.google.com",
+  "Dropbox":"dropbox.com",
+  "OneDrive":"onedrive.live.com",
+  "GitHub":"github.com",
+  "GitLab":"gitlab.com",
+  "Cursor":"cursor.com",
+  "Visual Studio Code":"code.visualstudio.com",
+  "Figma":"figma.com",
+  "Canva":"canva.com",
+  "Salesforce":"salesforce.com",
+  "HubSpot":"hubspot.com",
+  "Apollo":"apollo.io",
+  "LinkedIn":"linkedin.com",
+  "Excel":"microsoft.com",
+  "Google Sheets":"sheets.google.com",
+  "Airtable":"airtable.com",
+  "ChatGPT":"chatgpt.com",
+  "Claude":"claude.ai",
+  "Gemini":"gemini.google.com",
+  "Zapier":"zapier.com",
+  "Make":"make.com",
+  "n8n":"n8n.io",
+  "QuickBooks":"quickbooks.intuit.com",
+  "Ramp":"ramp.com",
+  "Stripe":"stripe.com",
+};
+
+function toolIconUrl(name){
+  const d=TOOL_DOMAINS[name];
+  if(!d) return "";
+  return "https://www.google.com/s2/favicons?domain="+encodeURIComponent(d)+"&sz=64";
+}
+
+function toolButton(name){
+  const kids=[];
+  const url=toolIconUrl(name);
+  if(url){
+    const img=el("img",{src:url, alt:"", width:"18", height:"18", loading:"lazy", decoding:"async"});
+    img.addEventListener("error",()=>{
+      img.replaceWith(el("span",{className:"tool-ico-fallback", text:(name[0]||"?").toUpperCase()}));
+    });
+    kids.push(img);
+  } else {
+    kids.push(el("span",{className:"tool-ico-fallback", text:(name[0]||"?").toUpperCase()}));
+  }
+  kids.push(document.createTextNode(name));
+  return el("button",{
+    type:"button",
+    className: toolSelected(name) ? "on" : "",
+    onclick:()=>toggleTool(name)
+  }, kids);
+}
 
 function el(tag, attrs={}, kids=[]){
   const n=document.createElement(tag);
@@ -474,7 +608,11 @@ function el(tag, attrs={}, kids=[]){
 function chipList(container, arr, onRemove){
   container.innerHTML="";
   arr.forEach((t,i)=>{
-    const b=el("button",{type:"button", text:"×", onclick:()=>{arr.splice(i,1); chipList(container,arr,onRemove);}});
+    const b=el("button",{type:"button", text:"×", onclick:()=>{
+      arr.splice(i,1);
+      if(typeof onRemove==="function") onRemove();
+      else chipList(container,arr);
+    }});
     container.append(el("span",{className:"chip-in"},[document.createTextNode(t), b]));
   });
 }
@@ -485,7 +623,52 @@ function addTag(inputId, arr, chipsId){
   if(!v) return;
   if(!arr.includes(v)) arr.push(v);
   inp.value="";
-  chipList(document.getElementById(chipsId), arr);
+  if(chipsId==="toolsChips" || chipsId==="toolsCustomChips") renderTools();
+  else chipList(document.getElementById(chipsId), arr);
+}
+
+function toolSelected(name){
+  return state.tools.some(t => t.toLowerCase()===name.toLowerCase());
+}
+
+function toggleTool(name){
+  const ix=state.tools.findIndex(t => t.toLowerCase()===name.toLowerCase());
+  if(ix>=0) state.tools.splice(ix,1);
+  else state.tools.push(name);
+  renderTools();
+}
+
+function renderTools(){
+  const host=document.getElementById("toolGroups");
+  if(host){
+    host.innerHTML="";
+    TOOL_GROUPS.forEach(g=>{
+      const box=el("div",{className:"tool-group"});
+      box.append(el("h3",{text:g.label}));
+      const row=el("div",{className:"tool-pick"});
+      g.tools.forEach(name=>{
+        row.append(toolButton(name));
+      });
+      box.append(row);
+      host.append(box);
+    });
+  }
+  const n=state.tools.length;
+  const count=document.getElementById("toolCount");
+  if(count) count.textContent = n
+    ? n+" selected — @@BRAND@@ will treat these as your daily stack."
+    : "None selected yet — skip anytime.";
+  const custom=state.tools.filter(t => !PRESET_TOOLS.some(p => p.toLowerCase()===t.toLowerCase()));
+  const customHost=document.getElementById("toolsCustomChips");
+  if(customHost){
+    customHost.innerHTML="";
+    custom.forEach(t=>{
+      const b=el("button",{type:"button", text:"×", onclick:()=>toggleTool(t)});
+      customHost.append(el("span",{className:"chip-in"},[document.createTextNode(t), b]));
+    });
+  }
+  const legacy=document.getElementById("toolsChips");
+  if(legacy) chipList(legacy, state.tools, ()=>renderTools());
 }
 
 function renderPeople(){
@@ -552,6 +735,7 @@ function showStep(n){
   document.getElementById("backBtn").style.visibility = n===0 ? "hidden" : "visible";
   document.getElementById("nextBtn").textContent = n===STEPS.length-1 ? "Save to @@BRAND@@" : "Continue";
   document.getElementById("err").textContent="";
+  if(STEPS[n]==="Tools") renderTools();
 }
 
 function collect(){
@@ -594,8 +778,7 @@ function applyProfile(p){
   state.schedule=(p.schedule||[]).filter(Boolean);
   state.priorities=(p.priorities||[]).filter(Boolean);
   document.getElementById("notes").value=p.notes||"";
-  renderPeople(); renderProjects();
-  chipList(document.getElementById("toolsChips"), state.tools);
+  renderPeople(); renderProjects(); renderTools();
   chipList(document.getElementById("schedChips"), state.schedule);
   chipList(document.getElementById("prioChips"), state.priorities);
 }
@@ -679,10 +862,10 @@ async function boot(){
     }
     const pr=await (await fetch("/onboarding/profile")).json();
     if(pr.ok && pr.profile) applyProfile(pr.profile);
-    else { renderPeople(); renderProjects(); }
+    else { renderPeople(); renderProjects(); renderTools(); }
   }catch(e){
     document.getElementById("statusLine").textContent="Could not load status — you can still fill the form.";
-    renderPeople(); renderProjects();
+    renderPeople(); renderProjects(); renderTools();
   }
 }
 
@@ -877,21 +1060,23 @@ document.getElementById("startBtn").onclick=()=>openWizard();
 document.getElementById("addPerson").onclick=()=>{state.people.push({name:"",aliases:[],relationship:"",note:""}); renderPeople();};
 document.getElementById("addProject").onclick=()=>{state.projects.push({name:"",kind:"project",aliases:[],note:""}); renderProjects();};
 document.getElementById("addTool").onclick=()=>addTag("toolInput", state.tools, "toolsChips");
+document.getElementById("addToolMain").onclick=()=>addTag("toolInputMain", state.tools, "toolsCustomChips");
 document.getElementById("addSched").onclick=()=>addTag("schedInput", state.schedule, "schedChips");
 document.getElementById("addPrio").onclick=()=>addTag("prioInput", state.priorities, "prioChips");
 document.getElementById("toolInput").addEventListener("keydown",e=>{if(e.key==="Enter"){e.preventDefault();addTag("toolInput",state.tools,"toolsChips");}});
+document.getElementById("toolInputMain").addEventListener("keydown",e=>{if(e.key==="Enter"){e.preventDefault();addTag("toolInputMain",state.tools,"toolsCustomChips");}});
 document.getElementById("schedInput").addEventListener("keydown",e=>{if(e.key==="Enter"){e.preventDefault();addTag("schedInput",state.schedule,"schedChips");}});
 document.getElementById("prioInput").addEventListener("keydown",e=>{if(e.key==="Enter"){e.preventDefault();addTag("prioInput",state.priorities,"prioChips");}});
 document.getElementById("backBtn").onclick=()=>showStep(Math.max(0,state.step-1));
 document.getElementById("nextBtn").onclick=async ()=>{
-  if(state.step===2){
+  if(state.step===3){
     try{
       await fetch("/first-run/meeting-listen",{method:"POST",
         headers:{"Content-Type":"application/json"},
         body:JSON.stringify({consent:!!document.getElementById("meetListen").checked})});
     }catch(e){}
   }
-  if(state.step===3 || state.step===STEPS.length-1){
+  if(state.step===4 || state.step===STEPS.length-1){
     try{
       await fetch("/first-run/ambient",{method:"POST",
         headers:{"Content-Type":"application/json"},

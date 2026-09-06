@@ -121,6 +121,54 @@ class PeoplePipelineTests(unittest.TestCase):
             self.assertEqual(res.decision, "reject")
             self.assertIsNone(res.person_id)
 
+    def test_known_org_canonical_name_never_mints_person(self):
+        # Eval 2026-09-06: "Andy Karos, the CEO of Boost Run, …" bumped the
+        # org entity AND minted a person twin "Boost Run". The pipelines must
+        # reconcile: a name the entity linker knows as an org is not a person.
+        self.store.resolve_entity("Boost Run", "org", ts=NOW)
+        res = pp.resolve_person_mention(
+            "Boost Run", store=self.store, event_id=10,
+            event_source="chat.user",
+            text="Andy Karos, the CEO of Boost Run, is letting us use "
+                 "Boost Run's compute",
+            now=NOW + 1)
+        self.assertEqual(res.decision, "reject")
+        self.assertIsNone(res.person_id)
+        self.assertIsNone(self.store.find_person_exact("Boost Run"))
+
+    def test_known_org_alias_never_mints_person(self):
+        eid = self.store.resolve_entity("Boostrun", "org", ts=NOW)
+        self.store.upsert_entity_alias(eid, "Boost Run", "boost run",
+                                       confirmed=True, ts=NOW)
+        res = pp.resolve_person_mention(
+            "Boost Run", store=self.store, event_id=11,
+            event_source="chat.user",
+            text="Boost Run is giving us free compute", now=NOW + 1)
+        self.assertEqual(res.decision, "reject")
+        self.assertIsNone(res.person_id)
+
+    def test_existing_person_beats_org_name_block(self):
+        # A real person who shares a name with an org still resolves —
+        # the block only stops MINTING a person twin for a known org.
+        pid = self.store.insert_person(
+            "Sydney", ts=NOW, promotion_state="active")
+        self.store.resolve_entity("Sydney", "org", ts=NOW)
+        res = pp.resolve_person_mention(
+            "Sydney", store=self.store, event_id=12,
+            event_source="audio.whisper", text="I talked to Sydney today",
+            now=NOW + 1, relationship_boost=0.9)
+        self.assertEqual(res.person_id, pid)
+
+    def test_non_org_entity_kinds_do_not_block_people(self):
+        # A junk "idea" entity (e.g. a stray "Andy" node) must not stop a
+        # person of the same name from resolving or being minted.
+        self.store.resolve_entity("Andy", "idea", ts=NOW)
+        res = pp.resolve_person_mention(
+            "Andy Karos", store=self.store, event_id=13,
+            event_source="chat.user", text="Andy Karos runs Boost Run",
+            now=NOW + 1)
+        self.assertNotEqual(res.decision, "reject")
+
     def test_news_policy_no_person_create(self):
         res = pp.resolve_person_mention(
             "Ben Shapiro", store=self.store, event_id=4,

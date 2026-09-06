@@ -106,7 +106,9 @@ class IngestTests(_TempPathsMixin):
         texts = " || ".join(c["text"] for c in claims)
         for expected in ("Jae", "product engineer", "standup at 10am",
                          "ship onboarding this week", "owns the data pipeline",
-                         "the flagship dashboard", "Second paragraph."):
+                         "the flagship dashboard", "Second paragraph.",
+                         "Tools and apps the user uses include:",
+                         "Cursor", "FL Studio"):
             self.assertIn(expected, texts)
         self.assertTrue(all(c["review"] == "approved" for c in claims))
         self.assertTrue(all(c["source_event_id"] for c in claims))

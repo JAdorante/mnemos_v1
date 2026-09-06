@@ -148,3 +148,32 @@ def profile_lines(store, max_items: int = 6) -> list[str]:
     lines = ["USER PROFILE (what the user has said about themselves):"]
     lines += [f"- {text}" for _, text in items[:max_items]]
     return lines
+
+
+def tool_lines(store, max_items: int = 40) -> list[str]:
+    """Compact USER TOOLS grounding from person→uses→entity edges."""
+    pid = self_person_id(store)
+    if pid is None:
+        return []
+    try:
+        edges = store.relations_of("person", pid)
+    except Exception:
+        return []
+    names: list[str] = []
+    for e in edges.get("out", []):
+        if e.get("predicate") != "uses" or e.get("obj_type") != "entity":
+            continue
+        try:
+            ent = store.get_entity(int(e["obj_id"]))
+        except Exception:
+            ent = None
+        name = ((ent or {}).get("name") or "").strip()
+        if name:
+            names.append(name)
+    if not names:
+        return []
+    uniq = list(dict.fromkeys(names))[:max_items]
+    return [
+        "USER TOOLS (apps and services the user works in):",
+        "- " + ", ".join(uniq),
+    ]

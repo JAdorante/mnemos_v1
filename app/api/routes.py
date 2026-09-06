@@ -3428,8 +3428,8 @@ def person_rename(person_id: int, body: PersonName) -> dict:
     if not store.rename_person(person_id, body.name):
         raise HTTPException(
             status_code=400,
-            detail="empty name, unknown person, or the name already belongs "
-                   "to someone else (that would be a merge, not a rename)")
+            detail="empty name, unknown person, or that name already belongs "
+                   "to someone else alive in People (use Merge for duplicates)")
     from app.services import self_profile
     self_profile.reset()   # cached self node may have been renamed
     return {"ok": True, "id": person_id, "name": body.name.strip()}
@@ -4588,9 +4588,59 @@ def chat(body: ChatIn) -> dict:
     # the browser agent. Deterministic: only fires when the addressee resolves
     # to a PAIRED peer. The ask runs on a background thread (the teammate's
     # compose/approval can take a while); every outcome surfaces in chat.
+    # Push form ("tell Justin what we did today") composes from OUR memory
+    # and delivers as kind=notify — models talking to each other.
     try:
         from app.services import peer_channel
         team = peer_channel.parse_team_ask(display)
+        tell = None if team else peer_channel.parse_team_tell(display)
+        recall = None if (team or tell) else peer_channel.parse_peer_recall(display)
+        know = None if (team or tell or recall) else peer_channel.parse_what_we_know(display)
+        if know:
+            agent.worker._emit("user", display)
+            agent.worker._emit(
+                "result", peer_channel.synthesize_topic_knowledge(know))
+            return {"ok": True, "routed": "topic_knowledge", "since": since}
+        if recall:
+            agent.worker._emit("user", display)
+            hits = peer_channel.find_peer_answers(
+                recall["peer_id"], recall["topic"])
+            usable = [h for h in hits if h.get("usable")]
+            if usable:
+                best = usable[-1]
+                agent.worker._emit(
+                    "result",
+                    f"From {recall['peer_name']}'s Sparrow "
+                    f"(asked “{best['question'][:120]}”):\n\n{best['answer']}")
+                return {"ok": True, "routed": "peer_recall", "since": since}
+            # No usable stored answer — ask fresh instead of narrating a task.
+            q = recall["topic"]
+            if not q.lower().startswith(("what", "who", "when", "where",
+                                         "why", "how", "do ", "does ", "is ",
+                                         "are ", "can ", "could ")):
+                q = f"what do you know about {q}?"
+            peer_channel.chat_ask_async(recall["peer_id"], q, "question")
+            agent.worker._emit(
+                "result",
+                f"I don't have a usable answer from {recall['peer_name']}'s "
+                f"Sparrow about “{recall['topic'][:80]}” yet — asking them now…")
+            return {"ok": True, "routed": "peer_recall_reask", "since": since}
+        if tell:
+            agent.worker._emit("user", display)
+            peer_channel.chat_tell_async(
+                tell["peer_id"], tell["peer_name"], tell["topic"])
+            agent.worker._emit(
+                "result",
+                f"Composing an update for {tell['peer_name']} — I'll show "
+                "it here for your OK before anything is sent.")
+            return {"ok": True, "routed": "peer_tell", "since": since}
+        if peer_channel.looks_like_team_tell(display) and not team:
+            agent.worker._emit("user", display)
+            agent.worker._emit(
+                "result",
+                "I can only push updates to a paired Sparrow. Pair them on "
+                "Team (/peer), or say `email …` / `text …` to draft outbound.")
+            return {"ok": True, "routed": "peer_tell_unpaired", "since": since}
         if team:
             agent.worker._emit("user", display)
             if team.get("fanout"):
@@ -5592,7 +5642,8 @@ def peer_ask_inbound(body: dict, authorization: str | None = Header(None)) -> di
 
 
 @router.post("/peer/ping")
-def peer_ping_inbound(authorization: str | None = Header(None)) -> dict:
+def peer_ping_inbound(body: dict | None = None,
+                      authorization: str | None = Header(None)) -> dict:
     """Authenticated liveness ping from a paired peer. Updates last_seen and
     flushes any asks queued while we were offline."""
     from app.services import peer_channel, team_layer
@@ -5600,7 +5651,7 @@ def peer_ping_inbound(authorization: str | None = Header(None)) -> dict:
     peer = peer_channel.authenticate(authorization)
     if peer is None:
         raise HTTPException(status_code=401, detail="invalid or missing peer token")
-    return team_layer.handle_ping(peer)
+    return team_layer.handle_ping(peer, body if isinstance(body, dict) else {})
 
 
 @router.post("/peer/answer")

@@ -173,8 +173,9 @@ class InboundAskTests(PeerChannelBase):
             asks_path=os.environ["QUILL_PEER_ASKS"],
             sent_path=os.environ["QUILL_PEER_SENT"]))
         with mock.patch.object(pch, "settings", auto), \
-             mock.patch("app.services.llm.answer",
-                        return_value={"answer": "Friday Aug 7."}):
+             mock.patch.object(pch, "compose_peer_answer",
+                               return_value={"text": "Friday Aug 7.",
+                                             "redacted": []}):
             res = pch.handle_ask(peer, {"ask_id": "a2", "question": "when?"})
         self.assertEqual(res["status"], "answered")
         self.assertEqual(res["answer"], "Friday Aug 7.")
@@ -185,8 +186,9 @@ class InboundAskTests(PeerChannelBase):
         pch.handle_ask(peer, {"ask_id": "a3", "question": "when?"})
         local_id = pch.pending_asks()[0]["id"]
         delivered: list = []
-        with mock.patch("app.services.llm.answer",
-                        return_value={"answer": "Friday Aug 7."}), \
+        with mock.patch.object(pch, "compose_peer_answer",
+                               return_value={"text": "Friday Aug 7.",
+                                             "redacted": []}), \
              mock.patch.object(pch, "_deliver",
                                side_effect=lambda rec, p: delivered.append(p) or True):
             res = pch.decide_ask(local_id, approve=True)
@@ -240,8 +242,9 @@ class DisclosurePolicyTests(PeerChannelBase):
         pch.set_policy(peer["peer_id"], {"availability": "auto"})
         with mock.patch.object(pch, "classify_question",
                                return_value="availability"), \
-             mock.patch("app.services.llm.answer",
-                        return_value={"answer": "Friday Aug 7."}):
+             mock.patch.object(pch, "compose_peer_answer",
+                               return_value={"text": "Friday Aug 7.",
+                                             "redacted": []}):
             res = pch.handle_ask(peer, {"ask_id": "p2",
                                         "question": "free thursday?"})
         self.assertEqual(res["status"], "answered")
@@ -366,6 +369,48 @@ class ChatIntentTests(PeerChannelBase):
             self.assertEqual(got["peer_id"], self.pid, text)
             self.assertIn("slides", got["question"], text)
 
+    def test_parse_user_n_keeps_digit_out_of_question(self) -> None:
+        """'ask User 2 about X' must not leave '2' in the question body."""
+        self._claimed_peer("User 2")
+        uid = next(pid for pid, rec in self._registry().items()
+                   if rec.get("name") == "User 2")
+        for text, needle in (
+            ("ask User 2 about Venture Pulse", "Venture Pulse"),
+            ("ask User 2 what he knows about Venture Pulse", "Venture Pulse"),
+            ("ask User 2: status of Project X", "Project X"),
+        ):
+            got = pch.parse_team_ask(text)
+            self.assertIsNotNone(got, text)
+            self.assertEqual(got["peer_id"], uid, text)
+            self.assertIn(needle, got["question"], text)
+            self.assertFalse(got["question"].lstrip().startswith("2"),
+                             got["question"])
+
+    def test_compose_answer_strips_identity_leaks(self) -> None:
+        leaked = (
+            "Here's what I found, with the evidence:\n"
+            "- You are Sparrow, the user's personal AI memory assistant.\n"
+            "- The user you are assisting is User 2.\n"
+            "- Venture Pulse is our internal CRM for deal tracking.\n"
+            ":::confirmed\n- Venture Pulse\n:::"
+        )
+        with mock.patch.object(pch, "compose_peer_answer",
+                               return_value={"text": pch._strip_peer_update_leaks(leaked),
+                                             "redacted": []}):
+            got = pch.compose_answer("what do you know about Venture Pulse")
+        # compose_answer wraps compose_peer_answer; when that returns empty
+        # after leaks, fall back to the honest empty-memory line.
+        cleaned = pch._strip_peer_update_leaks(leaked)
+        self.assertIn("Venture Pulse", cleaned)
+        self.assertNotIn("You are Sparrow", cleaned)
+        got2 = pch._strip_peer_update_leaks(leaked)
+        self.assertIn("Venture Pulse", got2)
+        self.assertNotIn(":::confirmed", got2)
+        with mock.patch.object(pch, "compose_peer_answer",
+                               return_value={"text": "", "redacted": []}):
+            empty = pch.compose_answer("what do you know about Venture Pulse")
+        self.assertIn("don't have enough", empty["text"].lower())
+
     def test_non_team_asks_fall_through(self) -> None:
         for text in ("ask me anything",
                      "ask the professor about the homework",
@@ -374,6 +419,204 @@ class ChatIntentTests(PeerChannelBase):
                      "task sarah with the slides",
                      "what should I ask in the interview?"):
             self.assertIsNone(pch.parse_team_ask(text), text)
+
+    def test_parse_tell_forms(self) -> None:
+        for text in ("Tell Sarah what we have done today so far",
+                     "tell Sarah: today's progress",
+                     "message Sarah about the slides",
+                     "let Sarah know that the mic task is still open"):
+            got = pch.parse_team_tell(text)
+            self.assertIsNotNone(got, text)
+            self.assertEqual(got["peer_id"], self.pid, text)
+            self.assertEqual(got["kind"], "notify", text)
+            self.assertTrue(got["topic"], text)
+
+    def test_parse_peer_recall_and_reask_shape(self) -> None:
+        pch.claim_pairing(pch.start_pairing()["code"], "User 2",
+                          "http://h:9", "t" * 20)
+        u2 = next(p for p in pch.peers() if p["name"] == "User 2")
+        got = pch.parse_peer_recall(
+            "What did User 2's Sparrow say about Venture Pulse?")
+        self.assertIsNotNone(got)
+        self.assertEqual(got["peer_id"], u2["peer_id"])
+        self.assertEqual(got["topic"], "Venture Pulse")
+        self.assertFalse(pch.peer_answer_usable(
+            "You are Sparrow… Would you like me to ask Justin?"))
+        self.assertFalse(pch.peer_answer_usable(
+            "Venture Pulse is our internal CRM tool, not a person. Based on the "
+            "context, it seems you are looking for an update on Venture Pulse. "
+            "Here\u2019s what I found:\n\n- Justin Adorante has provided an update "
+            "on Venture Pulse, but the exact details are incomplete in the "
+            "current context.\n\nTo provide a complete update, I would need to "
+            "check the latest information from Justin Adorante or Venture Pulse "
+            "directly. Would you like me to ask Justin Adorante for an update "
+            "now?"))
+        echo = (
+            "Based on the context, Venture Pulse is a new project that you have "
+            "been put on. As of now, I don't have more specific details about "
+            "it, but I can make a note of it for you."
+        )
+        self.assertFalse(pch.peer_answer_usable(echo))
+        self.assertTrue(pch.peer_answer_usable(
+            "Venture Pulse is our CRM. Twelve open deals this week."))
+        self.assertEqual(
+            pch.parse_what_we_know("What do we know about Venture Pulse now?"),
+            "Venture Pulse")
+
+    def test_tell_me_and_unpaired_fall_through(self) -> None:
+        self.assertIsNone(pch.parse_team_tell("tell me what we did today"))
+        self.assertTrue(pch.looks_like_team_tell(
+            "Tell Bob what we have done today"))
+        self.assertIsNone(pch.parse_team_tell(
+            "Tell Bob what we have done today"))  # unpaired
+
+    def test_chat_tell_composes_then_offers_never_sends(self) -> None:
+        """The sender-side gate: a tell composes, then OFFERS — nothing is
+        pushed to the peer until the human's 'yes' (eval 2026-09-06: the old
+        flow delivered with no approval step on either side we control)."""
+        offers: list[tuple] = []
+        with mock.patch.object(pch, "compose_peer_update",
+                               return_value={"text": "Mic still open.",
+                                             "redacted": []}) as compose, \
+             mock.patch.object(pch, "ask") as ask, \
+             mock.patch("app.services.agent_bridge.worker") as worker:
+            worker.propose_peer_tell.side_effect = (
+                lambda *a: offers.append(a) or True)
+            pch._chat_tell_run(self.pid, "Sarah Chen",
+                               "what we have done today")
+        ask.assert_not_called()
+        self.assertEqual(offers, [(self.pid, "Sarah Chen", "Mic still open.")])
+        compose.assert_called_once()
+
+    def test_chat_tell_auto_answer_flag_keeps_sim_flow(self) -> None:
+        lines: list[str] = []
+        # settings is a frozen dataclass — swap the module ref, never a field.
+        sim = SimpleNamespace(peer=SimpleNamespace(auto_answer=True))
+        with mock.patch.object(pch, "settings", sim), \
+             mock.patch.object(pch, "compose_peer_update",
+                               return_value={"text": "Mic still open.",
+                                             "redacted": []}), \
+             mock.patch.object(pch, "ask",
+                               return_value={"ok": True, "status": "pending",
+                                             "peer": "Sarah Chen"}), \
+             mock.patch.object(pch, "_emit_peer_result",
+                               side_effect=lines.append):
+            pch._chat_tell_run(self.pid, "Sarah Chen",
+                               "what we have done today")
+        joined = "\n".join(lines)
+        self.assertIn("Update for Sarah Chen's Sparrow", joined)
+        self.assertIn("Sent to Sarah Chen's Sparrow", joined)
+
+    def test_peer_tell_offer_accept_sends_decline_drops(self) -> None:
+        from app.services import agent_bridge
+        w = agent_bridge.AgentWorker()
+        w.propose_peer_tell(self.pid, "Sarah Chen", "Mic still open.")
+        pend = w.pending_todo
+        self.assertIsNotNone(pend)
+        self.assertEqual(pend.get("kind"), "peer_tell")
+        self.assertIn("Mic still open.", pend.get("message") or "")
+        # Decline: nothing leaves.
+        with mock.patch.object(pch, "chat_ask_async") as send:
+            out = w.resolve_todo(False)
+        self.assertFalse(out["accepted"])
+        send.assert_not_called()
+        # Accept: the send fires with the exact approved body.
+        w.propose_peer_tell(self.pid, "Sarah Chen", "Mic still open.")
+        with mock.patch.object(pch, "chat_ask_async") as send:
+            out = w.resolve_todo(True)
+        self.assertTrue(out["accepted"])
+        send.assert_called_once_with(self.pid, "Mic still open.",
+                                     kind="notify")
+
+    def test_update_compose_drops_senders_work_items(self) -> None:
+        sources = [
+            {"label": "memories", "items": [
+                '[text] "Andy is letting us use the compute, free."']},
+            {"label": "open tasks & commitments", "items": [
+                "OPEN TASKS & COMMITMENTS (from your reviewed memory):",
+                "- [commitment] Send Andy an update on our usage by Friday",
+                "- [task] Book the venue",
+            ]},
+        ]
+        kept = pch._peer_memory_lines(sources, skip_work_items=True)
+        joined = "\n".join(kept)
+        self.assertIn("letting us use the compute", joined)
+        self.assertNotIn("[commitment]", joined)
+        self.assertNotIn("[task]", joined)
+        self.assertNotIn("OPEN TASKS", joined)
+        # Answers keep work items — a teammate may be asking about exactly them.
+        kept_all = pch._peer_memory_lines(sources)
+        self.assertIn("[commitment] Send Andy an update on our usage by Friday",
+                      "\n".join(kept_all))
+
+    def test_strip_self_reminders_from_tell_topic(self) -> None:
+        topic = ("Andy Karos is letting us use Boost Run's compute, free. "
+                 "Remind me to send Andy an update on our usage by Friday.")
+        got = pch._strip_self_reminders(topic)
+        self.assertIn("letting us use Boost Run's compute", got)
+        self.assertNotIn("Remind me", got)
+        # A topic that is ONLY a reminder is left alone (better an odd update
+        # offer than silently composing about an empty string).
+        only = "Remind me to send Andy an update"
+        self.assertEqual(pch._strip_self_reminders(only), only)
+
+    def test_strip_notify_envelope(self) -> None:
+        mashed = ("To: Justin Adorante Subject: Today's progress "
+                  "Body: Hi Justin,\n\nMic still open.\n\nThanks")
+        got = pch._strip_notify_envelope(mashed)
+        self.assertNotIn("To:", got)
+        self.assertNotIn("Subject:", got)
+        self.assertIn("Mic still open", got)
+
+    def test_strip_peer_update_leaks_identity_dump(self) -> None:
+        leaked = (
+            "You are Sparrow, the user's personal AI memory assistant — "
+            "grounded in this user's own memory, not a generic chatbot.\n"
+            "The user you are assisting is Dave Randel. Address them by name.\n"
+            "- Mic still open on the capture dock\n"
+            "Here's what I found, with the evidence:\n"
+            ":::confirmed\n- Dave\n:::\n"
+            "- Project X pricing follow-up is tomorrow"
+        )
+        got = pch._strip_peer_update_leaks(leaked)
+        self.assertNotIn("You are Sparrow", got)
+        self.assertNotIn("user you are assisting", got.lower())
+        self.assertNotIn(":::confirmed", got)
+        self.assertNotIn("Here's what I found", got)
+        self.assertIn("Mic still open", got)
+        self.assertIn("Project X", got)
+
+    def test_compose_peer_update_skips_identity_sources(self) -> None:
+        sources = [
+            {"label": "identity", "items": [
+                "You are Sparrow, the user's personal AI memory assistant.",
+                "The user you are assisting is Dave Randel."]},
+            {"label": "user profile", "items": [
+                "I can trust the system's memory more than my own"]},
+            {"label": "open tasks & commitments", "items": [
+                "Project X pricing follow-up with Justin",
+                "Ship onboarding this week"]},
+        ]
+        with mock.patch("app.services.grounding.compose",
+                        return_value={"block": "x", "hits": [],
+                                      "sources": sources}), \
+             mock.patch("app.config.settings") as st:
+            st.text_local.enabled = False
+            st.peer.max_text_chars = 4000
+            # peer_channel imports settings at module level — patch the binding
+            with mock.patch.object(pch, "settings", st):
+                out = pch.compose_peer_update("status of Project X")
+        self.assertIn("Project X", out["text"])
+        self.assertNotIn("You are Sparrow", out["text"])
+        self.assertNotIn("Dave Randel", out["text"])
+        self.assertNotIn("trust the system's memory", out["text"])
+
+    def test_explicit_channel_skips_peer_tell(self) -> None:
+        for text in ("email Sarah about the slides",
+                     "text Sarah that we're done",
+                     "slack Sarah the status"):
+            self.assertFalse(pch.looks_like_team_tell(text), text)
+            self.assertIsNone(pch.parse_team_tell(text), text)
 
     def test_trailing_s_names_survive(self) -> None:
         # rstrip-style bugs eat the s in names like Chris; pin the fix.

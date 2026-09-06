@@ -65,6 +65,41 @@ _FUNC = frozenset({
     "page", "put", "make", "get", "so", "but", "if", "when",
 })
 
+# Leading speech-act / directive verbs — chat/peer utterances like
+# "Tell Justin …", "Ask User …", "Message Sarah …" that the extractor
+# otherwise mints as people (and, on person-reject fallthrough, as projects).
+_SPEECH_ACT_LEAD = frozenset({
+    "tell", "ask", "asking", "message", "notify", "remind", "ping",
+    "text", "email", "call", "show", "send", "give", "bring", "fetch",
+    "let",
+})
+
+# Diarization / multi-user slot labels ("User 2", "User12") — never people
+# and never projects (onboarding speaker tags leak into the entity graph).
+_USER_SLOT = re.compile(r"(?i)^(?:new\s+)?user\s*\d+$")
+
+# Media / product / brand tokens that almost never appear in a real person's
+# name. Safer than applying the full _NONPERSON_TOKENS set to people (that
+# list includes surname collisions like "west" / "home" / "family").
+_NEVER_PERSON_TOKENS = frozenset({
+    "pulse", "venture", "ventures", "capital", "partners", "radar", "news",
+    "feed", "feeds", "calendar", "console", "pipeline", "robotics", "service",
+    "studio", "code", "project", "manager", "campaign", "agenda", "suite",
+    "sheets", "drive", "chrome", "outlook", "teams", "zoom", "insider",
+    "pocket", "eats", "lists", "robots", "omniverse", "halos", "soft",
+    "legacy", "computing", "architecture", "technology", "tech", "sdk",
+    "api", "crm", "ui", "ux", "html", "python", "java", "docs", "page",
+    "pages", "browser", "desktop", "terminal", "notepad", "iphone",
+    "google", "microsoft", "united", "agency", "procurement", "corporate",
+    "integrity", "election", "uniparty", "industrywide", "klondike",
+    "solitaire", "activities", "properties", "ownership", "contacts",
+    "panels", "panel", "view", "change", "terms", "cards", "discussion",
+    "notes", "idea", "overview", "connection", "sso", "editor", "document",
+    "interface", "setup", "nested", "decision", "loop", "issue", "symbol",
+    "activity", "portdev", "dtc", "quilk", "spacesk", "edition", "whale",
+    "uber", "gen", "fl", "win11",
+})
+
 
 def _tokens(name: str) -> list[str]:
     return [t for t in (name or "").split() if t]
@@ -146,13 +181,19 @@ def normalize_person_name(name: str) -> str:
     return " ".join(w[:1].upper() + w[1:].lower() for w in words)
 
 
+def _is_speech_act_phrase(name: str) -> bool:
+    """True for directive utterances mis-parsed as a proper name."""
+    words = _tokens(name or "")
+    return bool(words) and words[0].lower().rstrip(".,!?:;") in _SPEECH_ACT_LEAD
+
+
 def is_plausible_person(name: str) -> bool:
     n = normalize_person_name((name or "").strip())
     if len(n) < 2:
         return False
     if n.lower() in _GENERIC or _shared_reject(n) or _SNAKE.search(n):
         return False
-    if _SPEAKER_LABEL.match(n):
+    if _SPEAKER_LABEL.match(n) or _USER_SLOT.match(n):
         return False
     if n.lower() in _os_account_names():
         return False
@@ -161,7 +202,12 @@ def is_plausible_person(name: str) -> bool:
         return False
     if not _has_capital(words):              # real names carry a capitalized token
         return False
+    if _is_speech_act_phrase(n):             # "Tell Justin", "Ask User"
+        return False
     if any(w.lower() in _FUNC for w in words):   # "QA and CTO review", "set it to 0"
+        return False
+    # Brand / media phrases ("Venture Pulse", "Google Calendar") — not people.
+    if any(w.lower().rstrip(".,") in _NEVER_PERSON_TOKENS for w in words):
         return False
     if any(ch.isdigit() for ch in n):        # digits aren't part of a name
         return False
@@ -173,13 +219,16 @@ def is_plausible_entity(name: str) -> bool:
     ('alpaca_market_data'), lowercase multi-word ('sync shop campaign'), or a
     tech token ('edge-tts'), all of which are REAL user projects/tools. So this
     rejects only the unambiguous junk: the product's own name, file paths /
-    domains / code punctuation, env vars, and over-long paragraph fragments.
+    domains / code punctuation, env vars, speech-act fragments, slot labels,
+    and over-long paragraph fragments.
     (The snake_case & all-lowercase rules that work for PEOPLE would delete real
     projects here, so they are intentionally not applied.)"""
     n = (name or "").strip()
     if len(n) < 2:
         return False
     if _shared_reject(n):
+        return False
+    if _USER_SLOT.match(n) or _is_speech_act_phrase(n):
         return False
     if len(_tokens(n)) > 6:                   # a label, not a paragraph fragment
         return False

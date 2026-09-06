@@ -95,6 +95,21 @@ class SelfNodeTests(unittest.TestCase):
         with self._known_user():
             self.assertEqual(self_profile.profile_lines(self.store), [])
 
+    def test_tool_lines_from_uses_edges(self):
+        with self._known_user():
+            pid = self_profile.self_person_id(self.store)
+            slack = self.store.resolve_entity("Slack", kind="tool")
+            linear = self.store.resolve_entity("Linear", kind="tool")
+            self.store.add_relation("person", pid, "uses", "entity", slack,
+                                    origin="asserted", ts=1.0)
+            self.store.add_relation("person", pid, "uses", "entity", linear,
+                                    origin="asserted", ts=1.0)
+            lines = self_profile.tool_lines(self.store)
+        self.assertTrue(lines[0].startswith("USER TOOLS"))
+        body = "\n".join(lines)
+        self.assertIn("Slack", body)
+        self.assertIn("Linear", body)
+
     def test_link_self_without_known_user_is_false(self):
         with patch("app.services.identity.user_identity", return_value={}):
             fid = self.store.add_claim("I like tea", extracted_at=100.0)

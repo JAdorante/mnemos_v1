@@ -354,6 +354,31 @@ def resolve_person_mention(
     if not policy.extract_mentions:
         return ResolveResult(None, "reject", confidence=0.0)
 
+    # A name the entity linker already knows as an ORG never becomes a
+    # person — the two extraction paths used to run blind to each other, so
+    # one sentence could both bump the org entity AND mint a person twin
+    # ("Boost Run", eval 2026-09-06). An existing person with the same name
+    # wins over the block: normal resolution should bind them.
+    try:
+        org_hit = store.find_entity_matching_name(display, kinds=("org",))
+    except Exception:
+        org_hit = None
+    if org_hit is not None and store.find_person_exact(display) is None:
+        mid = None
+        if event_id is not None:
+            mid = store.insert_person_mention(
+                event_id=event_id, raw_text=raw, normalized_text=display,
+                discourse_role=discourse_role,
+                grammatical_role=grammatical_role,
+                observed_at=ts, extractor_version=EXTRACTOR_VERSION,
+                pipeline_version=PIPELINE_VERSION,
+                person_probability=0.05, extraction_confidence=0.3,
+                actor_types=[("organization", 0.9)],
+                resolution_status="rejected",
+                relationship_relevance=0.0,
+            )
+        return ResolveResult(None, "reject", mention_id=mid, confidence=0.0)
+
     # --- candidate generation (also used for knowledge-only exact bind) ---
     people = store.list_people_embed()
     # Full roster BEFORE filtering: the WS-C recurrence gate needs to know
