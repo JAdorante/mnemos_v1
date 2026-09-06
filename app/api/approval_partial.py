@@ -1,6 +1,6 @@
 """Global approval affordance — one source of truth for banner / Today / Chat.
 
-Copper here is legitimate: a human decision is required.
+Periwinkle here is legitimate: a human decision is required.
 Yes/No are real POST forms (no-JS). JS enhances for inline dismiss + SSE.
 """
 from __future__ import annotations
@@ -39,9 +39,9 @@ APPROVAL_CSS = """\
   font:500 13px/1.2 var(--font);letter-spacing:var(--track-snug);cursor:pointer;
   border:1px solid var(--line);background:var(--panel);color:var(--navy);
   text-decoration:none;display:inline-flex;align-items:center;
-  box-shadow:0 1px 2px rgba(11,19,32,.03);
+  box-shadow:0 1px 2px rgba(0,0,0,.25);
 }
-#mnemosApproval .ap-actions .go{background:var(--navy);color:#F8F6F1;border:none}
+#mnemosApproval .ap-actions .go{background:var(--acc);color:var(--acc-fg);border:none}
 #mnemosApproval .ap-actions .quiet{background:transparent;color:var(--mut)}
 #mnemosApproval .ap-actions .review{color:var(--mut)}
 @keyframes approvalSlide{
@@ -60,7 +60,7 @@ APPROVAL_CSS = """\
 .action-detail[open] > summary::before{content:"▾ "}
 .action-detail .detail-card{
   margin-top:8px;padding:12px 14px;border:1px solid var(--acc-22);
-  border-radius:var(--radius-sm);background:linear-gradient(180deg,#FFFCF7 0%,var(--surface) 100%);
+  border-radius:var(--radius-sm);background:linear-gradient(180deg,var(--acc-warm) 0%,var(--surface) 100%);
   border-left:3px solid var(--acc);
 }
 .action-detail .intent{font-size:14px;margin:0 0 10px;color:var(--text)}

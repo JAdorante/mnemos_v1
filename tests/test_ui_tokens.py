@@ -40,7 +40,7 @@ THEME_CALL = re.compile(
 GRAY_COLOR = re.compile(r"color:\s*gray\b")
 COPPER_RGBA = re.compile(r"rgba\(184,115,51")
 FORKED_MUT = "#6B6F76"
-CANONICAL_MUT = "--mut:#555960"
+CANONICAL_MUT = "--mut:#9298a3"
 HEX_COLOR = re.compile(
     r"(?<![\w-])#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})\b",
 )
@@ -287,12 +287,27 @@ class UiTokenEnforcementTests(unittest.TestCase):
             self.assertIn("@media", src, f"{path.name} missing responsive @media rules")
 
     def test_apply_uses_static_theme_links(self) -> None:
-        from app.api.mnemos_theme import apply
+        from app.api.mnemos_theme import apply, asset_version
 
         page = apply("<!doctype html><head>@@FONTS@@</head><body>@@UI_JS@@</body></html>")
         self.assertIn("/static/css/mnemos-ink.css", page)
         self.assertIn("/static/js/mnemos-approval.js", page)
         self.assertNotIn("inkDraw", page)
+        v = asset_version()
+        self.assertIn(f"?v={v}", page)
+        self.assertRegex(page, r"/static/css/mnemos-chrome\.css\?v=[a-f0-9]{10}")
+
+    def test_rec_bar_separates_status_from_meta(self) -> None:
+        """Capture sources stay chips; Privacy/Voice are quieter trailing meta."""
+        from app.api.mnemos_theme import CHROME_CSS
+        from app.api.mnemos_ui import UI_JS
+
+        self.assertIn(".rec-status", CHROME_CSS)
+        self.assertIn(".rec-meta", CHROME_CSS)
+        self.assertIn("_statusChipHtml", UI_JS)
+        self.assertIn("_privacyMetaHtml", UI_JS)
+        self.assertIn("this._state.headless", UI_JS)
+        self.assertIn("window.location.href = '/capture'", UI_JS)
 
     def test_self_hosted_ui_static_present(self) -> None:
         root = Path(__file__).resolve().parents[1]

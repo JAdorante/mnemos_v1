@@ -1,5 +1,5 @@
 {
-    "version": "1.5",
+  "version": "1.6",
   "classes": {
     "private_conversation": {
       "extract_mentions": true,
@@ -109,7 +109,7 @@
       "create_claims": true,
       "update_people": false,
       "identity_evidence": false,
-      "knowledge_entities": true
+      "knowledge_entities": false
     },
     "news_page": {
       "extract_mentions": true,
@@ -120,7 +120,7 @@
       "create_claims": true,
       "update_people": false,
       "identity_evidence": false,
-      "knowledge_entities": true
+      "knowledge_entities": false
     },
     "social_feed": {
       "extract_mentions": false,
@@ -212,8 +212,8 @@
     },
     "research_answer": {
       "extract_mentions": true,
-      "create_person_candidates": true,
-      "relationship_evidence": true,
+      "create_person_candidates": false,
+      "relationship_evidence": false,
       "extract_contacts": false,
       "create_commitments": false,
       "create_claims": true,

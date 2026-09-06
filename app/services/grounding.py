@@ -386,7 +386,10 @@ def _dedup_hit_lines(kept: list[dict]) -> list[str]:
         if key in seen:
             continue
         seen.add(key)
-        lines.append(f"- [{h.get('modality', '?')}] {text}")
+        # Quoted, not bare: a remembered line that LOOKS like a command
+        # ("reply with X", "send this") must read as a record of speech, or
+        # small local models will obey it over the actual current request.
+        lines.append(f'- [{h.get("modality", "?")}] "{text}"')
     return lines
 
 

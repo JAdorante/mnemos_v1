@@ -3187,6 +3187,18 @@ class Store:
                 [*args, limit]).fetchall()
         return [dict(r) for r in rows]
 
+    def person_mention_counts(self, since_ts: float) -> dict[int, int]:
+        """Mentions per resolved person since `since_ts` — the People list's
+        chip weight (UI spec §6: a plain integer, not the raw score)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT resolved_person_id AS pid, COUNT(*) AS n "
+                "FROM person_mentions WHERE observed_at >= ? "
+                "AND resolved_person_id IS NOT NULL "
+                "GROUP BY resolved_person_id",
+                (float(since_ts),)).fetchall()
+        return {int(r["pid"]): int(r["n"]) for r in rows}
+
     # --------------- People v3 WS-C: recurrence-gated minting -------------
     def pending_mint_mentions(self, normalized_text: str) -> list[dict]:
         """The pending pool for one would-be identity: every 'pending_mint'

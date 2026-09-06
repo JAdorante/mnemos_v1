@@ -2,14 +2,19 @@
 
 Served at GET /today (GET /shell permanently redirects here).
 
-Stages (cumulative):
-  1. read-only world — constellation / field
-  2. attention-ordered — WM focus, horizon, at-risk
-  3. proposals — renders existing offer pipeline (incl. reasoners); yes/no
-     goes through /today/offer → worker.resolve_todo (no new channel)
+Layout (UI refactor spec §4): 1120px frame, two-column grid — main flow
+(Waiting on you, In focus, Meeting notes, Recently noticed) plus a 320px
+rail (Coming up, At risk, In the margin, Quietly archived). The world
+graph is gone from Today (§5); its stat line lives in the day header.
+The Ask field and worker status live in the shared shell, not here.
 """
 
 from app.api.mnemos_theme import apply as _mnemos
+
+try:
+    from app.version import __version__ as _ver
+except Exception:
+    _ver = ""
 
 SHELL_PAGE = _mnemos(r"""<!doctype html>
 <html lang="en">
@@ -25,199 +30,163 @@ SHELL_PAGE = _mnemos(r"""<!doctype html>
 *{box-sizing:border-box}
 body{
   margin:0;min-height:100vh;
-  font:var(--fs-body)/var(--lh-body) var(--font);color:var(--text);
-  background:
-    radial-gradient(900px 480px at 8% -8%, var(--acc-06), transparent 55%),
-    radial-gradient(700px 400px at 94% 0%, color-mix(in srgb,var(--emerald) 4%,transparent), transparent 50%),
-    linear-gradient(180deg,#FBF9F4 0%,var(--paper) 40%,var(--workspace) 100%);
+  font:15px/1.5 var(--sans);color:var(--text);
+  background:var(--ink);
+  -webkit-font-smoothing:antialiased;
 }
-.page-sub{margin-left:-4px}
-.wrap{max-width:1100px;margin:0 auto;padding:var(--sp-1) var(--sp-6) var(--sp-14)}
-.mast{padding:var(--sp-4) 0 var(--sp-1);animation:morningPaper var(--dur-slow) var(--ease) both}
-.mast .date{
-  font-family:var(--display);font-weight:400;font-size:clamp(1.25rem,2.6vw,1.6rem);
-  letter-spacing:var(--track-tight);color:var(--navy);margin:0;line-height:var(--lh-tight);
+.wrap{max-width:1120px;margin:0 auto;padding:44px 24px 80px}
+header.day{
+  display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;margin-bottom:34px;
+  animation:morningPaper var(--dur-slow) var(--ease) both;
 }
-.mast .line{color:var(--mut);font-size:var(--fs-sub);margin:var(--sp-2) 0 0;max-width:40em}
-.stack{display:flex;flex-direction:column;gap:var(--sp-4);margin-top:var(--sp-3)}
-.band{
-  background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);
-  box-shadow:var(--shadow-surface);padding:var(--sp-4) var(--sp-5);position:relative;
+.day h1{
+  font-family:var(--serif);font-weight:500;font-size:34px;letter-spacing:.005em;
+  color:var(--text);margin:0;line-height:1.2;
+}
+.day-sub{color:var(--mut);font-size:15px}
+.day-sub b{color:var(--text);font-weight:600}
+.grid{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:24px;align-items:start}
+section.card{
+  background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);
+  padding:22px 24px;margin-bottom:24px;position:relative;
   animation:fadeUp var(--dur) var(--ease) both;
 }
-.stack .band:nth-child(2){animation-delay:.04s}
-.stack .band:nth-child(3){animation-delay:.08s}
-.stack .band:nth-child(4){animation-delay:.12s}
-.stack .band:nth-child(5){animation-delay:.16s}
-.stack .band:nth-child(6){animation-delay:.2s}
-.stack .band:nth-child(7){animation-delay:.24s}
-.band.proposal{
-  border-color:var(--acc-35);
-  background:linear-gradient(180deg,#FFFCF7 0%,var(--surface) 70%);
-  box-shadow:var(--shadow-folio);
+.card h2{
+  font-family:var(--serif);font-weight:500;font-size:19px;margin:0 0 2px;color:var(--text);
 }
-.band h2{
-  font-family:var(--display);font-weight:400;font-size:var(--fs-title2);color:var(--navy);
-  margin:0 0 var(--sp-1);letter-spacing:var(--track-tight);line-height:var(--lh-tight);
+.card .hint{color:var(--mut);font-size:13.5px;margin:0 0 16px}
+.rail section.card{padding:18px 20px}
+.rail .card h2{font-size:17px}
+.card.proposal{border-color:var(--acc-35)}
+/* In focus — entity chips, no eyebrows; type carried by the dot. */
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+/* Meeting notes */
+.notepad-box{
+  width:100%;min-height:84px;resize:vertical;border:1px solid var(--line);
+  border-radius:var(--r-md);padding:13px 14px;
+  font:inherit;color:var(--text);background:var(--ink);
 }
-.band .lead{color:var(--mut);font-size:var(--fs-footnote);margin:0 0 var(--sp-3);overflow-wrap:anywhere}
-.row{display:flex;gap:var(--sp-3);align-items:flex-start;padding:var(--sp-2) 0;border-top:1px solid var(--hairline)}
-.row:first-of-type{border-top:0;padding-top:0}
-.row .t{flex:1;min-width:0}
-.row .meta{font:var(--fs-caption2)/var(--lh-snug) var(--mono);color:var(--mut);margin-top:var(--sp-1)}
+.notepad-box::placeholder{color:var(--faint)}
+.notepad-box:focus{outline:2px solid var(--violet);outline-offset:-1px;border-color:transparent}
+.note-row{display:flex;align-items:center;gap:14px;margin-top:12px;flex-wrap:wrap}
+.note-row .hint{margin:0}
+.jot-list{margin-top:12px;display:flex;flex-direction:column;gap:0;max-height:180px;overflow:auto}
+.jot-item{
+  font-size:13.5px;line-height:1.45;padding:8px 0;
+  border-top:1px solid var(--line);color:var(--text);overflow-wrap:anywhere;min-width:0;
+}
+.jot-item:first-child{border-top:0;padding-top:0}
+.jot-item .when{font-size:12.5px;color:var(--faint);margin-top:2px}
+/* Recently noticed — humanized memory rows */
+.mem{border-top:1px solid var(--line);padding:13px 2px;display:flex;gap:12px;align-items:flex-start}
+.mem:first-of-type{border-top:0;padding-top:4px}
+.mem .d{margin-top:7px;flex:none;width:8px;height:8px;border-radius:50%}
+.mem p{font-size:14.5px;margin:0}
+.mem .meta{color:var(--faint);font-size:12.5px;margin-top:2px}
+.mem details{margin-top:4px}
+.see-all{display:inline-block;margin-top:10px;color:var(--mut);font-size:13.5px;text-decoration:none}
+.see-all:hover{color:var(--text)}
+/* Coming up chips */
+.hz{display:flex;flex-direction:column;gap:8px}
+.hz .hz-item{
+  border:1px solid var(--line);border-radius:var(--r-md);padding:8px 12px;
+  font-size:13.5px;background:var(--raised);color:var(--text);max-width:100%;
+}
+.hz .hz-item .when{font-weight:600;margin-right:4px}
+.hz .hz-item .meta{font-size:12.5px;color:var(--faint);margin-top:2px}
+/* At risk rows + ok line */
+.risk-row{display:flex;gap:12px;align-items:flex-start;padding:8px 0;border-top:1px solid var(--line)}
+.risk-row:first-of-type{border-top:0;padding-top:0}
+.risk-row .t{flex:1;min-width:0;font-size:13.5px}
+.risk-row .meta{font-size:12.5px;color:var(--faint);margin-top:2px}
 .pill{
-  font:var(--fs-caption2)/1.2 var(--mono);padding:3px var(--sp-2);border-radius:var(--radius-full);
+  font-size:12px;padding:3px 8px;border-radius:var(--radius-full);
   border:1px solid var(--line);color:var(--mut);white-space:nowrap;
 }
 .pill.attn{border-color:var(--acc-40);color:var(--acc);background:var(--acc-dim)}
 .pill.urgent{border-color:color-mix(in srgb,var(--danger) 35%,transparent);color:var(--danger)}
-.actions{display:flex;gap:var(--sp-2);flex-wrap:wrap;margin-top:var(--sp-4)}
-.msg{
-  white-space:pre-wrap;font-size:var(--fs-sub);line-height:var(--lh-body);color:var(--text);
-  margin:0 0 var(--sp-1);
+.ok-line{display:flex;align-items:center;gap:9px;color:var(--mut);font-size:14px;margin-top:6px}
+.ok-line .d{width:8px;height:8px;border-radius:50%;background:var(--green);flex:none}
+/* In the margin — serif prose, daily-briefing voice */
+.rail .ambient-note{
+  font-family:var(--serif);font-style:normal;font-size:15.5px;line-height:1.55;
+  color:var(--text);border-left:0;padding:0;margin:0 0 14px;
 }
-#constWrap{
-  height:240px;border-radius:var(--radius-sm);border:1px solid var(--line);
-  background:var(--bg-elev);box-shadow:var(--shadow-workspace);overflow:hidden;position:relative;
-  transition:border-color var(--dur-fast) var(--ease-io);
+.rail .ambient-note.attention{color:var(--text)}
+.rail .ambient-note.actionable{cursor:pointer;background:transparent;border:0;text-align:left;
+  width:100%;font:inherit;padding:0;display:block}
+.rail .ambient-note.actionable:hover .ambient-text{color:var(--violet)}
+.rail .ambient-act{
+  display:block;margin-top:6px;color:var(--violet);font:600 13.5px var(--sans);
 }
-#constLink{
-  display:block;width:100%;height:100%;cursor:pointer;text-decoration:none;color:inherit;
+/* Proposal detail + actions */
+.msg{white-space:pre-wrap;font-size:14px;line-height:1.55;color:var(--text);margin:0 0 4px}
+.prop-meta{display:flex;gap:8px;flex-wrap:wrap;padding:8px 0 0}
+.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px}
+.action-detail{margin:8px 0 4px}
+.action-detail > summary{
+  cursor:pointer;font:500 13px/1.3 var(--sans);color:var(--text);list-style:none;
 }
-#constWrap:hover{border-color:var(--line-strong)}
-#constCanvas{width:100%;height:100%;display:block}
-#constEmpty{
-  position:absolute;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;
-  font-family:var(--display);font-size:var(--fs-title3);color:var(--mut);
-  padding:var(--sp-6);text-align:center;gap:var(--sp-2);
-}
-#constEmpty .empty-act{
-  appearance:none;border:0;background:transparent;cursor:pointer;
-  font:500 var(--fs-footnote) var(--font);letter-spacing:var(--track-snug);
-  color:var(--navy);padding:var(--sp-1);
-}
-#constEmpty .empty-act:hover{text-decoration:underline}
-#worldCap{font:var(--fs-caption) var(--mono);color:var(--mut);margin:var(--sp-2) 0 0}
-.notepad-box{
-  width:100%;min-height:72px;resize:vertical;border:1px solid var(--line);
-  border-radius:var(--radius-sm);padding:var(--sp-2) var(--sp-3);
-  font:var(--fs-sub)/1.45 var(--font);color:var(--text);background:var(--panel);
-  transition:border-color var(--dur-fast) var(--ease-io);
-}
-.notepad-box:hover{border-color:var(--line-strong)}
-.notepad-box:focus{outline:2px solid var(--acc-35);outline-offset:1px}
-.jot-list{margin-top:var(--sp-2);display:flex;flex-direction:column;gap:0;max-height:180px;overflow:auto}
-.jot-item{
-  font-size:var(--fs-footnote);line-height:var(--lh-snug);padding:var(--sp-2) 0;
-  border-top:1px solid var(--hairline);color:var(--text);overflow-wrap:anywhere;min-width:0;
-}
-.jot-item:first-child{border-top:0;padding-top:0}
-.jot-item .when{font:var(--fs-caption2) var(--mono);color:var(--mut);margin-top:2px}
-.hz{display:flex;flex-wrap:wrap;gap:var(--sp-2)}
-.hz .chip{
-  border:1px solid var(--line);border-radius:var(--radius-sm);padding:var(--sp-2) var(--sp-3);
-  font-size:var(--fs-footnote);background:var(--panel);color:var(--navy);max-width:100%;
-}
-.hz .chip .when{font:500 var(--fs-caption2) var(--mono);color:var(--charcoal);margin-right:var(--sp-1)}
-.hz .chip .meta{font:var(--fs-caption2)/var(--lh-snug) var(--mono);color:var(--mut);margin-top:var(--sp-1)}
-.wm{display:flex;flex-wrap:wrap;gap:var(--sp-2)}
-.wm .slot{
-  border:1px solid var(--line);border-radius:var(--radius-sm);padding:var(--sp-2) var(--sp-3);
-  font-size:var(--fs-footnote);background:var(--panel);max-width:100%;min-width:0;
-  overflow-wrap:anywhere;
-}
-.wm .slot .k{
-  font:10px/1.2 var(--mono);color:var(--mut);
-  text-transform:uppercase;letter-spacing:var(--track-caps);
-}
-.fetch-err{
-  margin:0 var(--sp-6) var(--sp-3);padding:var(--sp-2) var(--sp-4);border-radius:var(--radius-sm);
-  background:color-mix(in srgb,var(--danger) 8%,transparent);
-  border:1px solid color-mix(in srgb,var(--danger) 25%,transparent);
-  color:var(--danger);font-size:var(--fs-footnote);
-  display:flex;gap:var(--sp-3);align-items:center;flex-wrap:wrap;
-}
-.fetch-err button{
-  font:500 var(--fs-caption)/1.2 var(--font);letter-spacing:var(--track-snug);
-  padding:var(--sp-1) var(--sp-3);border-radius:var(--radius-xs);cursor:pointer;
-  border:1px solid color-mix(in srgb,var(--danger) 35%,transparent);
-  background:var(--panel);color:var(--danger);
-}
-.foot{
-  margin-top:var(--sp-8);display:flex;gap:var(--sp-4);flex-wrap:wrap;align-items:center;
-  color:var(--mut);font-size:var(--fs-caption);
-}
-.foot a{color:var(--mut);transition:color var(--dur-fast) var(--ease-io)}
-.foot a:hover{color:var(--navy)}
-#spotlight{
-  display:none;position:fixed;inset:0;z-index:var(--z-modal);background:var(--overlay);
-  align-items:flex-start;justify-content:center;padding:12vh var(--sp-4) var(--sp-4);
-}
-#spotlight.open{display:flex}
-#spotlight .sheet{
-  width:min(560px,100%);max-height:calc(100dvh - 48px);overflow:auto;
-  background:var(--folio);border:1px solid var(--line);
-  border-radius:var(--radius-lg);box-shadow:var(--shadow-float);
-  padding:var(--sp-6) var(--sp-6) var(--sp-5);
-  animation:sheetIn var(--dur) var(--ease) both;
-}
-#spotlight .sheet h3{
-  font-family:var(--display);font-weight:400;font-size:var(--fs-title1);
-  letter-spacing:var(--track-tight);margin:0 0 var(--sp-2);color:var(--navy);
-}
-#spotBox{
-  width:100%;min-height:72px;resize:vertical;font:inherit;
-  padding:var(--sp-3) var(--sp-4);border:1px solid var(--line);
-  border-radius:var(--radius-sm);background:var(--bg-elev);color:var(--text);
-}
-.kbd{font:var(--fs-caption2) var(--mono);border:1px solid var(--line);border-radius:var(--radius-xs);padding:2px 6px}
-@media(max-width:720px){
-  .mast{padding-top:var(--sp-2)}
-  .top{padding:10px var(--sp-3)}
-  .wrap{padding:0 var(--sp-3) var(--sp-8)}
-  .fetch-err{margin:0 var(--sp-3) var(--sp-3)}
-  .foot{margin-top:var(--sp-5)}
-  #spotlight .sheet{width:100%;margin:0 var(--sp-2)}
-  #spotlight{padding:8vh var(--sp-2) var(--sp-2)}
-}
-@media(prefers-reduced-motion:reduce){
-  .mast,.band,#spotlight .sheet{animation:none}
-}
-.band .action-detail{margin:var(--sp-2) 0 var(--sp-1)}
-.band .action-detail > summary{
-  cursor:pointer;font:500 var(--fs-footnote)/1.3 var(--font);
-  letter-spacing:var(--track-snug);color:var(--navy);list-style:none;
-}
-.band .action-detail > summary::-webkit-details-marker{display:none}
-.band .action-detail > summary::before{
-  content:"▸ ";color:var(--acc);font-size:var(--fs-caption2);
-}
-.band .action-detail[open] > summary::before{content:"▾ "}
-.band .action-detail .detail-card{
-  margin-top:var(--sp-2);padding:var(--sp-3) var(--sp-4);border:1px solid var(--acc-22);
-  border-radius:var(--radius-sm);background:linear-gradient(180deg,#FFFCF7 0%,var(--surface) 100%);
+.action-detail > summary::-webkit-details-marker{display:none}
+.action-detail > summary::before{content:"▸ ";color:var(--acc);font-size:11px}
+.action-detail[open] > summary::before{content:"▾ "}
+.action-detail .detail-card{
+  margin-top:8px;padding:12px 14px;border:1px solid var(--acc-22);
+  border-radius:var(--r-md);background:var(--raised);
   border-left:3px solid var(--acc);
 }
-.band .action-detail .intent{font-size:var(--fs-sub);margin:0 0 var(--sp-2);color:var(--text)}
-.band .action-detail .steps{
+.action-detail .intent{font-size:14px;margin:0 0 8px;color:var(--text)}
+.action-detail .steps{
   margin:0;padding:0;list-style:none;
-  font:var(--fs-caption)/var(--lh-body) var(--mono);color:var(--mut);
+  font:12.5px/1.55 var(--sans);color:var(--mut);
 }
-.band .action-detail .steps li{padding:3px 0}
-.band .action-detail .payload{
-  margin-top:var(--sp-2);max-height:180px;overflow:auto;white-space:pre-wrap;
-  font:var(--fs-footnote)/1.45 var(--font);color:var(--text);padding:var(--sp-2) var(--sp-3);
-  background:var(--bg-elev);border:1px solid var(--line);border-radius:var(--radius-xs);
+.action-detail .steps li{padding:3px 0}
+.action-detail .payload{
+  margin-top:8px;max-height:180px;overflow:auto;white-space:pre-wrap;
+  font:13px/1.45 var(--sans);color:var(--text);padding:8px 12px;
+  background:var(--ink);border:1px solid var(--line);border-radius:var(--r-sm);
+}
+/* Quietly archived rows */
+.forgot-row{display:flex;gap:12px;align-items:center;justify-content:space-between;
+  padding:8px 0;border-top:1px solid var(--line);font-size:13.5px}
+.forgot-row:first-of-type{border-top:0;padding-top:0}
+.forgot-row .meta{font-size:12.5px;color:var(--faint)}
+.fetch-err{
+  max-width:1120px;margin:12px auto 0;padding:8px 16px;border-radius:var(--r-md);
+  background:color-mix(in srgb,var(--danger) 8%,transparent);
+  border:1px solid color-mix(in srgb,var(--danger) 25%,transparent);
+  color:var(--danger);font-size:13px;
+  display:flex;gap:12px;align-items:center;flex-wrap:wrap;
+}
+.fetch-err button{
+  font:500 12px/1.2 var(--sans);
+  padding:4px 12px;border-radius:var(--r-sm);cursor:pointer;
+  border:1px solid color-mix(in srgb,var(--danger) 35%,transparent);
+  background:transparent;color:var(--danger);
+}
+footer.foot{
+  max-width:1120px;margin:0 auto;padding:0 24px 40px;
+  color:var(--faint);font-size:13px;display:flex;gap:20px;flex-wrap:wrap;
+}
+.foot a{color:var(--faint);text-decoration:none}
+.foot a:hover{color:var(--mut)}
+@media(max-width:900px){
+  .grid{grid-template-columns:1fr}
+  .rail{order:2}
+}
+@media(max-width:720px){
+  .wrap{padding:28px 16px 48px}
+  .fetch-err{margin:12px 16px 0}
+}
+@media(prefers-reduced-motion:reduce){
+  header.day,section.card{animation:none}
 }
 </style>
 </head>
 <body>
 <header class="top">
   <a class="brand" href="/">@@MARK@@ @@BRAND@@</a>
-  <span class="page-sub">Today</span>
   @@NAV@@
-  <span class="spacer"></span>
-  <button class="btn" id="spotOpen" type="button">Ask <span class="kbd">⌘K</span></button>
 </header>
 @@APPROVAL@@
 <div id="shellErr" class="fetch-err" hidden role="alert">
@@ -226,120 +195,111 @@ body{
 </div>
 
 <div class="wrap">
-  <header class="mast">
-    <div class="date" id="dateLabel">—</div>
-    <p class="line" id="tagLine">Nothing needs you right now.</p>
+  <header class="day">
+    <h1 id="dateLabel">—</h1>
+    <span class="day-sub" id="tagLine">Nothing needs you right now.</span>
   </header>
 
-  <div class="stack">
-    <section class="band proposal" id="secProposal" hidden>
-      <h2 id="propTitle">Waiting on you</h2>
-      <p class="lead" id="propLead">From the existing offer pipeline — not a separate channel.</p>
-      <div class="msg" id="propMsg"></div>
-      <div class="row" id="propMeta" style="border:0;padding-top:8px"></div>
-      <details class="action-detail" id="propDetail">
-        <summary>What will happen</summary>
-        <div class="detail-card">
-          <p class="intent" id="propIntent"></p>
-          <ol class="steps" id="propSteps"></ol>
-          <div class="payload" id="propPayload" hidden></div>
+  <div class="grid">
+    <div class="main">
+      <section class="card proposal" id="secProposal" hidden>
+        <h2 id="propTitle">Waiting on you</h2>
+        <p class="hint" id="propLead">From the existing offer pipeline — not a separate channel.</p>
+        <div class="msg" id="propMsg"></div>
+        <div class="prop-meta" id="propMeta"></div>
+        <details class="action-detail" id="propDetail">
+          <summary>What will happen</summary>
+          <div class="detail-card">
+            <p class="intent" id="propIntent"></p>
+            <ol class="steps" id="propSteps"></ol>
+            <div class="payload" id="propPayload" hidden></div>
+          </div>
+        </details>
+        <div class="actions" id="propActions">
+          <form method="post" action="/approvals/resolve" class="approval-form" style="display:inline">
+            <input type="hidden" name="accept" value="1">
+            <input type="hidden" name="next" value="/today">
+            <button type="submit" class="go" id="propYes">Yes — proceed</button>
+          </form>
+          <form method="post" action="/approvals/resolve" class="approval-form" style="display:inline">
+            <input type="hidden" name="accept" value="0">
+            <input type="hidden" name="next" value="/today">
+            <button type="submit" class="quiet" id="propNo">Not now</button>
+          </form>
+          <div id="propChoices" hidden></div>
+          <a class="btnish" href="/chat">Open chat</a>
         </div>
-      </details>
-      <div class="actions" id="propActions">
-        <form method="post" action="/approvals/resolve" class="approval-form" style="display:inline">
-          <input type="hidden" name="accept" value="1">
-          <input type="hidden" name="next" value="/today">
-          <button type="submit" class="go" id="propYes">Yes — proceed</button>
-        </form>
-        <form method="post" action="/approvals/resolve" class="approval-form" style="display:inline">
-          <input type="hidden" name="accept" value="0">
-          <input type="hidden" name="next" value="/today">
-          <button type="submit" class="quiet" id="propNo">Not now</button>
-        </form>
-        <div id="propChoices" hidden></div>
-        <a class="btnish" href="/chat">Open chat</a>
-      </div>
-    </section>
+      </section>
 
-    <section class="band" id="secFocus">
-      <h2>In focus</h2>
-      <p class="lead">Working memory — the same attention field, chat, and planner share.</p>
-      <div class="wm" id="wmList"><div class="skel" aria-hidden="true"><span class="bone"></span><span class="bone"></span><span class="bone"></span></div></div>
-    </section>
-
-    <section class="band" id="secNotepad">
-      <h2>Meeting notes</h2>
-      <p class="lead" id="noteLead">Rough notes during a call become importance anchors — not fabricated quotes.</p>
-      <textarea class="notepad-box" id="noteBox" placeholder="pricing — pushback&#10;follow up with Sarah on deck" rows="3"></textarea>
-      <div class="actions" style="margin-top:10px">
-        <button type="button" class="go" id="noteSave">Save note</button>
-        <span class="pill" id="noteStatus" hidden role="status" aria-live="polite"></span>
-        <a class="btnish" id="noteOpenEnhanced" href="/meetings" hidden>Open enhanced note</a>
-      </div>
-      <div class="jot-list" id="jotList"></div>
-    </section>
-
-    <section class="band" id="secHorizon">
-      <h2>Coming up</h2>
-      <p class="lead">Horizon strip — what you are likely to need next.</p>
-      <div class="hz" id="hzList"><div class="skel" aria-hidden="true"><span class="bone"></span><span class="bone"></span></div></div>
-    </section>
-
-    <section class="band" id="secRisk">
-      <h2>At risk</h2>
-      <p class="lead">Open commitments that look overdue or neglected.</p>
-      <div id="riskList"><div class="skel rows" aria-hidden="true"><span class="bone"></span><span class="bone"></span></div></div>
-    </section>
-
-    <section class="band" id="secWorld">
-      <h2>World</h2>
-      <p class="lead">Your field — open Memory to explore.</p>
-      <div id="constWrap">
-        <a id="constLink" href="/memory?mode=constellation" aria-label="Open constellation in Memory">
-          <canvas id="constCanvas"></canvas>
-        </a>
-        <div id="constEmpty">
-          <span>Memories will gather here as you capture, chat, and work. Each node is something Sparrow can show its evidence for.</span>
-          <button type="button" class="empty-act" id="constStartCapture">Start capturing</button>
+      <section class="card" id="secFocus">
+        <h2>In focus</h2>
+        <p class="hint">Your working memory — chat and the planner share this attention field.</p>
+        <div class="chips" id="wmList"><div class="skel" aria-hidden="true"><span class="bone"></span><span class="bone"></span><span class="bone"></span></div></div>
+        <div class="chip-legend" id="wmLegend" hidden>
+          <span><span class="d person"></span>People</span>
+          <span><span class="d entity"></span>Topics &amp; entities</span>
+          <span>Numbers show memories gathered there</span>
         </div>
-      </div>
-      <div id="worldCap" hidden></div>
-    </section>
+      </section>
 
-    <section class="band" id="secForgot" hidden>
-      <h2>Quietly archived</h2>
-      <p class="lead">Compacted this month — restore anytime from Memory console.</p>
-      <div id="forgotList"></div>
-      <div class="actions">
-        <a class="btnish" href="/memory">Review in Memory</a>
-      </div>
-    </section>
-  </div>
+      <section class="card" id="secNotepad">
+        <h2>Meeting notes</h2>
+        <p class="hint" id="noteLead">Rough notes during a call become importance anchors — never fabricated quotes.</p>
+        <textarea class="notepad-box" id="noteBox" placeholder="pricing — pushback&#10;follow up with Sarah on deck" rows="3"></textarea>
+        <div class="note-row">
+          <button type="button" class="btn-primary" id="noteSave">Save note</button>
+          <span class="pill" id="noteStatus" hidden role="status" aria-live="polite"></span>
+          <a class="btn-link" id="noteOpenEnhanced" href="/meetings" hidden>Open enhanced note</a>
+          <p class="hint">Notes are anchored to whatever session is live.</p>
+        </div>
+        <div class="jot-list" id="jotList"></div>
+      </section>
 
-  <footer class="foot">
-    <span id="stageNote">Today · field + WM + offers</span>
-    <a href="/chat">Chat is secondary — full thread</a>
-    <a href="/memory">Memory console</a>
-  </footer>
-</div>
+      <section class="card" id="secRecent">
+        <h2>Recently noticed</h2>
+        <p class="hint">What @@BRAND@@ picked up today, in plain language. Raw detail stays one click away.</p>
+        <div id="recentList"><div class="skel rows" aria-hidden="true"><span class="bone"></span><span class="bone"></span></div></div>
+        <a class="see-all" href="/memory" id="recentSeeAll" hidden></a>
+      </section>
+    </div>
 
-<div id="spotlight" aria-hidden="true">
-  <div class="sheet" role="dialog" aria-modal="true" aria-label="Ask">
-    <h3>Ask @@BRAND@@</h3>
-    <p style="color:var(--mut);font-size:13px;margin:0 0 10px">Orientation only. Full thread lives in Chat.</p>
-    <textarea id="spotBox" placeholder="A question, a task, a follow-up…"></textarea>
-    <div class="actions" style="justify-content:flex-end">
-      <button type="button" class="quiet" id="spotCancel">Dismiss</button>
-      <a class="btnish" href="/chat">Full chat</a>
-      <button type="button" class="go" id="spotGo">Send</button>
+    <div class="rail">
+      <section class="card" id="secHorizon">
+        <h2>Coming up</h2>
+        <div class="hz" id="hzList"><div class="skel" aria-hidden="true"><span class="bone"></span></div></div>
+      </section>
+
+      <section class="card" id="secRisk">
+        <h2>At risk</h2>
+        <div id="riskList"><div class="skel rows" aria-hidden="true"><span class="bone"></span></div></div>
+      </section>
+
+      <section class="card" id="secMargin">
+        <h2>In the margin</h2>
+        <div id="ambientBox"><p class="ambient-note">Listening…</p></div>
+      </section>
+
+      <section class="card" id="secForgot" hidden>
+        <h2>Quietly archived</h2>
+        <p class="hint">Compacted this month — restore anytime.</p>
+        <div id="forgotList"></div>
+        <div class="actions" style="margin-top:8px">
+          <a class="btn-link" href="/memory">Review in Memory</a>
+        </div>
+      </section>
     </div>
   </div>
 </div>
 
+<footer class="foot">
+  <span id="stageNote">@@BRAND@@ @@VER@@ · local-first</span>
+  <a href="/chat">Chat — full thread</a>
+  <a href="/memory">Memory</a>
+</footer>
+
 @@UI_JS@@
 <script>
 MnemosMemory.set('lastRoute', '/today');
-let constCtl = null;
 let pollTimer = null;
 let _shellSig = null;
 let _shellFails = 0;
@@ -417,7 +377,6 @@ async function loadShell() {
     renderNotepad(data.notepad || {}, data.latest_meeting_note || null);
     renderHorizon((data.attention && data.attention.horizon) || []);
     renderRisk((data.attention && data.attention.at_risk) || []);
-    renderWorld(data.world || {});
     renderForgot(data.forgotten || []);
     updateMastLine(data);
     _shellSig = sig;  /* commit only after a clean render, or it never repaints */
@@ -432,6 +391,7 @@ document.getElementById('shellRetry')?.addEventListener('click', (ev) => {
     return;
   }
   loadShell();
+  loadRecent();
 });
 
 let _noteSessionId = null;
@@ -442,7 +402,7 @@ function renderNotepad(np, latestNote) {
     lead.textContent = (np.calendar_linked ? 'Live notes for ' : 'Notes · ')
       + np.title + ' — jots lift what matters in the transcript.';
   } else {
-    lead.textContent = 'Rough notes during a call become importance anchors — not fabricated quotes.';
+    lead.textContent = 'Rough notes during a call become importance anchors — never fabricated quotes.';
   }
   const enh = document.getElementById('noteOpenEnhanced');
   if (latestNote && latestNote.href) {
@@ -455,7 +415,7 @@ function renderNotepad(np, latestNote) {
   const list = document.getElementById('jotList');
   const jots = np.jots || [];
   if (!jots.length) {
-    list.innerHTML = '<div class="jot-item" style="color:var(--mut)">No notes yet this session.</div>';
+    list.innerHTML = '';
     return;
   }
   list.innerHTML = jots.map(j => {
@@ -506,13 +466,13 @@ document.getElementById('noteBox').addEventListener('keydown', e => {
   }
 });
 
+let _memToday = null; /* from Recently noticed — feeds the header sub-line */
 function updateMastLine(data) {
   const el = document.getElementById('tagLine');
-  const p = data.proposal;
-  const queued = data.queued_offers || 0;
-  const wm = ((data.attention && data.attention.wm) || []).length;
-  const hz = ((data.attention && data.attention.horizon) || []).length;
-  if (p || data.awaiting_approval) {
+  const p = data && data.proposal;
+  const queued = (data && data.queued_offers) || 0;
+  const wm = ((data && data.attention && data.attention.wm) || []).length;
+  if (p || (data && data.awaiting_approval)) {
     const n = 1 + (p && queued ? queued : 0);
     el.textContent = n === 1
       ? '1 decision waiting on you.'
@@ -520,9 +480,9 @@ function updateMastLine(data) {
     return;
   }
   const parts = [];
-  if (wm) parts.push(wm + (wm === 1 ? ' thing in focus' : ' things in focus'));
-  if (hz) parts.push(hz + ' coming up');
-  if (parts.length) el.textContent = parts.join(' · ') + '.';
+  if (wm) parts.push('<b>' + wm + (wm === 1 ? ' thing' : ' things') + '</b> in focus');
+  if (_memToday != null && _memToday > 0) parts.push(_memToday + ' memories');
+  if (parts.length) el.innerHTML = parts.join(' · ');
   else el.textContent = 'Nothing needs you right now.';
 }
 
@@ -611,37 +571,46 @@ function renderProposal(p, queued, waitingOn, packet) {
   }
 }
 
+/* In focus — entity chips. Circle violet = person, amber square = topic;
+   trailing faint number = how many memories cluster in the slot. */
 function renderWm(slots) {
   const el = document.getElementById('wmList');
+  const legend = document.getElementById('wmLegend');
   if (!slots.length) {
+    legend.hidden = true;
     el.innerHTML = MnemosRender.empty(
       'Nothing in working memory yet. Focus builds from what you capture — start a chat or turn on capture.',
       { link: { href: '/chat', label: 'Open Chat' } });
     return;
   }
-  el.innerHTML = slots.map(s =>
-    '<div class="slot"><div class="k">' + MnemosEsc(s.node_type || 'node')
-    + (s.cluster_n > 1 ? (' · ×' + s.cluster_n) : '') + '</div>'
-    + MnemosEsc(s.label || s.node_key || '') + '</div>'
-  ).join('');
+  legend.hidden = false;
+  el.innerHTML = slots.map(s => {
+    const person = (s.node_type === 'person') || (s.kind === 'person');
+    const label = s.label || s.node_key || '';
+    const n = (s.cluster_n && s.cluster_n > 1) ? s.cluster_n : null;
+    return '<button type="button" class="echip" title="' + MnemosEsc(label) + '">'
+      + '<span class="d ' + (person ? 'person' : 'entity') + '"></span>'
+      + '<span class="t">' + MnemosEsc(label) + '</span>'
+      + (n ? ('<span class="w">' + n + '</span>') : '')
+      + '</button>';
+  }).join('');
 }
 
 function renderHorizon(items) {
   const el = document.getElementById('hzList');
   if (!items.length) {
-    el.innerHTML = MnemosRender.empty(
-      'Nothing on the horizon yet. Open loops and upcoming calendar items appear here.',
-      { link: { href: '/onboarding?step=rhythm', label: 'Open rhythm setup' } });
+    el.innerHTML = '<div class="empty">Open loops and calendar items will land here as your day takes shape.'
+      + '<br><a href="/onboarding?step=rhythm">Set up your rhythm</a> or <a href="/onboarding">connect a calendar</a>.</div>';
     return;
   }
   el.innerHTML = items.map(i => {
-    const why = (i.reason || []).slice(0, 2).join(' · ');
-    const kind = i.loop_kind || i.source || '';
-    const meta = [i.when_label || '', kind === 'open_loop' ? '' : kind,
-      why].filter(Boolean).join(' · ');
-    return '<div class="chip"><span class="when">' + MnemosEsc(i.when_label || '')
-      + '</span>' + MnemosEsc(i.label || '')
-      + (meta ? ('<div class="meta">' + MnemosEsc(meta) + '</div>') : '')
+    let why = String((i.reason || [])[0] || '');
+    if (why.length > 90) why = why.slice(0, 87) + '…';
+    const when = (i.when_label && i.when_label !== (i.label || '')) ? i.when_label : '';
+    return '<div class="hz-item" title="' + MnemosEsc((i.reason || []).join(' · ')) + '">'
+      + (when ? ('<span class="when">' + MnemosEsc(when) + '</span>') : '')
+      + MnemosEsc(i.label || '')
+      + (why ? ('<div class="meta">' + MnemosEsc(why) + '</div>') : '')
       + '</div>';
   }).join('');
 }
@@ -649,11 +618,11 @@ function renderHorizon(items) {
 function renderRisk(items) {
   const el = document.getElementById('riskList');
   if (!items.length) {
-    el.innerHTML = MnemosRender.empty('No open commitments at risk.');
+    el.innerHTML = '<div class="ok-line"><span class="d"></span>No commitments look overdue.</div>';
     return;
   }
   el.innerHTML = items.map(r =>
-    '<div class="row"><div class="t">' + MnemosEsc(r.text || '')
+    '<div class="risk-row"><div class="t">' + MnemosEsc(r.text || '')
     + '<div class="meta">' + MnemosEsc((r.why || []).join(' · ') || 'at risk')
     + (r.subject ? (' · ' + MnemosEsc(r.subject)) : '') + '</div></div>'
     + '<span class="pill urgent">' + (r.risk != null ? Math.round(r.risk * 100) + '%' : 'risk')
@@ -661,36 +630,67 @@ function renderRisk(items) {
   ).join('');
 }
 
-function renderWorld(world) {
-  const nodes = world.nodes || [];
-  const empty = document.getElementById('constEmpty');
-  const cap = document.getElementById('worldCap');
-  empty.style.display = nodes.length ? 'none' : 'flex';
-  if (nodes.length) {
-    const active = nodes.filter(n => (n.layer || '') !== 'periphery').length;
-    cap.hidden = false;
-    cap.textContent = nodes.length + ' memories · ' + active + ' active today';
-  } else {
-    cap.hidden = true;
+/* Recently noticed — today's memories in plain language (spec §6 contract:
+   summary + meta line; raw payload only inside the disclosure). */
+function memDotClass(e) {
+  if ((e.source || '').indexOf('chat') === 0 || e.modality === 'chat') return 'chat';
+  return 'screen';
+}
+function memMeta(e) {
+  const src = (e.source || '').indexOf('desktop.') === 0 ? 'Screen'
+    : e.modality === 'vision' ? 'Screen'
+    : e.modality === 'audio' ? 'Audio'
+    : (e.source || '').indexOf('chat') === 0 ? 'Chat'
+    : (e.modality || 'Memory');
+  const when = e.time
+    ? new Date(e.time * 1000).toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'})
+    : '';
+  return [src, e.window || e.monitor || '', when].filter(Boolean).join(' · ');
+}
+async function loadRecent() {
+  const el = document.getElementById('recentList');
+  const seeAll = document.getElementById('recentSeeAll');
+  let j;
+  try {
+    j = await (await fetch('/console/events?limit=6', {cache: 'no-store'})).json();
+  } catch (e) { return; }
+  const events = (j && j.events) || [];
+  _memToday = (j && j.total) != null ? j.total : events.length;
+  if (seeAll) {
+    seeAll.hidden = !_memToday;
+    seeAll.textContent = 'See all ' + _memToday + ' memories in Memory →';
   }
-  if (!nodes.length) {
-    if (constCtl) { try { constCtl.destroy(); } catch (e) {} constCtl = null; }
+  updateMastLine(_lastShellData || {});
+  if (!events.length) {
+    el.innerHTML = '<div class="empty">Nothing captured yet today. Memories appear as you '
+      + 'work, chat, and record — <a href="/chat">start a chat</a> or turn on capture.</div>';
     return;
   }
-  const payload = {
-    nodes: nodes,
-    edges: world.edges || [],
-    selection: world.selection,
-    mode: world.mode,
-    context: world.context,
-  };
-  if (constCtl) constCtl.update(payload);
-  else {
-    constCtl = MnemosConstellation.mount(
-      document.getElementById('constCanvas'), payload, {
-        mode: 'thumbnail',
-        href: '/memory?mode=constellation',
-      });
+  el.innerHTML = events.map(e => {
+    const text = e.summary || e.text || '(empty)';
+    const raw = e.summary && e.text && e.text !== e.summary ? e.text : null;
+    return '<div class="mem"><span class="d ' + memDotClass(e) + '"></span><div>'
+      + '<p>' + MnemosEsc(text) + '</p>'
+      + '<p class="meta">' + MnemosEsc(memMeta(e)) + '</p>'
+      + (raw ? ('<details class="disclosure"><summary>Show raw capture</summary><pre>'
+        + MnemosEsc(raw) + '</pre></details>') : '')
+      + '</div></div>';
+  }).join('');
+}
+let _lastShellData = null;
+const _origLoadShell = loadShell;
+loadShell = async function () {
+  await _origLoadShell();
+  /* keep for mast-line recompute when the memory count arrives */
+  try { _lastShellData = JSON.parse(_shellSig); } catch (e) {}
+};
+
+async function loadAmbient() {
+  try {
+    const intel = await (await fetch('/home/intelligence')).json();
+    MnemosAmbient.render(document.getElementById('ambientBox'), intel.ambient || []);
+  } catch (e) {
+    MnemosAmbient.render(document.getElementById('ambientBox'), [{text: 'Listening…'}]);
   }
 }
 
@@ -700,8 +700,8 @@ function renderForgot(items) {
   if (!items.length) { sec.hidden = true; return; }
   sec.hidden = false;
   el.innerHTML = items.map(f =>
-    '<div class="row"><div class="t">' + MnemosEsc(f.summary || ('event ' + f.event_id))
-    + '<div class="meta">event ' + MnemosEsc(String(f.event_id || '')) + '</div></div>'
+    '<div class="forgot-row"><span>' + MnemosEsc(f.summary || ('event ' + f.event_id))
+    + '</span>'
     + '<button type="button" class="quiet" data-eid="' + MnemosEsc(String(f.event_id || ''))
     + '">Restore</button></div>'
   ).join('');
@@ -754,17 +754,7 @@ document.querySelectorAll('#secProposal form.approval-form').forEach(form => {
   });
 });
 
-const startCap = document.getElementById('constStartCapture');
-if (startCap) {
-  startCap.onclick = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (window.MnemosCapture && MnemosCapture.openPrivacy) MnemosCapture.openPrivacy();
-    else location.href = '/chat';
-  };
-}
-
-/* §7 review fixtures: ?empty=focus|horizon|risk|world|all */
+/* §7 review fixtures: ?empty=focus|horizon|risk|recent|all */
 (function applyEmptyFixture() {
   try {
     const which = new URLSearchParams(location.search).get('empty');
@@ -772,59 +762,38 @@ if (startCap) {
     const orig = loadShell;
     loadShell = async function () {
       await orig();
-      const data = { attention: { wm: [], horizon: [], at_risk: [] }, world: { nodes: [], edges: [] },
+      const data = { attention: { wm: [], horizon: [], at_risk: [] },
         proposal: null, queued_offers: 0, awaiting_approval: false, forgotten: [] };
       if (which === 'focus' || which === 'all') renderWm([]);
       if (which === 'horizon' || which === 'all') renderHorizon([]);
       if (which === 'risk' || which === 'all') renderRisk([]);
-      if (which === 'world' || which === 'all') renderWorld({ nodes: [], edges: [] });
       if (which === 'all') updateMastLine(data);
     };
+    if (which === 'recent' || which === 'all') {
+      const origRecent = loadRecent;
+      loadRecent = async function () {
+        await origRecent();
+        document.getElementById('recentList').innerHTML =
+          '<div class="empty">Nothing captured yet today. Memories appear as you '
+          + 'work, chat, and record — <a href="/chat">start a chat</a> or turn on capture.</div>';
+      };
+    }
   } catch (e) {}
 })();
 
-function openSpot() {
-  MnemosDialog.open(document.getElementById('spotlight'), {
-    lockScroll: true,
-    focus: '#spotBox',
-    onEscape: closeSpot,
-  });
-}
-function closeSpot() {
-  MnemosDialog.close(document.getElementById('spotlight'));
-}
-document.getElementById('spotOpen').onclick = openSpot;
-document.getElementById('spotCancel').onclick = closeSpot;
-document.getElementById('spotlight').addEventListener('click', e => {
-  if (e.target.id === 'spotlight') closeSpot();
-});
-async function sendSpot() {
-  const msg = (document.getElementById('spotBox').value || '').trim();
-  if (!msg) return;
-  closeSpot();
-  document.getElementById('spotBox').value = '';
-  try {
-    await fetch('/chat', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({message: msg}),
-    });
-  } catch (e) {}
-  window.location.href = '/chat';
-}
-document.getElementById('spotGo').onclick = sendSpot;
-document.addEventListener('keydown', e => {
-  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
-    e.preventDefault(); openSpot();
-  }
-});
-
 loadShell();
-pollTimer = setInterval(() => { if (!document.hidden) loadShell(); }, 12000);
+loadRecent();
+loadAmbient();
+pollTimer = setInterval(() => {
+  if (!document.hidden) { loadShell(); loadRecent(); }
+}, 12000);
 if (window.MnemosFieldStream) {
   const live = MnemosFieldStream.connect(() => loadShell());
-  if (live) clearInterval(pollTimer), pollTimer = setInterval(() => { if (!document.hidden) loadShell(); }, 45000);
+  if (live) clearInterval(pollTimer), pollTimer = setInterval(() => {
+    if (!document.hidden) { loadShell(); loadRecent(); }
+  }, 45000);
 }
 </script>
 </body>
 </html>
-""")
+""").replace("@@VER@@", _ver)

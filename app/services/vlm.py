@@ -40,6 +40,7 @@ _SCHEMA = {
     "type": "object",
     "properties": {
         "description": {"type": "string", "description": "One or two sentences describing the scene."},
+        "summary": {"type": "string", "description": "One plain-language sentence for the user's memory feed, second person (\"You were debugging the web app demo — VS Code, Python, dev tools open\"), 140 characters or fewer. No JSON, no monitor names, no jargon."},
         "ocr_text": {"type": "string", "description": "ALL legible text on the page/board, verbatim, preserving line order. Empty string if none."},
         "people_count": {"type": "integer", "description": "Number of distinct people visible."},
         "objects": {"type": "array", "items": {"type": "string"}, "description": "Salient objects/entities (whiteboard, laptop, notebook, slide, document, ...)."},
@@ -75,8 +76,8 @@ _SCHEMA = {
             "ambiguous handwriting, blur, glare, or a partially-visible page.",
         },
     },
-    "required": ["description", "ocr_text", "people_count", "objects", "scene_type",
-                 "content_type", "title", "items", "confidence"],
+    "required": ["description", "summary", "ocr_text", "people_count", "objects",
+                 "scene_type", "content_type", "title", "items", "confidence"],
     "additionalProperties": False,
 }
 
@@ -118,7 +119,11 @@ _SYSTEM = (
     "  - none      : no page of content (just a person, a room, an object)\n"
     "Transcribe the discrete entries into `items` (one to-do/question/row/bullet "
     "per string), and put any heading in `title`. Read handwriting carefully. "
-    "Set `confidence` honestly — low when the text is hard to read."
+    "Set `confidence` honestly — low when the text is hard to read.\n"
+    "Also write `summary`: ONE plain-language sentence for the user's own "
+    "memory feed, addressed to them in the second person ('You were …'), "
+    "140 characters or fewer. Plain words only — no JSON, no jargon, no "
+    "monitor or window names."
 )
 
 _USER = "Extract the structured summary of this frame as JSON matching the schema."
@@ -155,7 +160,8 @@ def _parse_json(text: str) -> dict[str, Any]:
             except Exception:
                 pass
     # Unparseable -> force escalation by reporting zero confidence on an unknown page.
-    return {"description": t[:200], "ocr_text": "", "people_count": 0, "objects": [],
+    return {"description": t[:200], "summary": "", "ocr_text": "",
+            "people_count": 0, "objects": [],
             "scene_type": "", "content_type": "none", "title": "", "items": [],
             "item_confidences": [], "confidence": 0.0}
 

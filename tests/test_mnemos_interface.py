@@ -341,8 +341,11 @@ class ThemeApplyTests(unittest.TestCase):
         self.assertIn("/static/css/mnemos-chrome.css", page)
         self.assertIn("/static/js/mnemos-ui.js", page)
         self.assertIn("Sparrow", page)
-        self.assertIn("/static/ravenry-mark.png", apply(
-            "<html>@@MARK@@</html>"))
+        # The brand mark is an inline SVG bird on the accent token (UI spec §2),
+        # not an image fetch — it recolors with the theme and needs no filter.
+        marked = apply("<html>@@MARK@@</html>")
+        self.assertIn('<svg class="mark"', marked)
+        self.assertIn("var(--violet)", marked)
 
 
 if __name__ == "__main__":

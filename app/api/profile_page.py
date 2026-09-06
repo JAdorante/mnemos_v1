@@ -25,9 +25,9 @@ PROFILE_PAGE = _mnemos(r"""<!doctype html>
 @@CHROME@@
 *{box-sizing:border-box}
 body{margin:0;min-height:100vh;font:var(--fs-body)/var(--lh-body) var(--font);color:var(--text);
-  background:linear-gradient(180deg,#FBF9F4 0%,var(--paper) 40%,var(--workspace) 100%)}
+  background:linear-gradient(180deg,#131318 0%,var(--paper) 40%,var(--workspace) 100%)}
 .top{display:flex;align-items:center;gap:var(--sp-3);flex-wrap:wrap;padding:var(--sp-3) var(--sp-5)}
-.wrap{max-width:860px;margin:0 auto;padding:var(--sp-2) var(--sp-6) var(--sp-12)}
+.wrap{max-width:1120px;margin:0 auto;padding:var(--sp-2) var(--sp-6) var(--sp-12)}
 .mast h1{font-family:var(--display);font-weight:400;font-size:clamp(2rem,5vw,2.8rem);
   letter-spacing:var(--track-tight);color:var(--navy);margin:var(--sp-4) 0 var(--sp-2);line-height:1}
 .lead{color:var(--mut);font-size:var(--fs-footnote);line-height:var(--lh-snug);margin:0 0 var(--sp-2)}
@@ -43,8 +43,8 @@ body{margin:0;min-height:100vh;font:var(--fs-body)/var(--lh-body) var(--font);co
 .idcard .contact{margin-top:var(--sp-4);display:flex;flex-direction:column;gap:var(--sp-2);
   font:var(--fs-footnote)/var(--lh-snug) var(--font);color:var(--text)}
 .idcard .contact div{display:flex;flex-wrap:wrap;gap:var(--sp-2) var(--sp-3);align-items:baseline}
-.idcard .contact span{color:var(--mut);font:var(--fs-caption2)/1.2 var(--mono);
-  letter-spacing:var(--track-caps);text-transform:uppercase;min-width:7.5rem}
+.idcard .contact span{color:var(--mut);font:12px/1.2 var(--sans);
+  min-width:7.5rem}
 .idcard a{font-size:var(--fs-caption)}
 .card{display:flex;gap:var(--sp-3);align-items:flex-start;border:1px solid var(--line);
   border-radius:var(--radius);background:var(--panel);padding:var(--sp-3) var(--sp-4);
@@ -53,8 +53,8 @@ body{margin:0;min-height:100vh;font:var(--fs-body)/var(--lh-body) var(--font);co
 .card:hover{border-color:var(--line-strong)}
 .card .t{flex:1;min-width:0}
 .card .meta{color:var(--mut);font-size:var(--fs-caption);margin-top:var(--sp-1)}
-.card .pill{font:var(--fs-caption2)/1.2 var(--mono);letter-spacing:var(--track-caps);
-  text-transform:uppercase;border:1px solid var(--hairline);border-radius:var(--radius-full);
+.card .pill{font:12px/1.2 var(--sans);letter-spacing:var(--track-caps);
+  border:1px solid var(--hairline);border-radius:var(--radius-full);
   padding:3px 9px;color:var(--mut);white-space:nowrap;background:var(--panel-2)}
 .acts{display:flex;gap:var(--sp-1);flex-shrink:0}
 .acts button{border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--panel);
@@ -72,7 +72,7 @@ body{margin:0;min-height:100vh;font:var(--fs-body)/var(--lh-body) var(--font);co
   font:500 var(--fs-footnote)/1.2 var(--font);letter-spacing:var(--track-snug);
   color:var(--mut);cursor:pointer;padding:8px 16px}
 .tabs button:hover{color:var(--navy);background:var(--panel-2)}
-.tabs button.on{color:var(--navy);background:rgba(11,19,32,.06);border-color:var(--line-strong)}
+.tabs button.on{color:var(--navy);background:var(--ink-06);border-color:var(--line-strong)}
 .psearch{width:100%;margin-top:var(--sp-3);padding:7px 12px;min-height:36px;
   border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--panel);
   font:var(--fs-sub)/1.4 var(--font);color:var(--text);
@@ -91,8 +91,8 @@ body{margin:0;min-height:100vh;font:var(--fs-body)/var(--lh-body) var(--font);co
   box-shadow:var(--shadow-surface)}
 .pdetail h3{font-family:var(--display);font-weight:400;font-size:var(--fs-title2);
   letter-spacing:var(--track-tight);color:var(--navy);margin:0}
-.chip{display:inline-block;font:var(--fs-caption2)/1.2 var(--mono);
-  letter-spacing:var(--track-caps);text-transform:uppercase;border:1px solid var(--hairline);
+.chip{display:inline-block;font:12px/1.2 var(--sans);
+  border:1px solid var(--hairline);
   border-radius:var(--radius-full);padding:3px 9px;color:var(--mut);
   margin:var(--sp-1) var(--sp-1) 0 0;background:var(--panel-2)}
 .pfield{display:flex;gap:var(--sp-2);margin-top:var(--sp-3)}
@@ -108,8 +108,8 @@ body{margin:0;min-height:100vh;font:var(--fs-body)/var(--lh-body) var(--font);co
   font:500 var(--fs-caption)/1.2 var(--font);letter-spacing:var(--track-snug);
   color:var(--navy);cursor:pointer;padding:7px 12px;min-height:36px;white-space:nowrap}
 .pfield button:hover{background:var(--panel-2);border-color:var(--line-strong)}
-.plabel{font:500 var(--fs-caption2)/1.2 var(--mono);letter-spacing:var(--track-caps);
-  color:var(--mut);text-transform:uppercase;margin-top:var(--sp-5)}
+.plabel{font:600 13px/1.2 var(--sans);letter-spacing:var(--track-caps);
+  color:var(--mut);margin-top:var(--sp-5)}
 .forget-person{margin-top:var(--sp-4);border:1px solid var(--line);border-radius:var(--radius-sm);
   background:var(--panel);font:500 var(--fs-caption)/1.2 var(--font);
   letter-spacing:var(--track-snug);color:var(--danger);
@@ -215,7 +215,7 @@ body{margin:0;min-height:100vh;font:var(--fs-body)/var(--lh-body) var(--font);co
       <h2>Tasks &amp; commitments</h2>
       <p class="lead">The full working board — add your own, or manage what the ears
       and chat picked up. A commitment is a promise to someone; a task is just work.</p>
-      <div class="pdetail" style="border-left-color:var(--acc,#B87333)">
+      <div class="pdetail" style="border-left-color:var(--acc)">
         <div class="plabel">Add one</div>
         <div class="pfield">
           <select id="wKind" style="border:1px solid var(--line);border-radius:9px;background:var(--panel);font:13.5px var(--font);color:var(--text);padding:7px 10px">
@@ -270,7 +270,7 @@ function fmtWhen(ts){
 }
 
 function card(f, isWork){
-  const conf=f.confidence!=null?Math.round(f.confidence*100)+'%':'';
+  const conf=(f.confidence!=null&&f.confidence<0.7)?'low confidence':'';
   const rev=f.review==='approved'?'<span class="confirmed">confirmed</span>'
     :(f.review==='edited'?'edited by you':'');
   const meta=[f.kind,fmtWhen(f.updated_at),conf,rev].filter(Boolean).join(' · ');
@@ -419,7 +419,11 @@ function renderPeopleList(){
       +(p.is_self?' <span class="chip">you</span>':'')
       +(p.promotion_state==='candidate'?' <span class="chip">candidate</span>':'')
       +(p.from_calendar?' <span class="chip">calendar</span>':'')
-      +'<div class="meta">connection '+p.weight.toFixed(1)+' · '+fmtSeen(p.last_seen)+'</div></div>'
+      +'<div class="meta">'
+      +((p.mentions_7d||0)>0?(p.mentions_7d+' mention'+(p.mentions_7d===1?'':'s')+' this week · '):'')
+      +'<span title="connection strength (score '+p.weight.toFixed(1)+')">'
+      +'●'.repeat(Math.min(p.strength||1,4))+'○'.repeat(4-Math.min(p.strength||1,4))+'</span>'
+      +' · '+fmtSeen(p.last_seen)+'</div></div>'
       +'<span class="meta">'+(openPersonId===p.id?'▾':'▸')+'</span></div>';
     return row+(openPersonId===p.id?'<div class="pdetail" id="pDetail"><div class="lead">Loading…</div></div>':'');
   }).join('');
@@ -456,7 +460,9 @@ function detailSrcChip(d){
 async function loadPersonDetail(pid){
   const host=document.getElementById('pDetail'); if(!host) return;
   const p=await (await fetch('/people/'+pid)).json();
-  let h='<h3>'+MnemosEsc(p.name)+'</h3>';
+  // The id is what Merge… asks for — it has to be findable without devtools.
+  let h='<h3>'+MnemosEsc(p.name)
+    +' <span class="chip" style="font-family:var(--mono)" title="Person id — Merge… on another card asks for this number">#'+pid+'</span></h3>';
   if(p.aliases&&p.aliases.length)
     h+='<div>'+p.aliases.map(a=>'<span class="chip">'+MnemosEsc(a)+'</span>').join('')+'</div>';
   h+='<div class="plabel">Details — add phones, orgs, and teams; × removes one value</div>';
@@ -480,7 +486,7 @@ async function loadPersonDetail(pid){
         +'<button data-pact="detail-add" data-key="'+k+'">Add</button></div>';
     }else{
       const d=(p.details||{})[k]||{};
-      h+='<div class="pfield"><span style="min-width:96px;align-self:center;font:11px var(--mono);letter-spacing:.05em;text-transform:uppercase;color:var(--mut)">'+label+'</span>'
+      h+='<div class="pfield"><span style="min-width:96px;align-self:center;font:11px var(--sans);color:var(--mut)">'+label+'</span>'
         +'<input id="pd_'+k+'" value="'+MnemosEsc(d.value||'')+'" placeholder="unknown — type to set">'
         +detailSrcChip(d)
         +'<button data-pact="detail" data-key="'+k+'">Save</button></div>';
@@ -553,7 +559,8 @@ async function personAct(pid, act, key, ref, value){
     await fetch('/people/'+pid+'/confirm',{method:'POST',
       headers:{'Content-Type':'application/json'},body:JSON.stringify({state:'contact'})});
   }else if(act==='merge'){
-    const other=prompt('Id of the person to merge INTO this one (absorbed id):');
+    const other=prompt('Id of the duplicate to absorb into this person — '
+      +'open the duplicate\'s card and use the #number beside their name:');
     if(!other) return;
     const r=await fetch('/people/'+pid+'/soft-merge',{method:'POST',
       headers:{'Content-Type':'application/json'},
@@ -604,7 +611,10 @@ function entityRowHtml(x){
   const row='<div class="prow" data-eid="'+x.id+'">'
     +'<div style="flex:1"><span class="nm">'+MnemosEsc(x.name)+'</span>'
     +' <span class="chip">'+MnemosEsc(x.kind)+'</span>'+brief
-    +'<div class="meta">connection '+x.weight.toFixed(1)+' · '+fmtSeen(x.last_seen)+'</div></div>'
+    +'<div class="meta"><span title="connection strength (score '+x.weight.toFixed(1)+')">'
+    +'●'.repeat(Math.min(1+(x.weight>=5)+(x.weight>=15)+(x.weight>=40),4))
+    +'○'.repeat(4-Math.min(1+(x.weight>=5)+(x.weight>=15)+(x.weight>=40),4))+'</span>'
+    +' · '+fmtSeen(x.last_seen)+'</div></div>'
     +'<span class="meta">'+(openEntityId===x.id?'▾':'▸')+'</span></div>';
   return row+(openEntityId===x.id?'<div class="pdetail" id="eDetail"><div class="lead">Loading…</div></div>':'');
 }
@@ -673,7 +683,7 @@ async function loadEntityDetail(eid){
       : (d.value?'<span class="chip" style="align-self:center" title="'+MnemosEsc(d.quote||'mined from memory')+'">from memory</span>':'');
     if(d.stale) src+='<span class="chip" style="align-self:center" title="Nothing has confirmed this in '
       +Math.round(d.age_days)+' days (its freshness window is '+Math.round(d.freshness_days)+')">stale</span>';
-    h+='<div class="pfield"><span style="min-width:96px;align-self:center;font:11px var(--mono);letter-spacing:.05em;text-transform:uppercase;color:var(--mut)">'+label+'</span>'
+    h+='<div class="pfield"><span style="min-width:96px;align-self:center;font:11px var(--sans);color:var(--mut)">'+label+'</span>'
       +'<input id="ed_'+k+'" value="'+MnemosEsc(d.value||'')+'" placeholder="unknown — type to set">'
       +src
       +'<button data-eact="detail" data-key="'+k+'">Save</button></div>';

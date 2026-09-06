@@ -25,7 +25,7 @@ FLOATERS = (
     "header.top, .top",
     "#mnemosApproval.on",
     "#pastPanel.open",
-    "#spotlight.open",
+    "#mnemosAsk.open",
     "#mnemosPrivacy.open",
 )
 

@@ -30,3 +30,4 @@ test_full_suite_out.txt
 
 # Unsloth JIT-compiled kernels (regenerated per training run)
 /unsloth_compiled_cache/
+deploy/hosted/gb10/.env

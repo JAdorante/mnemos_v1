@@ -1,0 +1,106 @@
+# Sparrow hosted pilot on the GB10 (arm64 Grace + Blackwell GPU).
+#
+# Posture: CPU ASR inside each container (CTranslate2 aarch64 wheels are
+# CPU-only; the Grace cores handle a few bursty users fine), GPU spent on the
+# ONE shared Ollama running on the host for the text tier. No NVIDIA Docker
+# runtime needed.
+#
+#   cp .env.example .env   # then fill in one token per user
+#   docker compose up -d --build
+#
+# Each container binds to loopback only; the TLS reverse proxy (tailscale
+# serve or Caddy) is the only way in. TLS is mandatory: /capture uses
+# getUserMedia, which browsers refuse outside a secure context.
+
+x-sparrow: &sparrow
+  build:
+    context: ../../..
+    dockerfile: deploy/hosted/Dockerfile
+  image: sparrow-hosted
+  restart: unless-stopped
+  extra_hosts:
+    - "host.docker.internal:host-gateway"   # reach host Ollama from Linux
+
+x-env: &sparrow-env
+  QUILL_TEXT_LOCAL: "1"
+  # 11435 = the ollama-proxy below; host Ollama itself is loopback-only.
+  QUILL_OLLAMA_URL: http://host.docker.internal:11435
+  OLLAMA_HOST: host.docker.internal:11435
+  # The app's default local model (llama3.2) isn't pulled on this box.
+  QUILL_TEXT_LOCAL_MODEL: qwen2.5:7b-instruct
+
+services:
+  # Host Ollama binds 127.0.0.1 only and changing that needs root; this
+  # host-network socat re-publishes it on 0.0.0.0:11435 without sudo. Drop it
+  # (and switch the URLs back to 11434) once OLLAMA_HOST=0.0.0.0 is set on
+  # the systemd service.
+  ollama-proxy:
+    image: alpine/socat
+    restart: unless-stopped
+    network_mode: host
+    command: TCP-LISTEN:11435,fork,reuseaddr TCP:127.0.0.1:11434
+
+  sparrow-user1:
+    <<: *sparrow
+    ports:
+      - "127.0.0.1:8001:8000"
+    volumes:
+      - sparrow-user1-data:/srv/sparrow/data
+    environment:
+      <<: *sparrow-env
+      QUILL_API_TOKEN: "${SPARROW_USER1_TOKEN:?set a per-user token in .env}"
+      QUILL_LORA_TAG_SUFFIX: user1
+      # Web-goal pilot: cloud routing + browser agent for this user only.
+      # Optional (defaults empty) so the other users stay local-only chat.
+      ANTHROPIC_API_KEY: "${SPARROW_ANTHROPIC_KEY:-}"
+
+  sparrow-user2:
+    <<: *sparrow
+    ports:
+      - "127.0.0.1:8002:8000"
+    volumes:
+      - sparrow-user2-data:/srv/sparrow/data
+    environment:
+      <<: *sparrow-env
+      QUILL_API_TOKEN: "${SPARROW_USER2_TOKEN:?set a per-user token in .env}"
+      QUILL_LORA_TAG_SUFFIX: user2
+
+  sparrow-user3:
+    <<: *sparrow
+    ports:
+      - "127.0.0.1:8003:8000"
+    volumes:
+      - sparrow-user3-data:/srv/sparrow/data
+    environment:
+      <<: *sparrow-env
+      QUILL_API_TOKEN: "${SPARROW_USER3_TOKEN:?set a per-user token in .env}"
+      QUILL_LORA_TAG_SUFFIX: user3
+
+  sparrow-user4:
+    <<: *sparrow
+    ports:
+      - "127.0.0.1:8004:8000"
+    volumes:
+      - sparrow-user4-data:/srv/sparrow/data
+    environment:
+      <<: *sparrow-env
+      QUILL_API_TOKEN: "${SPARROW_USER4_TOKEN:?set a per-user token in .env}"
+      QUILL_LORA_TAG_SUFFIX: user4
+
+  sparrow-user5:
+    <<: *sparrow
+    ports:
+      - "127.0.0.1:8005:8000"
+    volumes:
+      - sparrow-user5-data:/srv/sparrow/data
+    environment:
+      <<: *sparrow-env
+      QUILL_API_TOKEN: "${SPARROW_USER5_TOKEN:?set a per-user token in .env}"
+      QUILL_LORA_TAG_SUFFIX: user5
+
+volumes:
+  sparrow-user1-data:
+  sparrow-user2-data:
+  sparrow-user3-data:
+  sparrow-user4-data:
+  sparrow-user5-data:

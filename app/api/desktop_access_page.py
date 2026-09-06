@@ -15,7 +15,7 @@ body{
   margin:0;font:14px/1.55 var(--font);color:var(--text);
   background:
     radial-gradient(900px 480px at 6% -8%, var(--acc-05), transparent 55%),
-    radial-gradient(700px 400px at 95% 5%, rgba(30,91,79,.04), transparent 50%),
+    radial-gradient(700px 400px at 95% 5%, rgba(95,179,158,.04), transparent 50%),
     var(--paper);
   min-height:100vh;
 }
@@ -25,10 +25,10 @@ body{
 }
 .page-sub{margin-left:-4px}
 #msg{font-family:var(--mono);font-size:12px;color:var(--mut)}
-.lead{
-  color:var(--mut);font-size:13px;padding:16px 24px 0;max-width:1100px;
-}
-main{padding:16px 24px 40px;max-width:1100px}
+.lead{color:var(--mut);font-size:13.5px;margin:0 0 4px}
+.wrap{max-width:1120px;margin:0 auto;padding:20px 24px 48px}
+.wrap > h1{font-family:var(--serif);font-weight:500;font-size:28px;margin:8px 0 6px;color:var(--text)}
+main{padding:12px 0 0}
 .env{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px}
 .chip{
   background:var(--panel);border:1px solid var(--line);border-radius:12px;
@@ -36,19 +36,19 @@ main{padding:16px 24px 40px;max-width:1100px}
   transition:border-color .28s var(--ease),transform .22s var(--ease),box-shadow .28s var(--ease);
   animation:fadeUp .3s var(--ease) both;
 }
-.chip:hover{transform:translateY(-1px);box-shadow:0 4px 14px rgba(11,19,32,.07)}
+.chip:hover{transform:translateY(-1px);box-shadow:0 4px 14px rgba(0,0,0,.35)}
 .chip b{color:var(--text)}.chip .k{color:var(--mut)}
-.chip.warn{border-color:rgba(199,138,44,.4)}.chip.ok{border-color:rgba(46,111,87,.4)}
+.chip.warn{border-color:rgba(217,160,63,.4)}.chip.ok{border-color:rgba(92,189,143,.4)}
 table{width:100%;border-collapse:collapse;font-size:13px;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;box-shadow:var(--shadow)}
 th,td{text-align:left;padding:11px 12px;border-bottom:1px solid var(--line);vertical-align:top}
 tr:last-child td{border-bottom:none}
-th{color:var(--mut);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.04em;background:var(--panel-2)}
+th{color:var(--mut);font-weight:600;font-size:11px;background:var(--panel-2)}
 tbody tr{transition:background .22s var(--ease)}
 tbody tr:hover{background:var(--acc-05)}
 .badge{display:inline-block;border-radius:999px;padding:2px 9px;font-size:11px;font-weight:600}
-.b-ok{background:rgba(46,111,87,.1);color:var(--ok);border:1px solid rgba(46,111,87,.28)}
-.b-no{background:rgba(166,71,71,.1);color:var(--danger);border:1px solid rgba(166,71,71,.28)}
-.b-off{background:rgba(199,138,44,.1);color:var(--warn);border:1px solid rgba(199,138,44,.28)}
+.b-ok{background:rgba(92,189,143,.1);color:var(--ok);border:1px solid rgba(92,189,143,.28)}
+.b-no{background:rgba(224,113,106,.1);color:var(--danger);border:1px solid rgba(224,113,106,.28)}
+.b-off{background:rgba(217,160,63,.1);color:var(--warn);border:1px solid rgba(217,160,63,.28)}
 .path{font-family:var(--mono);font-size:11px;color:var(--mut);word-break:break-all;cursor:pointer;transition:color .22s var(--ease)}
 .path:hover{color:var(--navy)}
 .caps{color:var(--mut);font-size:11px}
@@ -58,8 +58,8 @@ button{
   cursor:pointer;margin-right:6px;
 }
 button:hover{background:var(--panel-2);border-color:var(--acc-28)}
-button.danger{border-color:rgba(166,71,71,.4);color:var(--danger)}
-button.danger:hover{background:rgba(166,71,71,.1);border-color:rgba(166,71,71,.55);box-shadow:0 4px 14px rgba(166,71,71,.12)}
+button.danger{border-color:rgba(224,113,106,.4);color:var(--danger)}
+button.danger:hover{background:rgba(224,113,106,.1);border-color:rgba(224,113,106,.55);box-shadow:0 4px 14px rgba(224,113,106,.12)}
 h2{
   font-family:var(--display);font-size:1.15rem;color:var(--navy);
   font-weight:400;letter-spacing:-.01em;margin:28px 0 10px;text-transform:none;
@@ -77,12 +77,12 @@ h2 .caps{font-family:var(--font);font-size:12px;letter-spacing:0;text-transform:
   padding:14px 16px;min-width:104px;box-shadow:var(--shadow);animation:fadeUp .35s var(--ease) both;
 }
 .stat .n{font-family:var(--display);font-size:1.65rem;font-weight:400;letter-spacing:-.02em;color:var(--navy)}
-.stat .l{color:var(--mut);font-size:11px;text-transform:uppercase;letter-spacing:.03em;margin-top:3px}
+.stat .l{color:var(--mut);font-size:11px;margin-top:3px}
 .safety{margin:2px 0 8px;font-size:12px;color:var(--mut)}
 .safety .s-ok{color:var(--ok)}
 .safety .s-tag{
-  display:inline-block;background:rgba(166,71,71,.08);color:var(--danger);
-  border:1px solid rgba(166,71,71,.28);border-radius:999px;padding:2px 9px;
+  display:inline-block;background:rgba(224,113,106,.08);color:var(--danger);
+  border:1px solid rgba(224,113,106,.28);border-radius:999px;padding:2px 9px;
   margin:2px 6px 2px 0;font-size:11px;
 }
 @media(max-width:720px){
@@ -102,6 +102,8 @@ h2 .caps{font-family:var(--font);font-size:12px;letter-spacing:0;text-transform:
   <span class="spacer"></span>
   <span id="msg"></span>
 </header>
+<div class="wrap">
+<h1>Desktop</h1>
 <p class="lead">What the desktop agent may launch and do on this machine — the allowlist, made visible.</p>
 <main>
   <div class="env" id="env"></div>
@@ -117,6 +119,7 @@ h2 .caps{font-family:var(--font);font-size:12px;letter-spacing:0;text-transform:
   <h2>Recent actions</h2>
   <div id="recent"></div>
 </main>
+</div>
 <script>
 const msg = document.getElementById('msg');
 function note(t){ msg.textContent = t; if(t) setTimeout(()=>{if(msg.textContent===t)msg.textContent='';}, 4000); }

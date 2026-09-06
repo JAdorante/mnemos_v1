@@ -1,0 +1,49 @@
+# Public HTTPS URLs for the pilot — Cloudflare quick tunnels.
+#
+# The GB10 sits behind home NAT, so instead of port-forwarding 443, each
+# cloudflared makes an outbound connection and Cloudflare hands back an
+# https://<random>.trycloudflare.com URL (find it in the container logs):
+#
+#   docker compose -f docker-compose.yml -f docker-compose.tunnel.yml up -d
+#   docker compose logs tunnel-user1 | grep trycloudflare
+#
+# Quick tunnels need no account but the URL CHANGES whenever the tunnel
+# restarts — fine for a demo, not for a standing pilot. For stable URLs, put a
+# domain on Cloudflare (free) and swap the command for a named tunnel:
+#   command: tunnel run --token <per-tunnel token from the Zero Trust dash>
+# with one hostname per user (user1.yourdomain.com -> sparrow-user1:8000).
+#
+# TLS terminates at Cloudflare, so getUserMedia's secure-context requirement
+# is satisfied; the per-user QUILL_API_TOKEN (/auth) is the access control —
+# anyone with the URL still hits the token wall.
+
+services:
+  tunnel-user1:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate --url http://sparrow-user1:8000
+    depends_on: [sparrow-user1]
+
+  tunnel-user2:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate --url http://sparrow-user2:8000
+    depends_on: [sparrow-user2]
+
+  tunnel-user3:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate --url http://sparrow-user3:8000
+    depends_on: [sparrow-user3]
+
+  tunnel-user4:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate --url http://sparrow-user4:8000
+    depends_on: [sparrow-user4]
+
+  tunnel-user5:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate --url http://sparrow-user5:8000
+    depends_on: [sparrow-user5]

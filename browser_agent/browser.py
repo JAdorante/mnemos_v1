@@ -9,6 +9,7 @@ Two launch modes:
     to drive real installed Chrome, which login providers rarely block.
 """
 import hashlib
+import os
 import struct
 from pathlib import Path
 
@@ -84,6 +85,10 @@ class BrowserDriver:
             return
 
         launch_args = ["--disable-blink-features=AutomationControlled"]
+        # Hosted containers run as root, where Chromium's user-namespace
+        # sandbox cannot start. Opt-in only — never weaken desktop installs.
+        if os.environ.get("QUILL_BROWSER_NO_SANDBOX", "").strip() in ("1", "true", "True"):
+            launch_args.append("--no-sandbox")
         hidden = self._ghost == "hidden" and not self.headless
         if hidden:
             # Chromium clamps --window-position back onto the display, so the

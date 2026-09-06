@@ -17,19 +17,26 @@ PHONE_PAGE = _mnemos(r"""<!doctype html>
 @@INK@@
 @@CHROME@@
 *{box-sizing:border-box}
+input:-webkit-autofill,input:-webkit-autofill:hover,input:-webkit-autofill:focus{
+  -webkit-box-shadow:0 0 0 1000px var(--raised) inset;
+  -webkit-text-fill-color:var(--text);
+  caret-color:var(--text);
+  transition:background-color 9999s ease-in-out 0s;
+}
+input:autofill{box-shadow:0 0 0 1000px var(--raised) inset}
 body{margin:0;font:16px/1.55 var(--font);color:var(--text);background:var(--paper)}
 .top{position:sticky;top:0;display:flex;gap:14px;align-items:center;padding:10px 20px;z-index:var(--z-raised);background:var(--chrome-bg);backdrop-filter:blur(10px)}
-.wrap{max-width:760px;margin:0 auto;padding:26px 20px 80px}
+.wrap{max-width:1120px;margin:0 auto;padding:26px 24px 80px}
 h1{font-family:var(--display);font-weight:400;font-size:2rem;letter-spacing:-.02em;color:var(--navy);margin:0 0 6px}
 .lead{color:var(--mut);margin:0 0 22px}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
   padding:20px;box-shadow:var(--shadow);margin-bottom:18px;animation:fadeUp .35s var(--ease) both}
 .panel h2{font-family:var(--display);font-weight:400;font-size:1.35rem;margin:0 0 10px;color:var(--navy)}
 .btn{appearance:none;border:0;cursor:pointer;font:inherit;font-weight:600;border-radius:12px;
-  padding:11px 20px;background:var(--navy);color:#F8F6F1}
+  padding:11px 20px;background:var(--acc);color:var(--acc-fg)}
 .btn-ghost{background:transparent;color:var(--text);border:1px solid var(--line)}
 .muted{color:var(--mut);font-size:.92rem}
-.warn{border:1px solid rgba(199,138,44,.35);background:rgba(199,138,44,.08);
+.warn{border:1px solid var(--line);border-left:3px solid var(--amber);background:var(--raised);
   border-radius:12px;padding:12px 14px;font-size:.92rem;margin:12px 0}
 .code{font-family:var(--mono);font-size:2.2rem;letter-spacing:.35em;color:var(--navy);
   padding:8px 0 2px}
@@ -37,7 +44,7 @@ h1{font-family:var(--display);font-weight:400;font-size:2rem;letter-spacing:-.02
 .qr svg{width:200px;height:200px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:10px}
 .url{font-family:var(--mono);font-size:.85rem;word-break:break-all;color:var(--mut)}
 table{width:100%;border-collapse:collapse;font-size:.92rem}
-th{font-size:.75rem;text-transform:uppercase;letter-spacing:.05em;color:var(--mut);text-align:left;padding:6px 8px}
+th{font-size:.75rem;color:var(--mut);text-align:left;padding:6px 8px}
 td{border-top:1px solid var(--line);padding:9px 8px}
 .linkish{background:none;border:0;color:var(--danger);cursor:pointer;font:inherit;font-size:.85rem;padding:0}
 .ok{color:var(--ok);font-weight:600}
@@ -341,11 +348,11 @@ h1{font-family:var(--display);font-weight:400;font-size:1.7rem;color:var(--navy)
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
   padding:18px;box-shadow:var(--shadow);margin-bottom:16px}
 label{display:block;font-size:.78rem;font-weight:600;letter-spacing:.04em;
-  text-transform:uppercase;color:var(--mut);margin:12px 0 6px}
+  color:var(--mut);margin:12px 0 6px}
 input,select{width:100%;font:inherit;color:var(--text);background:var(--bg-elev);
   border:1px solid var(--line);border-radius:12px;padding:12px 13px;outline:none}
 .btn{appearance:none;border:0;cursor:pointer;font:inherit;font-weight:600;border-radius:12px;
-  padding:13px 20px;background:var(--navy);color:#F8F6F1;width:100%;margin-top:16px}
+  padding:13px 20px;background:var(--acc);color:var(--acc-fg);width:100%;margin-top:16px}
 .err{color:var(--danger);font-size:.9rem;min-height:1.2em;margin-top:8px}
 .tok{font-family:var(--mono);font-size:.82rem;word-break:break-all;background:var(--panel-2);
   border:1px solid var(--line);border-radius:10px;padding:10px;margin:8px 0}
@@ -354,7 +361,7 @@ input,select{width:100%;font:inherit;color:var(--text);background:var(--bg-elev)
 ol{padding-left:20px;margin:8px 0}
 li{margin:8px 0}
 h2{font-family:var(--display);font-weight:400;font-size:1.25rem;color:var(--navy);margin:0 0 8px}
-.warn{border:1px solid rgba(199,138,44,.35);background:rgba(199,138,44,.08);
+.warn{border:1px solid var(--line);border-left:3px solid var(--amber);background:var(--raised);
   border-radius:12px;padding:10px 12px;font-size:.88rem;margin-top:10px}
 .muted{color:var(--mut);font-size:.88rem}
 @media(max-width:640px){

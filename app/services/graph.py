@@ -1053,12 +1053,20 @@ def constellation(store: Store | None = None, limit: int = 28,
             "_age": age,
         }
 
+    try:
+        from app.services import self_profile as _selfp
+        _self_pid = _selfp.self_person_id(store)
+    except Exception:
+        _self_pid = None
     for p in people:
         ts = p.get("last_seen")
-        candidates[f"person:{p['id']}"] = _base(
+        cand = _base(
             f"person:{p['id']}", p["name"], "person", ts=ts, confidence=0.9,
             meta={"name": p["name"]},
         )
+        if _self_pid is not None and p["id"] == _self_pid:
+            cand["is_self"] = True
+        candidates[f"person:{p['id']}"] = cand
 
     for e in entities:
         kind = entity_constellation_kind(e.get("kind"))

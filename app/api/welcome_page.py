@@ -23,11 +23,7 @@ html,body{margin:0;min-height:100%}
 body{
   font:16px/1.55 var(--font);color:var(--text);
   min-height:100vh;display:flex;flex-direction:column;
-  background:
-    radial-gradient(920px 520px at 10% -10%, var(--acc-08), transparent 55%),
-    radial-gradient(700px 420px at 100% 0%, rgba(30,91,79,.06), transparent 52%),
-    linear-gradient(180deg, #FBF9F4 0%, var(--paper) 38%, var(--workspace) 100%);
-  background-attachment:fixed;
+  background:var(--ink);
 }
 a{color:var(--navy);text-decoration:none}
 a:hover{opacity:.8}
@@ -37,56 +33,40 @@ a:hover{opacity:.8}
   max-width:640px;width:100%;margin:0 auto;padding:48px 24px 64px;
   animation:morningPaper .45s var(--ease) both;
 }
-.brand-row{
-  display:flex;align-items:center;gap:14px;margin:0 0 20px;
+.company{
+  display:inline-flex;align-items:center;gap:0;margin:0 0 28px;
+  text-decoration:none;color:inherit;
 }
-.brand-logo{
-  display:block;width:min(340px,86vw);height:auto;
-  animation:fadeUp .5s var(--ease) both;
+.company-logo{
+  height:28px;width:auto;display:block;
+  /* Lockup is near-black on transparent — invert for the dark ink ground. */
+  filter:brightness(0) invert(1);
+  opacity:.9;
 }
-.brand-row .mark{color:var(--navy);width:40px;height:40px}
-.brand-row .mark path{
-  stroke-dasharray:64;animation:inkDraw .55s var(--ease) both;
-}
-.brand{
-  font-family:var(--display);font-weight:400;
-  font-size:clamp(3.6rem,12vw,6rem);letter-spacing:-.035em;line-height:.9;
-  margin:0;color:var(--navy);
-}
-.rule{
-  width:76px;height:1.5px;background:var(--acc);margin:0 0 26px;
-  transform-origin:left center;animation:inkLine .4s var(--ease) .12s both;
+.product{
+  font-family:var(--serif);font-weight:500;
+  font-size:clamp(2.6rem,7vw,3.8rem);letter-spacing:var(--track-tight);
+  margin:0 0 18px;color:var(--text);line-height:1.05;
 }
 h1{
-  font-family:var(--display);font-weight:400;
-  font-size:clamp(1.55rem,3.8vw,2.15rem);letter-spacing:-.02em;
-  margin:0 0 12px;max-width:18ch;color:var(--navy);line-height:1.15;
+  font-family:var(--sans);font-weight:500;
+  font-size:clamp(1.15rem,2.8vw,1.35rem);letter-spacing:var(--track-snug);
+  margin:0 0 12px;max-width:36ch;color:var(--text);line-height:1.35;
 }
-.lead{color:var(--mut);font-size:1.05rem;max-width:34ch;margin:0 0 30px}
+.lead{
+  color:var(--muted);
+  font-size:1.08rem;line-height:1.55;max-width:40ch;margin:0 0 30px;
+}
 .cta{display:flex;flex-wrap:wrap;gap:12px;align-items:center}
 .btn{
-  appearance:none;border:0;cursor:pointer;font:inherit;font-weight:600;
-  border-radius:12px;padding:13px 22px;
-  transition:transform .22s var(--ease),background .28s var(--ease),
-    box-shadow .28s var(--ease),border-color .28s var(--ease),filter .28s var(--ease);
+  appearance:none;border:1px solid transparent;cursor:pointer;font:inherit;font-weight:600;
+  font-size:14px;border-radius:var(--r-sm);padding:11px 18px;
 }
-.btn:hover:not(:disabled){transform:translateY(-2px)}
-.btn:active:not(:disabled){transform:translateY(0) scale(.97)}
-.btn-primary{
-  background:var(--navy);color:#F8F6F1;
-  box-shadow:0 2px 10px rgba(11,19,32,.16);
-}
-.btn-primary:hover:not(:disabled){
-  background:#152033;box-shadow:0 8px 22px rgba(11,19,32,.22);filter:brightness(1.05);
-}
-.btn-ghost{
-  background:transparent;color:var(--text);border:1px solid var(--line);
-}
-.btn-ghost:hover:not(:disabled){
-  border-color:var(--acc-45);color:var(--navy);
-  background:var(--acc-05);box-shadow:0 4px 14px rgba(11,19,32,.06);
-}
-.btn:disabled{opacity:.45;cursor:not-allowed;transform:none;box-shadow:none}
+.btn-primary{background:var(--violet);color:var(--acc-fg)}
+.btn-primary:hover:not(:disabled){filter:brightness(1.08)}
+.btn-ghost{background:transparent;color:var(--mut);border-color:var(--line)}
+.btn-ghost:hover:not(:disabled){color:var(--text);border-color:var(--faint)}
+.btn:disabled{opacity:.45;cursor:not-allowed}
 .skip{
   font-size:.92rem;color:var(--mut);padding:8px 4px;
   transition:color .22s var(--ease),transform .22s var(--ease);
@@ -94,7 +74,7 @@ h1{
 .skip:hover{color:var(--navy);transform:translateY(-1px)}
 
 .unlock{
-  margin-top:36px;padding-top:28px;border-top:1px solid rgba(11,19,32,.08);
+  margin-top:36px;padding-top:28px;border-top:1px solid var(--ink-08);
   max-width:28rem;animation:fadeUp .35s var(--ease) both;
 }
 .unlock h2{
@@ -103,8 +83,8 @@ h1{
 }
 .unlock p{color:var(--mut);font-size:.95rem;margin:0 0 14px;max-width:36ch}
 .unlock label{
-  display:block;font:600 11px/1.2 var(--mono);letter-spacing:.06em;
-  text-transform:uppercase;color:var(--mut);margin:0 0 6px;
+  display:block;font:500 13px/1.2 var(--sans);
+  color:var(--mut);margin:0 0 6px;
 }
 .unlock input{
   width:100%;font:inherit;color:var(--text);background:var(--bg-elev);
@@ -112,7 +92,7 @@ h1{
   transition:border-color .28s var(--ease),box-shadow .28s var(--ease);
 }
 .unlock input:focus{
-  border-color:var(--acc-45);box-shadow:0 0 0 3px var(--acc-dim);
+  outline:2px solid var(--violet);outline-offset:-1px;border-color:transparent;
 }
 .unlock .row{display:flex;gap:10px;align-items:stretch;margin-top:10px}
 .unlock .row .btn{flex:0 0 auto}
@@ -122,7 +102,7 @@ h1{
 
 .foot{
   padding:16px 24px 28px;text-align:center;
-  font:12px/1.4 var(--mono);color:var(--mut);
+  font:13px/1.4 var(--sans);color:var(--faint);
 }
 .foot a{color:var(--mut)}
 .foot a:hover{color:var(--navy)}
@@ -133,17 +113,17 @@ h1{
   .unlock .row{flex-direction:column}
 }
 @media(prefers-reduced-motion:reduce){
-  .stage,.brand-logo,.brand-row .mark path,.rule,.unlock{animation:none}
+  .stage,.unlock{animation:none}
 }
 </style>
 </head>
 <body>
   <main class="stage" id="stage">
-    <div class="brand-row">
-      <img class="brand-logo" src="/static/ravenry-logo.png" width="340" height="88"
+    <a class="company" href="/" aria-label="@@COMPANY@@">
+      <img class="company-logo" src="/static/ravenry-logo.png" width="759" height="222"
            alt="@@COMPANY@@" decoding="async">
-    </div>
-    <div class="rule" aria-hidden="true"></div>
+    </a>
+    <p class="product">@@BRAND@@</p>
     <h1 id="headline">Your memory starts here</h1>
     <p class="lead" id="lead">A personal memory that hears, remembers, and — with your approval — acts. This install lives on your machine.</p>
     <div class="cta" id="cta">

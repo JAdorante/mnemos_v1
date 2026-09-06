@@ -140,7 +140,10 @@ class CaptureEndpointTests(unittest.TestCase):
     def test_consent_flow(self):
         r = self.client.get("/capture/status")
         self.assertEqual(r.status_code, 200)
-        self.assertFalse(r.json()["consent"]["consented"])
+        body = r.json()
+        self.assertFalse(body["consent"]["consented"])
+        self.assertIn("headless", body)
+        self.assertIsInstance(body["headless"], bool)
         r = self.client.post("/capture/consent",
                              json={"mic": False, "webcam": False,
                                    "screen": False, "system_audio": False,

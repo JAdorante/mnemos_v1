@@ -215,13 +215,13 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   body{margin:0;font:15px/1.55 var(--font);background:var(--bg);color:var(--text);
     height:100vh;display:flex;flex-direction:column}
   header{padding:12px 18px;border-bottom:1px solid var(--line);display:flex;gap:12px;
-    align-items:center;background:rgba(248,246,241,.94);backdrop-filter:blur(12px)}
+    align-items:center;background:rgba(16,16,19,.94);backdrop-filter:blur(12px)}
   header b{font-family:var(--display);font-weight:400;font-size:1.25rem;color:var(--navy)}
   .url{color:var(--mut);font-size:13px;max-width:48vw;overflow:hidden;
     text-overflow:ellipsis;white-space:nowrap} .spacer{flex:1}
   .cost{color:var(--mut);font-size:13px;font-family:"IBM Plex Mono",ui-monospace,monospace}
   .dot{width:8px;height:8px;border-radius:50%;
-    background:rgba(11,19,32,.2);display:inline-block;margin-right:8px}
+    background:var(--ink-20);display:inline-block;margin-right:8px}
   .dot.busy{background:var(--acc);animation:p 1.2s var(--ease) infinite}
   @keyframes p{50%{opacity:.35}}
   @keyframes fadeUp{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
@@ -230,26 +230,26 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
     border-radius:10px;padding:7px 11px;cursor:pointer;
     transition:border-color .28s var(--ease),background .28s var(--ease),
       transform .22s var(--ease),box-shadow .28s var(--ease),color .28s var(--ease)}
-  .ctl:hover{border-color:rgba(184,115,51,.45);background:var(--panel-2);
-    transform:translateY(-1px);box-shadow:0 4px 12px rgba(11,19,32,.07)}
+  .ctl:hover{border-color:var(--acc-45);background:var(--panel-2);
+    transform:translateY(-1px);box-shadow:0 4px 12px rgba(0,0,0,.35)}
   .ctl:active{transform:translateY(0) scale(.97)}
   #log{flex:1;overflow:auto;padding:22px 18px;display:flex;flex-direction:column;gap:10px}
   .msg{max-width:78%;padding:11px 15px;border-radius:var(--radius);white-space:pre-wrap;
     word-wrap:break-word;box-shadow:var(--shadow);animation:fadeUp .3s var(--ease) both}
-  .user{align-self:flex-end;background:var(--navy);color:#F8F6F1;box-shadow:none}
+  .user{align-self:flex-end;background:var(--navy);color:var(--paper);box-shadow:none}
   .result{align-self:flex-start;background:var(--panel);border:1px solid var(--line)}
   .system{align-self:center;color:var(--mut);font-size:13px;background:transparent;box-shadow:none}
-  .ask{align-self:flex-start;background:var(--panel);border:1px solid rgba(11,19,32,.1);
-    box-shadow:0 2px 4px rgba(11,19,32,.05),0 16px 40px rgba(11,19,32,.08);position:relative}
+  .ask{align-self:flex-start;background:var(--panel);border:1px solid var(--ink-10);
+    box-shadow:0 2px 4px rgba(0,0,0,.3),0 16px 40px rgba(0,0,0,.4);position:relative}
   .ask::before{content:"";position:absolute;left:0;top:12px;bottom:12px;width:3px;
-    background:linear-gradient(180deg,var(--acc),rgba(184,115,51,.15));border-radius:2px}
-  .error{align-self:flex-start;background:rgba(166,71,71,.08);border:1px solid rgba(166,71,71,.28)}
+    background:linear-gradient(180deg,var(--acc),var(--acc-15));border-radius:2px}
+  .error{align-self:flex-start;background:rgba(224,113,106,.08);border:1px solid rgba(224,113,106,.28)}
   .progress{align-self:flex-start;color:var(--mut);font:12px/1.45 "IBM Plex Mono",ui-monospace,monospace;
     background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:8px 12px;max-width:88%;box-shadow:none}
-  footer{padding:14px 16px;border-top:1px solid var(--line);background:rgba(248,246,241,.94);
+  footer{padding:14px 16px;border-top:1px solid var(--line);background:rgba(16,16,19,.94);
     display:flex;gap:10px;flex-wrap:wrap}
   .seal-btn{position:relative;isolation:isolate;overflow:hidden;
-    border:1px solid rgba(184,115,51,.45)!important;background:rgba(184,115,51,.08)!important;
+    border:1px solid var(--acc-45)!important;background:var(--acc-08)!important;
     color:var(--navy)!important;min-width:132px;font-weight:600}
   .seal-btn .seal-ring{position:absolute;right:10px;top:50%;width:22px;height:22px;
     transform:translateY(-50%);pointer-events:none;opacity:0}
@@ -259,21 +259,21 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   @keyframes sealDraw{from{stroke-dashoffset:120}to{stroke-dashoffset:0}}
   .seal-btn.holding .seal-ring circle{animation:sealDraw .85s var(--ease) forwards}
   .seal-btn.sealed .seal-ring{opacity:.92}
-  .seal-btn.sealed .seal-ring circle{stroke-dashoffset:0;fill:rgba(184,115,51,.12)}
+  .seal-btn.sealed .seal-ring circle{stroke-dashoffset:0;fill:var(--acc-12)}
   @media (prefers-reduced-motion:reduce){
     .seal-btn.holding .seal-ring circle{animation:none;stroke-dashoffset:0}
   }
   #box{flex:1;background:var(--panel);color:var(--text);border:1px solid var(--line);
     border-radius:var(--radius);padding:12px 14px;resize:none;height:48px;box-shadow:var(--shadow);
     transition:border-color .28s var(--ease),box-shadow .28s var(--ease)}
-  #box:focus{outline:none;border-color:rgba(184,115,51,.45);box-shadow:0 0 0 3px rgba(184,115,51,.12)}
-  #send{background:var(--navy);color:#F8F6F1;border:none;border-radius:var(--radius);
+  #box:focus{outline:none;border-color:var(--acc-45);box-shadow:0 0 0 3px var(--acc-12)}
+  #send{background:var(--acc);color:var(--acc-fg);border:none;border-radius:var(--radius);
     padding:0 20px;cursor:pointer;font-weight:600;
-    box-shadow:0 2px 8px rgba(11,19,32,.16);
+    box-shadow:0 2px 8px rgba(0,0,0,.4);
     transition:background .28s var(--ease),transform .22s var(--ease),
       box-shadow .28s var(--ease),filter .28s var(--ease)}
   #send:hover:not(:disabled){background:#152033;transform:translateY(-2px);
-    box-shadow:0 8px 20px rgba(11,19,32,.22);filter:brightness(1.06)}
+    box-shadow:0 8px 20px rgba(0,0,0,.5);filter:brightness(1.06)}
   #send:active:not(:disabled){transform:translateY(0) scale(.97)}
   #send:disabled{opacity:.5;cursor:default;transform:none;box-shadow:none}
   @media (prefers-reduced-motion:reduce){

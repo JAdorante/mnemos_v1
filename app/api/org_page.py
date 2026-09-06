@@ -19,13 +19,13 @@ ORG_PAGE = _mnemos(r"""<!doctype html>
 @@CHROME@@
 *{box-sizing:border-box}
 body{margin:0;min-height:100vh;font:15px/1.55 var(--font);color:var(--text);
-  background:linear-gradient(180deg,#FBF9F4 0%,var(--paper) 40%,var(--workspace) 100%)}
+  background:linear-gradient(180deg,#131318 0%,var(--paper) 40%,var(--workspace) 100%)}
 .top{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:12px 22px}
-.wrap{max-width:860px;margin:0 auto;padding:8px 22px 48px}
+.wrap{max-width:1120px;margin:0 auto;padding:8px 24px 48px}
 .mast h1{font-family:var(--display);font-weight:400;font-size:clamp(2rem,5vw,2.8rem);
   letter-spacing:-.03em;color:var(--navy);margin:14px 0 6px;line-height:1}
 .lead{color:var(--mut);font-size:13.5px;margin:0 0 16px}
-.chip{display:inline-block;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em;
+.chip{display:inline-block;font-size:.72rem;
   border:1px solid var(--line);border-radius:99px;padding:2px 9px;color:var(--mut);margin:0 6px 6px 0}
 .section{margin:22px 0 0}
 .section h2{font-family:var(--display);font-weight:400;font-size:1.35rem;color:var(--navy);margin:0 0 8px}
@@ -49,7 +49,7 @@ body{margin:0;min-height:100vh;font:15px/1.55 var(--font);color:var(--text);
 .fetch-err button{font:inherit;padding:4px 12px;border-radius:8px;cursor:pointer;
   border:1px solid rgba(154,63,63,.35);background:var(--panel);color:var(--danger);}
 .detail{display:grid;grid-template-columns:120px 1fr;gap:6px 12px;font-size:.92rem}
-.detail dt{color:var(--mut);font:11px/1.2 var(--mono);letter-spacing:.04em;text-transform:uppercase}
+.detail dt{color:var(--mut);font:11px/1.2 var(--sans);}
 @media(max-width:640px){
   .top{padding:10px 14px}
   .wrap{padding:8px 14px 40px}
@@ -64,7 +64,7 @@ body{margin:0;min-height:100vh;font:15px/1.55 var(--font);color:var(--text);
   <span class="page-sub">Org</span>
   @@NAV@@
   <span class="spacer"></span></div>
-<div id="orgErr" class="fetch-err" hidden role="alert" style="max-width:860px;margin:12px auto 0;padding:0 22px">
+<div id="orgErr" class="fetch-err" hidden role="alert" style="max-width:1120px;margin:12px auto 0;padding:0 24px">
   <span style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:10px 14px;border-radius:10px;background:rgba(154,63,63,.08);border:1px solid rgba(154,63,63,.25);color:var(--danger);font-size:13px;width:100%">
     <span>Couldn't reach Sparrow — retrying…</span>
     <button type="button" id="orgRetry">Retry now</button>

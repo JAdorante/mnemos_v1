@@ -18,11 +18,11 @@ body{
   margin:0;min-height:100vh;font:15px/1.55 var(--font);color:var(--text);
   background:
     radial-gradient(900px 480px at 8% -8%, var(--acc-06), transparent 55%),
-    linear-gradient(180deg,#FBF9F4 0%,var(--paper) 40%,var(--workspace) 100%);
+    linear-gradient(180deg,#131318 0%,var(--paper) 40%,var(--workspace) 100%);
 }
-.wrap{max-width:780px;margin:0 auto;padding:8px 22px 64px}
+.wrap{max-width:1120px;margin:0 auto;padding:8px 24px 64px}
 .mast{padding:18px 0 8px}
-.mast .kicker{font:12px var(--mono);color:var(--mut);letter-spacing:.04em;text-transform:uppercase}
+.mast .kicker{font:12px var(--sans);color:var(--mut);}
 .mast h1{
   font-family:var(--display);font-weight:400;font-size:clamp(1.6rem,3.2vw,2.1rem);
   color:var(--navy);margin:6px 0 0;letter-spacing:-.02em;line-height:1.15;
@@ -31,7 +31,7 @@ body{
 .mast .meta{font:12px var(--mono);color:var(--mut);margin-top:10px}
 .privacy{
   margin-top:14px;padding:12px 14px;border:1px solid var(--line);border-radius:var(--radius);
-  background:rgba(248,246,241,.7);font-size:13px;line-height:1.45;
+  background:rgba(19,19,24,.7);font-size:13px;line-height:1.45;
 }
 .privacy .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:8px}
 .privacy .pill{
@@ -41,14 +41,14 @@ body{
   border-radius:8px;padding:7px 12px;font:500 12px var(--font);cursor:pointer;
   border:1px solid var(--line);background:var(--panel);color:var(--navy);
 }
-.privacy button.on{background:var(--navy);color:#F8F6F1;border:none}
+.privacy button.on{background:var(--acc);color:var(--acc-fg);border:none}
 .stack{display:flex;flex-direction:column;gap:10px;margin-top:18px}
 .item{
   background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);
   box-shadow:var(--shadow-surface);padding:14px 16px;
 }
 .item .kind{
-  font:11px/1.2 var(--mono);color:var(--acc);text-transform:uppercase;letter-spacing:.04em;
+  font:11px/1.2 var(--sans);color:var(--acc);
 }
 .item .text{margin:6px 0 0;font-size:15px;color:var(--navy);line-height:1.45}
 .item .detail{margin:6px 0 0;font-size:13px;color:var(--mut)}
@@ -67,7 +67,7 @@ body{
   border:1px solid var(--line);background:var(--panel);color:var(--navy);
   text-decoration:none;display:inline-flex;align-items:center;
 }
-.receipt button.play{background:var(--navy);color:#F8F6F1;border:none}
+.receipt button.play{background:var(--acc);color:var(--acc-fg);border:none}
 .item .row-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
 .item.dismissed{opacity:.55}
 .item .pill{
@@ -92,7 +92,7 @@ body{
 }
 .ask-row button,.draft-btn{
   border-radius:8px;padding:10px 14px;font:500 13px var(--font);cursor:pointer;
-  border:none;background:var(--navy);color:#F8F6F1;
+  border:none;background:var(--acc);color:var(--acc-fg);
 }
 .draft-btn{background:var(--acc);margin-top:4px}
 .ask-out{
@@ -384,9 +384,9 @@ MEETINGS_LIST_PAGE = _mnemos(r"""<!doctype html>
 *{box-sizing:border-box}
 body{
   margin:0;min-height:100vh;font:15px/1.55 var(--font);color:var(--text);
-  background:linear-gradient(180deg,#FBF9F4 0%,var(--paper) 50%,var(--workspace) 100%);
+  background:linear-gradient(180deg,#131318 0%,var(--paper) 50%,var(--workspace) 100%);
 }
-.wrap{max-width:780px;margin:0 auto;padding:8px 22px 64px}
+.wrap{max-width:1120px;margin:0 auto;padding:8px 24px 64px}
 h1{font-family:var(--display);font-weight:400;font-size:1.8rem;color:var(--navy);margin:18px 0 6px}
 .lead{color:var(--mut);margin:0 0 18px}
 .row{
@@ -423,7 +423,7 @@ async function load() {
   const el = document.getElementById('list');
   const rows = data.meetings || [];
   if (!rows.length) {
-    el.innerHTML = '<p class="lead">No enhanced meeting notes yet.</p>';
+    el.innerHTML = '<div class="empty-state">Enhanced notes land here after a meeting is captured and settled — each line carries a receipt back to the audio. <a href="/today">Take rough notes on Today</a> or <a href="/capture">start capture</a>.</div>';
     return;
   }
   el.innerHTML = rows.map(m =>

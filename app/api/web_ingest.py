@@ -369,6 +369,42 @@ async def speakers_enroll_web(request: Request,
             "enrolled": spk.enrolled_names()}
 
 
+@router.post("/ingest/frame")
+async def ingest_frame(request: Request,
+                       ts: float | None = Query(default=None),
+                       title: str = Query(default="")) -> dict:
+    """Web Perceive screen frames: the capture page samples the shared
+    getDisplayMedia video track (~1 frame / few seconds) and posts each as
+    a JPEG body. Rides the DESKTOP screen pipeline unchanged — quality
+    score, motion/interval gate, privacy gate, VLM caption, ingest filters,
+    `desktop.screen` event — with the share picker's label as the window
+    title. Consent class 'screen', same as the local capture it replaces.
+
+    Normal HTTP — LanApiAuthMiddleware and CSRF apply (unlike the WS)."""
+    from app.services import capture_consent
+    if not capture_consent.allows("screen"):
+        raise HTTPException(
+            403, "Capture source 'screen' is off until Privacy consent. "
+                 "Open the recording controls and opt in.")
+    body = await request.body()
+    if not body:
+        raise HTTPException(400, "expected a JPEG body")
+    if len(body) > 8 << 20:
+        raise HTTPException(413, "frame too large (8 MB max)")
+    import cv2
+    bgr = cv2.imdecode(np.frombuffer(body, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if bgr is None:
+        raise HTTPException(400, "not a decodable image")
+    rgb = bgr[:, :, ::-1].copy()
+    when = float(ts) if ts else time.time()
+    from app.api.routes import _desktop_capture
+    loop = asyncio.get_running_loop()
+    # The VLM caption can take seconds — keep it off the event loop.
+    result = await loop.run_in_executor(
+        None, _desktop_capture.feed_web_frame, rgb, when, title[:160])
+    return result
+
+
 @router.get("/capture", response_class=HTMLResponse)
 def capture_page() -> HTMLResponse:
     from app.api.capture_page import CAPTURE_PAGE

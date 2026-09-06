@@ -26,11 +26,11 @@ body{
   margin:0;min-height:100vh;font:15px/1.55 var(--font);color:var(--text);
   background:
     radial-gradient(900px 480px at 8% -8%, var(--acc-06), transparent 55%),
-    linear-gradient(180deg,#FBF9F4 0%,var(--paper) 40%,var(--workspace) 100%);
+    linear-gradient(180deg,#131318 0%,var(--paper) 40%,var(--workspace) 100%);
 }
 .wrap{max-width:720px;margin:0 auto;padding:8px 22px 64px}
 .mast{padding:18px 0 8px}
-.mast .kicker{font:12px var(--mono);color:var(--mut);letter-spacing:.04em;text-transform:uppercase}
+.mast .kicker{font:12px var(--sans);color:var(--mut);}
 .mast h1{font-family:var(--display);font-weight:400;font-size:clamp(1.6rem,3.2vw,2.1rem);
   color:var(--navy);margin:6px 0 0;letter-spacing:-.02em}
 .mast .summary{color:var(--text);font-size:14px;margin:10px 0 0;max-width:46em}
@@ -47,12 +47,12 @@ body{
 .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px}
 button{border-radius:8px;padding:8px 14px;font:500 13px var(--font);cursor:pointer;
   border:1px solid var(--line);background:var(--panel);color:var(--navy)}
-button.primary{background:var(--navy);color:#F8F6F1;border:none}
-button.danger{background:#C0392B;color:#F8F6F1;border:none}
+button.primary{background:var(--acc);color:var(--acc-fg);border:none}
+button.danger{background:#C0392B;color:#FFF;border:none}
 button:disabled{opacity:.45;cursor:default}
 .status{font:12px var(--mono);color:var(--mut);margin-left:auto}
 .consent{padding:10px 12px;border:1px dashed var(--line);border-radius:8px;
-  background:rgba(248,246,241,.7);font-size:13px;margin-top:10px}
+  background:rgba(19,19,24,.7);font-size:13px;margin-top:10px}
 .consent b{color:var(--navy)}
 .banner{display:none;margin-top:14px;padding:12px 14px;border-radius:var(--radius);
   border:1px solid #C0392B;background:rgba(192,57,43,.08);color:#8f2b20;font-size:13px}
@@ -61,7 +61,7 @@ button:disabled{opacity:.45;cursor:default}
 .notice.show{display:block}
 .ticker{margin-top:14px}
 .ticker .line{padding:8px 0;border-top:1px solid var(--line);font-size:14px;color:var(--navy)}
-.ticker .line .src{font:11px var(--mono);color:var(--mut);margin-right:8px;text-transform:uppercase}
+.ticker .line .src{font:11px var(--sans);color:var(--mut);margin-right:8px;}
 .ticker .empty{color:var(--mut);font-size:13px;padding:8px 0}
 .small{font-size:12px;color:var(--mut)}
 .priv{display:none;margin-top:8px;font:12px var(--mono);color:#2E7D32}
@@ -124,6 +124,26 @@ button:disabled{opacity:.45;cursor:default}
   <div class="notice" id="no-tab-audio">This browser can’t share tab audio
   (Chromium only). Mic-only mode still works — use headphones so the mic hears
   the far side, or keep speakers on and expect lower far-side quality.</div>
+</div>
+
+<div class="card" id="card-screen">
+  <h2><span class="dot" id="dot-screen"></span>Screen
+      <span class="status" id="st-screen">off</span></h2>
+  <div class="hint">Share a tab, window, or your whole screen; @@BRAND@@ samples
+  a frame every few seconds, keeps only meaningful changes, and turns them into
+  memory. Your browser shows a sharing indicator the entire time.</div>
+  <div class="consent" id="consent-screen">
+    <b>Consent required.</b> Capture source “screen” is off until Privacy consent.
+    <button id="optin-screen">Allow screen capture</button>
+  </div>
+  <div class="row">
+    <button id="start-screen" class="primary">Share screen</button>
+    <button id="stop-screen" disabled>Stop</button>
+    <span class="small" id="meter-screen"></span>
+  </div>
+  <div class="priv" id="priv-screen">&#128274; Sampled capture: one frame every
+  few seconds, only when the screen changed — credential and banking surfaces
+  are blocked server-side before any model sees them.</div>
 </div>
 
 <div class="card" id="card-meeting">
@@ -503,21 +523,85 @@ function offline(on) {
     !!on && (mic.wanted || tab.wanted));
 }
 function updateUnloadGuard() {
-  window.onbeforeunload = (mic.wanted || tab.wanted)
+  window.onbeforeunload = (mic.wanted || tab.wanted || scr.on)
     ? (e => { e.preventDefault(); e.returnValue = ''; }) : null;
 }
+
+/* --- screen frames: sample the shared track, POST JPEGs -------------------
+   Server does the heavy lifting (motion gate, privacy gate, VLM); the client
+   just samples every SCREEN_SEND_S and reports what the server decided. */
+const SCREEN_SEND_S = 5, SCREEN_MAX_W = 1280;
+const scr = {
+  on: false, stream: null, video: null, timer: null, sent: 0, kept: 0,
+  async start() {
+    const stream = await navigator.mediaDevices.getDisplayMedia(
+      {video: {frameRate: 5}, audio: false});
+    this.stream = stream;
+    const track = stream.getVideoTracks()[0];
+    track.onended = () => this.stop();      // browser "Stop sharing" button
+    const v = document.createElement('video');
+    v.muted = true; v.srcObject = stream; await v.play();
+    this.video = v; this.on = true; this.sent = 0; this.kept = 0;
+    this.label = (track.label || 'shared screen').slice(0, 160);
+    this.timer = setInterval(() => this.snap().catch(()=>{}), SCREEN_SEND_S * 1000);
+    this.snap().catch(()=>{});
+    this.paint('sharing');
+    updateUnloadGuard();
+  },
+  async snap() {
+    if (!this.on || !this.video || this.video.videoWidth === 0) return;
+    const w = Math.min(SCREEN_MAX_W, this.video.videoWidth);
+    const h = Math.round(this.video.videoHeight * w / this.video.videoWidth);
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    c.getContext('2d').drawImage(this.video, 0, 0, w, h);
+    const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.75));
+    if (!blob) return;
+    const q = '?ts=' + (Date.now() / 1000) + '&title=' + encodeURIComponent(this.label);
+    const r = await fetch('/ingest/frame' + q, {method: 'POST', body: blob});
+    if (r.status === 403) { this.stop(); alert('Screen consent was revoked.'); return; }
+    const res = await r.json().catch(() => ({}));
+    this.sent++;
+    if (res.accepted) this.kept++;
+    $('meter-screen').textContent =
+      this.kept + ' frame' + (this.kept === 1 ? '' : 's') + ' kept / '
+      + this.sent + ' sampled';
+    this.paint('sharing');
+  },
+  stop() {
+    this.on = false;
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+    if (this.stream) this.stream.getTracks().forEach(t => t.stop());
+    this.stream = null; this.video = null;
+    this.paint('off');
+    updateUnloadGuard();
+    refreshConsent();
+  },
+  paint(state) {
+    $('st-screen').textContent = state;
+    const d = $('dot-screen');
+    d.className = 'dot' + (state === 'sharing' ? ' rec' : '');
+    $('stop-screen').disabled = state === 'off';
+    $('start-screen').disabled = state !== 'off' || !consentState.screen;
+    $('priv-screen').classList.toggle('show', state === 'sharing');
+  },
+};
 
 async function refreshConsent() {
   try {
     const r = await fetch('/capture/status');
     const s = await r.json();
     const src = (s.consent && s.consent.sources) || {};
-    consentState = {mic: !!src.mic, system_audio: !!src.system_audio};
+    consentState = {mic: !!src.mic, system_audio: !!src.system_audio,
+                    screen: !!src.screen};
   } catch (e) {}
   $('consent-mic').style.display = consentState.mic ? 'none' : '';
   $('consent-tab').style.display = consentState.system_audio ? 'none' : '';
+  $('consent-screen').style.display = consentState.screen ? 'none' : '';
   $('start-mic').disabled = !consentState.mic || mic.state !== 'off';
   $('start-tab').disabled = !consentState.system_audio || tab.state !== 'off';
+  $('start-screen').disabled = !consentState.screen || scr.on;
   // Mic consent is enough to run a meeting; tab audio joins when consented.
   $('meeting').disabled = !consentState.mic;
 }
@@ -555,6 +639,11 @@ $('pause-mic').onclick = () => mic.togglePause();
 $('pause-tab').onclick = () => tab.togglePause();
 $('stop-mic').onclick = () => mic.stop();
 $('stop-tab').onclick = () => tab.stop();
+$('optin-screen').onclick = async () => {
+  await post('/capture/consent', {screen: true}); refreshConsent(); };
+$('start-screen').onclick = () => scr.start().catch(e => {
+  if (e.name !== 'NotAllowedError') alert('Screen: ' + e.message); });
+$('stop-screen').onclick = () => scr.stop();
 // --- meeting session: titled start/end with its own consent ---------------
 let MEET = {active: false, title: ''};
 function paintMeeting() {

@@ -43,6 +43,34 @@ window.MnemosMemory = {
   };
 })();
 
+/* Fetch JSON with human errors. Behind a tunnel/proxy a restarting server
+   answers with an HTML error page; raw resp.json() then surfaces
+   "JSON.parse: unexpected character…" to the user. Throws Error whose
+   .message is safe to render. */
+window.MnemosJson = async function (url, init) {
+  let resp;
+  try {
+    resp = await fetch(url, init);
+  } catch (e) {
+    throw new Error('Can’t reach the server — check your connection and retry.');
+  }
+  const text = await resp.text();
+  let data = null;
+  try { data = JSON.parse(text); } catch (e) {}
+  if (!resp.ok) {
+    const detail = data && (typeof data.detail === 'string' ? data.detail : data.error);
+    if (resp.status === 401) {
+      throw new Error(detail || 'Session locked — unlock at /auth and retry.');
+    }
+    throw new Error(detail || ('Server unavailable (HTTP ' + resp.status
+      + ') — it may be restarting. Retry in a moment.'));
+  }
+  if (data === null) {
+    throw new Error('Server sent an unexpected reply — it may be restarting. Retry in a moment.');
+  }
+  return data;
+};
+
 window.MnemosReduceMotion = () =>
   window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
@@ -617,6 +645,8 @@ window.MnemosConstellation = {
       t0: performance.now(),
       onSelect: opts && opts.onSelect,
       onChange: opts && opts.onChange,
+      detailMode: !!(opts && opts.detailMode),
+      rangeCutoff: null,
       persistKey: isThumb ? null
         : (((opts && opts.persistKey) || 'constellation.cam') + '.v6'),
       mode: mode,
@@ -659,33 +689,36 @@ window.MnemosConstellation = {
         wrap.appendChild(insightEl);
       }
       legendEl = wrap && wrap.querySelector('.const-legend');
-      if (wrap && !legendEl) {
+      if (opts.legend === false) legendEl = null;
+      else if (wrap && !legendEl) {
         legendEl = document.createElement('div');
         legendEl.className = 'const-legend';
         // Self-contained styles so the key looks identical on the console + home
         // pages without touching two CSS blocks. Non-interactive (never eats a drag).
         legendEl.style.cssText = 'position:absolute;left:10px;top:10px;z-index:var(--z-base);'
           + 'display:flex;flex-wrap:wrap;gap:3px 10px;max-width:min(360px,72%);'
-          + 'padding:6px 9px;border-radius:10px;background:rgba(255,254,251,.9);'
-          + 'border:1px solid rgba(11,19,32,.1);box-shadow:0 1px 6px rgba(11,19,32,.08);'
-          + 'font:11px "Iowan Old Style",Georgia,serif;color:rgba(35,38,43,.82);'
+          + 'padding:6px 9px;border-radius:10px;background:rgba(22,22,27,.94);'
+          + 'border:1px solid rgba(232,231,244,.14);box-shadow:0 1px 6px rgba(0,0,0,.4);'
+          + 'font:11px ui-sans-serif,system-ui,sans-serif;color:rgba(233,231,226,.8);'
           + 'pointer-events:none';
         wrap.appendChild(legendEl);
       }
     }
     const REDUCED_MOTION = !!(window.matchMedia
       && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
-    // One hue per node kind (shared by glyphs + legend, so they can't drift).
-    // Muted ink family on purpose — distinct at a glance, no neon on the paper.
+    // Three hues (constellation mockup): violet = people, amber = topics &
+    // entities (shape still tells kinds apart), green = you. Shared by glyphs
+    // + legend so they can't drift.
+    const SELF_RGB = '116,194,148';
     const KIND_RGB = {
-      person: '30,91,79',       // teal
-      org: '55,88,120',         // steel blue — companies, not project diamonds
-      project: '43,58,103',     // indigo
-      tool: '94,71,129',        // violet
-      place: '107,118,58',      // olive
-      task: '184,115,51',       // copper
-      commitment: '150,54,66',  // burgundy — a promise, not just a to-do
-      idea: '90,86,78',         // warm gray
+      person: '141,133,242',    // violet
+      org: '223,179,94',        // amber family below — kinds keep their shapes
+      project: '223,179,94',
+      tool: '223,179,94',
+      place: '223,179,94',
+      task: '223,179,94',
+      commitment: '223,179,94',
+      idea: '223,179,94',
     };
     function kindColor(kind, alpha) {
       return 'rgba(' + (KIND_RGB[kind] || KIND_RGB.idea) + ',' + alpha + ')';
@@ -889,8 +922,8 @@ window.MnemosConstellation = {
       panel.hidden = false;
       panel.innerHTML = '<div class="const-edit-hint">Gathering evidence…</div>';
       try {
-        const data = await (await fetch('/graph/constellation/evidence?id='
-          + encodeURIComponent(id))).json();
+        const data = await MnemosJson('/graph/constellation/evidence?id='
+          + encodeURIComponent(id));
         const n = data.node || state.byId[id] || {};
         const fullTitle = (data.detail && data.detail.fact && data.detail.fact.text)
           || (n.meta && n.meta.full_text)
@@ -991,7 +1024,10 @@ window.MnemosConstellation = {
         panel.innerHTML = html;
       } catch (err) {
         panel.innerHTML = '<div class="const-edit-hint" style="color:var(--danger)">'
-          + MnemosEsc(err.message || err) + '</div>';
+          + MnemosEsc(err.message || err) + '</div>'
+          + '<div class="const-edit-actions">'
+          + '<button type="button" class="const-link-btn" data-act="retry-ev">Retry</button>'
+          + '<button type="button" class="linkish" data-act="close-ev">Close</button></div>';
       }
     }
 
@@ -1019,7 +1055,7 @@ window.MnemosConstellation = {
     }
     async function refreshGraph() {
       // explain stays off the poll path — evidence drawer fetches breakdowns on click
-      const data2 = await (await fetch('/field/state?limit=28')).json();
+      const data2 = await MnemosJson('/field/state?limit=28');
       state.nodes = data2.nodes || [];
       state.edges = data2.edges || [];
       state.insights = data2.insights || [];
@@ -1232,7 +1268,7 @@ window.MnemosConstellation = {
       const padX = 6;
       const lx = side >= 0 ? x + 10 : x - 10 - tw;
       const ly = y - 4;
-      ctx.fillStyle = emphasis ? 'rgba(255,254,251,.96)' : 'rgba(255,254,251,.88)';
+      ctx.fillStyle = emphasis ? 'rgba(22,22,27,.96)' : 'rgba(22,22,27,.88)';
       ctx.beginPath();
       const rw = tw + padX * 2, rh = 16, rx = lx - padX, ry = ly - 11;
       const rad = 7;
@@ -1243,7 +1279,7 @@ window.MnemosConstellation = {
       ctx.arcTo(rx, ry, rx + rw, ry, rad);
       ctx.closePath();
       ctx.fill();
-      ctx.fillStyle = emphasis ? 'rgba(11,19,32,.9)' : 'rgba(35,38,43,.78)';
+      ctx.fillStyle = emphasis ? 'rgba(242,241,247,.92)' : 'rgba(201,200,207,.8)';
       ctx.textAlign = 'left';
       ctx.fillText(label, lx, ly);
     }
@@ -1272,8 +1308,17 @@ window.MnemosConstellation = {
       if (kind === 'person') {
         ctx.beginPath();
         ctx.arc(x, y, r, 0, Math.PI * 2);
-        ctx.fillStyle = kindColor('person', alpha);
+        ctx.fillStyle = n.is_self
+          ? 'rgba(' + SELF_RGB + ',' + alpha + ')'
+          : kindColor('person', alpha);
         ctx.fill();
+        if (n.is_self) {
+          ctx.beginPath();
+          ctx.arc(x, y, r + 4, 0, Math.PI * 2);
+          ctx.strokeStyle = 'rgba(' + SELF_RGB + ',.55)';
+          ctx.lineWidth = 1.4;
+          ctx.stroke();
+        }
       } else if (kind === 'org') {
         // Hexagon — companies/orgs, distinct from project diamonds.
         const hr = r * 1.05;
@@ -1350,9 +1395,9 @@ window.MnemosConstellation = {
       const w = st.w, h = st.h;
       ctx.clearRect(0, 0, w, h);
       const g = ctx.createRadialGradient(w / 2, h / 2, 8, w / 2, h / 2, Math.min(w, h) * 0.55);
-      g.addColorStop(0, 'rgba(184,115,51,.035)');
-      g.addColorStop(0.55, 'rgba(30,91,79,.02)');
-      g.addColorStop(1, 'rgba(248,246,241,0)');
+      g.addColorStop(0, 'rgba(141,133,242,.035)');
+      g.addColorStop(0.55, 'rgba(95,179,158,.02)');
+      g.addColorStop(1, 'rgba(10,10,11,0)');
       ctx.fillStyle = g;
       ctx.fillRect(0, 0, w, h);
 
@@ -1384,8 +1429,8 @@ window.MnemosConstellation = {
         }
         const isPromise = e.rel === 'promise' || e.rel === 'responsible_for';
         ctx.strokeStyle = hot || isPromise
-          ? 'rgba(184,115,51,' + (0.28 + (e.weight || 1) * 0.05) + ')'
-          : 'rgba(11,19,32,' + (0.12 + conf * 0.12) + ')';
+          ? 'rgba(141,133,242,' + (0.28 + (e.weight || 1) * 0.05) + ')'
+          : 'rgba(242,241,247,' + (0.14 + conf * 0.14) + ')';
         ctx.lineWidth = hot ? 1.7 : (e.manual ? 1.4 : 1.05);
         ctx.stroke();
         ctx.setLineDash([]);
@@ -1412,7 +1457,11 @@ window.MnemosConstellation = {
           if (st.emphasizeIds.has(n.id)) alpha = Math.max(alpha, 1.0);
           else alpha *= 0.28;
         }
-        const r = n._r || ((peri ? 3.5 : 5.5) + gScore * (peri ? 3 : 5.5));
+        let r = n._r || ((peri ? 3.5 : 5.5) + gScore * (peri ? 3 : 5.5));
+        if (st.rangeCutoff && n.ts && n.ts < st.rangeCutoff) {
+          alpha *= 0.3;
+          r *= 0.72;
+        }
         const scale = 1 + breath * (n.prospective_risk >= 0.7 ? 0.9 : 0.25);
         // Soft aura — keep tight so neighbors don't melt into one blob.
         ctx.beginPath();
@@ -1427,7 +1476,7 @@ window.MnemosConstellation = {
           const halo = r * scale * (1.55 + aging * 0.55);
           ctx.beginPath();
           ctx.arc(n._x, n._y, halo, 0, Math.PI * 2);
-          ctx.strokeStyle = 'rgba(184,115,51,' + (0.22 + aging * 0.45).toFixed(2) + ')';
+          ctx.strokeStyle = 'rgba(141,133,242,' + (0.22 + aging * 0.45).toFixed(2) + ')';
           ctx.lineWidth = 1 + aging * 1.5;
           ctx.stroke();
         }
@@ -1435,7 +1484,7 @@ window.MnemosConstellation = {
         if (st.selected === n.id || st.focusId === n.id || st.hover === n.id || n.pinned) {
           ctx.beginPath();
           ctx.arc(n._x, n._y, r * scale + 3, 0, Math.PI * 2);
-          ctx.strokeStyle = 'rgba(184,115,51,.75)';
+          ctx.strokeStyle = 'rgba(141,133,242,.75)';
           ctx.lineWidth = 1.5;
           ctx.stroke();
         }
@@ -1449,7 +1498,7 @@ window.MnemosConstellation = {
           ctx.lineTo(n._x - 3.5, ay + (up ? 5 : -5));
           ctx.lineTo(n._x + 3.5, ay + (up ? 5 : -5));
           ctx.closePath();
-          ctx.fillStyle = up ? 'rgba(30,91,79,.7)' : 'rgba(150,54,66,.65)';
+          ctx.fillStyle = up ? 'rgba(95,179,158,.7)' : 'rgba(224,113,106,.65)';
           ctx.fill();
         }
         // Cluster chip — absorbed near-duplicates ("+7 related")
@@ -1460,16 +1509,20 @@ window.MnemosConstellation = {
           const bx = n._x + r * scale * 0.55;
           const by = n._y - r * scale * 0.85;
           const pw = tw + 6, ph = 11;
-          ctx.fillStyle = 'rgba(11,19,32,0.78)';
+          ctx.fillStyle = 'rgba(28,32,41,0.92)';
           ctx.fillRect(bx, by - ph + 2, pw, ph);
-          ctx.fillStyle = 'rgba(250,247,242,0.95)';
+          ctx.fillStyle = 'rgba(233,231,226,0.95)';
           ctx.textBaseline = 'middle';
           ctx.fillText(chip, bx + 3, by - ph / 2 + 3);
         }
       });
 
+      /* Label policy (UI spec §5): a sparse field (<=12 nodes) labels
+         everything; beyond that labels are hover/selection-revealed so they
+         can never collide into each other. */
+      const fewNodes = st.nodes.length <= 12;
       st.nodes.forEach(n => {
-        const show = n.layer === 'focus' || st.hover === n.id || st.selected === n.id
+        const show = fewNodes || st.hover === n.id || st.selected === n.id
           || st.focusId === n.id || n.pinned;
         if (!show) return;
         if (dimFocus && st.focusId !== n.id) {
@@ -1482,7 +1535,7 @@ window.MnemosConstellation = {
         drawLabel(
           n._x + (n._labelSide || 1) * (r + 3),
           n._y + (n._labelDy || 0),
-          n.label, n._labelSide || 1,
+          n.label + (n.is_self ? ' — you' : ''), n._labelSide || 1,
           st.hover === n.id || st.selected === n.id || st.focusId === n.id);
       });
       ctx.restore();
@@ -1559,6 +1612,10 @@ window.MnemosConstellation = {
           flushDwell();
           state.selected = null; state.linkFrom = null;
           panel.hidden = true; panel.innerHTML = ''; return;
+        }
+        if (act === 'retry-ev' && state.selected) {
+          openEvidence(state.selected);
+          return;
         }
         if (act === 'play-moment') {
           const aid = t.getAttribute('data-audio-id');
@@ -1675,6 +1732,11 @@ window.MnemosConstellation = {
             state.linkFrom = null;
             openEvidence(state.hover);
           }
+        } else if (state.detailMode) {
+          state.selected = state.selected === state.hover ? null : state.hover;
+          if (state.onSelect) {
+            state.onSelect(state.selected ? state.byId[state.selected] : null);
+          }
         } else {
           openEvidence(state.hover);
           if (state.onSelect) state.onSelect(state.byId[state.hover]);
@@ -1784,6 +1846,17 @@ window.MnemosConstellation = {
         }
       },
       openEvidence,
+      select(id) {
+        state.selected = id || null;
+        if (state.onSelect) {
+          state.onSelect(id ? state.byId[id] : null);
+        }
+      },
+      setRange(cutoffTs) {
+        state.rangeCutoff = cutoffTs || null;
+      },
+      node(id) { return state.byId[id]; },
+      data() { return { nodes: state.nodes, edges: state.edges }; },
       destroy() {
         cancelAnimationFrame(state.raf);
         window.removeEventListener('resize', resize);
@@ -1852,7 +1925,7 @@ window.MnemosRenderFolio = function (packet, opts) {
   html += '<div class="ink-divider" style="margin-left:18px;margin-right:8px"></div>';
   rows.forEach(([label, key, val]) => {
     html += '<div style="margin:10px 0 10px 18px">';
-    html += '<div class="pv-label" style="font:11px var(--mono);text-transform:uppercase;'
+    html += '<div class="pv-label" style="font:11px var(--sans);'
       + 'letter-spacing:.05em;color:var(--mut)">' + label + '</div>';
     if (editable && (key === 'body' || key === 'subject')) {
       html += '<textarea data-field="' + key + '" style="width:100%;margin-top:4px;'
@@ -2333,6 +2406,11 @@ window.MnemosCapture = {
   },
   async toggle(source) {
     if (!this._state) return;
+    // Hosted: local resume always 503s — open the browser Capture page.
+    if (this._state.headless && !(this._state.running || {})[source]) {
+      window.location.href = '/capture';
+      return;
+    }
     const running = (this._state.running || {})[source];
     try {
       if (running) await this.pause(source);
@@ -2340,6 +2418,10 @@ window.MnemosCapture = {
       this._state = await this.status();
       this.render();
     } catch (e) {
+      if (this._state.headless) {
+        window.location.href = '/capture';
+        return;
+      }
       // Likely 403 — open consent.
       this.openPrivacy();
     }
@@ -2409,7 +2491,7 @@ window.MnemosCapture = {
       + '<button type="button" class="pv-btn quiet" id="pvSeePayload">See exactly what would be sent</button>'
       + '</div>'
       + '<pre id="pvPayload" hidden style="max-height:180px;overflow:auto;font-size:11px;'
-      + 'background:rgba(11,19,32,.04);padding:8px;border-radius:8px;white-space:pre-wrap"></pre>'
+      + 'background:var(--ink-04);padding:8px;border-radius:8px;white-space:pre-wrap"></pre>'
       + '<label class="pv-src"><input type="checkbox" id="pv_ping">'
       + '<div><b>Send these stats weekly, automatically</b>'
       + '<span id="pvPingHint">Off by default. Only the payload above, only to the '
@@ -2601,7 +2683,7 @@ window.MnemosCapture = {
     el.innerHTML = rows.map((r) =>
       '<div style="display:flex;gap:8px;padding:3px 0">'
       + '<span style="flex:0 0 auto;width:9px;height:9px;border-radius:50%;margin-top:5px;'
-      + 'background:' + (r[2] ? 'var(--navy)' : 'rgba(11,19,32,.18)') + '"></span>'
+      + 'background:' + (r[2] ? 'var(--navy)' : 'var(--ink-20)') + '"></span>'
       + '<span><b style="color:var(--navy);font-weight:600">' + MnemosEsc(r[0])
       + '</b> — ' + MnemosEsc(r[1]) + '</span></div>').join('')
       + '<div style="margin-top:6px;padding-top:6px;border-top:1px dashed var(--line)">'
@@ -2673,10 +2755,12 @@ window.MnemosCapture = {
     const bar = document.getElementById('mnemosRecBar');
     if (!bar) return;
     if (!this._state) {
-      bar.innerHTML = this._voiceChipHtml();
-      const voiceBtn = document.getElementById('recVoice');
-      if (voiceBtn) voiceBtn.onclick = () => this.toggleVoice();
-      try { if (typeof window.MnemosPlaceToast === 'function') window.MnemosPlaceToast(); } catch (e) {}
+      bar.innerHTML = '<div class="rec-row">'
+        + this._metaSepHtml()
+        + this._privacyMetaHtml()
+        + this._voiceChipHtml()
+        + '</div>';
+      this._bindBar(bar);
       return;
     }
     const consent = this._state.consent || {};
@@ -2684,8 +2768,11 @@ window.MnemosCapture = {
     const running = this._state.running || {};
     const mm = this._state.meeting_mode || {};
     const ms = this._state.meeting_session || {};
+    const headless = !!this._state.headless;
     const liveKeys = ['mic', 'webcam', 'screen', 'system_audio'];
     const consented = !!consent.consented;
+    const armedKeys = liveKeys.filter((k) => !!sources[k]);
+    const liveCount = armedKeys.filter((k) => !!running[k]).length;
     let html = '';
     if (ms.pending) {
       html += '<div class="rec-row meeting">'
@@ -2705,35 +2792,45 @@ window.MnemosCapture = {
         + '</span></span></div>';
     }
     if (!consented) {
-      html += '<button type="button" class="rec-consent-btn" id="recOpenPrivacy">'
-        + 'Enable capture…</button>';
+      html += '<div class="rec-row">'
+        + '<button type="button" class="rec-consent-btn" id="recOpenPrivacy">'
+        + 'Enable capture…</button>'
+        + this._metaSepHtml()
+        + this._voiceChipHtml()
+        + '</div>';
     } else {
+      // Status + (desktop) source toggles | Privacy + Voice.
+      // Hosted skips per-source chips — resume is always /capture.
       html += '<div class="rec-row">';
-      liveKeys.forEach((k) => {
-        if (!sources[k]) return;
-        const on = !!running[k];
-        const meta = this._SOURCES.find((s) => s.key === k) || {label: k};
-        html += '<button type="button" class="rec-chip' + (on ? '' : ' paused')
-          + '" data-src="' + k + '" title="'
-          + (on ? 'Pause ' : 'Resume ') + meta.label + '">'
-          + '<span class="dot" aria-hidden="true"></span>'
-          + '<span>' + meta.label + '</span>'
-          + '<span class="act">' + (on ? 'pause' : 'resume') + '</span>'
-          + '</button>';
-      });
-      // One click to stop everything, on the bar itself: a tester who wants
-      // recording to stop should not have to find it inside a settings sheet.
-      if (liveKeys.some((k) => running[k])) {
-        html += '<button type="button" class="rec-chip" id="recStopAll" '
-          + 'style="color:#8c1d18" title="Stop every capture source now">'
-          + '<span>Stop all</span><span class="act">stop</span></button>';
+      html += this._statusChipHtml(liveCount, headless, armedKeys.length);
+      if (!headless) {
+        armedKeys.forEach((k) => {
+          const on = !!running[k];
+          const meta = this._SOURCES.find((s) => s.key === k) || {label: k};
+          html += '<button type="button" class="rec-chip' + (on ? '' : ' paused')
+            + '" data-src="' + k + '" title="'
+            + (on ? 'Pause ' : 'Resume ') + meta.label
+            + '" aria-pressed="' + (on ? 'true' : 'false') + '">'
+            + '<span class="dot" aria-hidden="true"></span>'
+            + '<span>' + meta.label + '</span>'
+            + '<span class="act">' + (on ? 'pause' : 'resume') + '</span>'
+            + '</button>';
+        });
+        if (liveCount > 0) {
+          html += '<button type="button" class="rec-chip stop-all" id="recStopAll" '
+            + 'title="Stop every capture source now">'
+            + '<span>Stop all</span><span class="act">stop</span></button>';
+        }
       }
-      html += '<button type="button" class="rec-chip paused" id="recOpenPrivacy" '
-        + 'title="Privacy controls"><span>Privacy</span></button>';
+      html += this._metaSepHtml();
+      html += this._privacyMetaHtml();
+      html += this._voiceChipHtml();
       html += '</div>';
     }
-    html += this._voiceChipHtml();
     bar.innerHTML = html;
+    this._bindBar(bar);
+  },
+  _bindBar(bar) {
     const openBtn = document.getElementById('recOpenPrivacy');
     if (openBtn) openBtn.onclick = () => this.openPrivacy();
     const stopAllBtn = document.getElementById('recStopAll');
@@ -2743,31 +2840,53 @@ window.MnemosCapture = {
     });
     const voiceBtn = document.getElementById('recVoice');
     if (voiceBtn) voiceBtn.onclick = () => this.toggleVoice();
-    // RecBar height drives toast stacking on pages without a margin slot.
     try { if (typeof window.MnemosPlaceToast === 'function') window.MnemosPlaceToast(); } catch (e) {}
+  },
+  _statusChipHtml(liveCount, headless, armedCount) {
+    if (headless) {
+      return '<a class="rec-status hosted" href="/capture" '
+        + 'title="Open the Capture page to start mic, tab audio, or screen">'
+        + '<span class="dot" aria-hidden="true"></span>'
+        + '<span>Capture</span></a>';
+    }
+    if (liveCount > 0) {
+      return '<span class="rec-status live" title="'
+        + liveCount + ' source' + (liveCount === 1 ? '' : 's') + ' recording">'
+        + '<span class="dot" aria-hidden="true"></span>'
+        + '<span>Listening</span></span>';
+    }
+    const tip = armedCount
+      ? 'Capture allowed — nothing recording right now'
+      : 'Capture allowed — enable a source in Privacy';
+    return '<span class="rec-status idle" title="' + tip + '">'
+      + '<span class="dot" aria-hidden="true"></span>'
+      + '<span>Idle</span></span>';
+  },
+  _metaSepHtml() {
+    return '<span class="rec-sep" aria-hidden="true"></span>';
+  },
+  _privacyMetaHtml() {
+    return '<button type="button" class="rec-meta" id="recOpenPrivacy" '
+      + 'title="Privacy controls"><span>Privacy</span></button>';
   },
   _voiceChipHtml() {
     const v = this._voice || {};
     const enabled = v.enabled !== false;
     const on = enabled && !v.muted;
     let title = 'Mute AI voice';
-    let act = 'mute';
-    let cls = 'rec-chip voice-on';
+    let cls = 'rec-meta voice-on';
     if (!enabled) {
       title = 'AI voice disabled (QUILL_TTS=off)';
-      act = 'off';
-      cls = 'rec-chip paused';
+      cls = 'rec-meta';
     } else if (!on) {
       title = 'Unmute AI voice';
-      act = 'unmute';
-      cls = 'rec-chip paused';
+      cls = 'rec-meta';
     }
-    return '<div class="rec-row">'
-      + '<button type="button" class="' + cls + '" id="recVoice" title="' + title + '">'
+    return '<button type="button" class="' + cls + '" id="recVoice" title="' + title + '"'
+      + ' aria-pressed="' + (on ? 'true' : 'false') + '">'
       + '<span class="dot" aria-hidden="true"></span>'
       + '<span>Voice</span>'
-      + '<span class="act">' + act + '</span>'
-      + '</button></div>';
+      + '</button>';
   },
   async tick() {
     try {
@@ -2794,6 +2913,117 @@ window.MnemosCapture = {
   }
 };
 
+/* Global Ask (command palette trigger) — lives in the shell on every route.
+   The dialog is injected on demand; ⌘K / Ctrl+K opens it anywhere. */
+window.MnemosAsk = {
+  _el: null,
+  _ensure() {
+    if (this._el) return this._el;
+    const host = document.createElement('div');
+    host.id = 'mnemosAsk';
+    host.setAttribute('aria-hidden', 'true');
+    host.innerHTML =
+      '<div class="ask-sheet" role="dialog" aria-modal="true" aria-label="Ask">'
+      + '<h3>Ask Sparrow</h3>'
+      + '<p class="ask-hint">Orientation only. The full thread lives in Chat.</p>'
+      + '<textarea id="mnemosAskBox" placeholder="A question, a task, a follow-up…"></textarea>'
+      + '<div class="ask-actions">'
+      + '<button type="button" class="btn-quiet" data-ask="dismiss">Dismiss</button>'
+      + '<a class="btn-ghost" href="/chat">Full chat</a>'
+      + '<button type="button" class="btn-primary" data-ask="send">Send</button>'
+      + '</div></div>';
+    document.body.appendChild(host);
+    host.addEventListener('click', (e) => { if (e.target === host) this.close(); });
+    host.querySelector('[data-ask="dismiss"]').onclick = () => this.close();
+    host.querySelector('[data-ask="send"]').onclick = () => this.send();
+    host.querySelector('textarea').addEventListener('keydown', (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); this.send(); }
+    });
+    this._el = host;
+    return host;
+  },
+  open() {
+    const el = this._ensure();
+    MnemosDialog.open(el, { lockScroll: true, focus: '#mnemosAskBox', onEscape: () => this.close() });
+  },
+  close() { if (this._el) MnemosDialog.close(this._el); },
+  async send() {
+    const box = this._el && this._el.querySelector('textarea');
+    const msg = (box && box.value || '').trim();
+    if (!msg) return;
+    this.close();
+    box.value = '';
+    try {
+      await fetch('/chat', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({message: msg}),
+      });
+    } catch (e) {}
+    window.location.href = '/chat';
+  },
+  mount() {
+    const trigger = document.getElementById('mnemosAskOpen');
+    if (trigger) trigger.onclick = () => this.open();
+    if (this._bound) return;
+    this._bound = true;
+    document.addEventListener('keydown', (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        this.open();
+      }
+    });
+  }
+};
+
+/* Worker status, collapsed to one 9px dot: green idle/healthy, amber degraded.
+   Full status lives in the tooltip; pulse only on state change. Pages may add
+   a context line (e.g. Memory's "107 shown · 107 total") via setExtra(). */
+window.MnemosStatus = {
+  _timer: null, _lastState: null, _worker: '', _extra: '',
+  _dot() { return document.getElementById('mnemosStatusDot'); },
+  setExtra(text) { this._extra = text || ''; this._paint(this._lastState || 'ok'); },
+  _paint(state) {
+    const dot = this._dot();
+    if (!dot) return;
+    if (this._lastState !== null && state !== this._lastState) {
+      dot.classList.remove('changed');
+      void dot.offsetWidth; /* restart the one-shot pulse */
+      dot.classList.add('changed');
+    }
+    this._lastState = state;
+    dot.classList.toggle('warn', state === 'warn');
+    const bits = [this._worker || 'worker idle'];
+    if (this._extra) bits.push(this._extra);
+    dot.title = bits.join(' · ');
+    dot.setAttribute('aria-label', dot.title);
+  },
+  async tick() {
+    if (document.hidden || !this._dot()) return;
+    try {
+      const j = await (await fetch('/console/jobs')).json();
+      const st = j.stats || {};
+      const parts = [];
+      if (st.pending) parts.push(st.pending + ' pending');
+      if (st.running) parts.push('running');
+      if (st.dead) parts.push(st.dead + ' dead');
+      else if (st.error) parts.push(st.error + ' err');
+      this._worker = parts.length ? ('worker: ' + parts.join(', ')) : 'worker idle';
+      this._paint((st.dead || st.error) ? 'warn' : 'ok');
+    } catch (e) {
+      this._worker = 'worker unreachable';
+      this._paint('warn');
+    }
+  },
+  start() {
+    if (!this._dot()) return;
+    this.tick();
+    if (this._timer) clearInterval(this._timer);
+    this._timer = setInterval(() => this.tick(), 30000);
+  }
+};
+
 document.addEventListener('DOMContentLoaded', () => {
   try { window.MnemosCapture && window.MnemosCapture.start(); } catch (e) {}
+  try { window.MnemosAsk && window.MnemosAsk.mount(); } catch (e) {}
+  try { window.MnemosStatus && window.MnemosStatus.start(); } catch (e) {}
 });

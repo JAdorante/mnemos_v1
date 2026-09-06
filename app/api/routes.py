@@ -21,6 +21,9 @@
 """
 from __future__ import annotations
 
+import json
+import re
+
 from pathlib import Path
 
 from fastapi import (APIRouter, File, Form, Header, HTTPException, Query, Request,
@@ -421,6 +424,9 @@ def capture_status() -> dict:
         # offering toggles that only ever return 503 (the 503 stays as the
         # backstop — this is so the user is told before they click).
         "support": capture_support.status(),
+        # Hosted boxes have no local devices — RecBar must send people to
+        # /capture instead of calling /capture/resume (always 503).
+        "headless": _headless(),
     }
 
 
@@ -802,6 +808,52 @@ def memory_search(q: str = "", limit: int = 20, modality: str | None = None) -> 
 # audio clip or frame (provenance). This is the trust/training layer: you can
 # see what Sparrow heard and saw, and judge what's good, low-confidence, or junk.
 
+def _display_summary(text: str, meta: dict) -> str:
+    """Plain-language feed sentence (UI spec §6), fixed at serialization.
+
+    New vision records carry `meta.display_summary` written by the model pass.
+    Older records fall back to their pipeline text: drop a leading
+    "[Window Title]" prefix, unwrap a raw-JSON description if one leaked
+    through, then truncate at a sentence boundary. The full original stays in
+    `text` for the raw disclosure — nothing here is client-side surgery."""
+    ds = str(meta.get("display_summary") or "").strip()
+    if ds:
+        return ds
+    t = (text or "").strip()
+    if t.startswith("[") and "]" in t[:120]:
+        t = t.split("]", 1)[1].strip()
+    if t.startswith("{"):
+        try:
+            j = json.loads(t)
+            if isinstance(j, dict):
+                t = str(j.get("summary") or j.get("description") or t).strip()
+        except Exception:
+            # Truncated / malformed JSON — salvage the description value.
+            m = re.search(r'"(?:summary|description)"\s*:\s*"((?:[^"\\]|\\.)*)', t)
+            if m:
+                t = m.group(1).replace('\\"', '"').strip()
+    if len(t) > 180:
+        cut = t[:180]
+        dot = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "))
+        t = cut[: dot + 1] if dot > 60 else cut.rsplit(" ", 1)[0] + "…"
+    return t
+
+
+def _confidence_bucket(conf) -> str | None:
+    """Display policy (UI spec §6): floats never render. >=.7 shows nothing,
+    .4-.7 shows a 'low confidence' tag, <.4 is suppressed from the default
+    feed (still reachable through the Low-confidence filter)."""
+    if conf is None:
+        return None
+    try:
+        c = float(conf)
+    except (TypeError, ValueError):
+        return None
+    if c >= 0.7:
+        return None
+    return "low" if c >= 0.4 else "suppressed"
+
+
 def _console_row(d: dict) -> dict:
     """Flatten an event dict into the compact shape the console renders."""
     meta = d.get("meta") or {}
@@ -842,6 +894,7 @@ def _console_row(d: dict) -> dict:
         "source": d.get("source"),
         "window": meta.get("window"),
         "text": text,
+        "summary": _display_summary(text, meta),
         "speaker": speaker,
         "speaker_profile": spk_profile,
         "utterance_type": ut_type,
@@ -849,6 +902,7 @@ def _console_row(d: dict) -> dict:
         "provenance_detail": prov_detail,
         "enhanced_audio": meta.get("enhanced_audio_path"),
         "confidence": d.get("confidence"),
+        "confidence_bucket": _confidence_bucket(d.get("confidence")),
         "low_confidence": bool(quality.get("low_confidence")),
         "needs_review": bool(quality.get("needs_review")) or bool(meta.get("needs_review")),
         "skipped": meta.get("skipped"),
@@ -871,26 +925,43 @@ def console_events(
     modality: str | None = None,
     source: str | None = None,
     low_only: bool = False,
+    since: float = 0,
 ) -> dict:
     """Feed for the console: newest first, with optional search / modality /
-    source-prefix / low-confidence filters. `source` is a prefix match so
-    e.g. source=desktop. spans desktop.screen and desktop.click."""
+    source-prefix / low-confidence / time-range filters. `source` is a prefix
+    match so e.g. source=desktop. spans desktop.screen and desktop.click.
+    `since` (unix ts) keeps only events at or after that moment."""
+    import time as _time
+
+    all_rows = memory.all()
+    midnight = _time.mktime(_time.localtime()[:3] + (0, 0, 0, 0, 0, -1))
+    today_n = sum(1 for r in all_rows if (r.get("time") or 0) >= midnight)
     if q.strip():
         rows = memory.search(q, limit=limit, modality=modality)
         if source:
             rows = [r for r in rows if (r.get("source") or "").startswith(source)]
+        if since:
+            rows = [r for r in rows if (r.get("time") or 0) >= since]
     else:
-        rows = memory.all()
+        rows = all_rows
         if modality:
             rows = [r for r in rows if r.get("modality") == modality]
         if source:
             rows = [r for r in rows if (r.get("source") or "").startswith(source)]
+        if since:
+            rows = [r for r in rows if (r.get("time") or 0) >= since]
         rows = rows[-limit:]
     out = [_console_row(r) for r in rows]
     if low_only:
-        out = [r for r in out if r["low_confidence"]]
+        out = [r for r in out if r["low_confidence"]
+               or r["confidence_bucket"] in ("low", "suppressed")]
+    else:
+        # Display policy (§6): confidence < .4 is suppressed from the default
+        # feed — those rows stay reachable via the Low-confidence filter.
+        out = [r for r in out if r["confidence_bucket"] != "suppressed"]
     out.sort(key=lambda r: r["time"] or 0, reverse=True)
-    return {"count": len(out), "total": len(memory.all()), "events": out}
+    return {"count": len(out), "total": len(all_rows), "today": today_n,
+            "events": out}
 
 
 @router.get("/artifact")
@@ -2761,8 +2832,8 @@ def _adoption_console_chrome() -> str:
 <div id="mnemosUpdateBar" hidden style="padding:10px 16px;border-radius:12px;
   margin:0 0 12px;font:14px/1.45 system-ui;display:flex;gap:12px;align-items:center;
   flex-wrap:wrap"></div>
-<div id="mnemosToast" hidden class="mnemos-toast" style="max-width:340px;padding:14px 16px;border-radius:14px;background:#0b1320;color:#f8f6f1;
-  box-shadow:0 12px 40px rgba(11,19,32,.28);font:14px/1.45 system-ui"></div>
+<div id="mnemosToast" hidden class="mnemos-toast" style="max-width:340px;padding:14px 16px;border-radius:14px;background:#1C1C22;color:#F2F1F7;
+  box-shadow:0 12px 40px rgba(0,0,0,.55);font:14px/1.45 system-ui"></div>
 <script>
 (function(){
   const toast=document.getElementById('mnemosToast');
@@ -2867,8 +2938,8 @@ def _adoption_console_chrome() -> str:
     try{ dismissed=window.localStorage.getItem(DISMISS_KEY); }catch(e){}
     if(!b.unsupported && dismissed===b.dismiss_key){ bar.hidden=true; return; }
     const crit=b.level==='critical';
-    bar.style.background=crit?'#7a1420':'#0b1320';
-    bar.style.color='#f8f6f1';
+    bar.style.background=crit?'#7a1420':'#1C1C22';
+    bar.style.color='#F2F1F7';
     bar.innerHTML='<strong>'+(crit?'Update required':'Update available')+'</strong>'
       +'<span>'+b.message+'</span>'
       +(b.url?(' <a href="'+b.url+'" target="_blank" rel="noopener" '
@@ -2905,7 +2976,7 @@ def memory_console_page() -> HTMLResponse:
         '<button class="btn" onclick="load()">Refresh</button>\n    '
         '<button class="btn" id="reportBtn" type="button">Report a problem</button>\n    '
         '<button class="btn" id="statsBtn" type="button">Send my stats</button>\n    '
-        '<span id="mnemosVersion" style="margin-left:10px;color:#888;font-size:12px"></span>',
+        '<span id="mnemosVersion" style="margin-left:10px;color:var(--faint);font-size:12px"></span>',
         1)
     page = page.replace(
         '<div class="layout">',
@@ -3219,6 +3290,10 @@ def people_list(include_hidden: bool = False, include_candidates: bool = True) -
     # WS-B: v2 ranks only when QUILL_SCORE_V2 is on AND the shadow soak
     # passed (7 clean nightlies). None -> v1, the shipped default.
     v2_scores = score_v2.live_scores(store, now)
+    try:
+        mentions_7d = store.person_mention_counts(now - 7 * 86400)
+    except Exception:
+        mentions_7d = {}
     out = []
     for p in store.all_people():
         if not include_hidden and (
@@ -3233,6 +3308,11 @@ def people_list(include_hidden: bool = False, include_candidates: bool = True) -
             score = person_score(rel.get("out") or [], p.get("last_seen"), now)
         out.append({"id": p["id"], "name": p["name"],
                     "weight": round(score, 1),
+                    "first_seen": p.get("first_seen"),
+                    "mentions_7d": mentions_7d.get(p["id"], 0),
+                    # 1-4 tenure bucket of the long-run score — the list never
+                    # renders the raw float (UI spec §6); it stays for detail.
+                    "strength": 1 + (score >= 5) + (score >= 15) + (score >= 40),
                     "last_seen": p.get("last_seen"),
                     "is_self": p["id"] == self_pid,
                     "promotion_state": p.get("promotion_state") or "candidate",

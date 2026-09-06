@@ -54,6 +54,23 @@ _LINUX_SYSTEM_AUDIO = (
 _LINUX_DESKTOP_NOTE = (
     "Needs an X11 session (mss + pynput). Wayland screen/click capture is "
     "not supported yet.")
+# Hosted (QUILL_HEADLESS=1): the server has no devices at all — the user's
+# BROWSER is the capture surface. Mic and meeting-tab audio arrive over
+# WS /ingest/audio from the /capture page; everything device-shaped is off.
+_HOSTED_MIC = (
+    "Captured from your browser: open the Capture page and start the mic "
+    "there.")
+_HOSTED_TAB = (
+    "Your meeting tab's audio, shared from the Capture page (“Share "
+    "meeting tab” + “Also share tab audio”). Desktop browsers "
+    "only — phones can't share tab audio.")
+_HOSTED_SCREEN = (
+    "Share a tab, window, or screen from the Capture page — the browser "
+    "shows a sharing indicator the whole time. Desktop browsers only.")
+_HOSTED_NO_DEVICE = (
+    "This hosted instance runs on a server with no local devices — "
+    "capture happens in your browser, which offers mic, meeting-tab "
+    "audio, and screen sharing only.")
 
 
 def _norm(platform: str | None) -> str:
@@ -65,14 +82,31 @@ def _norm(platform: str | None) -> str:
     return "linux"
 
 
-def support(platform: str | None = None) -> dict[str, dict[str, Any]]:
-    """Per-source capability for this OS. Pure — pass `platform` to test."""
+def _headless_env() -> bool:
+    import os
+    return os.environ.get("QUILL_HEADLESS", "") in ("1", "true", "True")
+
+
+def support(platform: str | None = None,
+            headless: bool | None = None) -> dict[str, dict[str, Any]]:
+    """Per-source capability for this OS. Pure — pass `platform`/`headless`
+    to test; `headless` defaults to QUILL_HEADLESS."""
     os_name = _norm(platform)
     out: dict[str, dict[str, Any]] = {}
 
     def put(key: str, state: str, reason: str = "") -> None:
         out[key] = {"state": state, "available": state != UNSUPPORTED,
                     "reason": reason}
+
+    if _headless_env() if headless is None else headless:
+        # Server OS is irrelevant here: the browser is the capture surface.
+        put("mic", AVAILABLE, _HOSTED_MIC)
+        put("system_audio", AVAILABLE, _HOSTED_TAB)
+        put("save_audio", AVAILABLE)
+        put("screen", AVAILABLE, _HOSTED_SCREEN)
+        put("webcam", UNSUPPORTED, _HOSTED_NO_DEVICE)
+        put("clicks", UNSUPPORTED, _HOSTED_NO_DEVICE)
+        return out
 
     # Mic and camera are portable: sounddevice/PortAudio and OpenCV both work
     # on all three. macOS gates them behind a TCC permission prompt, which is
@@ -97,11 +131,16 @@ def support(platform: str | None = None) -> dict[str, dict[str, Any]]:
     return out
 
 
-def status(platform: str | None = None) -> dict[str, Any]:
+def status(platform: str | None = None,
+           headless: bool | None = None) -> dict[str, Any]:
     """What ``GET /capture/status`` embeds under ``"support"``."""
     os_name = _norm(platform)
-    per_source = support(platform)
-    if os_name == "windows":
+    hosted = _headless_env() if headless is None else headless
+    per_source = support(platform, headless=hosted)
+    if hosted:
+        note = ("Hosted instance: capture happens in your browser on the "
+                "Capture page — mic, meeting-tab audio, and screen sharing.")
+    elif os_name == "windows":
         note = ""
     elif os_name == "linux":
         note = ("Screen and mouse-click capture work under X11. "

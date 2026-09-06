@@ -841,8 +841,11 @@ class Extractor:
             if kind == "person":
                 # Chat / DM sources are allowed to mint; ambient ASR stays
                 # conservative so overheard names don't flood the network.
+                # "chat.research" is NOT user-typed chat — web content the
+                # agent read must not get the high-trust boost.
                 src = (event_source or "audio.whisper").lower()
-                boost = 0.75 if "chat" in src else 0.45
+                boost = (0.75 if "chat" in src and "research" not in src
+                         else 0.45)
                 pid = self._resolve_person_id(
                     nm, now, event_id=anchor,
                     event_source=event_source or "audio.whisper",

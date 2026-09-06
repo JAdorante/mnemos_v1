@@ -63,8 +63,19 @@ class SourcePolicyTests(unittest.TestCase):
             "research_answer")
         pol = sp.policy_for("research_answer")
         self.assertTrue(pol.create_claims)
-        self.assertTrue(pol.create_person_candidates)
+        # Reading the web about someone is not knowing them: names in
+        # researched content must not mint people ("tell me the news" once
+        # turned Putin into a contact).
+        self.assertFalse(pol.create_person_candidates)
+        self.assertFalse(pol.relationship_evidence)
         self.assertFalse(pol.create_commitments)
+
+    def test_newsy_research_rides_the_news_policy(self):
+        self.assertEqual(
+            sp.classify_source(
+                event_source="chat.research",
+                text="Here's what's on Google News right now: ..."),
+            "news_page")
 
 
 class IngestTests(unittest.TestCase):

@@ -132,6 +132,7 @@ class DesktopCapturePipeline:
         self._last_click: tuple[float, int, int, str] | None = None  # ts, x, y, btn
         self._screen_vlm_broken = False
         self._lock = threading.Lock()
+        self._web_frame_busy = threading.Lock()
         Path(self.cfg.frame_dir).mkdir(parents=True, exist_ok=True)
 
     # -------------------------- screen selection -------------------------
@@ -180,13 +181,17 @@ class DesktopCapturePipeline:
         print("[desktop_capture] screen loop stopped.")
 
     def _analyze_screen(self, rgb: np.ndarray, motion: float, ts: float,
-                        fq: dict) -> None:
+                        fq: dict, win: dict | None = None) -> None:
         from app.services.surface_filters import (
             is_console_window, scrub_vision_result, should_ingest_screen,
             strip_noise_lines,
         )
 
-        win = _foreground_window()
+        # `win` given = the frame arrived with its own window context (web
+        # share: the browser picker's label); the local foreground window
+        # would be the SERVER's, which is meaningless for a remote frame.
+        if win is None:
+            win = _foreground_window()
         window_title = str(win.get("window") or "")
         # Dedicated terminals: never VLM / never publish — don't take the noise in.
         if is_console_window(window_title):
@@ -273,6 +278,12 @@ class DesktopCapturePipeline:
                 _heads.record_outcome(_fk, needed_model=True)
                 raw = res.get("ocr_text") or res.get("description", raw)
                 summary = res.get("description", summary) or raw
+                # Presentation-layer sentence (UI spec §6): the same model pass
+                # emits one second-person feed sentence; stored beside the
+                # pipeline summary so nothing downstream changes shape.
+                _display = str(res.get("summary") or "").strip()
+                if _display:
+                    meta["display_summary"] = _display[:180]
                 entities = list(res.get("objects", [])) or entities
                 if "desktop_screen" not in entities:
                     entities.append("desktop_screen")
@@ -334,6 +345,49 @@ class DesktopCapturePipeline:
             print(f"[desktop_capture] identifier stamp skipped ({exc}).")
         print(f"[desktop_capture] screen: {summary[:160]}")
         self._sink(ev)
+
+    # --------------------------- web frames ------------------------------
+    def feed_web_frame(self, rgb: np.ndarray, ts: float,
+                       title: str = "", wait: bool = False) -> dict:
+        """One browser-shared frame (Web Perceive): the same ladder as the
+        local screen loop — quality score, motion/interval gate, privacy
+        gate, VLM, ingest filters — with the share picker's label standing
+        in for the foreground window title. Returns why a frame was dropped
+        so the capture page can show it. Thread-safe; a frame arriving while
+        another is still in the VLM is dropped (busy) rather than queued —
+        screens are sampled, not streamed."""
+        bgr = rgb[:, :, ::-1].copy()
+        fq = frame_quality.score(bgr)
+        if not fq.get("analyzable"):
+            return {"accepted": False, "reason": "quality"}
+        small = _downscale(rgb, 160)
+        gray = np.mean(small, axis=2).astype(np.uint8)
+        with self._lock:
+            motion = self._motion(gray)
+            now = time.time()
+            if not self._should_analyze(motion, now):
+                return {"accepted": False, "reason": "unchanged"}
+            self._last_screen_analysis = now
+        if not self._web_frame_busy.acquire(blocking=False):
+            return {"accepted": False, "reason": "busy"}
+
+        def _run() -> None:
+            try:
+                self._analyze_screen(
+                    rgb, motion, ts, fq,
+                    win={"window": str(title or "shared screen"),
+                         "surface": "web_share"})
+            finally:
+                self._web_frame_busy.release()
+
+        # The VLM can take seconds (minutes on a cold model load) — never
+        # make the browser's fetch wait for it. `wait` is for tests.
+        if wait:
+            _run()
+        else:
+            threading.Thread(target=_run, daemon=True,
+                             name="web-frame-vlm").start()
+        return {"accepted": True, "motion": round(motion, 1)}
 
     # ------------------------------ clicks -------------------------------
     def _on_click(self, x: int, y: int, button, pressed: bool) -> None:

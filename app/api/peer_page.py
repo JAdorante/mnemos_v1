@@ -19,14 +19,14 @@ PEER_PAGE = _mnemos(r"""<!doctype html>
 *{box-sizing:border-box}
 body{margin:0;font:16px/1.55 var(--font);color:var(--text);background:var(--paper)}
 .top{position:sticky;top:0;display:flex;gap:14px;align-items:center;padding:10px 20px;z-index:var(--z-raised);background:var(--chrome-bg);backdrop-filter:blur(10px)}
-.wrap{max-width:860px;margin:0 auto;padding:26px 20px 80px}
+.wrap{max-width:1120px;margin:0 auto;padding:26px 24px 80px}
 h1{font-family:var(--display);font-weight:400;font-size:2rem;letter-spacing:-.02em;color:var(--navy);margin:0 0 6px}
 .lead{color:var(--mut);margin:0 0 22px}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
   padding:20px;box-shadow:var(--shadow);margin-bottom:18px;animation:fadeUp .35s var(--ease) both}
 .panel h2{font-family:var(--display);font-weight:400;font-size:1.35rem;margin:0 0 10px;color:var(--navy)}
 .btn{appearance:none;border:0;cursor:pointer;font:inherit;font-weight:600;border-radius:12px;
-  padding:11px 20px;background:var(--navy);color:#F8F6F1}
+  padding:11px 20px;background:var(--acc);color:var(--acc-fg)}
 .btn-ghost{background:transparent;color:var(--text);border:1px solid var(--line)}
 .btn-sm{padding:7px 14px;font-size:.88rem}
 .muted{color:var(--mut);font-size:.92rem}
@@ -35,20 +35,22 @@ h1{font-family:var(--display);font-weight:400;font-size:2rem;letter-spacing:-.02
 input,select{font:inherit;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:var(--bg-elev);color:var(--text)}
 input{flex:1;min-width:200px}
 table{width:100%;border-collapse:collapse;font-size:.92rem}
-th{font-size:.75rem;text-transform:uppercase;letter-spacing:.05em;color:var(--mut);text-align:left;padding:6px 8px}
+th{font-size:.8rem;font-weight:600;color:var(--mut);text-align:left;padding:6px 8px}
 td{border-top:1px solid var(--line);padding:9px 8px;vertical-align:top}
 .linkish{background:none;border:0;color:var(--danger);cursor:pointer;font:inherit;font-size:.85rem;padding:0}
 .ok{color:var(--ok);font-weight:600}
 .ask{border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin:10px 0;
   display:flex;gap:12px;align-items:center;flex-wrap:wrap}
 .ask .q{flex:1;min-width:240px}
-.tag{display:inline-block;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em;
+.tag{display:inline-block;font-size:.75rem;
   border:1px solid var(--line);border-radius:99px;padding:2px 9px;color:var(--mut);margin-left:8px}
 .pol{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
 .pol select{padding:5px 8px;font-size:.85rem;border-radius:8px}
 .pol label{font-size:.78rem;color:var(--mut)}
-.note{border:1px solid rgba(199,138,44,.35);background:rgba(199,138,44,.08);
-  border-radius:12px;padding:12px 14px;font-size:.92rem;margin:12px 0}
+/* Guidance, not an alert: amber left border, quiet fill (spec §7). */
+.note{border:1px solid var(--line);border-left:3px solid var(--amber);
+  background:var(--raised);border-radius:var(--r-md);padding:12px 14px;
+  font-size:.92rem;margin:12px 0;width:fit-content;max-width:100%}
 @media(max-width:640px){
   .top{padding:8px 14px;gap:10px;flex-wrap:wrap}
   .wrap{padding:18px 14px 64px}

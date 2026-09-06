@@ -46,7 +46,9 @@ _NEWS_WINDOW = re.compile(
     r"the hill|axios|forbes|business\s*insider|buzzfeed|vice news|"
     r"variety|hollywood\s*tonight|hollywood\s*weekly|hollywood\s*digest|"
     r"hollywood|ap news|associated press|npr|pbs|aljazeera|al jazeera|"
-    r"the verge|wired|vox|slate|salon|huffpost|huffington)\b",
+    r"the verge|wired|vox|slate|salon|huffpost|huffington|"
+    r"google news|apple news|yahoo news|ground news|smartnews|flipboard|"
+    r"top stories|news feed)\b",
     re.I,
 )
 # Content chrome common on news / celebrity article pages (window title alone
@@ -170,7 +172,13 @@ def classify_source(
     if src.startswith("org"):
         return "org_coordinator"
     # Web/agent research writeback (testing-first) — not user-typed chat.
+    # A research answer that IS news content (a headlines run, an article
+    # summary) rides the news policy: reading the web about someone is not
+    # knowing them, so no people/commitments mint from it.
     if "research" in src:
+        if (_NEWS_WINDOW.search(blob) or _NEWS_CONTENT.search(blob)
+                or _ARTICLE_MENTIONED.search(blob)):
+            return "news_page"
         return "research_answer"
     if "chat" in src:
         return "direct_message"
