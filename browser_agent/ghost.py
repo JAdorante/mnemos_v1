@@ -60,10 +60,16 @@ def clear() -> None:
         _meta.update(ts=0.0, url="", title="")
 
 
-# --- parked-window management (Windows best-effort) -------------------------
-# In "hidden" mode the headed agent window is parked at -32000,-32000. The only
-# window we will ever touch is one that is ALREADY parked off-screen (the user's
-# own browser can never match that), remembered so it can be parked again.
+# --- parked-window management (Windows + X11, best-effort) ------------------
+# In "hidden" mode the headed agent window is hidden after launch: Windows
+# parks it at -32000,-32000 via user32; X11 iconifies it with skip-taskbar
+# (WMs like mutter clamp off-screen moves, but honour iconify — and CDP
+# screenshots keep feeding the ghost pane while iconified). Either way the
+# only window we will ever touch is one WE hid — remembered by handle, with a
+# discriminator no user-owned window can match (the off-screen position on
+# Windows; hidden+skip-taskbar together on X11). Wayland and hosted-headless
+# fail soft with an honest reason — sign-in reveal needs a real window on a
+# real display.
 _PARK_X = -32000
 _revealed_hwnd: int | None = None
 
@@ -82,6 +88,49 @@ def _user32():
 
 
 _ghost_hwnds: set[int] = set()      # windows we parked (snapshot-diff at launch)
+
+
+def _x11():
+    """desktop_agent.x11_util when a usable X11 session exists, else None."""
+    import os
+    if os.name == "nt":
+        return None
+    try:
+        from desktop_agent import x11_util
+        if x11_util.session_ok():
+            return x11_util
+    except Exception:
+        pass
+    return None
+
+
+# Executable basenames the agent's Chromium-family window may run under
+# (Playwright's bundled build is "chrome"; channels add edge/brave).
+_CHROMIUM_EXES = ("chrome", "chromium", "chromium-browser", "msedge", "brave")
+
+
+def _x11_browser_xids(x) -> set[int]:
+    """Top-level X11 windows owned by a Chromium-family process."""
+    found: set[int] = set()
+    for xid, pid, _title in x.client_windows():
+        exe = x.exe_for_pid(pid).lower()
+        if exe in _CHROMIUM_EXES or exe.startswith("chrom"):
+            found.add(int(xid))
+    return found
+
+
+def _no_window_reason() -> str:
+    """Why there is no agent window to reveal on this install."""
+    try:
+        from . import config as cfg
+        if cfg.GHOST_MODE == "headless":
+            return ("the agent browser runs fully headless here — there is "
+                    "no window to reveal (on a desktop install, "
+                    "QUILL_GHOST_BROWSER=hidden enables sign-in handoffs)")
+    except Exception:
+        pass
+    return ("no desktop window session available — revealing the agent "
+            "window needs Windows or a Linux X11 session")
 
 
 def _widgetwin_hwnds() -> set[int]:
@@ -109,14 +158,20 @@ def _widgetwin_hwnds() -> set[int]:
 def snapshot_windows() -> set[int]:
     """Pre-launch snapshot; hide_new_windows() parks whatever appears after.
     Chromium clamps --window-position back onto the display, so the only
-    reliable hide is a post-launch SetWindowPos (never clamped)."""
+    reliable hide is a post-launch move (never clamped)."""
     import os
-    if os.name != "nt":
-        return set()
-    try:
-        return _widgetwin_hwnds()
-    except Exception:
-        return set()
+    if os.name == "nt":
+        try:
+            return _widgetwin_hwnds()
+        except Exception:
+            return set()
+    x = _x11()
+    if x is not None:
+        try:
+            return x.snapshot_window_ids()
+        except Exception:
+            return set()
+    return set()
 
 
 def _parked_hwnds() -> list[int]:
@@ -161,18 +216,44 @@ def hide_new_windows(before: set[int], retries: int = 10,
     snapshot): move it off-screen and strip its taskbar button. Retries
     briefly — the window can lag the Playwright call."""
     import os
-    if os.name != "nt":
-        return {"ok": False, "reason": "windows only"}
+    if os.name == "nt":
+        try:
+            user32 = _user32()
+            for _ in range(max(1, retries)):
+                new = _widgetwin_hwnds() - before
+                if new:
+                    for h in new:
+                        user32.SetWindowPos(h, 0, _PARK_X, _PARK_X, 0, 0,
+                                            _SWP_NOSIZE | _SWP_NOZORDER)
+                        _set_toolwindow(h, True)
+                        _ghost_hwnds.add(h)
+                    return {"ok": True, "windows": len(new)}
+                time.sleep(delay_s)
+            return {"ok": False, "reason": "no new agent window appeared"}
+        except Exception as exc:
+            return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+    x = _x11()
+    if x is None:
+        return {"ok": False, "reason": _no_window_reason()}
     try:
-        user32 = _user32()
         for _ in range(max(1, retries)):
-            new = _widgetwin_hwnds() - before
+            new = _x11_browser_xids(x) - set(before)
             if new:
-                for h in new:
-                    user32.SetWindowPos(h, 0, _PARK_X, _PARK_X, 0, 0,
-                                        _SWP_NOSIZE | _SWP_NOZORDER)
-                    _set_toolwindow(h, True)
-                    _ghost_hwnds.add(h)
+                # Iconify, not an off-screen move — WMs like mutter clamp
+                # coordinates back onto the display. ORDER MATTERS: mutter
+                # refuses to minimize a window that is already skip-taskbar,
+                # so hide first, then strip the taskbar button (HIDDEN
+                # survives gaining skip-taskbar). Together the two states
+                # make the window invisible AND are the reveal discriminator
+                # (a user's own minimized browser keeps its taskbar button,
+                # so it can never match).
+                _ghost_hwnds.update(new)
+                hidden = _iconify_until_hidden(x, new)
+                for xid in new:
+                    x.set_skip_taskbar(xid, True)
+                if not hidden:
+                    return {"ok": False, "windows": len(new),
+                            "reason": "window manager kept the window visible"}
                 return {"ok": True, "windows": len(new)}
             time.sleep(delay_s)
         return {"ok": False, "reason": "no new agent window appeared"}
@@ -180,22 +261,98 @@ def hide_new_windows(before: set[int], retries: int = 10,
         return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
 
 
+def _iconify_until_hidden(x, xids, attempts: int = 8,
+                          delay_s: float = 0.4) -> bool:
+    """Iconify until _NET_WM_STATE_HIDDEN sticks. The WM applies state
+    asynchronously — and mutter drops a WM_CHANGE_STATE that lands while the
+    window is still mid-map right after launch — so fire-and-forget is not
+    enough; verify and re-send."""
+    remaining = {int(i) for i in xids}
+    for _ in range(max(1, attempts)):
+        for xid in list(remaining):
+            if "_NET_WM_STATE_HIDDEN" in x.net_wm_state(xid):
+                remaining.discard(xid)
+            else:
+                x.iconify(xid)
+        if not remaining:
+            return True
+        time.sleep(delay_s)
+    return not remaining
+
+
+def _parked_x11_xids(x) -> list[int]:
+    """X11 twin of _parked_hwnds: tracked-and-alive first, else the state
+    discriminator — hidden AND skip-taskbar together only ever describe OUR
+    parked window (a user's own minimized browser keeps its taskbar button)."""
+    alive_ids = x.snapshot_window_ids()
+    alive = [h for h in _ghost_hwnds if h in alive_ids]
+    if alive:
+        return alive
+    found: list[int] = []
+    for xid in _x11_browser_xids(x):
+        states = x.net_wm_state(xid)
+        if ("_NET_WM_STATE_HIDDEN" in states
+                and "_NET_WM_STATE_SKIP_TASKBAR" in states):
+            found.append(xid)
+    return found
+
+
+def is_parked() -> bool:
+    """True while an agent window WE hid is meant to STAY hidden (parked and
+    not currently revealed). The driver checks this before bring_to_front —
+    CDP's Page.bringToFront activates the X window, which deiconifies an X11
+    park (proven live: every real-site navigation step unhid the window)."""
+    return bool(_ghost_hwnds) and not _revealed_hwnd
+
+
+def can_reveal() -> bool:
+    """True when a parked agent window exists to reveal. Cheap and
+    side-effect-free — chat uses it to decide whether a sign-in ask should
+    mention the reveal button (a headless install must not advertise it)."""
+    import os
+    if os.name == "nt":
+        try:
+            return bool(_parked_hwnds())
+        except Exception:
+            return False
+    x = _x11()
+    if x is None:
+        return False
+    try:
+        return bool(_parked_x11_xids(x))
+    except Exception:
+        return False
+
+
 def reveal_window() -> dict:
     """Bring the parked agent window on-screen with its taskbar button back
     (e.g. for a sign-in handoff)."""
     global _revealed_hwnd
     import os
-    if os.name != "nt":
-        return {"ok": False, "reason": "windows only"}
+    if os.name == "nt":
+        try:
+            found = _parked_hwnds()
+            if not found:
+                return {"ok": False, "reason": "no parked agent window found"}
+            hwnd = found[0]
+            _set_toolwindow(hwnd, False)
+            _user32().SetWindowPos(hwnd, 0, 80, 60, 0, 0,
+                                   _SWP_NOSIZE | _SWP_NOZORDER)
+            _revealed_hwnd = hwnd
+            return {"ok": True}
+        except Exception as exc:
+            return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+    x = _x11()
+    if x is None:
+        return {"ok": False, "reason": _no_window_reason()}
     try:
-        found = _parked_hwnds()
+        found = _parked_x11_xids(x)
         if not found:
             return {"ok": False, "reason": "no parked agent window found"}
-        hwnd = found[0]
-        _set_toolwindow(hwnd, False)
-        _user32().SetWindowPos(hwnd, 0, 80, 60, 0, 0,
-                               _SWP_NOSIZE | _SWP_NOZORDER)
-        _revealed_hwnd = hwnd
+        xid = found[0]
+        x.set_skip_taskbar(xid, False)
+        x.activate_window(xid)     # deiconifies, raises, and focuses
+        _revealed_hwnd = xid
         return {"ok": True}
     except Exception as exc:
         return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
@@ -205,14 +362,25 @@ def park_window() -> dict:
     """Move a previously revealed agent window back off-screen, taskbar-less."""
     global _revealed_hwnd
     import os
-    if os.name != "nt":
-        return {"ok": False, "reason": "windows only"}
     if not _revealed_hwnd:
         return {"ok": False, "reason": "nothing was revealed"}
+    if os.name == "nt":
+        try:
+            _user32().SetWindowPos(_revealed_hwnd, 0, _PARK_X, _PARK_X, 0, 0,
+                                   _SWP_NOSIZE | _SWP_NOZORDER)
+            _set_toolwindow(_revealed_hwnd, True)
+            _revealed_hwnd = None
+            return {"ok": True}
+        except Exception as exc:
+            return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+    x = _x11()
+    if x is None:
+        return {"ok": False, "reason": _no_window_reason()}
     try:
-        _user32().SetWindowPos(_revealed_hwnd, 0, _PARK_X, _PARK_X, 0, 0,
-                               _SWP_NOSIZE | _SWP_NOZORDER)
-        _set_toolwindow(_revealed_hwnd, True)
+        # Same order as the launch hide: mutter refuses to minimize a
+        # skip-taskbar window, so iconify first, strip the button after.
+        _iconify_until_hidden(x, [_revealed_hwnd], attempts=4)
+        x.set_skip_taskbar(_revealed_hwnd, True)
         _revealed_hwnd = None
         return {"ok": True}
     except Exception as exc:

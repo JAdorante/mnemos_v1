@@ -17,7 +17,8 @@ from urllib.parse import urlsplit, parse_qsl
 
 from . import config as cfg
 from .browser import BrowserDriver
-from .credentials import get as get_creds, host_from_url, inject_login, try_save_from_reply
+from .credentials import (get as get_creds, host_from_url, inject_login,
+                          looks_like_login_wall, try_save_from_reply)
 from .failures import INSTRUCT, LOGIN, REPLAN, STOP, classify
 from .llm import LLM
 from .memory import Memory, redact
@@ -503,6 +504,9 @@ class Agent:
         # (the shared profile is often already held by Exec.AI → "Opening in
         # existing browser session"). Browser starts on first web goal.
         self._browser_started = False
+        # Hosts already given the sign-in-wall reveal hint (once per session —
+        # login flows revisit their wall on every step).
+        self._signin_hint_hosts: set[str] = set()
         self.transcript = []   # [{goal, result}] — conversational context
         self.step = 0          # global step counter across all goals
         self.last_steps = 0
@@ -561,6 +565,32 @@ class Agent:
             self._log(f"   filled saved login for {host} from .credentials.env")
             return True
         return False
+
+    def _maybe_signin_handoff_hint(self, scan: dict) -> None:
+        """One deterministic hint per host when a real sign-in wall appears:
+        tell the user the reveal handoff exists. The model-generated ask path
+        stays — this fires even when the model soldiers on without asking.
+        Only when there's actually a hidden window to reveal (never headless),
+        and never for a host whose stored creds just auto-filled."""
+        try:
+            wall = looks_like_login_wall(scan)
+            if not wall:
+                return
+            host = host_from_url((scan or {}).get("url") or "")
+            if not host or host in self._signin_hint_hosts:
+                return
+            self._signin_hint_hosts.add(host)
+            if get_creds(host):
+                return
+            from . import ghost
+            if not ghost.can_reveal():
+                return
+            self._log(
+                f"   sign-in wall at {host} ({wall}) — press “reveal” on the "
+                "Agent browser pane to sign in yourself, then “park” to hide "
+                "it again.")
+        except Exception:
+            pass
 
     # Session conversation window — follow-ups ("text that", "what you just said")
     # need more than a couple of clipped turns.
@@ -1870,6 +1900,7 @@ class Agent:
             scan = self.driver.scan()
             if self._maybe_stored_login(scan):
                 scan = self.driver.scan()
+            self._maybe_signin_handoff_hint(scan)
             ax_path = self.sdir / "ax" / f"step_{self.step}.json"
             ax_path.write_text(json.dumps(scan)[:200000], encoding="utf-8")
             shot_path = self.sdir / "shots" / f"step_{self.step}.png"

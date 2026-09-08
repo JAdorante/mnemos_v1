@@ -162,38 +162,135 @@ def active_window() -> dict:
         return {}
 
 
-def move_offscreen(xid: int) -> bool:
-    """Park a window at (-32000,-32000); skip taskbar when the WM allows."""
+def _ewmh_message(xid: int, message: str, data: list[int]) -> None:
+    """Send one EWMH ClientMessage to the root window on a mapped window's
+    behalf — the ONLY way a client may change WM-owned state (_NET_WM_STATE,
+    _NET_ACTIVE_WINDOW, …) once a window is mapped. (An earlier version built
+    the event as ``X.ClientMessage(...)`` — an int constant, not a
+    constructor — so the send always threw and was swallowed.)"""
+    from Xlib import X
+    from Xlib.protocol import event as xevent
+
+    d = display()
+    w = d.create_resource_object("window", int(xid))
+    payload = [(int(v) & 0xFFFFFFFF) for v in (list(data) + [0] * 5)[:5]]
+    ev = xevent.ClientMessage(window=w,
+                              client_type=d.intern_atom(message),
+                              data=(32, payload))
+    d.screen().root.send_event(
+        ev, event_mask=(X.SubstructureRedirectMask
+                        | X.SubstructureNotifyMask))
+    d.sync()
+
+
+def set_skip_taskbar(xid: int, on: bool) -> bool:
+    """Add/remove the skip-taskbar + skip-pager states (EWMH message)."""
     if not session_ok() or not xid:
         return False
-    park = -32000
+    try:
+        d = display()
+        action = 1 if on else 0        # _NET_WM_STATE_ADD / _NET_WM_STATE_REMOVE
+        _ewmh_message(xid, "_NET_WM_STATE",
+                      [action,
+                       d.intern_atom("_NET_WM_STATE_SKIP_TASKBAR"),
+                       d.intern_atom("_NET_WM_STATE_SKIP_PAGER"),
+                       1])             # source: normal application
+        return True
+    except Exception:
+        return False
+
+
+def _move(xid: int, x: int, y: int) -> bool:
+    """Move a top-level window (configure + EWMH moveresize fallback)."""
+    if not session_ok() or not xid:
+        return False
     try:
         d = display()
         w = d.create_resource_object("window", int(xid))
-        # Skip taskbar / pager when supported.
-        for state in ("_NET_WM_STATE_SKIP_TASKBAR", "_NET_WM_STATE_SKIP_PAGER"):
-            try:
-                w.change_property(d.intern_atom("_NET_WM_STATE"),
-                                  d.intern_atom("ATOM"), 32, [d.intern_atom(state)],
-                                  d.intern_atom("_NET_WM_STATE_ADD"))
-            except Exception:
-                pass
-        w.configure(x=park, y=park)
+        w.configure(x=int(x), y=int(y))
         d.sync()
-        # EWMH moveresize — some WMs ignore a bare configure.
+        # Some WMs ignore a bare configure on managed windows; the EWMH
+        # message asks the WM itself. l[0]: gravity NorthWest(1) | x-bit
+        # (1<<8) | y-bit (1<<9) | source application (1<<12).
         try:
-            from Xlib import X
-
-            ev = X.ClientMessage(
-                display=d, window=int(xid),
-                client_type=d.intern_atom("_NET_MOVERESIZE_WINDOW"),
-                data=(32, [0, park, park, 0, 0, 0]))
-            root = d.screen().root
-            root.send_event(ev, (X.SubstructureRedirectMask
-                                 | X.SubstructureNotifyMask))
-            d.sync()
+            _ewmh_message(xid, "_NET_MOVERESIZE_WINDOW",
+                          [1 | (1 << 8) | (1 << 9) | (1 << 12),
+                           int(x), int(y), 0, 0])
         except Exception:
             pass
         return True
     except Exception:
         return False
+
+
+def move_offscreen(xid: int) -> bool:
+    """Park a window at (-32000,-32000); skip taskbar when the WM allows."""
+    if not session_ok() or not xid:
+        return False
+    set_skip_taskbar(xid, True)
+    return _move(xid, -32000, -32000)
+
+
+def iconify(xid: int) -> bool:
+    """Minimize a window (ICCCM WM_CHANGE_STATE → IconicState). The reliable
+    X11 hide: WMs like mutter CLAMP off-screen moves back onto the display,
+    but honour iconify everywhere — and a Chromium driven over CDP keeps
+    rendering (Playwright screenshots still work while iconified)."""
+    if not session_ok() or not xid:
+        return False
+    try:
+        _ewmh_message(xid, "WM_CHANGE_STATE", [3])   # IconicState
+        return True
+    except Exception:
+        return False
+
+
+def net_wm_state(xid: int) -> set[str]:
+    """The window's _NET_WM_STATE atom names (empty set on any failure)."""
+    if not session_ok() or not xid:
+        return set()
+    try:
+        d = display()
+        w = d.create_resource_object("window", int(xid))
+        p = w.get_full_property(d.intern_atom("_NET_WM_STATE"),
+                                d.intern_atom("ATOM"))
+        if not p:
+            return set()
+        return {d.get_atom_name(a) for a in p.value}
+    except Exception:
+        return set()
+
+
+def activate_window(xid: int) -> bool:
+    """Raise + focus a window (EWMH activate; e.g. a sign-in handoff)."""
+    if not session_ok() or not xid:
+        return False
+    try:
+        from Xlib import X
+
+        _ewmh_message(xid, "_NET_ACTIVE_WINDOW", [2, X.CurrentTime, 0])
+        d = display()
+        w = d.create_resource_object("window", int(xid))
+        w.configure(stack_mode=X.Above)
+        d.sync()
+        return True
+    except Exception:
+        return False
+
+
+def window_root_pos(xid: int) -> tuple[int, int] | None:
+    """A window's top-left corner in root (screen) coordinates, or None."""
+    if not session_ok() or not xid:
+        return None
+    try:
+        d = display()
+        w = d.create_resource_object("window", int(xid))
+        p = d.screen().root.translate_coords(w, 0, 0)
+        # translate_coords returns unsigned 16-bit ints; recover negatives
+        # so a window parked at -32000 doesn't read as +33536.
+        def _signed(v: int) -> int:
+            v = int(v)
+            return v - 0x10000 if v >= 0x8000 else v
+        return _signed(p.x), _signed(p.y)
+    except Exception:
+        return None

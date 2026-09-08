@@ -107,9 +107,22 @@ services:
       QUILL_LORA_TAG_SUFFIX: user5
       QUILL_PEER_BASE_URL: https://how-notifications-complicated-minister.trycloudflare.com
 
+  sparrow-user6:
+    <<: *sparrow
+    ports:
+      - "127.0.0.1:8006:8000"
+    volumes:
+      - sparrow-user6-data:/srv/sparrow/data
+    environment:
+      <<: *sparrow-env
+      QUILL_API_TOKEN: "${SPARROW_USER6_TOKEN:?set a per-user token in .env}"
+      QUILL_LORA_TAG_SUFFIX: user6
+      QUILL_PEER_BASE_URL: http://127.0.0.1:8006
+
 volumes:
   sparrow-user1-data:
   sparrow-user2-data:
   sparrow-user3-data:
   sparrow-user4-data:
   sparrow-user5-data:
+  sparrow-user6-data:

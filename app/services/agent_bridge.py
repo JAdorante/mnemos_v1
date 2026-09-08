@@ -443,6 +443,28 @@ def _local_chat_ready() -> bool:
         return False
 
 
+_SIGNIN_ASK_RE = re.compile(
+    r"(?i)\b(?:sign|log)[ -]?in\b|\bpassword\b|\b2fa\b|\bcaptcha\b|"
+    r"\bverification code\b|\bauthenticat")
+
+
+def _signin_handoff_hint(q: str) -> str:
+    """Append the reveal instruction to a sign-in-shaped agent ask — but only
+    when a parked window actually exists (a headless install must not point
+    the user at a button that answers 'no window to reveal')."""
+    try:
+        if not q or not _SIGNIN_ASK_RE.search(q):
+            return q
+        from browser_agent import ghost
+        if not ghost.can_reveal():
+            return q
+        return (q + "\n\n(The agent's browser is hidden — press “reveal” on "
+                    "the Agent browser pane to bring it up, sign in there, "
+                    "then press “park” to hide it again.)")
+    except Exception:
+        return q
+
+
 class AgentWorker:
     """Owns the persistent Agent(s); the API enqueues work.
 
@@ -573,6 +595,7 @@ class AgentWorker:
         self._emit("progress", s)
 
     def _on_ask(self, q: str) -> str:  # runs on the worker thread; blocks until answered
+        q = _signin_handoff_hint(q)
         with self.lock:
             self.awaiting, self.question = True, q
         self._emit("ask", q)

@@ -47,3 +47,9 @@ services:
     restart: unless-stopped
     command: tunnel --no-autoupdate --url http://sparrow-user5:8000
     depends_on: [sparrow-user5]
+
+  tunnel-user6:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate --url http://sparrow-user6:8000
+    depends_on: [sparrow-user6]

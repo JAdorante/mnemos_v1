@@ -144,6 +144,10 @@ class UiTokenEnforcementTests(unittest.TestCase):
         self.assertIn("Agent ready|Fast lane ready|Offer expired", CHAT_PAGE)
         self.assertIn("Sources", CHAT_PAGE)
         self.assertNotIn("Remembered", CHAT_PAGE)
+        # Progress lands in the thinking block, not as transcript chrome.
+        self.assertIn("ensureThinking", CHAT_PAGE)
+        self.assertIn("Thought for ", CHAT_PAGE)
+        self.assertIn("thinkShimmer", CHAT_PAGE)
 
     def test_mnemos_chat_stream_in_ui_bundle(self) -> None:
         from app.api.mnemos_ui import UI_JS

@@ -148,7 +148,14 @@ class BrowserDriver:
         if self.context and self.context.pages:
             self.page = self.context.pages[-1]
             try:
-                self.page.bring_to_front()
+                # bring_to_front ACTIVATES the OS window (CDP), which
+                # deiconifies an X11-parked ghost onto the user's screen —
+                # and steals their focus. Skip it while parked; screenshots
+                # target the page object directly, so frames are unaffected.
+                # Tab-following resumes the moment the user reveals.
+                from . import ghost
+                if not ghost.is_parked():
+                    self.page.bring_to_front()
             except Exception:
                 pass
 

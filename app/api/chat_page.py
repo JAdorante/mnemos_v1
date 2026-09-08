@@ -231,6 +231,59 @@ body{
   padding:4px 0 4px var(--sp-4);border-left:1.5px solid var(--line);
   background:transparent;box-shadow:none;
 }
+/* Frontier-style thinking — live shimmer, then collapsed “Thought for Ns”. */
+.msg.thinking{
+  margin:var(--sp-3) 0 var(--sp-1);max-width:min(800px,94%);
+  animation:fadeUp var(--dur) var(--ease) both;
+}
+.msg.thinking .think-sum{
+  list-style:none;cursor:pointer;user-select:none;
+  display:inline-flex;align-items:center;gap:8px;
+  font:500 var(--fs-footnote)/1.3 var(--font);color:var(--mut);
+  padding:2px 0;border-radius:var(--radius-xs);
+}
+.msg.thinking .think-sum::-webkit-details-marker{display:none}
+.msg.thinking .think-sum::before{
+  content:'';width:5px;height:5px;border-radius:50%;
+  background:var(--ink-20);flex:0 0 auto;
+  transition:background var(--dur-fast) var(--ease-io);
+}
+.msg.thinking.live .think-sum::before{
+  background:var(--acc);
+  box-shadow:0 0 0 0 var(--acc-28);
+  animation:listenPulse 2.4s var(--ease) infinite;
+}
+.msg.thinking .think-label{
+  letter-spacing:var(--track-snug);
+}
+.msg.thinking.live .think-label{
+  background:linear-gradient(105deg,
+    var(--mut) 0%,var(--mut) 35%,
+    var(--navy) 50%,
+    var(--mut) 65%,var(--mut) 100%);
+  background-size:220% 100%;
+  -webkit-background-clip:text;background-clip:text;color:transparent;
+  animation:thinkShimmer 2.2s linear infinite;
+}
+@keyframes thinkShimmer{
+  0%{background-position:100% 0}
+  100%{background-position:-100% 0}
+}
+@media(prefers-reduced-motion:reduce){
+  .msg.thinking.live .think-label{animation:none;color:var(--navy);background:none}
+  .msg.thinking.live .think-sum::before{animation:none;box-shadow:0 0 0 3px var(--acc-12)}
+}
+.msg.thinking .think-body{
+  margin:6px 0 0;padding:4px 0 4px var(--sp-4);
+  border-left:1.5px solid var(--line);
+  font:var(--fs-caption2)/1.55 var(--mono);color:var(--mut);
+  max-height:min(220px,32vh);overflow:auto;
+  white-space:pre-wrap;word-wrap:break-word;overflow-wrap:anywhere;
+}
+.msg.thinking .think-line{margin:0 0 4px}
+.msg.thinking .think-line:last-child{margin-bottom:0}
+.msg.thinking:not(.live) .think-body:empty{display:none}
+.msg.thinking:not([open]) .think-body{display:none}
 /* Empty welcome */
 #emptyState{
   width:min(800px,94%);margin:auto 0;padding:var(--sp-12) var(--sp-2) var(--sp-8);
@@ -842,6 +895,7 @@ async function openPast(id, title){
     if(!r.ok||!j.session){ alert((j&&j.detail)||'Could not open saved chat'); return; }
     setLiveMode(false);
     archiveBannerText.textContent='Viewing “'+(title||j.session.title||'saved chat')+'” (read-only).';
+    thinkEl=null; thinkStartedAt=0; pendingThink=false; wasBusy=false;
     [...log.querySelectorAll('.msg')].forEach(n=>n.remove());
     for(const e of (j.session.events||[])){
       add(e.kind, e.text, e.distill_id, e.sources, e.packet, null);
@@ -854,6 +908,7 @@ async function openPast(id, title){
 }
 async function backToLive(){
   setLiveMode(true);
+  thinkEl=null; thinkStartedAt=0; pendingThink=false; wasBusy=false;
   [...log.querySelectorAll('.msg')].forEach(n=>n.remove());
   since=0;
   syncEmptyState();
@@ -870,6 +925,7 @@ async function newChat(){
     const j=await r.json().catch(()=>({}));
     if(!r.ok||j.ok===false){ alert(j.error||j.detail||'Could not start a new chat'); return; }
     setLiveMode(true);
+    thinkEl=null; thinkStartedAt=0; pendingThink=false; wasBusy=false;
     [...log.querySelectorAll('.msg')].forEach(n=>n.remove());
     since=0;
     syncEmptyState();
@@ -1068,11 +1124,97 @@ function bindFolioSeal(root){
   });
   if(cancel) cancel.onclick=()=>decide('cancel');
 }
+let thinkEl=null;
+let thinkStartedAt=0;
+let pendingThink=false;
+let wasBusy=false;
+const THINK_LINE_CAP=16;
+function ensureThinking(open){
+  if(!liveMode) return null;
+  if(thinkEl && thinkEl.isConnected){
+    thinkEl.classList.add('live');
+    const lab=thinkEl.querySelector('.think-label');
+    if(lab) lab.textContent='Thinking';
+    if(open!==false) thinkEl.open=true;
+    return thinkEl;
+  }
+  const d=document.createElement('details');
+  d.className='msg thinking live';
+  d.open=open!==false;
+  d.innerHTML='<summary class="think-sum"><span class="think-label">Thinking</span></summary>'
+    +'<div class="think-body" aria-live="polite"></div>';
+  log.appendChild(d);
+  thinkEl=d;
+  thinkStartedAt=Date.now();
+  syncEmptyState();
+  log.scrollTop=log.scrollHeight;
+  return d;
+}
+function appendThinkLine(text){
+  const t=String(text||'').trim();
+  if(!t) return;
+  const d=ensureThinking(true);
+  if(!d) return;
+  const body=d.querySelector('.think-body');
+  if(!body) return;
+  const line=document.createElement('div');
+  line.className='think-line';
+  line.textContent=t.length>280?t.slice(0,277)+'…':t;
+  body.appendChild(line);
+  while(body.children.length>THINK_LINE_CAP) body.removeChild(body.firstChild);
+  log.scrollTop=log.scrollHeight;
+}
+function finalizeThinking(){
+  pendingThink=false;
+  wasBusy=false;
+  if(!thinkEl || !thinkEl.isConnected){ thinkEl=null; return; }
+  const d=thinkEl;
+  const body=d.querySelector('.think-body');
+  const secs=Math.max(1, Math.round((Date.now()-(thinkStartedAt||Date.now()))/1000));
+  d.classList.remove('live');
+  d.open=false;
+  const lab=d.querySelector('.think-label');
+  if(lab) lab.textContent='Thought for '+secs+'s';
+  if(body && !body.children.length){
+    // No steps to expand — keep the duration label, drop the empty panel.
+    body.remove();
+    d.removeAttribute('open');
+    const sum=d.querySelector('.think-sum');
+    if(sum){ sum.style.cursor='default'; d.style.pointerEvents='none'; }
+  }
+  thinkEl=null;
+  thinkStartedAt=0;
+}
+function syncThinking(busy){
+  if(!liveMode){
+    pendingThink=false;
+    wasBusy=false;
+    if(thinkEl && thinkEl.isConnected && thinkEl.classList.contains('live')){
+      finalizeThinking();
+    }
+    return;
+  }
+  if(busy || pendingThink){
+    ensureThinking(true);
+    if(busy){ pendingThink=false; wasBusy=true; }
+    return;
+  }
+  if(thinkEl && thinkEl.isConnected && thinkEl.classList.contains('live')){
+    finalizeThinking();
+  } else {
+    wasBusy=false;
+  }
+}
 function add(kind,text,distillId,sources,packet,compiled){
-  // Orchestrator logs and startup heartbeats stay in the event log; they
-  // are not conversation. Status already shows Working… while a turn runs.
-  if(kind==='progress') return;
+  // Progress feeds the thinking block (frontier-style), not the transcript.
+  if(kind==='progress'){
+    if(liveMode) appendThinkLine(text);
+    return;
+  }
   if(kind==='system' && /^(Agent ready|Fast lane ready|Offer expired)\b/.test(String(text||''))) return;
+  if(kind==='result' || kind==='ask' || kind==='error'){
+    finalizeThinking();
+  }
   const d=document.createElement('div');d.className='msg '+kind;
   const pkt=packet||(kind==='ask'?MnemosParsePacket(text):null);
   if(kind==='ask' && pkt && pkt.kind==='approval'){
@@ -1170,10 +1312,12 @@ async function poll(){
  if(polling) return; polling=true;
  try{
   const r=await fetch('/chat/poll?since='+since); const j=await r.json();
+  let gotTerminal=false;
   for(const e of (j.events||[])){
     since=e.id+1;
     if(e.kind==='error') lastErrShown=e.text;
     if(liveMode) add(e.kind, e.text, e.distill_id, e.sources, e.packet, e.compiled);
+    if(e.kind==='result'||e.kind==='ask'||e.kind==='error') gotTerminal=true;
   }
   const s=j.state||{};
   awaiting=!!s.awaiting; todo=!!s.todo_pending;
@@ -1190,9 +1334,11 @@ async function poll(){
   box.placeholder=!liveMode?'Viewing a saved chat — Back to live to continue…'
     :(awaiting||todo)?(approvalMode?'Edit the folio, or type a revision…':'Yes/no above, or type a new request…')
     :'Ask @@BRAND@@ anything…';
+  const showThinking=liveMode && !!s.busy && !awaiting && !todo && !gotTerminal;
+  syncThinking(showThinking);
   if(liveMode){
     if(approvalMode || todo) lastStreamStatus=s.waiting_on||'Waiting on you';
-    else if(s.busy) lastStreamStatus='Working…';
+    else if(s.busy) lastStreamStatus='Thinking…';
     else if(s.waiting_on) lastStreamStatus=s.waiting_on;
     else lastStreamStatus='Quiet for now';
   } else {
@@ -1226,7 +1372,23 @@ async function send(){
    ctxPanel.classList.remove('open'); ctxBtn.classList.remove('on'); syncCtxBtn();
  }
  const payload={message:t,dry_run:dry,mode}; if(ctx) payload.context=ctx;
- await fetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+ pendingThink=true;
+ ensureThinking(true);
+ try{
+   const r=await fetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+   if(!r.ok){
+     pendingThink=false;
+     finalizeThinking();
+     const j=await r.json().catch(()=>({}));
+     add('error', (j&&(j.detail||j.error))||('Send failed ('+r.status+')'));
+     return;
+   }
+ }catch(e){
+   pendingThink=false;
+   finalizeThinking();
+   add('error', 'Could not reach the server — try again.');
+   return;
+ }
  poll();
 }
 function reply(t){ box.value=t; send(); }

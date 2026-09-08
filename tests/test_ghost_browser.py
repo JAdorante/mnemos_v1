@@ -137,6 +137,426 @@ class HeadlessFramePublishTests(unittest.TestCase):
                 d.close()
 
 
+class _FakeX11:
+    """Recorded stand-in for desktop_agent.x11_util: two chromium windows,
+    one pre-existing (100) and one that 'appears' after launch (200).
+    Windows carry (exe, states) — states mirrors _NET_WM_STATE."""
+
+    def __init__(self) -> None:
+        self.windows: dict[int, tuple[str, set]] = {
+            100: ("chrome", set()), 200: ("chrome", set())}
+        self.activated: list[int] = []
+
+    def client_windows(self):
+        return [(xid, xid, "t") for xid in self.windows]
+
+    def exe_for_pid(self, pid):
+        return self.windows.get(pid, ("", set()))[0]
+
+    def snapshot_window_ids(self):
+        return set(self.windows)
+
+    def net_wm_state(self, xid):
+        return set(self.windows.get(xid, ("", set()))[1])
+
+    def set_skip_taskbar(self, xid, on):
+        states = self.windows[xid][1]
+        if on:
+            states.add("_NET_WM_STATE_SKIP_TASKBAR")
+        else:
+            states.discard("_NET_WM_STATE_SKIP_TASKBAR")
+        return True
+
+    def iconify(self, xid):
+        # Mutter rule: a skip-taskbar window refuses to minimize — pins the
+        # hide order (iconify first, THEN strip the taskbar button).
+        if "_NET_WM_STATE_SKIP_TASKBAR" in self.windows[xid][1]:
+            return False
+        self.windows[xid][1].add("_NET_WM_STATE_HIDDEN")
+        return True
+
+    def activate_window(self, xid):
+        self.windows[xid][1].discard("_NET_WM_STATE_HIDDEN")
+        self.activated.append(xid)
+        return True
+
+
+@unittest.skipIf(__import__("os").name == "nt", "exercises the posix dispatch")
+class ParkRevealDispatchTests(unittest.TestCase):
+    """The sign-in handoff state machine on Linux (fake X11 — no display)."""
+
+    def setUp(self) -> None:
+        self.x = _FakeX11()
+        ghost._ghost_hwnds.clear()
+        ghost._revealed_hwnd = None
+
+    def tearDown(self) -> None:
+        ghost._ghost_hwnds.clear()
+        ghost._revealed_hwnd = None
+
+    def test_hide_parks_only_new_browser_windows(self) -> None:
+        with mock.patch.object(ghost, "_x11", return_value=self.x):
+            res = ghost.hide_new_windows({100}, retries=1, delay_s=0)
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["windows"], 1)
+        self.assertIn(200, ghost._ghost_hwnds)
+        self.assertEqual(self.x.windows[200][1],
+                         {"_NET_WM_STATE_HIDDEN",
+                          "_NET_WM_STATE_SKIP_TASKBAR"})
+        self.assertEqual(self.x.windows[100][1], set())  # untouched
+
+    def test_reveal_then_park_round_trip(self) -> None:
+        with mock.patch.object(ghost, "_x11", return_value=self.x):
+            ghost.hide_new_windows({100}, retries=1, delay_s=0)
+            r = ghost.reveal_window()
+            self.assertTrue(r["ok"], r)
+            self.assertEqual(self.x.windows[200][1], set())  # visible again
+            self.assertEqual(self.x.activated, [200])
+            p = ghost.park_window()
+            self.assertTrue(p["ok"], p)
+            self.assertEqual(self.x.windows[200][1],
+                             {"_NET_WM_STATE_HIDDEN",
+                              "_NET_WM_STATE_SKIP_TASKBAR"})
+        self.assertIsNone(ghost._revealed_hwnd)
+
+    def test_reveal_falls_back_to_state_discriminator(self) -> None:
+        # Tracking lost (e.g. server restart) — hidden + skip-taskbar
+        # together can only describe OUR parked window.
+        self.x.windows[200][1].update(
+            {"_NET_WM_STATE_HIDDEN", "_NET_WM_STATE_SKIP_TASKBAR"})
+        with mock.patch.object(ghost, "_x11", return_value=self.x):
+            r = ghost.reveal_window()
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(self.x.activated, [200])
+
+    def test_users_minimized_browser_never_matches(self) -> None:
+        # A user's own minimized chromium is hidden but keeps its taskbar
+        # button — reveal must not touch it.
+        self.x.windows[100][1].add("_NET_WM_STATE_HIDDEN")
+        with mock.patch.object(ghost, "_x11", return_value=self.x):
+            r = ghost.reveal_window()
+        self.assertFalse(r["ok"])
+        self.assertIn("no parked agent window", r["reason"])
+        self.assertEqual(self.x.activated, [])
+
+    def test_park_without_reveal_says_so(self) -> None:
+        with mock.patch.object(ghost, "_x11", return_value=self.x):
+            p = ghost.park_window()
+        self.assertFalse(p["ok"])
+        self.assertEqual(p["reason"], "nothing was revealed")
+
+    def test_headless_mode_reason_is_honest(self) -> None:
+        from browser_agent import config as bcfg
+
+        with mock.patch.object(ghost, "_x11", return_value=None), \
+             mock.patch.object(bcfg, "GHOST_MODE", "headless"):
+            r = ghost.reveal_window()
+        self.assertFalse(r["ok"])
+        self.assertIn("headless", r["reason"])
+        self.assertNotIn("windows only", r["reason"])
+
+    def test_no_display_reason_names_x11(self) -> None:
+        from browser_agent import config as bcfg
+
+        with mock.patch.object(ghost, "_x11", return_value=None), \
+             mock.patch.object(bcfg, "GHOST_MODE", "hidden"):
+            r = ghost.reveal_window()
+        self.assertFalse(r["ok"])
+        self.assertIn("X11", r["reason"])
+
+    def test_is_parked_gates_bring_to_front(self) -> None:
+        # Parked → the driver must NOT bring_to_front (CDP activate
+        # deiconifies an X11 park); revealed → tab-following resumes.
+        with mock.patch.object(ghost, "_x11", return_value=self.x):
+            self.assertFalse(ghost.is_parked())
+            ghost.hide_new_windows({100}, retries=1, delay_s=0)
+            self.assertTrue(ghost.is_parked())
+            ghost.reveal_window()
+            self.assertFalse(ghost.is_parked())
+            ghost.park_window()
+            self.assertTrue(ghost.is_parked())
+
+    def test_can_reveal_tracks_parked_state(self) -> None:
+        with mock.patch.object(ghost, "_x11", return_value=self.x):
+            self.assertFalse(ghost.can_reveal())
+            ghost.hide_new_windows({100}, retries=1, delay_s=0)
+            self.assertTrue(ghost.can_reveal())
+        with mock.patch.object(ghost, "_x11", return_value=None):
+            self.assertFalse(ghost.can_reveal())
+
+    def test_signin_ask_gets_reveal_hint_only_when_parked(self) -> None:
+        from app.services.agent_bridge import _signin_handoff_hint
+
+        ask = "I need you to sign in to GitHub to continue."
+        with mock.patch.object(ghost, "can_reveal", return_value=True):
+            hinted = _signin_handoff_hint(ask)
+            self.assertIn("reveal", hinted)
+            self.assertTrue(hinted.startswith(ask))
+            # Non-sign-in asks stay untouched.
+            self.assertEqual(_signin_handoff_hint("Which option should I pick?"),
+                             "Which option should I pick?")
+        with mock.patch.object(ghost, "can_reveal", return_value=False):
+            self.assertEqual(_signin_handoff_hint(ask), ask)
+
+
+class LoginWallDetectionTests(unittest.TestCase):
+    """looks_like_login_wall must recognize all three real-world wall shapes
+    (password, identifier-first, QR) and stay quiet on ordinary pages."""
+
+    @staticmethod
+    def wall(**scan):
+        from browser_agent.credentials import looks_like_login_wall
+        return looks_like_login_wall(scan)
+
+    def test_password_wall(self) -> None:
+        self.assertEqual(self.wall(
+            url="https://github.com/login",
+            page_text="Sign in to GitHub",
+            elements=[{"role": "text", "name": "Username", "editable": True},
+                      {"role": "password", "name": "Password",
+                       "editable": True}]),
+            "password")
+
+    def test_identifier_first_wall(self) -> None:
+        # Google/Microsoft/Slack: email or phone now, password later.
+        self.assertEqual(self.wall(
+            url="https://accounts.google.com/v3/signin/identifier",
+            page_text="Sign in — use your Google Account. Email or phone",
+            elements=[{"role": "email", "name": "Email or phone",
+                       "editable": True},
+                      {"role": "button", "name": "Next"}]),
+            "identifier")
+
+    def test_qr_wall(self) -> None:
+        # WhatsApp/Telegram: no typed input at all — link a device by QR.
+        self.assertEqual(self.wall(
+            url="https://web.whatsapp.com/",
+            page_text="Log into WhatsApp Web. Scan the QR code with your "
+                      "phone to link a device",
+            elements=[{"role": "button", "name": "Log in with phone number"}]),
+            "qr")
+
+    def test_query_param_wall_marker(self) -> None:
+        # x.com serves login as /i/jf/onboarding/web?mode=login with two
+        # anonymous text inputs (observed live 2026-09-08) — the wall marker
+        # lives in the query string, not the path.
+        self.assertEqual(self.wall(
+            url="https://x.com/i/jf/onboarding/web?mode=login",
+            page_text="Happening now. Continue with phone or Email or "
+                      "username Continue",
+            elements=[{"role": "text", "name": "", "editable": True}]),
+            "identifier")
+
+    def test_homepage_with_signin_link_is_not_a_wall(self) -> None:
+        # "Sign in" nav link + a search box must never classify as a wall.
+        self.assertEqual(self.wall(
+            url="https://github.com/",
+            page_text="Where the world builds software. Sign in. Sign up.",
+            elements=[{"role": "text", "name": "Search GitHub",
+                       "editable": True},
+                      {"role": "link", "name": "Sign in"}]),
+            "")
+
+    def test_ordinary_page_is_not_a_wall(self) -> None:
+        self.assertEqual(self.wall(
+            url="https://example.com/pricing",
+            page_text="Our pricing plans",
+            elements=[{"role": "button", "name": "Contact sales"}]),
+            "")
+
+
+class LoginUrlTableTests(unittest.TestCase):
+    def test_known_hosts_resolve(self) -> None:
+        from browser_agent.provider_tips import login_url_for
+
+        self.assertEqual(login_url_for("github.com"),
+                         "https://github.com/login")
+        self.assertEqual(login_url_for("mail.google.com"),
+                         "https://accounts.google.com/")
+        # Subdomain falls back to its registrable parent; www is stripped.
+        self.assertEqual(login_url_for("https://www.github.com/justin"),
+                         "https://github.com/login")
+        self.assertEqual(login_url_for("gist.github.com"),
+                         "https://github.com/login")
+        # Mirror hosts share one identity provider.
+        self.assertEqual(login_url_for("outlook.com"),
+                         login_url_for("teams.microsoft.com"))
+        self.assertEqual(login_url_for("unknown.example"), "")
+
+    def test_list_sites_survives_a_stored_credential(self) -> None:
+        # Regression: list_sites() built a LIST then called .add() — it
+        # crashed the moment any credential existed.
+        import os
+        from browser_agent import credentials
+
+        with mock.patch.dict(os.environ,
+                             {"QUILL_CRED_GITHUB_COM_USER": "u",
+                              "QUILL_CRED_GITHUB_COM_PASS": "p"}):
+            self.assertIn("github.com", credentials.list_sites())
+
+
+def _live_x11_ready() -> bool:
+    try:
+        from desktop_agent import x11_util
+        return x11_util.session_ok()
+    except Exception:
+        return False
+
+
+@unittest.skipUnless(_live_x11_ready(), "needs a live X11 session")
+class LiveX11ParkRevealTests(unittest.TestCase):
+    """End to end on the real display: a headed agent browser launches
+    parked off-screen, reveal brings it on-screen for sign-in, park hides
+    it again. This is the exact flow the chat pane's reveal button drives."""
+
+    @staticmethod
+    def _wait_state(x11_util, xid, want_hidden: bool, timeout_s: float = 10.0):
+        """Poll _NET_WM_STATE until HIDDEN matches `want_hidden` — and, when
+        parked, until SKIP_TASKBAR landed too. The WM applies both states
+        asynchronously (skip-taskbar is sent after the hide sticks), so on a
+        loaded box asserting right after the HIDDEN flip races the second
+        message."""
+        import time as _t
+        deadline = _t.time() + timeout_s
+        states: set = set()
+        while _t.time() < deadline:
+            states = x11_util.net_wm_state(xid)
+            settled = ("_NET_WM_STATE_HIDDEN" in states) == want_hidden
+            if settled and want_hidden:
+                settled = "_NET_WM_STATE_SKIP_TASKBAR" in states
+            if settled:
+                return states
+            _t.sleep(0.25)
+        return states
+
+    def test_hidden_launch_reveal_park(self) -> None:
+        from desktop_agent import x11_util
+        from browser_agent import config as bcfg
+        from browser_agent.browser import BrowserDriver
+
+        ghost.clear()
+        ghost._ghost_hwnds.clear()
+        ghost._revealed_hwnd = None
+        with mock.patch.object(bcfg, "GHOST_MODE", "hidden"):
+            d = BrowserDriver(headless=False)
+            d.start()
+            try:
+                self.assertTrue(ghost._ghost_hwnds,
+                                "launch did not park an agent window")
+                xid = next(iter(ghost._ghost_hwnds))
+                states = self._wait_state(x11_util, xid, want_hidden=True)
+                self.assertIn("_NET_WM_STATE_HIDDEN", states,
+                              f"window not parked: {states}")
+                self.assertIn("_NET_WM_STATE_SKIP_TASKBAR", states)
+                # The ghost pane must keep streaming while parked.
+                d.page.set_content("<h1>sign-in probe</h1>")
+                self.assertTrue(d.page.screenshot().startswith(b"\x89PNG"))
+                r = ghost.reveal_window()
+                self.assertTrue(r["ok"], r)
+                states = self._wait_state(x11_util, xid, want_hidden=False)
+                self.assertNotIn("_NET_WM_STATE_HIDDEN", states,
+                                 f"window still hidden: {states}")
+                p = ghost.park_window()
+                self.assertTrue(p["ok"], p)
+                states = self._wait_state(x11_util, xid, want_hidden=True)
+                self.assertIn("_NET_WM_STATE_HIDDEN", states,
+                              f"window not re-parked: {states}")
+            finally:
+                d.close()
+        ghost.clear()
+        ghost._ghost_hwnds.clear()
+        ghost._revealed_hwnd = None
+
+
+@unittest.skipUnless(
+    __import__("os").environ.get("QUILL_LIVE_SITE_TESTS") == "1"
+    and _live_x11_ready(),
+    "network sweep: set QUILL_LIVE_SITE_TESTS=1 on a live X11 session")
+class LiveRealSiteSigninSweepTests(unittest.TestCase):
+    """The sign-in handoff against the REAL wall of every provider the agent
+    knows: navigate each live login page in the hidden ghost browser and
+    assert (a) the window stays parked through real navigation, (b) the wall
+    classifies as a sign-in wall, (c) the ghost pane still gets frames. One
+    reveal/park round trip at the end. Read-only — no credentials are ever
+    typed and nothing is submitted."""
+
+    # (host label, login URL, acceptable wall kinds). Kinds allow for A/B
+    # variants; bot-walled responses surface as a plain failure to classify.
+    SITES = [
+        ("github.com", "https://github.com/login", {"password"}),
+        ("accounts.google.com", "https://accounts.google.com/",
+         {"identifier", "password"}),
+        ("discord.com", "https://discord.com/login",
+         {"password", "identifier", "qr"}),
+        ("instagram.com", "https://www.instagram.com/accounts/login/",
+         {"password", "identifier"}),
+        ("messenger.com", "https://www.messenger.com/login/",
+         {"password", "identifier"}),
+        ("slack.com", "https://slack.com/signin", {"identifier", "password"}),
+        ("login.microsoftonline.com", "https://login.microsoftonline.com/",
+         {"identifier", "password"}),
+        ("linkedin.com", "https://www.linkedin.com/login",
+         {"password", "identifier"}),
+        ("web.telegram.org", "https://web.telegram.org/k/",
+         {"qr", "identifier"}),
+        ("web.whatsapp.com", "https://web.whatsapp.com/", {"qr"}),
+        ("x.com", "https://x.com/i/flow/login", {"identifier", "password"}),
+    ]
+
+    def test_signin_walls_with_window_parked(self) -> None:
+        import time as _t
+        from desktop_agent import x11_util
+        from browser_agent import config as bcfg
+        from browser_agent.browser import BrowserDriver
+        from browser_agent.credentials import looks_like_login_wall
+
+        ghost.clear()
+        ghost._ghost_hwnds.clear()
+        ghost._revealed_hwnd = None
+        failures: list[str] = []
+        with mock.patch.object(bcfg, "GHOST_MODE", "hidden"):
+            d = BrowserDriver(headless=False)
+            d.start()
+            try:
+                self.assertTrue(ghost._ghost_hwnds,
+                                "launch did not park an agent window")
+                xid = next(iter(ghost._ghost_hwnds))
+                for label, url, kinds in self.SITES:
+                    with self.subTest(site=label):
+                        try:
+                            d.page.goto(url, wait_until="domcontentloaded",
+                                        timeout=45000)
+                        except Exception as exc:
+                            failures.append(f"{label}: goto failed ({exc})")
+                            continue
+                        wall, deadline = "", _t.time() + 15
+                        while _t.time() < deadline:
+                            wall = looks_like_login_wall(d.scan())
+                            if wall in kinds:
+                                break
+                            _t.sleep(1.0)
+                        states = x11_util.net_wm_state(xid)
+                        if "_NET_WM_STATE_HIDDEN" not in states:
+                            failures.append(
+                                f"{label}: window came unparked ({states})")
+                        if wall not in kinds:
+                            failures.append(
+                                f"{label}: wall={wall!r}, wanted {kinds}")
+                        if not (d.page.screenshot() or b"").startswith(
+                                b"\x89PNG"):
+                            failures.append(f"{label}: no ghost frame")
+                r = ghost.reveal_window()
+                self.assertTrue(r["ok"], r)
+                p = ghost.park_window()
+                self.assertTrue(p["ok"], p)
+            finally:
+                d.close()
+        ghost.clear()
+        ghost._ghost_hwnds.clear()
+        ghost._revealed_hwnd = None
+        self.assertFalse(failures, "\n".join(failures))
+
+
 # --- plan 6.5: prompt-injection fixtures + hash-gate defense ---------------
 
 class PromptInjectionPageTests(unittest.TestCase):

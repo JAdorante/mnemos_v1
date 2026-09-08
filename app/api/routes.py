@@ -4926,8 +4926,10 @@ def ghost_frame() -> Response:
 
 @router.post("/agent/ghost/reveal")
 def ghost_reveal() -> dict:
-    """Bring the parked agent window on-screen (sign-in handoff). Windows-only;
-    only a window parked at the ghost off-screen position can ever match."""
+    """Bring the parked agent window on-screen (sign-in handoff). Windows and
+    Linux X11; only a window the ghost itself hid can ever match (off-screen
+    position on Windows, hidden+skip-taskbar on X11). Headless/Wayland
+    installs answer with an honest reason instead."""
     from browser_agent import ghost
     return ghost.reveal_window()
 

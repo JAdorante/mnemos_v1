@@ -164,12 +164,57 @@ def try_save_from_reply(reply: str, current_url: str = "") -> dict[str, str] | N
 def list_sites() -> list[str]:
     """Hosts with stored credentials (password values omitted)."""
     _load_file()
-    sites: set[str] = []
+    sites: set[str] = set()
     for k in os.environ:
         if k.startswith(_PREFIX) and k.endswith(_USER_SUFFIX):
             slug = k[len(_PREFIX):-len(_USER_SUFFIX)]
             sites.add(slug.lower().replace("_", "."))
     return sorted(sites)
+
+
+# Sign-in wall detection across REAL sites. Three wall shapes exist in the
+# wild: classic user+password forms (GitHub, Discord, Instagram), identifier-
+# first pages that ask only for an email/phone and reveal the password later
+# (Google, Microsoft, Slack), and link-a-device QR walls with no typed input
+# at all (WhatsApp Web, Telegram Web). _find_login_fields only handles the
+# first shape — this classifier recognizes all three so the sign-in handoff
+# (ghost reveal) can be offered wherever a wall actually appears.
+_WALL_URL_RE = re.compile(
+    r"(?:^|[./\-=?&_])(?:log[- ]?in|sign[- ]?in|signin|login|auth|accounts?|"
+    r"sessions?|sso|oauth)(?=[/?#.&_-]|$)")
+_QR_WALL_PHRASES = ("scan the qr", "qr code", "log in by qr",
+                    "link a device", "linked devices", "log in with qr")
+_WALL_TEXT_PHRASES = ("sign in", "log in", "login", "welcome back",
+                      "enter your password", "enter your email",
+                      "phone, email", "continue with google")
+
+
+def looks_like_login_wall(scan: dict | None) -> str:
+    """'' when the page is not a sign-in wall; else its kind:
+    'password' (a password field is on screen), 'qr' (link-a-device wall), or
+    'identifier' (email/phone-first page — the password step comes later).
+
+    Deliberately conservative for 'identifier': the URL itself must look like
+    an auth surface, so a homepage with a "Sign in" nav link and a search box
+    never classifies as a wall."""
+    if not scan:
+        return ""
+    elements = scan.get("elements") or []
+    if any((e.get("role") or "").lower() == "password" for e in elements):
+        return "password"
+    text = (scan.get("page_text") or "").lower()
+    url = (scan.get("url") or "").lower()
+    url_wallish = bool(_WALL_URL_RE.search(url))
+    text_wallish = any(p in text for p in _WALL_TEXT_PHRASES)
+    if not (url_wallish or text_wallish):
+        return ""
+    if any(p in text for p in _QR_WALL_PHRASES):
+        return "qr"
+    if url_wallish:
+        user_el, _pw = _find_login_fields(scan)
+        if user_el is not None:
+            return "identifier"
+    return ""
 
 
 def _find_login_fields(scan: dict | None) -> tuple[dict | None, dict | None]:
