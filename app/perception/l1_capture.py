@@ -64,14 +64,25 @@ def _foreground_info() -> dict:
                     exe = pbuf.value or ""
             finally:
                 kernel32.CloseHandle(h)
-        return {
+        app_name = (exe.replace("\\", "/").rsplit("/", 1)[-1].lower()
+                    if exe else "")
+        out = {
             "hwnd": int(hwnd),
             "window": title,
             "window_id": str(int(hwnd)),
             "app_exe": exe,
-            "app_name": (exe.replace("\\", "/").rsplit("/", 1)[-1].lower()
-                         if exe else ""),
+            "app_name": app_name,
         }
+        # WS2d: cache-backed, non-blocking. None until the read warms, which
+        # is the honest answer rather than a guessed domain.
+        try:
+            from app.perception import uia_url
+            dom = uia_url.current_domain(int(hwnd), title, app_name)
+            if dom:
+                out["url_domain"] = dom
+        except Exception:
+            pass
+        return out
     except Exception:
         return {}
 
@@ -338,7 +349,9 @@ class L1Capture:
         if is_console_window(title):
             return None
 
-        rule = privacy_gate.check(title, app_exe=str(info.get("app_exe") or ""))
+        rule = privacy_gate.check(
+            title, app_exe=str(info.get("app_exe") or ""),
+            url_domain=info.get("url_domain"))
         if rule:
             privacy_gate.record_exclusion(
                 rule, window_id=window_id, ts_ms=int(now * 1000))

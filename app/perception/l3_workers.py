@@ -53,25 +53,42 @@ def run_segment(payload: dict | None = None,
     # oldest-first for assignment
     caps = sorted(caps, key=lambda c: int(c["ts_utc"]))
 
+    # WS2d: block the browser by (app, domain) rather than app alone, so a
+    # day of "Chrome" stops collapsing into one block with one app share.
+    try:
+        from app.services.activity import _domain_segment_enabled
+        by_domain = _domain_segment_enabled()
+    except Exception:
+        by_domain = False
+
     blocks_out = 0
     cur_app = metas[0].get("app_name") or ""
+    # Only when the block key includes the domain: a block that was NOT split
+    # on the domain may span several, and stamping the first row's domain on it
+    # would name it wrongly.
+    cur_domain = str(metas[0].get("url_domain") or "") if by_domain else ""
     cur_start = int(metas[0]["ts_utc"])
     cur_end = cur_start
     keys = 0
     mice = 0
     switch_since: int | None = None
 
-    def _flush(end_ts: int, app: str, k: int, m: int, start_ts: int) -> None:
+    def _flush(end_ts: int, app: str, k: int, m: int, start_ts: int,
+               domain: str = "") -> None:
         nonlocal blocks_out
         if end_ts <= start_ts:
             return
         member = [c["capture_id"] for c in caps
                   if start_ts <= int(c["ts_utc"]) < end_ts]
         intensity = (k + m) / max(1.0, (end_ts - start_ts) / 1000.0)
+        label = f"{app or 'unknown'}"
+        if domain:
+            label = f"{label} · {domain}"
         block = ActivityBlock(
             ts_start=start_ts, ts_end=end_ts, dominant_app=app,
+            dominant_domain=domain,
             input_intensity=round(intensity, 4), capture_ids=member,
-            summary=f"{app or 'unknown'} ({len(member)} captures)")
+            summary=f"{label} ({len(member)} captures)")
         st.upsert_activity_block(block)
         blocks_out += 1
 
@@ -80,26 +97,33 @@ def run_segment(payload: dict | None = None,
         app = row.get("app_name") or ""
         keys += int(row.get("key_count") or 0)
         mice += int(row.get("mouse_count") or 0)
+        dom = str(row.get("url_domain") or "") if by_domain else ""
         gap = ts - cur_end
         if gap >= idle_ms:
-            _flush(cur_end, cur_app, keys, mice, cur_start)
-            cur_app, cur_start, cur_end = app, ts, ts
+            _flush(cur_end, cur_app, keys, mice, cur_start, cur_domain)
+            cur_app, cur_domain, cur_start, cur_end = app, dom, ts, ts
             keys = mice = 0
             switch_since = None
             continue
-        if app != cur_app:
+        # An absent domain never splits a block — it means "not a browser" or
+        # "the read has not warmed", not "a different site".
+        switched = app != cur_app or (
+            by_domain and dom and cur_domain and dom != cur_domain)
+        if switched:
             if switch_since is None:
                 switch_since = cur_end
             if ts - switch_since >= switch_ms:
-                _flush(switch_since, cur_app, keys, mice, cur_start)
-                cur_app, cur_start, cur_end = app, ts, ts
+                _flush(switch_since, cur_app, keys, mice, cur_start, cur_domain)
+                cur_app, cur_domain, cur_start, cur_end = app, dom, ts, ts
                 keys = mice = 0
                 switch_since = None
                 continue
         else:
             switch_since = None
+            if by_domain and dom and not cur_domain:
+                cur_domain = dom
         cur_end = ts
-    _flush(cur_end, cur_app, keys, mice, cur_start)
+    _flush(cur_end, cur_app, keys, mice, cur_start, cur_domain)
     print(f"[perception.l3] segment: {blocks_out} block(s) from "
           f"{len(metas)} meta rows.")
     return {"blocks": blocks_out, "metas": len(metas)}

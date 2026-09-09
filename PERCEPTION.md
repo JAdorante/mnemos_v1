@@ -153,10 +153,123 @@ Secret-shaped OCR ⇒ prefer **skip the model call** over redact-then-send.
 | Item | Status |
 |---|---|
 | Criterion 9 (CPU ≤3% / RSS ≤400 MB / OCR p95 ≤1.5 s) with audio running | Measure with `python scripts/bench_perception_overhead.py --pid <app> --seconds 120` (live) or `--synthetic --audio-load` (contention approx). **Required before flipping `QUILL_PERCEPTION_L1=1` for real.** |
-| `browser_url` | Always `url_unavailable` until UIA URL read + registrable-domain validation lands — banking-domain gate and `dominant_domain` segmentation stay inert |
+| `browser_url` | WS2d landed the read behind `QUILL_PERCEPTION_URL` (default **off**). Until it clears its gate — domain precision ≥99% **per browser**, p95 ≤150 ms, no new `sleep` gaps — the field stays `url_unavailable` and the banking-domain gate and `dominant_domain` segmentation stay inert. See the WS2d section below. |
 | Windows.Media.Ocr confidence | Hardcoded `1.0` (API does not expose it) — `ocr_mean_conf` / `dropped_low_conf` are decorative with the default engine |
 | Test-plan harnesses | Synthetic-session ground-truth triggers, kill-mid-enrichment chaos, and 30-day storage soak scripts are **not** shipped; spirit covered piecewise by unit tests |
 | CAS shared SHA | Compactor + erasure use `sha_refcount` before unlink; CAS tree is never mtime-swept on erase |
+
+## WS2d — browser URL anchor (Windows)
+
+The browser was one opaque app: `activity.app_of` returned `Chrome` for every
+tab, so a day of browser work collapsed into one block with one app share.
+`uia_url.py` reads the **committed** URL from the browser's Document element
+ValuePattern (never the address-bar `Edit`, which returns what the user is
+typing) and `psl.py` parses it to a registrable domain against a vendored,
+pinned public suffix list.
+
+Four flags, four separate gates — never bundle them:
+
+| Flag | What it turns on | Gate |
+|---|---|---|
+| `QUILL_PERCEPTION_URL` | The read itself; `url_domain` populated, privacy gate live | Domain precision ≥99% **per browser** (no aggregates), read p95 ≤150 ms, timeout <1%, zero new `sleep` gaps in a 24 h soak |
+| `QUILL_PERCEPTION_URL_FULL` | Also *store* the path (query/fragment stripped, `TIER_SECRETS` redacted) | The domain is what everything downstream needs — this stays off unless something specific requires the path |
+| `QUILL_CONTEXT_DOMAIN_ANCHOR` | `kind="domain"` becomes an attribution candidate | Its own `eval_extraction` run |
+| `QUILL_CONTEXT_DOMAIN_SEGMENT` | Activity blocks split on `(app, domain)` | Its own `eval_extraction` run + `rebuild()` idempotency |
+
+Design points worth knowing before touching it:
+
+* **The L0 tick never waits.** `uia_url.current_url` is cache-backed and
+  non-blocking: a miss answers `None` and schedules a read on a dedicated STA
+  worker. The 1 Hz poll is the liveness clock for gap detection, so a blocking
+  cross-process COM call there would manufacture false `sleep` gaps. A
+  navigation therefore lands one tick late, which the 500 ms debounce usually
+  hides.
+* **Every failure is `None`.** Timeout, wrong shape, focus moved mid-read,
+  omnibox focused, non-allowlisted app, agent-driven: each returns `None` and
+  bumps a counter. A missing URL is honest; a wrong one poisons attribution
+  silently and survives rebuilds.
+* **The cache key is `(hwnd, window_title)`**, so reads happen roughly once per
+  navigation. Known miss: same-title SPA navigation. Harmless while only the
+  domain is consumed — same-domain SPA nav has the same domain — which is an
+  argument for the domain-only default.
+* **Agent self-suppression is two mechanisms.** `surface_filters.is_self_window`
+  is a title regex and cannot see `browser_agent`, which drives real Chrome
+  with real page titles. Launch mode is discriminable by profile/PID; attach
+  mode (`connect_over_cdp`) drives the *user's own* Chrome — same process, same
+  HWND — so suppression is temporal via `app/services/agent_activity.py`, which
+  the orchestrator sets and which expires on a TTL so a crashed run cannot
+  suppress reads forever.
+* **Three sibling kind filters exist and are deliberately not identical** —
+  `context_anchor._identifier_norms`, `identifiers.entity_candidate_names`, and
+  `identifier_rollup.derive_edges`. Only the first takes `kind="domain"`. Read
+  the comment above `entity_candidate_names` before hoisting them into a shared
+  constant.
+* **The trusted URL is truncated** to host + one path segment (two on repo
+  hosts) *before* it enters the identifier blob. Identifier `value` persists to
+  `quill.db`, so an untruncated URL would store full paths even with
+  `QUILL_PERCEPTION_URL_FULL=0`.
+* **Same-host OCR hits are suppressed** when a trusted URL is present — that is
+  the address-bar-misread case. Named residuals, not closed: a body link to
+  another repo on the *same* host is dropped, and a misread of the *host*
+  ("githuh.com/...") collides with nothing and survives.
+
+### Validation harness (`scripts/ws2d/`, `scripts/bench_browser_a11y.py`)
+
+Not production code — nothing in `app/` imports it. The URL source is
+pluggable so the harness runs on Linux against AT-SPI and on Windows against
+the shipped UIA reader with only the source swapped. Linux L0 stays out of
+scope; the point is to debug the harness where iteration is cheap.
+
+```
+python3 scripts/bench_browser_a11y.py --browser chromium --seconds 45   # Phase -1
+python3 scripts/ws2d/ground_truth.py  --browser chromium --strict       # Phase 0
+```
+
+**Phase -1, measured on the GB10 Linux box, 2026-09-09** — Chromium, 6 heavy
+tabs, 15→17 processes, whole process tree sampled with accessibility off then
+on: **ΔCPU +1.97 pp, ΔRSS +90.5 MB → BOUNDED.** Not free, not severe. The
+consequence per the brief's own table is "cut read frequency further, or read
+only on allowlisted hosts" — which the `(hwnd, window_title)` cache key
+already does, at roughly one read per navigation.
+
+Two findings from that run worth carrying to Windows:
+
+* **The tree really is lazy.** With `org.a11y.Status.ScreenReaderEnabled`
+  false, Chromium publishes an application and a frame whose only child is an
+  unpopulated stub — `GetRoleName` on it fails, there is no document, and
+  there is no URL. Setting it true builds the web-contents tree and the URL
+  becomes readable. So the cost above is the cost of *having* the tree, not of
+  reading one property from it.
+* **Linux buys it coarsely; Windows should not.** The Linux switch is a
+  desktop-wide flag affecting every application. UIA is a per-request path, so
+  the Windows number should be lower — but that is a prediction, and Phase -1
+  has to be rerun there before anyone relies on it.
+
+**Phase 0 on Linux/AT-SPI/Chromium: 14/14, precision 1.00, recall 1.00.** That
+is not the gate — the gate is a claim about UIA on Windows browsers — but it
+says the approach is sound before Windows time is spent on it. The run also
+measured the known SPA miss rather than asserting it: `spa_same_title` scored
+`correct: 2, path_correct: 0`, i.e. the domain was right both times and the
+path was stale both times. That is the whole argument for the domain-only
+default, as a number.
+
+Two harness bugs found by running it, both pinned by tests:
+
+* `page.url` is not a trustworthy oracle. Navigating to `bbc.co.uk/news` lands
+  on `bbc.com/news`; every document in the accessibility tree said `bbc.com`
+  while `page.url` still said `bbc.co.uk`, scoring a CORRECT read as a
+  precision failure. Ground truth now comes from `location.href` inside the
+  document.
+* A redirect legitimately spans two URLs across the read window, so the driver
+  URL is sampled before *and* after the read and either counts.
+
+`GET /perception/status` carries `url` — per-browser counters (`url_ok`,
+`url_timeout`, `url_rejected_shape`, `url_rejected_focus`,
+`url_suppressed_omnibox`, `url_suppressed_agent`) plus read latency p50/p95.
+Per browser on purpose: a 99% aggregate can hide one browser at 80%.
+
+Refresh the suffix list with `python3 scripts/update_psl.py` — a developer
+command, never called from perception code (no network in the capture path).
 
 ## Package map (`app/perception/`)
 
@@ -168,6 +281,8 @@ Secret-shaped OCR ⇒ prefer **skip the model call** over redact-then-send.
 | `privacy_gate.py` | Pre-pixel rules + user blocklist + excluded captures | A |
 | `spend_cap.py` | USD/day ledger + allow/check/record | A |
 | `l0_meta.py` | 1 Hz monitor, gaps (sleep/pause/process_down) | A |
+| `uia_url.py` | Guarded, cache-backed, non-blocking committed-URL read | WS2d |
+| `psl.py` | Registrable domain via the vendored public suffix list | WS2d |
 | `erasure.py` | Cascading erase job (incl. `ocr_blocks`) | A/B |
 | `dhash.py` | 64-bit perceptual hash | B |
 | `ocr.py` | Windows.Media.Ocr engine interface | B |

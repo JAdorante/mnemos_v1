@@ -52,6 +52,10 @@ psutil>=5.9                     # criterion-9 CPU/RSS harness (bench_perception_
 edge-tts>=6.1               # free neural (online) voices — the "human" default
 pyttsx3>=2.90               # offline TTS (non-Windows fallback)
 pywin32>=306; sys_platform == "win32"   # Windows SAPI5 SpVoice (offline backend)
+comtypes>=1.2.0; sys_platform == "win32"   # UIAutomation client for the browser URL read (WS2d)
+
+# --- Pairing QR codes (phone setup link, team invite) -----------------------
+qrcode>=7.4                 # optional at runtime: no lib = the link/invite text alone
 
 # --- Later milestones (kept here as the target stack) ---
 # pyannote.audio             # speaker diarization

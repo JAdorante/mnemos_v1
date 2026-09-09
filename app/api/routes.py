@@ -226,6 +226,15 @@ def stop_all() -> None:
         mon.stop()
 
 
+def _web_capture_state() -> dict:
+    """Browser-fed capture state; never let a status probe raise."""
+    try:
+        from app.api.web_ingest import web_capture_state
+        return web_capture_state()
+    except Exception:
+        return {}
+
+
 def _running_map() -> dict:
     return {
         "mic": _audio_running,
@@ -425,8 +434,13 @@ def capture_status() -> dict:
         # backstop — this is so the user is told before they click).
         "support": capture_support.status(),
         # Hosted boxes have no local devices — RecBar must send people to
-        # /capture instead of calling /capture/resume (always 503).
+        # the browser capture dock instead of calling /capture/resume
+        # (always 503).
         "headless": _headless(),
+        # Browser-fed capture (the dock window), read from the server's own
+        # socket state so every page and every reload sees it — the stream
+        # itself lives in whichever window opened it.
+        "web": _web_capture_state(),
     }
 
 
@@ -560,6 +574,20 @@ def perception_status() -> dict:
         counts = ps.counts()
     except Exception as exc:
         coverage = {"error": str(exc)}
+    # WS2d: per-browser URL read counters. Broken out by app_name on purpose —
+    # an aggregate 99% precision can hide one browser at 80%, and the exit gate
+    # keys on the per-browser number.
+    url: dict = {}
+    try:
+        from app.perception import uia_url
+        url = uia_url.stats()
+    except Exception as exc:
+        url = {"error": str(exc)}
+    try:
+        from app.services import agent_activity
+        url["agent"] = agent_activity.status()
+    except Exception:
+        pass
     return {
         "enabled": bool(settings.perception.enabled),
         "capturing": capturing,
@@ -568,6 +596,7 @@ def perception_status() -> dict:
         "consent": capture_consent.status(),
         "running": _running_map(),
         "l0": l0,
+        "url": url,
         "spend": spend,
         "coverage_24h": coverage,
         "counts": counts,
@@ -4387,6 +4416,10 @@ class ChatIn(BaseModel):
     context: str | None = None
     # Optional study mode for this turn (also sticky via POST /chat/mode).
     mode: str | None = None
+    # Optional per-conversation connector enables (ids). When set, applied
+    # before the turn so Claude-style toggles take effect immediately.
+    connectors: list[str] | None = None
+    connectors_off: list[str] | None = None
 
 
 class ChatModeBody(BaseModel):
@@ -4528,7 +4561,26 @@ def chat(body: ChatIn) -> dict:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     study_mode = _smode.current()["id"]
 
+    # Per-conversation connector toggles (Claude-style). Apply before grounding
+    # so a flip in the composer takes effect on this same send.
+    try:
+        from app.services.connectors import session as _conn_session
+        for cid in (body.connectors or []):
+            _conn_session.set_enabled(str(cid), True)
+        for cid in (body.connectors_off or []):
+            _conn_session.set_enabled(str(cid), False)
+    except Exception as exc:
+        print(f"[connectors.session] skipped ({exc}).")
+
     agent_goal, display = _attach_user_context(body.message, body.context)
+    # Surface which connectors may contribute tools/data this turn.
+    try:
+        from app.services.connectors import session as _conn_session
+        guide = _conn_session.guidance_line()
+        if guide:
+            agent_goal = f"{guide}\n\n{agent_goal}"
+    except Exception:
+        pass
     # Learning Memory: short homework/quiz verdicts update mastery (best-effort).
     if study_mode in ("homework", "study_quiz"):
         try:
@@ -4963,6 +5015,11 @@ def chat_new() -> dict:
     if _agent_disabled():
         return {"ok": False, "error": "agent disabled (QUILL_AGENT=0)"}
     archived = agent.worker.new()
+    try:
+        from app.services.connectors import session as _conn_session
+        _conn_session.reset()
+    except Exception:
+        pass
     return {"ok": True, "archived": archived or None}
 
 
@@ -5518,12 +5575,14 @@ class PeerClaimIn(BaseModel):
     code: str
     name: str = ""
     base_url: str = ""          # where WE can call the claimer back
+    internal_url: str = ""      # optional private-network address, preferred
     token_for_caller: str = ""  # what WE present when calling them
 
 
 class PeerJoinIn(BaseModel):
-    url: str    # the other instance, e.g. http://192.168.1.20:8000
-    code: str   # the 6-digit code their desktop is showing
+    url: str = ""     # the other instance, e.g. http://192.168.1.20:8000
+    code: str = ""    # the 6-digit code their desktop is showing
+    invite: str = ""  # or one pasted sparrow://pair/… token instead of both
 
 
 class PeerQueryIn(BaseModel):
@@ -5606,10 +5665,14 @@ def peer_policy(body: PeerPolicyIn) -> dict:
 
 @router.post("/peer/pair/start")
 def peer_pair_start() -> dict:
-    """Desktop-side: show a single-use code a teammate's instance can claim."""
-    from app.services import peer_channel
+    """Desktop-side: show a single-use code a teammate's instance can claim,
+    plus the same code packed into one pasteable invite (and its QR)."""
+    from app.services import peer_channel, phone_channel
 
-    return peer_channel.start_pairing()
+    res = peer_channel.start_pairing()
+    if res.get("ok") and res.get("invite"):
+        res["qr_svg"] = phone_channel.qr_svg(res["invite"])
+    return res
 
 
 @router.post("/peer/pair/claim")
@@ -5619,14 +5682,22 @@ def peer_pair_claim(body: PeerClaimIn) -> dict:
     from app.services import peer_channel
 
     return peer_channel.claim_pairing(body.code, body.name, body.base_url,
-                                      body.token_for_caller)
+                                      body.token_for_caller,
+                                      body.internal_url)
 
 
 @router.post("/peer/pair/join")
 def peer_pair_join(body: PeerJoinIn) -> dict:
-    """Desktop-side: claim a code shown on a teammate's desktop at `url`."""
+    """Desktop-side: claim a teammate's code — from one pasted invite, or from
+    an address plus the 6-digit code typed separately."""
     from app.services import peer_channel
 
+    invite = (body.invite or "").strip()
+    # A pasted invite in the address box is still an invite.
+    if not invite and body.url.strip().lower().startswith("sparrow://"):
+        invite = body.url.strip()
+    if invite:
+        return peer_channel.join_invite(invite)
     return peer_channel.join(body.url, body.code)
 
 

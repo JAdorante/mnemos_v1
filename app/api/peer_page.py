@@ -47,6 +47,14 @@ td{border-top:1px solid var(--line);padding:9px 8px;vertical-align:top}
 .pol{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
 .pol select{padding:5px 8px;font-size:.85rem;border-radius:8px}
 .pol label{font-size:.78rem;color:var(--mut)}
+.invite{display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap;margin-top:12px}
+.invite .qr svg{width:168px;height:168px;background:#fff;border:1px solid var(--line);
+  border-radius:12px;padding:8px}
+.invite .side{flex:1;min-width:260px}
+.blob{font-family:var(--mono);font-size:.8rem;width:100%;min-height:74px;resize:vertical;
+  word-break:break-all;line-height:1.4}
+details.fallback{margin-top:12px}
+details.fallback summary{cursor:pointer;color:var(--mut);font-size:.9rem}
 /* Guidance, not an alert: amber left border, quiet fill (spec §7). */
 .note{border:1px solid var(--line);border-left:3px solid var(--amber);
   background:var(--raised);border-radius:var(--r-md);padding:12px 14px;
@@ -57,6 +65,8 @@ td{border-top:1px solid var(--line);padding:9px 8px;vertical-align:top}
   h1{font-size:clamp(1.5rem,6vw,2rem)}
   .panel{padding:16px}
   .code{font-size:1.6rem;letter-spacing:.2em;word-break:break-all}
+  .invite{flex-direction:column;gap:12px}
+  .invite .qr svg{width:min(168px,100%);height:auto;aspect-ratio:1}
   .row{flex-direction:column;align-items:stretch}
   .row input{min-width:0;width:100%}
   .row input[style]{max-width:none!important}
@@ -87,21 +97,43 @@ td{border-top:1px solid var(--line);padding:9px 8px;vertical-align:top}
   <div class="panel">
     <h2>Pair with a teammate</h2>
     <div class="row">
-      <button class="btn" id="startBtn" type="button">Show a pairing code</button>
-      <span class="muted" style="align-self:center">Tell your teammate the code and your
-      address — codes work once and expire in 10 minutes.</span>
+      <button class="btn" id="startBtn" type="button">Create an invite</button>
+      <span class="muted" style="align-self:center">Send your teammate the invite —
+      it carries your address and the code, works once, and expires in 10 minutes.</span>
     </div>
     <div id="pairBox" hidden>
-      <div class="code" id="codeText"></div>
-      <div class="muted">Your address: <span id="myUrl" style="font-family:var(--mono)"></span></div>
+      <div class="invite">
+        <div class="qr" id="qrHolder"></div>
+        <div class="side">
+          <label class="muted" for="inviteBlob">Send them this line</label>
+          <textarea id="inviteBlob" class="blob" readonly spellcheck="false"></textarea>
+          <div class="row" style="margin:8px 0 0">
+            <button class="btn btn-ghost btn-sm" id="copyBtn" type="button">Copy invite</button>
+            <span class="muted" id="copyMsg" style="align-self:center"></span>
+          </div>
+          <details class="fallback">
+            <summary>Read it out instead</summary>
+            <div class="code" id="codeText"></div>
+            <div class="muted">Your address: <span id="myUrl" style="font-family:var(--mono)"></span></div>
+            <div class="muted" id="myInternal" hidden></div>
+          </details>
+        </div>
+      </div>
     </div>
     <hr style="border:0;border-top:1px solid var(--line);margin:16px 0">
-    <p class="muted" style="margin:0 0 6px">Or join a teammate showing a code:</p>
+    <p class="muted" style="margin:0 0 6px">Or join a teammate who sent you one:</p>
     <div class="row">
-      <input id="joinUrl" placeholder="Their address, e.g. http://192.168.1.20:8000">
-      <input id="joinCode" placeholder="6-digit code" style="max-width:140px">
+      <input id="joinInvite" placeholder="Paste their invite (sparrow://pair/…)">
       <button class="btn btn-ghost" id="joinBtn" type="button">Join</button>
     </div>
+    <details class="fallback">
+      <summary>They only gave me an address and a code</summary>
+      <div class="row">
+        <input id="joinUrl" placeholder="Their address, e.g. http://192.168.1.20:8000">
+        <input id="joinCode" placeholder="6-digit code" style="max-width:140px">
+        <button class="btn btn-ghost" id="joinManualBtn" type="button">Join</button>
+      </div>
+    </details>
     <div id="pairMsg" class="muted"></div>
   </div>
 
@@ -286,7 +318,7 @@ function renderOffers(rows){
   $('offersPanel').hidden=false;
   $('offersBox').innerHTML='<ul style="margin:0;padding-left:1.2rem">'+rows.map(o=>
     `<li><b>${esc(o.name||o.email)}</b>${o.email&&o.name?` <span class="muted">${esc(o.email)}</span>`:''}
-     — show a pairing code above and send it to them.</li>`).join('')+'</ul>';
+     — create an invite above and send it to them.</li>`).join('')+'</ul>';
 }
 async function linkPerson(pid,sel){
   const v=sel.value;
@@ -323,13 +355,30 @@ $('startBtn').onclick=async()=>{
   const r=await post('/peer/pair/start');
   if(!r.ok){$('pairMsg').textContent=r.error||'could not start pairing';return}
   $('pairBox').hidden=false;$('codeText').textContent=r.code;$('myUrl').textContent=r.base_url;
+  $('inviteBlob').value=r.invite||'';
+  $('qrHolder').innerHTML=r.qr_svg||'<span class="muted">QR unavailable — send the line.</span>';
+  const int=$('myInternal');
+  int.hidden=!r.internal_url;
+  if(r.internal_url) int.innerHTML='On this network: <span style="font-family:var(--mono)">'+esc(r.internal_url)+'</span>';
+  $('copyMsg').textContent='';
+  $('startBtn').textContent='New invite';
 };
-$('joinBtn').onclick=async()=>{
+$('copyBtn').onclick=async()=>{
+  const text=$('inviteBlob').value;
+  if(!text)return;
+  try{ await navigator.clipboard.writeText(text); $('copyMsg').textContent='Copied.'; }
+  catch(e){ $('inviteBlob').select(); $('copyMsg').textContent='Press ⌘/Ctrl+C to copy.'; }
+};
+async function doJoin(body){
   $('pairMsg').textContent='Joining…';
-  const r=await post('/peer/pair/join',{url:$('joinUrl').value.trim(),code:$('joinCode').value.trim()});
+  const r=await post('/peer/pair/join',body);
   $('pairMsg').innerHTML=r.ok?`<span class="ok">✓ Paired with ${esc(r.name)}.</span>`:esc(r.error||'join failed');
+  if(r.ok){$('joinInvite').value='';$('joinUrl').value='';$('joinCode').value='';}
   refresh();
-};
+}
+$('joinBtn').onclick=()=>doJoin({invite:$('joinInvite').value.trim()});
+$('joinManualBtn').onclick=()=>doJoin({url:$('joinUrl').value.trim(),code:$('joinCode').value.trim()});
+$('joinInvite').addEventListener('keydown',e=>{ if(e.key==='Enter')$('joinBtn').click(); });
 refresh();setInterval(()=>{ if(!document.hidden) refresh(); },5000);
 </script>
 </body>

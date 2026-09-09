@@ -74,10 +74,45 @@ class _RemoteFeed:
         self.pending = np.zeros(0, dtype=np.float32)   # re-chunk remainder
         self.idle_timer: threading.Timer | None = None
         self.last_throttle = 0.0
+        # Is a browser actually streaming right now? `running` stays True
+        # through the keep-warm grace after a dropped socket, so it cannot
+        # answer "is the mic live" for the recording indicator.
+        self.connected = False
 
 
 _feeds: dict[str, _RemoteFeed] = {}
 _feeds_lock = threading.Lock()
+
+# Screen frames arrive as discrete POSTs, not a socket — liveness is "a frame
+# landed recently" (the sampler posts every SCREEN_SEND_S = 5 s).
+_last_frame_ts = 0.0
+FRAME_LIVE_S = 20.0
+
+
+def web_capture_state() -> dict:
+    """Per-source browser capture state for GET /capture/status.
+
+    'recording' | 'paused' | 'off' for each browser-fed source, read from the
+    server's own connection state — so EVERY page and every reload sees the
+    truth about a capture owned by some other window (the dock), with no
+    cross-window messaging involved."""
+    out = {}
+    with _feeds_lock:
+        for kind in KINDS:
+            feed = _feeds.get(kind)
+            if feed is None or not feed.connected:
+                out[kind] = "off"
+            else:
+                out[kind] = "paused" if feed.paused else "recording"
+    out["screen"] = ("recording"
+                     if time.time() - _last_frame_ts < FRAME_LIVE_S else "off")
+    return out
+
+
+def _set_connected(feed: "_RemoteFeed", epoch: int, on: bool) -> None:
+    with _feeds_lock:
+        if feed.epoch == epoch:
+            feed.connected = bool(on)
 
 
 def _acquire(kind: str) -> tuple[_RemoteFeed, int]:
@@ -217,11 +252,13 @@ async def ingest_audio(ws: WebSocket) -> None:
         # dispatch is per-frame (headered vs. headerless binary).
         "vad": ("client" if hello.get("vad") == "client" else "server"),
     })
+    _set_connected(feed, epoch, True)
 
     try:
         while True:
             msg = await ws.receive()
             if msg["type"] == "websocket.disconnect":
+                _set_connected(feed, epoch, False)
                 _keep_warm(feed, epoch)
                 return
             if feed.epoch != epoch:
@@ -283,6 +320,7 @@ async def ingest_audio(ws: WebSocket) -> None:
                 feed.paused = False
                 await ws.send_json({"type": "resumed"})
             elif op == "stop":
+                _set_connected(feed, epoch, False)
                 await asyncio.to_thread(_shutdown_feed, feed, epoch)
                 await ws.send_json({
                     "type": "bye",
@@ -292,9 +330,11 @@ async def ingest_audio(ws: WebSocket) -> None:
                 await ws.close()
                 return
     except WebSocketDisconnect:
+        _set_connected(feed, epoch, False)
         _keep_warm(feed, epoch)
     except Exception as exc:
         print(f"[web_ingest] {kind} connection error: {exc}")
+        _set_connected(feed, epoch, False)
         _keep_warm(feed, epoch)
 
 
@@ -397,6 +437,8 @@ async def ingest_frame(request: Request,
         raise HTTPException(400, "not a decodable image")
     rgb = bgr[:, :, ::-1].copy()
     when = float(ts) if ts else time.time()
+    global _last_frame_ts
+    _last_frame_ts = time.time()      # liveness for the recording indicator
     from app.api.routes import _desktop_capture
     loop = asyncio.get_running_loop()
     # The VLM caption can take seconds — keep it off the event loop.
@@ -411,6 +453,21 @@ def capture_page() -> HTMLResponse:
     # Inline JS shell — same no-store policy as the other SSR pages.
     return HTMLResponse(
         CAPTURE_PAGE,
+        headers={"Cache-Control": "no-store, must-revalidate",
+                 "Pragma": "no-cache"},
+    )
+
+
+@router.get("/capture/dock", response_class=HTMLResponse)
+def capture_dock_page() -> HTMLResponse:
+    """The compact capture window the app opens as a popup.
+
+    Same engine as /capture in a window that OUTLIVES navigation in the main
+    app — a MediaStream dies with its document, so capture cannot live on a
+    page the user is about to click away from."""
+    from app.api.capture_dock import DOCK_PAGE
+    return HTMLResponse(
+        DOCK_PAGE,
         headers={"Cache-Control": "no-store, must-revalidate",
                  "Pragma": "no-cache"},
     )

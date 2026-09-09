@@ -33,8 +33,42 @@ if sys.platform.startswith("linux"):
 DCfg = settings.desktop_capture
 
 
+def _win32_app_name(hwnd: int) -> str:
+    """Foreground process image name ("chrome.exe"), lowercased. The basename
+    rather than the full path on purpose: it is what the privacy gate's user
+    app rules are written against, and it keeps the full executable path out
+    of event meta."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32, kernel32 = ctypes.windll.user32, ctypes.windll.kernel32
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(int(hwnd), ctypes.byref(pid))
+        h = kernel32.OpenProcess(0x1000, False, pid.value)  # QUERY_LIMITED_INFO
+        if not h:
+            return ""
+        try:
+            size = wintypes.DWORD(1024)
+            buf = ctypes.create_unicode_buffer(size.value)
+            if not kernel32.QueryFullProcessImageNameW(
+                    h, 0, buf, ctypes.byref(size)):
+                return ""
+            exe = buf.value or ""
+        finally:
+            kernel32.CloseHandle(h)
+        return exe.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    except Exception:
+        return ""
+
+
 def _foreground_window() -> dict:
-    """Best-effort foreground window title (Windows / Linux X11)."""
+    """Best-effort foreground window title (Windows / Linux X11).
+
+    On Windows this also carries `app_name` and, once WS2d's URL read is
+    enabled and has warmed its cache, `url_domain` — the two arguments the
+    privacy gate has always accepted and never been given here.
+    """
     os = __import__("os")
     if os.name == "nt":
         try:
@@ -51,6 +85,16 @@ def _foreground_window() -> dict:
             out: dict = {"hwnd": int(hwnd)}
             if title:
                 out["window"] = title
+            app_name = _win32_app_name(int(hwnd))
+            if app_name:
+                out["app_name"] = app_name
+            try:
+                from app.perception import uia_url
+                dom = uia_url.current_domain(int(hwnd), title, app_name)
+                if dom:
+                    out["url_domain"] = dom
+            except Exception:
+                pass
             return out
         except Exception:
             return {}
@@ -205,8 +249,14 @@ class DesktopCapturePipeline:
         # first. A match writes a LABELED captures(kind='excluded') row so
         # the timeline shows a redaction, not an unexplained hole. The rule
         # id (never the title — it may itself be the secret) is all we log.
+        # A supplied `win` means the frame arrived with its own window context
+        # (a remote web-share frame). The local foreground window — and so the
+        # locally read URL — belongs to the SERVER, not to that frame, so the
+        # domain argument stays None there by construction.
         from app.perception.privacy_gate import gate as privacy_gate
-        rule = privacy_gate.check(window_title)
+        rule = privacy_gate.check(
+            window_title, app_exe=str(win.get("app_name") or ""),
+            url_domain=win.get("url_domain"))
         if rule:
             print(f"[desktop_capture] privacy gate blocked frame ({rule}).")
             privacy_gate.record_exclusion(
@@ -427,7 +477,9 @@ class DesktopCapturePipeline:
             print(f"[desktop_capture] skip console click: {window_title[:80]!r}")
             return
         from app.perception.privacy_gate import gate as privacy_gate
-        rule = privacy_gate.check(window_title)
+        rule = privacy_gate.check(
+            window_title, app_exe=str(win.get("app_name") or ""),
+            url_domain=win.get("url_domain"))
         if rule:
             print(f"[desktop_capture] privacy gate blocked click ({rule}).")
             privacy_gate.record_exclusion(

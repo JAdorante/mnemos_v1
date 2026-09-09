@@ -22,6 +22,11 @@ Phase 3.
    reverse proxy, **with TLS** — `getUserMedia` requires a secure context.
 3. First visit: `/auth` unlock with the token → `/capture` → opt in → talk.
    The "last heard" ticker doubles as the ASR sanity check.
+4. If this user pairs with teammates on the same box, set
+   `QUILL_PEER_INTERNAL_URL` to the container's compose-network address
+   (`http://sparrow-userN:8000`). Peers prefer it over the public URL, so
+   on-box pairing survives a reverse-proxy/tunnel hostname change and that
+   traffic stays on the machine.
 
 ## GPU ASR
 
@@ -111,3 +116,12 @@ onboarding flow must put the between-meetings unlock card front and center.
 - Client-side VAD needs `/static/ort/` (baked here) or the pinned CDN; when
   neither loads the page silently streams to server-side VAD — capture never
   breaks, the page just drops the "silence stays local" badge.
+- Google Connect on hosted registers **one** redirect URI. Point
+  `QUILL_OAUTH_REDIRECT_BASE` at a stable HTTPS hostname (a Tailscale Funnel
+  needs no domain) and register only
+  `https://<that-host>/oauth/google/callback`. Its callback relays the code
+  back to whichever rotating hostname the browser started on — the live
+  origin rides in the OAuth `state`, and the originating container does the
+  exchange. Quick-tunnel restarts then cost nothing. Unset, the redirect is
+  derived from the live site (Origin / Forwarded-Host) and every hostname
+  must be registered by hand. See `gb10/README.md`.

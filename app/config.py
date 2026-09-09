@@ -916,16 +916,24 @@ class ExhaustConfig:
 
     @property
     def token_path(self) -> str:
+        # Prefer connectors layout; load still falls back to legacy path.
         return _get(
             "QUILL_EXHAUST_TOKEN",
-            f"{_get('QUILL_DATA_DIR', 'data')}/google_oauth_token.json")
+            f"{_get('QUILL_DATA_DIR', 'data')}/connectors/google/token.json")
+
+    @property
+    def legacy_token_path(self) -> str:
+        return f"{_get('QUILL_DATA_DIR', 'data')}/google_oauth_token.json"
+
+    @property
+    def oauth_state_path(self) -> str:
+        return f"{_get('QUILL_DATA_DIR', 'data')}/connectors/google/oauth_state.json"
 
     @property
     def ledger_path(self) -> str:
         return _get(
             "QUILL_EXHAUST_LEDGER",
             f"{_get('QUILL_DATA_DIR', 'data')}/exhaust_ledger.json")
-
 
 @dataclass(frozen=True)
 class McpConfig:
@@ -1348,6 +1356,17 @@ class PerceptionConfig:
     l3_idle_gap_s: float = float(_get("QUILL_PERCEPTION_L3_IDLE_S", "300"))
     l3_switch_gap_s: float = float(_get("QUILL_PERCEPTION_L3_SWITCH_S", "180"))
     l3_vlm_ocr_chars: int = int(_get("QUILL_PERCEPTION_L3_VLM_CHARS", "40"))
+    # WS2d: browser URL anchor (Windows). Dark by default — the UIA read has
+    # returned wrong content on this codebase before, and a wrong URL poisons
+    # attribution silently, so it ships off until the per-browser precision
+    # gate is met. `url_full` additionally STORES the path (query/fragment
+    # stripped, TIER_SECRETS redacted); the registrable domain alone is what
+    # the privacy gate, segmentation and repo-slug mining actually need.
+    url_enabled: bool = _get("QUILL_PERCEPTION_URL", "0") not in (
+        "0", "false", "False")
+    url_full: bool = _get("QUILL_PERCEPTION_URL_FULL", "0") not in (
+        "0", "false", "False")
+    url_timeout_ms: int = int(_get("QUILL_PERCEPTION_URL_TIMEOUT_MS", "500"))
 
     @property
     def db_path(self) -> str:
@@ -1571,6 +1590,16 @@ class ContextAnchorConfig:
         _get("QUILL_CONTEXT_EDGE_MIN_SHARE", "0.6"))
     alias_cos_min: float = float(_get("QUILL_ALIAS_COS_MIN", "0.86"))
     alias_autoconfirm_n: int = int(_get("QUILL_ALIAS_AUTOCONFIRM_N", "3"))
+    # WS2d consumption, two independent flags with two independent evals.
+    # `domain_anchor` lets a browser domain become an ATTRIBUTION candidate
+    # (kind="domain" enters _identifier_norms); `domain_segment` splits
+    # activity blocks on (app, domain) instead of app alone. The second
+    # changes per-app `share`, which changes which anchors clear
+    # derived_edge_min_share — never ship them on one flag.
+    domain_anchor: bool = _get("QUILL_CONTEXT_DOMAIN_ANCHOR", "0") not in (
+        "0", "false", "False")
+    domain_segment: bool = _get("QUILL_CONTEXT_DOMAIN_SEGMENT", "0") not in (
+        "0", "false", "False")
 
 
 @dataclass(frozen=True)

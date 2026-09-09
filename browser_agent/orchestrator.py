@@ -524,6 +524,15 @@ class Agent:
             return
         self.driver.start()
         self._browser_started = True
+        # WS2d: the perception URL read must not record the agent's own
+        # browsing as the user's. In attach mode there is no process-level
+        # discriminator (we are driving the user's own Chrome), so the only
+        # available signal is temporal — see app/services/agent_activity.py.
+        try:
+            from app.services import agent_activity
+            agent_activity.set_browser_run(True)
+        except Exception:
+            pass
         if self.driver.cdp_url:
             self._log(f"Attached to your running Chrome at {self.driver.cdp_url} — "
                       "using your existing logged-in session (I won't close your browser).")
@@ -2628,6 +2637,11 @@ class Agent:
         return result, status
 
     def close(self):
+        try:
+            from app.services import agent_activity
+            agent_activity.set_browser_run(False)
+        except Exception:
+            pass
         try:
             self.mem.end_session(self.session_id, "ended", None)
         except Exception:

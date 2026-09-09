@@ -39,23 +39,81 @@ SOURCE_CALENDAR = "calendar"
 SOURCE_WINDOW = "window_fallback"
 SOURCE_MANUAL = "manual"
 
-PROVIDERS = ("zoom", "meet", "teams", "unknown")
+PROVIDERS = ("zoom", "meet", "teams", "webex", "whereby", "goto", "jitsi",
+             "chime", "bluejeans", "ringcentral", "zoho", "discord", "slack",
+             "gather", "around", "livestorm", "riverside", "streamyard",
+             "unknown")
 
+# Every live conferencing surface we recognize, by host. A join link in a
+# calendar invite (or a shared browser tab) resolves to one of these, which is
+# what tells Sparrow a meeting is happening at all — an unrecognized host is
+# simply never offered a meeting session, so coverage here IS the feature.
+# Suffix-matched, so subdomains (acme.zoom.us, x.webex.com) resolve too.
 _JOIN_HOSTS = (
     ("zoom.us", "zoom"),
     ("zoom.com", "zoom"),
+    ("zoomgov.com", "zoom"),
     ("meet.google.com", "meet"),
     ("teams.microsoft.com", "teams"),
     ("teams.live.com", "teams"),
+    ("webex.com", "webex"),
+    ("webex.com.cn", "webex"),
+    ("whereby.com", "whereby"),
+    ("goto.com", "goto"),
+    ("gotomeeting.com", "goto"),
+    ("gotowebinar.com", "goto"),
+    ("join.me", "goto"),
+    ("meet.jit.si", "jitsi"),
+    ("jitsi.member", "jitsi"),
+    ("8x8.vc", "jitsi"),
+    ("chime.aws", "chime"),
+    # Verizon retired BlueJeans (its domain no longer resolves), but old
+    # calendar invites still carry these links — classifying an archived
+    # invite correctly costs nothing and keeps history readable.
+    ("bluejeans.com", "bluejeans"),
+    ("ringcentral.com", "ringcentral"),
+    ("meetings.ringcentral.com", "ringcentral"),
+    ("zoho.com", "zoho"),
+    ("meeting.zoho.com", "zoho"),
+    ("discord.com", "discord"),
+    ("discord.gg", "discord"),
+    ("slack.com", "slack"),
+    ("gather.town", "gather"),
+    ("around.co", "around"),
+    ("livestorm.co", "livestorm"),
+    # Riverside moved .fm -> .com (the old host still 301s); invites exist
+    # for both, so both resolve.
+    ("riverside.fm", "riverside"),
+    ("riverside.com", "riverside"),
+    ("streamyard.com", "streamyard"),
 )
 _URL_RE = re.compile(r"https?://[^\s<>\"')\]]+", re.I)
 _BROWSER_SUFFIX = re.compile(
     r"\s*[-—–]\s*(google chrome|microsoft edge|firefox|safari|zoom)\s*$",
     re.I)
 _WINDOW_PROVIDERS = (
+    # ORDER MATTERS: unambiguous vendor names first. Google Meet's pattern
+    # includes a bare `\bmeet\b`, which otherwise swallows "Jitsi Meet",
+    # "Webex Meet", and friends.
     (re.compile(r"\bzoom\b", re.I), "zoom"),
-    (re.compile(r"google meet|\bmeet\b", re.I), "meet"),
     (re.compile(r"microsoft teams|\bteams\b", re.I), "teams"),
+    (re.compile(r"\bwebex\b", re.I), "webex"),
+    (re.compile(r"\bwhereby\b", re.I), "whereby"),
+    (re.compile(r"gotomeeting|gotowebinar|\bgoto\s+(meeting|webinar)\b|"
+                r"\bjoin\.me\b", re.I), "goto"),
+    (re.compile(r"\bjitsi\b", re.I), "jitsi"),
+    (re.compile(r"amazon chime|\bchime\b", re.I), "chime"),
+    (re.compile(r"bluejeans", re.I), "bluejeans"),
+    (re.compile(r"ringcentral", re.I), "ringcentral"),
+    (re.compile(r"zoho meeting", re.I), "zoho"),
+    # Slack/Discord/Gather sit open all day, so the bare app name is NOT
+    # evidence of a call — only an unambiguous in-call word is. (A join URL
+    # in an invite still resolves them via _JOIN_HOSTS.)
+    (re.compile(r"\bhuddle\b", re.I), "slack"),
+    (re.compile(r"\blivestorm\b", re.I), "livestorm"),
+    (re.compile(r"\briverside\b", re.I), "riverside"),
+    (re.compile(r"\bstreamyard\b", re.I), "streamyard"),
+    (re.compile(r"google meet|\bmeet\b", re.I), "meet"),
     # Chrome Meet / Meet PWA often uses the calendar title as the window:
     # "EOW Team Call - Google Chrome" / popped-out "EOW Team Call".
     (re.compile(

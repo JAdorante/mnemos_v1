@@ -184,9 +184,26 @@ def _meeting_for_window(store: Store, t0: float, t1: float) -> dict | None:
     return None
 
 
+def _domain_anchor_enabled() -> bool:
+    """Env-first at call time, the codebase's runtime-knob convention."""
+    import os
+    env = os.getenv("QUILL_CONTEXT_DOMAIN_ANCHOR")
+    if env is not None:
+        return env not in ("0", "false", "False", "")
+    return bool(getattr(_cfg(), "domain_anchor", False))
+
+
 def _identifier_norms(store: Store, t0: float, t1: float) -> list[str]:
     """Verbatim OCR identifiers (WS2) stamped on frames inside the window —
-    they outrank title parsing (they are exact text, not convention)."""
+    they outrank title parsing (they are exact text, not convention).
+
+    kind="domain" (WS2d, QUILL_CONTEXT_DOMAIN_ANCHOR) joins the list when
+    enabled. It binds through the same `entity_alias.resolve` call as every
+    other candidate, so a fuzzy domain match is a PROPOSAL that auto-confirms
+    only after alias_autoconfirm_n distinct days — a domain seen on three days
+    is a signal, one seen once is a tab. Two sibling filters carry the same
+    kind list on purpose and are NOT extended: see the comment above
+    `identifiers.entity_candidate_names`."""
     try:
         rows = store.events_in_window(t0 - 30.0, t1 + 30.0,
                                       source="desktop.screen", limit=200)
@@ -195,8 +212,10 @@ def _identifier_norms(store: Store, t0: float, t1: float) -> list[str]:
     out, seen = [], set()
     for ev in rows:
         for ident in (ev.get("meta") or {}).get("identifiers") or []:
-            if (ident or {}).get("kind") not in ("repo", "title_segment",
-                                                 "path"):
+            kinds = ("repo", "title_segment", "path")
+            if _domain_anchor_enabled():
+                kinds = kinds + ("domain",)
+            if (ident or {}).get("kind") not in kinds:
                 continue
             n = str(ident.get("norm") or "").strip()
             if n and n.lower() not in seen:

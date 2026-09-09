@@ -46,6 +46,32 @@ _MAX_HEARD_CHARS = 90
 _MAX_SAW_CHARS = 110
 
 
+def _domain_segment_enabled() -> bool:
+    """WS2d segmentation flag, env-first at call time.
+
+    Blast radius, stated where it happens: splitting a block on the domain
+    multiplies block counts on browser-heavy days, which changes the per-app
+    `share` in context_anchor._apps_from_activities, which changes which
+    anchors clear derived_edge_min_share and receive an origin="context" edge.
+    It moves project attribution in both directions, so it ships on its own
+    flag with its own eval and `rebuild()` restores the old grouping when it
+    is flipped back off.
+    """
+    import os
+    env = os.getenv("QUILL_CONTEXT_DOMAIN_SEGMENT")
+    if env is not None:
+        return env not in ("0", "false", "False", "")
+    return bool(getattr(settings.context_anchor, "domain_segment", False))
+
+
+def domain_of(ev: Event) -> str:
+    """Registrable domain stamped on a desktop event by the capture path, or
+    "" when the URL read is off/unavailable — which is most of the time and is
+    why an absent domain must never start a new block."""
+    meta = ev.meta if isinstance(getattr(ev, "meta", None), dict) else {}
+    return str(meta.get("url_domain") or "").strip().lower()
+
+
 def app_of(window_title: str) -> str:
     """Best-effort application name from a foreground window title.
 
@@ -95,6 +121,10 @@ class Activity:
     n_audio: int = 0
     n_webcam: int = 0
     ctx_event_ids: list[int] = field(default_factory=list)
+    # WS2d: the browser domain this block was on, when segmentation is keyed
+    # on it. In-memory only — `Store.replace_activities` writes an explicit
+    # column list, so no schema migration rides on this field.
+    domain: str = ""
     # Internal accumulators (folded into `summary` by _compose).
     _notes: list[str] = field(default_factory=list, repr=False)
     _clicks_by_window: dict = field(default_factory=dict, repr=False)
@@ -107,6 +137,7 @@ class Activity:
             "n_screens": self.n_screens, "n_clicks": self.n_clicks,
             "n_audio": self.n_audio, "n_webcam": self.n_webcam,
             "ctx_event_ids": self.ctx_event_ids,
+            "domain": self.domain,
             "duration_s": round(self.end - self.start, 2),
         }
 
@@ -142,17 +173,24 @@ def group_activities(rows: list[tuple[int, Event]], max_gap_s: float) -> list[Ac
     ordered = sorted(rows, key=lambda r: r[1].time)
     acts: list[Activity] = []
     cur: Activity | None = None
+    by_domain = _domain_segment_enabled()
     for eid, ev in ordered:
         win = _window(ev)
         app = app_of(win)
+        # An absent domain never splits: it means "not a browser" or "the read
+        # has not warmed", and a missing value must not fracture a block.
+        dom = domain_of(ev) if by_domain else ""
         starts_new = (
             cur is None
             or (ev.time - cur.end) > max_gap_s
             or app != cur.app
+            or (by_domain and dom and cur.domain and dom != cur.domain)
         )
         if starts_new:
-            cur = Activity(start=ev.time, end=ev.time, app=app)
+            cur = Activity(start=ev.time, end=ev.time, app=app, domain=dom)
             acts.append(cur)
+        elif by_domain and dom and not cur.domain:
+            cur.domain = dom
         cur.end = max(cur.end, ev.time)
         cur.event_ids.append(int(eid))
         if win and win not in cur.windows:

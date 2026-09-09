@@ -204,6 +204,12 @@ the **answerer’s** memory by **their** models, then redacted and returned.
 Raw timeline rows never cross the wire.
 
 - Pairing is mutual, single-use, and expires; tokens authenticate peers.
+- "Create an invite" packs the address, name and code into one pasteable
+  `sparrow://pair/…` line (plus a QR) so nobody retypes a hostname. It is
+  packaging: the code inside obeys every rule above.
+- A peer may advertise a second, private-network address
+  (`QUILL_PEER_INTERNAL_URL`) that we try before the public one — same-box or
+  same-LAN pairs survive a tunnel hostname change and stay off the internet.
 - Disclosure is per-peer and per-class (`availability` / `work` / `contact` /
   `personal` / `other` → `auto` | `offer` | `deny`). Default is **offer** —
   you approve each disclosure. `personal` can never be set to auto.
@@ -1091,7 +1097,9 @@ Off by default; enable with `QUILL_DESKTOP_CAPTURE=1` or
 | `QUILL_PROFILE` | — | `tester` pins meeting-first and hard-off for Phone Link / anticipate / desktop capture |
 | `QUILL_EXHAUST_INGEST` | `1` | Gmail/Calendar *metadata* cold-start (headers + attendees, never bodies) |
 | `QUILL_EXHAUST_DAYS` | `90` | lookback for exhaust ingest |
-| `GOOGLE_OAUTH_CLIENT_ID` / `_SECRET` | — | Desktop OAuth client for exhaust (loopback redirect) |
+| `GOOGLE_OAUTH_CLIENT_ID` / `_SECRET` | — | OAuth client for Gmail/Calendar metadata (desktop loopback or hosted web redirect) |
+| `QUILL_PUBLIC_BASE_URL` | — | HTTPS origin for hosted Google OAuth; defaults to `QUILL_PEER_BASE_URL` when https |
+| `QUILL_OAUTH_REDIRECT_BASE` | — | the single stable origin registered with Google; its callback relays the code back to the live hostname |
 | `QUILL_MCP` | `0` | read-only MCP memory server (`python -m mcp_server`) |
 | `QUILL_EXTERNAL_CAPTURE` | `0` | Omi / phone-as-mic ingest at `POST /capture/external` |
 
@@ -1396,9 +1404,15 @@ doesn't raise, it quietly changes what becomes a memory.
   before loosening defaults).
 - **Peer channel over LAN needs TLS** before pairing beyond localhost.
   Peer↔Person links are user-asserted only (`POST /peer/link`).
-- **M6 connectors** — native Gmail/Outlook/HubSpot OAuth or IMAP still
-  deferred. Capture-first slice: Outlook/Gmail windows classify as `email` and
-  enrich People v2 contacts + `works_at` via
+- **M6 connectors** — Claude-style connector layer on Sparrow:
+  directory browse (`GET /connectors/directory`), Connect/OAuth (Google
+  ready; Outlook/HubSpot/Slack still planned), **per-conversation enable**
+  (Chat → Connectors; `POST /connectors/session`), custom MCP connectors
+  (`POST /connectors/custom` — reached from *this* machine, so localhost
+  is fine), team allowlist (`POST /connectors/team`), and Tool access
+  Auto vs On demand. Google Gmail/Calendar *metadata* still lands via
+  `/connectors/google`. Capture-first slice: Outlook/Gmail windows
+  classify as `email` and enrich People v2 contacts + `works_at` via
   `people_pipeline.ingest_email_network`.
 - **Postgres / object storage** — deferred, gated on a second device.
 - **Org AI Network (experimental)** — hybrid Org Coordinator + local digests /

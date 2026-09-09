@@ -1,0 +1,5 @@
+source: https://publicsuffix.org/list/public_suffix_list.dat
+version: 20231001.0357 (Debian publicsuffix package snapshot)
+vendored: 2026-09-09
+license: MPL-2.0 (header retained in the .dat)
+refresh: python3 scripts/update_psl.py   # dev-time only, never at capture time

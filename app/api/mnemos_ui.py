@@ -2400,8 +2400,20 @@ window.MnemosCapture = {
       voiceBox.disabled = v.enabled === false;
       voiceBox.checked = v.enabled !== false && !v.muted;
     }
+    // Hosted only: the sheet is where capture actually starts, because the
+    // server has no devices of its own.
+    const dockRow = document.getElementById('pvDockRow');
+    if (dockRow) {
+      dockRow.hidden = !(this._state && this._state.headless);
+      const hint = document.getElementById('pvDockHint');
+      if (hint && this.dockOpen()) {
+        hint.textContent = 'The capture window is already open — this brings '
+          + 'it to the front.';
+      }
+    }
     this.loadSharing();
     this.loadEgress();
+    this.loadConnections();
     MnemosDialog.open(el, {
       lockScroll: true,
       focus: '.pv-sheet input:not([disabled]), .pv-sheet button, .pv-sheet [href]',
@@ -2414,6 +2426,416 @@ window.MnemosCapture = {
   closePrivacy() {
     const el = document.getElementById('mnemosPrivacy');
     if (el) MnemosDialog.close(el);
+  },
+  /* ---- Connections ------------------------------------------------------
+     Claude-style: Manage opens a categorized directory; Connect is OAuth
+     (or a local MCP probe for customs); chat has a separate per-conversation
+     toggle. X-Return-Path brings OAuth back to this page, not onboarding. */
+  _connRow(c) {
+    const E = window.MnemosEsc;
+    const planned = c.availability !== 'ready';
+    const id = String(c.id || '');
+    const teamBlocked = c.team_allowed === false;
+    let dot = 'var(--mut)', state = 'Not connected', detail = '', acts = '';
+    if (planned) {
+      state = 'Planned';
+      detail = (c.description || 'Not available yet.').slice(0, 140);
+    } else if (teamBlocked) {
+      state = 'Team locked';
+      detail = 'An owner must enable this connector for your team first.';
+    } else if (!c.configured) {
+      state = 'Unavailable';
+      detail = c.kind === 'custom'
+        ? 'URL missing or invalid.'
+        : ('No OAuth client is configured on this install — ask whoever '
+           + 'runs this Sparrow to add one.');
+    } else if (c.connected) {
+      dot = 'var(--ok, #1f7a4d)';
+      state = 'Connected';
+      const p = c.progress || {};
+      detail = p.running
+        ? ('Importing… ' + (p.contacts || 0) + ' contacts, ' + (p.events || 0)
+           + ' events.')
+        : (p.events || p.contacts)
+          ? ((p.contacts || 0) + ' contacts, ' + (p.events || 0)
+             + ' events imported.')
+          : (c.kind === 'custom'
+             ? ('Reachable at ' + (c.url || 'MCP URL') + '.')
+             : 'Nothing imported yet — Re-sync to pull them in.');
+      if (p.error) detail = String(p.error);
+      if (c.error) detail = String(c.error);
+      acts = (c.kind === 'custom' ? '' :
+        '<button type="button" class="pv-btn quiet" data-conn-act="sync"'
+        + ' data-conn-id="' + E(id) + '"' + (p.running ? ' disabled' : '')
+        + '>Re-sync</button>')
+        + '<button type="button" class="pv-btn quiet" data-conn-act="disconnect"'
+        + ' data-conn-id="' + E(id) + '">Disconnect</button>';
+    } else {
+      detail = c.description
+        ? String(c.description).slice(0, 140)
+        : 'Read-only. You choose what to share on the provider’s own screen.';
+      acts = '<button type="button" class="pv-btn" data-conn-act="connect"'
+        + ' data-conn-id="' + E(id) + '">Connect</button>';
+      if (c.kind === 'custom') {
+        acts += '<button type="button" class="pv-btn quiet" data-conn-act="remove"'
+          + ' data-conn-id="' + E(id) + '">Remove</button>';
+      }
+    }
+    return '<div style="display:flex;gap:10px;align-items:flex-start;'
+      + 'padding:8px 0;border-top:1px solid var(--line)">'
+      + '<span aria-hidden="true" style="flex:0 0 auto;width:8px;height:8px;'
+      + 'border-radius:50%;margin-top:5px;background:' + dot + '"></span>'
+      + '<div style="flex:1 1 auto;min-width:0">'
+      + '<b style="color:var(--navy);font-weight:600">' + E(c.label || id)
+      + '</b> <span style="font-size:11px">· ' + E(state) + '</span>'
+      + '<div style="margin-top:2px">' + E(detail) + '</div></div>'
+      + (acts ? '<div style="flex:0 0 auto;display:flex;gap:6px;'
+                + 'flex-wrap:wrap">' + acts + '</div>' : '')
+      + '</div>';
+  },
+  async loadConnections() {
+    const el = document.getElementById('pvConns');
+    if (!el) return;
+    let d;
+    try {
+      d = await MnemosJson('/connectors');
+    } catch (e) {
+      el.textContent = e.message;
+      return;
+    }
+    this._connCache = d;
+    // Privacy sheet shows connected + ready (not the full planned catalog).
+    const show = (d.connectors || []).filter((c) =>
+      c.connected || c.availability === 'ready');
+    const rows = show.map((c) => this._connRow(c)).join('');
+    el.innerHTML = rows
+      || '<span style="color:var(--mut)">Nothing connected yet — use Manage '
+      + 'connectors to browse the directory.</span>';
+    const access = document.getElementById('pvToolAccess');
+    if (access) access.value = d.tool_access || 'auto';
+    const busy = (d.connectors || []).some((c) => (c.progress || {}).running);
+    if (busy) {
+      clearTimeout(this._connTimer);
+      this._connTimer = setTimeout(() => this.loadConnections(), 1500);
+    }
+    if (window.MnemosConnectors && MnemosConnectors.refreshChat) {
+      try { MnemosConnectors.refreshChat(d); } catch (e) {}
+    }
+  },
+  async connectorAction(act, id, btn) {
+    const note = document.getElementById('pvConnNote');
+    const say = (m) => { if (note) note.textContent = m || ''; };
+    const url = '/connectors/' + encodeURIComponent(id) + '/';
+    if (act === 'disconnect'
+        && !window.confirm('Disconnect ' + id + '? Sparrow deletes its tokens '
+                           + 'from this machine. Already-imported people and '
+                           + 'events stay — reconnect any time.')) return;
+    if (act === 'remove'
+        && !window.confirm('Remove this custom connector?')) return;
+    if (btn) btn.disabled = true;
+    say(act === 'connect' ? 'Opening the sign-in page…' : 'Working…');
+    try {
+      if (act === 'connect') {
+        const r = await MnemosJson(url + 'connect', {
+          method: 'POST',
+          headers: {
+            'X-Public-Base': location.origin,
+            'X-Return-Path': location.pathname + location.search,
+          },
+        });
+        if (r.mode === 'redirect' && r.auth_url) {
+          window.location = r.auth_url;
+          return;
+        }
+        if (!r.ok) throw new Error(r.error || 'Could not connect.');
+        say(r.mode === 'local' ? 'Custom connector reachable.' : 'Connected. Importing…');
+        if (r.mode !== 'local') {
+          await MnemosJson(url + 'sync', {method: 'POST'});
+        }
+      } else if (act === 'sync') {
+        await MnemosJson(url + 'sync', {method: 'POST'});
+        say('Importing…');
+      } else if (act === 'disconnect') {
+        await MnemosJson(url + 'disconnect', {method: 'POST'});
+        say('Disconnected.');
+      } else if (act === 'remove') {
+        await MnemosJson('/connectors/custom/' + encodeURIComponent(id),
+                         {method: 'DELETE'});
+        say('Removed.');
+      }
+    } catch (e) {
+      say(e.message);
+    }
+    if (btn) btn.disabled = false;
+    this.loadConnections();
+    const modal = document.getElementById('mnemosConnManage');
+    if (modal && modal.getAttribute('aria-hidden') === 'false') {
+      this.renderConnManage();
+    }
+  },
+  async setToolAccess(mode) {
+    try {
+      await MnemosJson('/connectors/tool-access', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({tool_access: mode}),
+      });
+    } catch (e) {
+      const note = document.getElementById('pvConnNote');
+      if (note) note.textContent = e.message;
+    }
+    this.loadConnections();
+  },
+  async openConnManage() {
+    let modal = document.getElementById('mnemosConnManage');
+    if (!modal) {
+      modal = document.createElement('div');
+      modal.id = 'mnemosConnManage';
+      modal.setAttribute('role', 'dialog');
+      modal.setAttribute('aria-modal', 'true');
+      modal.setAttribute('aria-label', 'Manage connectors');
+      modal.setAttribute('aria-hidden', 'true');
+      modal.innerHTML =
+        '<div class="pv-sheet" style="max-width:520px;max-height:min(88vh,720px);'
+        + 'overflow:auto">'
+        + '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">'
+        + '<h2 style="flex:1;margin:0;font-size:18px;color:var(--navy)">Connectors</h2>'
+        + '<button type="button" class="pv-btn quiet" id="connManageClose">Close</button>'
+        + '</div>'
+        + '<p style="font-size:12px;color:var(--mut);margin:0 0 12px;line-height:1.45">'
+        + 'Browse the directory, connect an account, then enable each service '
+        + 'in a conversation from Chat. Connecting alone does not turn it on '
+        + 'for every chat.</p>'
+        + '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">'
+        + '<button type="button" class="pv-btn" id="connAddCustom">+ Add custom connector</button>'
+        + '</div>'
+        + '<div id="connCustomForm" hidden style="margin-bottom:14px;padding:10px;'
+        + 'border:1px solid var(--line);border-radius:8px">'
+        + '<b style="font-size:13px;color:var(--navy)">Custom MCP server</b>'
+        + '<p style="font-size:12px;color:var(--mut);margin:6px 0 8px;line-height:1.4">'
+        + 'Reached from <em>this</em> Sparrow — localhost and private networks '
+        + 'are fine. (Claude custom connectors need a public URL; ours do not.)</p>'
+        + '<label style="display:block;font-size:12px;margin:6px 0 2px">Name</label>'
+        + '<input id="connCustLabel" type="text" placeholder="My tools" '
+        + 'style="width:100%;box-sizing:border-box;padding:7px 9px;border-radius:7px;'
+        + 'border:1px solid var(--line);font:inherit;font-size:13px">'
+        + '<label style="display:block;font-size:12px;margin:8px 0 2px">URL</label>'
+        + '<input id="connCustUrl" type="url" placeholder="http://127.0.0.1:3100" '
+        + 'style="width:100%;box-sizing:border-box;padding:7px 9px;border-radius:7px;'
+        + 'border:1px solid var(--line);font:inherit;font-size:13px">'
+        + '<details style="margin-top:8px"><summary style="font-size:12px;cursor:pointer;'
+        + 'color:var(--mut)">Advanced (OAuth client)</summary>'
+        + '<label style="display:block;font-size:12px;margin:6px 0 2px">Client ID</label>'
+        + '<input id="connCustCid" type="text" '
+        + 'style="width:100%;box-sizing:border-box;padding:7px 9px;border-radius:7px;'
+        + 'border:1px solid var(--line);font:inherit;font-size:13px">'
+        + '<label style="display:block;font-size:12px;margin:6px 0 2px">Client secret</label>'
+        + '<input id="connCustSecret" type="password" '
+        + 'style="width:100%;box-sizing:border-box;padding:7px 9px;border-radius:7px;'
+        + 'border:1px solid var(--line);font:inherit;font-size:13px">'
+        + '</details>'
+        + '<div style="display:flex;gap:8px;margin-top:10px">'
+        + '<button type="button" class="pv-btn" id="connCustSave">Add</button>'
+        + '<button type="button" class="pv-btn quiet" id="connCustCancel">Cancel</button>'
+        + '</div>'
+        + '<div id="connCustNote" style="font-size:12px;color:var(--mut);margin-top:6px"></div>'
+        + '</div>'
+        + '<div id="connManageBody">loading…</div>'
+        + '<div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--line)">'
+        + '<b style="font-size:13px;color:var(--navy)">Tool access</b>'
+        + '<p style="font-size:12px;color:var(--mut);margin:6px 0 8px;line-height:1.4">'
+        + 'With many connectors, On demand frees context — only toggled-on '
+        + 'services count for each chat.</p>'
+        + '<select id="connManageAccess" style="font:inherit;font-size:13px;'
+        + 'padding:6px 8px;border-radius:7px;border:1px solid var(--line);'
+        + 'background:var(--bg-elev);color:var(--text)">'
+        + '<option value="auto">Auto — connected services on unless you turn them off</option>'
+        + '<option value="on_demand">On demand — only services you enable per chat</option>'
+        + '</select>'
+        + '</div>'
+        + '<div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line)">'
+        + '<b style="font-size:13px;color:var(--navy)">Team</b>'
+        + '<p style="font-size:12px;color:var(--mut);margin:6px 0 8px;line-height:1.4">'
+        + 'When enabled, only allowlisted connectors can be connected. Enabling '
+        + 'for the team does not grant access — each person still signs in.</p>'
+        + '<label class="pv-src"><input type="checkbox" id="connTeamOn">'
+        + '<div><b>Limit connectors to a team allowlist</b>'
+        + '<span>Owners flip this for shared seats.</span></div></label>'
+        + '<div id="connTeamList" style="margin-top:8px"></div>'
+        + '<button type="button" class="pv-btn quiet" id="connTeamSave" '
+        + 'style="margin-top:8px">Save team policy</button>'
+        + '<div id="connTeamNote" style="font-size:12px;color:var(--mut);margin-top:6px"></div>'
+        + '</div>'
+        + '</div>';
+      document.body.appendChild(modal);
+      document.getElementById('connManageClose').onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.closeConnManage();
+      };
+      document.getElementById('connAddCustom').onclick = () => {
+        const f = document.getElementById('connCustomForm');
+        if (f) f.hidden = !f.hidden;
+      };
+      document.getElementById('connCustCancel').onclick = () => {
+        const f = document.getElementById('connCustomForm');
+        if (f) f.hidden = true;
+      };
+      document.getElementById('connCustSave').onclick = () => this.saveCustomConnector();
+      document.getElementById('connManageAccess').onchange = (e) => {
+        this.setToolAccess(e.target.value);
+      };
+      document.getElementById('connTeamSave').onclick = () => this.saveTeamPolicy();
+      modal.addEventListener('click', (e) => {
+        // Backdrop (the overlay itself) dismisses — same as Privacy/Ask.
+        if (e.target === modal) {
+          this.closeConnManage();
+          return;
+        }
+        const btn = e.target.closest('button[data-conn-act]');
+        if (btn) this.connectorAction(btn.dataset.connAct, btn.dataset.connId, btn);
+        const detail = e.target.closest('[data-conn-detail]');
+        if (detail) this.showConnDetail(detail.dataset.connDetail);
+      });
+    }
+    MnemosDialog.open(modal, {
+      lockScroll: true,
+      focus: '#connManageClose',
+      onEscape: () => this.closeConnManage(),
+    });
+    await this.renderConnManage();
+  },
+  closeConnManage() {
+    const el = document.getElementById('mnemosConnManage');
+    if (el) MnemosDialog.close(el);
+  },
+  async renderConnManage() {
+    const body = document.getElementById('connManageBody');
+    if (!body) return;
+    let d;
+    try {
+      d = await MnemosJson('/connectors/directory');
+    } catch (e) {
+      body.textContent = e.message;
+      return;
+    }
+    this._connDir = d;
+    const E = window.MnemosEsc;
+    const cats = d.categories || [];
+    const byCat = {};
+    (d.connectors || []).forEach((c) => {
+      const k = c.category || 'productivity';
+      (byCat[k] = byCat[k] || []).push(c);
+    });
+    let html = '';
+    cats.forEach((cat) => {
+      const rows = byCat[cat.id] || [];
+      if (!rows.length) return;
+      html += '<div style="margin-top:12px"><b style="font-size:12px;color:var(--mut);'
+        + 'text-transform:uppercase;letter-spacing:.04em">' + E(cat.label)
+        + '</b>';
+      rows.forEach((c) => {
+        html += '<div style="display:flex;gap:10px;align-items:flex-start;'
+          + 'padding:10px 0;border-top:1px solid var(--line)">'
+          + '<div style="flex:1;min-width:0">'
+          + '<button type="button" data-conn-detail="' + E(c.id) + '" '
+          + 'style="all:unset;cursor:pointer;font-weight:600;color:var(--navy)">'
+          + E(c.label) + '</button>'
+          + '<div style="font-size:12px;color:var(--mut);margin-top:2px;line-height:1.4">'
+          + E((c.description || '').slice(0, 160)) + '</div></div>'
+          + this._connManageActs(c)
+          + '</div>';
+      });
+      html += '</div>';
+    });
+    body.innerHTML = html || 'No connectors in the directory.';
+    const access = document.getElementById('connManageAccess');
+    if (access) access.value = d.tool_access || 'auto';
+    const team = d.team || {};
+    const teamOn = document.getElementById('connTeamOn');
+    if (teamOn) teamOn.checked = !!team.enabled;
+    const list = document.getElementById('connTeamList');
+    if (list) {
+      const allowed = new Set(team.allowed || []);
+      list.innerHTML = (d.connectors || []).filter((c) => c.availability === 'ready'
+          || c.kind === 'custom').map((c) =>
+        '<label class="pv-src" style="margin:4px 0"><input type="checkbox" '
+        + 'data-team-id="' + E(c.id) + '"'
+        + (allowed.has(c.id) ? ' checked' : '') + '>'
+        + '<div><b>' + E(c.label) + '</b></div></label>'
+      ).join('') || '<span style="font-size:12px;color:var(--mut)">No ready connectors.</span>';
+    }
+  },
+  _connManageActs(c) {
+    const E = window.MnemosEsc;
+    const id = E(c.id || '');
+    if (c.availability !== 'ready') {
+      return '<span style="font-size:11px;color:var(--mut)">Planned</span>';
+    }
+    if (c.team_allowed === false) {
+      return '<span style="font-size:11px;color:var(--mut)">Team locked</span>';
+    }
+    if (c.connected) {
+      return '<button type="button" class="pv-btn quiet" data-conn-act="disconnect"'
+        + ' data-conn-id="' + id + '">Disconnect</button>';
+    }
+    if (!c.configured && c.kind !== 'custom') {
+      return '<span style="font-size:11px;color:var(--mut)">Not configured</span>';
+    }
+    return '<button type="button" class="pv-btn" data-conn-act="connect"'
+      + ' data-conn-id="' + id + '">Connect</button>';
+  },
+  showConnDetail(id) {
+    const c = ((this._connDir || {}).connectors || []).find((x) => x.id === id);
+    if (!c) return;
+    const caps = (c.capabilities || []).map((x) => '• ' + x).join('\n');
+    window.alert((c.label || id) + '\n\n' + (c.description || '')
+      + (caps ? '\n\n' + caps : ''));
+  },
+  async saveCustomConnector() {
+    const note = document.getElementById('connCustNote');
+    const say = (m) => { if (note) note.textContent = m || ''; };
+    const label = (document.getElementById('connCustLabel') || {}).value || '';
+    const url = (document.getElementById('connCustUrl') || {}).value || '';
+    const oauth_client_id = (document.getElementById('connCustCid') || {}).value || '';
+    const oauth_client_secret = (document.getElementById('connCustSecret') || {}).value || '';
+    say('Adding…');
+    try {
+      const r = await MnemosJson('/connectors/custom', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({label, url, oauth_client_id, oauth_client_secret}),
+      });
+      if (!r.ok) throw new Error(r.error || 'Could not add.');
+      say('Added. Connect it to verify reachability.');
+      const f = document.getElementById('connCustomForm');
+      if (f) f.hidden = true;
+      await this.renderConnManage();
+      this.loadConnections();
+    } catch (e) {
+      say(e.message);
+    }
+  },
+  async saveTeamPolicy() {
+    const note = document.getElementById('connTeamNote');
+    const say = (m) => { if (note) note.textContent = m || ''; };
+    const enabled = !!(document.getElementById('connTeamOn') || {}).checked;
+    const allowed = Array.from(document.querySelectorAll('#connTeamList [data-team-id]'))
+      .filter((el) => el.checked)
+      .map((el) => el.getAttribute('data-team-id'));
+    say('Saving…');
+    try {
+      await MnemosJson('/connectors/team', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({enabled, allowed}),
+      });
+      say('Saved.');
+      await this.renderConnManage();
+      this.loadConnections();
+    } catch (e) {
+      say(e.message);
+    }
   },
   async loadSharing() {
     // Reflect stored state, and say plainly when the weekly ping is impossible
@@ -2445,6 +2867,21 @@ window.MnemosCapture = {
           : 'No backup taken yet.';
       }
     } catch (e) {}
+  },
+  // Hosted: save the ticks, then hand them to the dock window — one click
+  // from "what may be captured" to actually capturing. The window MUST be
+  // opened synchronously in this click or the popup blocker eats it, so the
+  // consent POST is awaited after the window exists.
+  startDockFromSheet() {
+    const want = {};
+    [['mic', 'mic'], ['tab', 'system_audio'], ['screen', 'screen']]
+      .forEach(([k, key]) => {
+        const box = document.getElementById('pv_' + key);
+        want[k] = !!(box && box.checked);
+      });
+    const w = this.openDock(want);
+    this.applyPrivacy();
+    return w;
   },
   async applyPrivacy() {
     const sources = {};
@@ -2487,11 +2924,88 @@ window.MnemosCapture = {
       this.closePrivacy();
     } catch (e) {}
   },
+  // --- capture dock (browser-side capture) --------------------------------
+  // A MediaStream dies with the document that created it, and this app does
+  // full page navigations — so capture lives in its own small window that
+  // survives them. Opening it again just focuses the one already open
+  // (window.name targeting), so there is never a second dock.
+  _DOCK_NAME: 'mnemosCaptureDock',
+  _bus() {
+    if (this.__bus !== undefined) return this.__bus;
+    try { this.__bus = new BroadcastChannel('mnemos-capture'); }
+    catch (e) { this.__bus = null; }
+    if (this.__bus) {
+      this.__bus.onmessage = (ev) => {
+        const m = ev.data || {};
+        if (m.type === 'dock') {
+          this._dockAlive = !!m.alive;
+          this._dockSeen = Date.now();
+        }
+      };
+      try { this.__bus.postMessage({type: 'ping'}); } catch (e) {}
+    }
+    return this.__bus;
+  },
+  dockOpen() {
+    // A dock that pinged in the last 12 s is open (it announces every 4 s).
+    return !!this._dockAlive && (Date.now() - (this._dockSeen || 0) < 12000);
+  },
+  webLive() {
+    const web = (this._state || {}).web || {};
+    return ['mic', 'tab', 'screen']
+      .some((k) => web[k] === 'recording' || web[k] === 'paused');
+  },
+  openDock(want) {
+    // Re-opening a NAMED window navigates it — which would tear down a live
+    // stream. While anything is capturing, "open the dock" means focus it.
+    if (this.webLive() && this.dockOpen()) {
+      this.dockCommand('focus');
+      return null;
+    }
+    const src = want || {};
+    const q = [];
+    ['mic', 'tab', 'screen'].forEach((k) => { if (src[k]) q.push(k + '=1'); });
+    const url = '/capture/dock' + (q.length ? ('?' + q.join('&')) : '');
+    let w = null;
+    try {
+      w = window.open(url, this._DOCK_NAME, 'popup=yes,width=380,height=560');
+    } catch (e) {}
+    if (!w) {
+      // Popup blocked — the full page still works, just not alongside.
+      window.location.href = '/capture';
+      return null;
+    }
+    try { w.focus(); } catch (e) {}
+    this._bus();
+    return w;
+  },
+  dockCommand(cmd) {
+    const bus = this._bus();
+    if (!bus) return false;
+    try { bus.postMessage({type: 'cmd', cmd: cmd}); return true; }
+    catch (e) { return false; }
+  },
+  // Open the dock armed with whatever the user has already allowed, so the
+  // sheet's ticks carry straight into capture instead of being re-chosen.
+  openDockFromConsent() {
+    const src = ((this._state || {}).consent || {}).sources || {};
+    return this.openDock({mic: !!src.mic, tab: !!src.system_audio,
+                          screen: !!src.screen});
+  },
   async toggle(source) {
     if (!this._state) return;
-    // Hosted: local resume always 503s — open the browser Capture page.
-    if (this._state.headless && !(this._state.running || {})[source]) {
-      window.location.href = '/capture';
+    // Hosted: capture is browser-side. Pause/resume goes to the dock window
+    // that owns the stream (so the browser's own recording indicator clears
+    // too); if no dock is open, opening one IS the resume.
+    if (this._state.headless) {
+      const web = this._state.web || {};
+      const key = source === 'system_audio' ? 'tab' : source;
+      const state = web[key];
+      if (state === 'recording') this.dockCommand('pause');
+      else if (state === 'paused') this.dockCommand('resume');
+      else if (this.dockOpen()) { this.dockCommand('focus'); }
+      else this.openDock({[key]: true});
+      setTimeout(() => this.tick(), 900);
       return;
     }
     const running = (this._state.running || {})[source];
@@ -2501,10 +3015,6 @@ window.MnemosCapture = {
       this._state = await this.status();
       this.render();
     } catch (e) {
-      if (this._state.headless) {
-        window.location.href = '/capture';
-        return;
-      }
       // Likely 403 — open consent.
       this.openPrivacy();
     }
@@ -2537,6 +3047,17 @@ window.MnemosCapture = {
       + rows
       + '<div class="pv-warn">System audio and screen can capture other people '
       + 'in meetings or nearby — only enable when everyone expects it.</div>'
+      // Hosted: the server has no devices, so capture runs in the browser.
+      // Save the ticks and hand them straight to the dock window — the sheet
+      // is where the user just decided what may be captured.
+      + '<div id="pvDockRow" hidden style="margin-top:12px;display:flex;'
+      + 'gap:8px;flex-wrap:wrap;align-items:center">'
+      + '<button type="button" class="pv-btn" id="pvStartDock">'
+      + 'Save &amp; start capture</button>'
+      + '<span id="pvDockHint" style="font-size:12px;color:var(--mut);'
+      + 'flex:1 1 200px;line-height:1.4">Opens a small capture window that '
+      + 'keeps running while you use the rest of Sparrow.</span>'
+      + '</div>'
       + '<div class="pv-ret" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line)">'
       + '<b style="font-size:13px;color:var(--navy)">After meetings</b>'
       + '<p style="font-size:12px;color:var(--mut);margin:6px 0 8px;line-height:1.45">'
@@ -2553,6 +3074,26 @@ window.MnemosCapture = {
       + 'Spoken replies. Uncheck to keep answers on screen only — you can also mute from the Voice chip.</p>'
       + '<label class="pv-src"><input type="checkbox" id="pv_voice">'
       + '<div><b>Speak replies aloud</b><span>Turn off anytime; it stays off until you turn it back on.</span></div></label>'
+      + '</div>'
+      + '<div class="pv-ret" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line)">'
+      + '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
+      + '<b style="font-size:13px;color:var(--navy);flex:1">Connections</b>'
+      + '<button type="button" class="pv-btn quiet" id="pvManageConns">Manage connectors</button>'
+      + '</div>'
+      + '<p style="font-size:12px;color:var(--mut);margin:6px 0 8px;line-height:1.45">'
+      + 'Connect an account here, then enable it per chat from the Chat composer. '
+      + 'Sparrow reads only what it needs \u2014 never message bodies. Tokens stay '
+      + 'on this machine.</p>'
+      + '<label style="display:flex;align-items:center;gap:8px;font-size:12px;'
+      + 'color:var(--mut);margin:0 0 8px">Tool access '
+      + '<select id="pvToolAccess" style="font:inherit;font-size:12px;padding:4px 6px;'
+      + 'border-radius:6px;border:1px solid var(--line);background:var(--bg-elev);'
+      + 'color:var(--text)">'
+      + '<option value="auto">Auto</option>'
+      + '<option value="on_demand">On demand</option>'
+      + '</select></label>'
+      + '<div id="pvConns">reading&hellip;</div>'
+      + '<div id="pvConnNote" style="font-size:12px;color:var(--mut);margin-top:6px"></div>'
       + '</div>'
       + '<div class="pv-ret" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line)">'
       + '<b style="font-size:13px;color:var(--navy)">Your data</b>'
@@ -2666,6 +3207,8 @@ window.MnemosCapture = {
     document.getElementById('pvRevoke').onclick = () => this.stopAll(true);
     const stopBtn = document.getElementById('pvStopAll');
     if (stopBtn) stopBtn.onclick = () => this.stopAll(false);
+    const startDock = document.getElementById('pvStartDock');
+    if (startDock) startDock.onclick = () => this.startDockFromSheet();
     const wipeBtn = document.getElementById('pvWipe');
     if (wipeBtn) wipeBtn.onclick = () => this.openWipe();
     const wipeCancel = document.getElementById('pvWipeCancel');
@@ -2682,8 +3225,22 @@ window.MnemosCapture = {
     };
     const wipeGo = document.getElementById('pvWipeGo');
     if (wipeGo) wipeGo.onclick = () => this.runWipe();
+    // Rows are re-rendered on every refresh, so delegate rather than rebind.
+    const conns = document.getElementById('pvConns');
+    if (conns) conns.addEventListener('click', (e) => {
+      const btn = e.target.closest('button[data-conn-act]');
+      if (btn) this.connectorAction(btn.dataset.connAct, btn.dataset.connId, btn);
+    });
+    const manage = document.getElementById('pvManageConns');
+    if (manage) manage.onclick = () => this.openConnManage();
+    const access = document.getElementById('pvToolAccess');
+    if (access) access.onchange = () => this.setToolAccess(access.value);
   },
   async stopAll(closeAfter) {
+    // Browser-side capture is owned by the dock window: only it can release
+    // the mic/screen and clear the browser's own recording indicator, so
+    // tell it first, then stop anything device-side.
+    this.dockCommand('stop-all');
     // Revoking consent alone leaves the already-running mic thread recording
     // until restart, so this goes through /privacy/stop, which does both.
     try {
@@ -2882,10 +3439,39 @@ window.MnemosCapture = {
         + this._voiceChipHtml()
         + '</div>';
     } else {
-      // Status + (desktop) source toggles | Privacy + Voice.
-      // Hosted skips per-source chips — resume is always /capture.
+      // Status + source toggles | Privacy + Voice. Hosted drives its chips
+      // from the browser-capture state the server reports, so they are live
+      // on every page even though the stream lives in the dock window.
+      const web = this._state.web || {};
+      const webLive = ['mic', 'tab', 'screen']
+        .filter((k) => web[k] === 'recording' || web[k] === 'paused').length;
       html += '<div class="rec-row">';
-      html += this._statusChipHtml(liveCount, headless, armedKeys.length);
+      html += this._statusChipHtml(
+        headless ? webLive : liveCount, headless, armedKeys.length);
+      if (headless) {
+        const WEB_SRC = [['mic', 'Mic', 'mic'],
+                         ['tab', 'Meeting audio', 'system_audio'],
+                         ['screen', 'Screen', 'screen']];
+        WEB_SRC.forEach(([k, label, consentKey]) => {
+          if (!sources[consentKey]) return;      // not allowed = not offered
+          const st = web[k] || 'off';
+          const on = st === 'recording';
+          html += '<button type="button" class="rec-chip'
+            + (on ? '' : ' paused') + '" data-websrc="' + k + '" title="'
+            + (on ? 'Pause ' : (st === 'paused' ? 'Resume ' : 'Start '))
+            + label + '" aria-pressed="' + (on ? 'true' : 'false') + '">'
+            + '<span class="dot" aria-hidden="true"></span>'
+            + '<span>' + label + '</span>'
+            + '<span class="act">'
+            + (on ? 'pause' : (st === 'paused' ? 'resume' : 'start'))
+            + '</span></button>';
+        });
+        if (webLive > 0) {
+          html += '<button type="button" class="rec-chip stop-all" id="recStopAll" '
+            + 'title="Stop every capture source now">'
+            + '<span>Stop all</span><span class="act">stop</span></button>';
+        }
+      }
       if (!headless) {
         armedKeys.forEach((k) => {
           const on = !!running[k];
@@ -2918,8 +3504,14 @@ window.MnemosCapture = {
     if (openBtn) openBtn.onclick = () => this.openPrivacy();
     const stopAllBtn = document.getElementById('recStopAll');
     if (stopAllBtn) stopAllBtn.onclick = () => this.stopAll(false);
+    const dockBtn = document.getElementById('recOpenDock');
+    if (dockBtn) dockBtn.onclick = () => this.openDockFromConsent();
     bar.querySelectorAll('.rec-chip[data-src]').forEach((btn) => {
       btn.onclick = () => this.toggle(btn.getAttribute('data-src'));
+    });
+    bar.querySelectorAll('.rec-chip[data-websrc]').forEach((btn) => {
+      // Web keys (mic|tab|screen) pass straight through — toggle() maps.
+      btn.onclick = () => this.toggle(btn.getAttribute('data-websrc'));
     });
     const voiceBtn = document.getElementById('recVoice');
     if (voiceBtn) voiceBtn.onclick = () => this.toggleVoice();
@@ -2927,10 +3519,18 @@ window.MnemosCapture = {
   },
   _statusChipHtml(liveCount, headless, armedCount) {
     if (headless) {
-      return '<a class="rec-status hosted" href="/capture" '
-        + 'title="Open the Capture page to start mic, tab audio, or screen">'
+      if (liveCount > 0) {
+        return '<span class="rec-status live" title="'
+          + liveCount + ' browser source' + (liveCount === 1 ? '' : 's')
+          + ' capturing in the dock window">'
+          + '<span class="dot" aria-hidden="true"></span>'
+          + '<span>Listening</span></span>';
+      }
+      return '<button type="button" class="rec-status hosted" id="recOpenDock" '
+        + 'title="Open the capture window — it keeps mic, meeting audio and '
+        + 'screen running while you use the rest of Sparrow">'
         + '<span class="dot" aria-hidden="true"></span>'
-        + '<span>Capture</span></a>';
+        + '<span>Capture</span></button>';
     }
     if (liveCount > 0) {
       return '<span class="rec-status live" title="'
@@ -2988,8 +3588,37 @@ window.MnemosCapture = {
       }
     } catch (e) {}
   },
+  /* Coming back from a connector's OAuth screen. Onboarding runs its own
+     handler for this, so only pages that would otherwise ignore it act. */
+  oauthReturn() {
+    if (/^\/onboarding/.test(location.pathname)) return;
+    const qp = new URLSearchParams(location.search);
+    const done = qp.get('connected');
+    const err = qp.get('oauth_error');
+    if (!done && !err) return;
+    // Drop the marker so a refresh cannot re-kick the import.
+    try {
+      const u = new URL(location.href);
+      u.searchParams.delete('connected');
+      u.searchParams.delete('oauth_error');
+      history.replaceState({}, '', u.pathname + (u.search || '') + u.hash);
+    } catch (e) {}
+    this.openPrivacy();
+    const say = (m) => {
+      const note = document.getElementById('pvConnNote');
+      if (note) note.textContent = m;
+    };
+    if (err) { say('Could not connect: ' + err); return; }
+    say('Connected. Importing…');
+    MnemosJson('/connectors/' + encodeURIComponent(done) + '/sync',
+               {method: 'POST'})
+      .then(() => this.loadConnections())
+      .catch((e) => say(e.message));
+  },
   start() {
     this.mount();
+    this.oauthReturn();
+    this._bus();          // ask any open dock to announce itself
     this.tick();
     if (this._timer) clearInterval(this._timer);
     this._timer = setInterval(() => { if (!document.hidden) this.tick(); }, 4000);
@@ -3103,6 +3732,90 @@ window.MnemosStatus = {
     if (this._timer) clearInterval(this._timer);
     this._timer = setInterval(() => this.tick(), 30000);
   }
+};
+
+/* Chat composer: per-conversation connector toggles (Claude-style). */
+window.MnemosConnectors = {
+  _session: null,
+  async load() {
+    try {
+      this._session = await MnemosJson('/connectors/session');
+    } catch (e) {
+      this._session = {connectors: [], tool_access: 'auto', active: []};
+    }
+    this.renderChat();
+    return this._session;
+  },
+  connectedCount() {
+    return ((this._session || {}).connectors || []).length;
+  },
+  openManage() {
+    if (window.MnemosCapture && MnemosCapture.openConnManage) {
+      MnemosCapture.openConnManage();
+    }
+  },
+  refreshChat(listPayload) {
+    if (listPayload && listPayload.session) this._session = listPayload.session;
+    this.renderChat();
+  },
+  renderChat() {
+    const panel = document.getElementById('connChatPanel');
+    const btn = document.getElementById('connChatBtn');
+    if (!panel) return;
+    const E = window.MnemosEsc;
+    const s = this._session || {};
+    const rows = s.connectors || [];
+    const access = s.tool_access || 'auto';
+    if (btn) {
+      const n = (s.active || []).length;
+      btn.textContent = n ? ('Connectors (' + n + ')') : 'Connectors';
+      btn.title = access === 'on_demand'
+        ? 'On demand — enable services for this chat'
+        : 'Toggle which connected services this chat may use';
+    }
+    if (!rows.length) {
+      panel.innerHTML = '<div class="conn-chat-empty">No accounts connected yet.</div>'
+        + '<button type="button" class="linkish" id="connChatManage">'
+        + 'Manage connectors…</button>';
+    } else {
+      panel.innerHTML = '<div class="conn-chat-head">For this conversation</div>'
+        + rows.map((r) =>
+          '<label class="conn-chat-row"><input type="checkbox" data-conn-toggle="'
+          + E(r.id) + '"' + (r.active ? ' checked' : '') + '>'
+          + '<span>' + E(r.label || r.id) + '</span></label>').join('')
+        + '<button type="button" class="linkish" id="connChatManage" '
+        + 'style="margin-top:8px">Manage connectors…</button>'
+        + '<div class="conn-chat-hint">Mode: ' + E(access)
+        + '. Connecting in settings is separate from enabling here.</div>';
+    }
+    const manage = document.getElementById('connChatManage');
+    if (manage) manage.onclick = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      panel.classList.remove('open');
+      if (btn) btn.classList.remove('on');
+      panel.hidden = true;
+      this.openManage();
+    };
+    panel.querySelectorAll('[data-conn-toggle]').forEach((el) => {
+      el.onchange = async () => {
+        try {
+          this._session = await MnemosJson('/connectors/session', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({id: el.getAttribute('data-conn-toggle'),
+                                  enabled: !!el.checked}),
+          });
+          this.renderChat();
+        } catch (e) {
+          el.checked = !el.checked;
+        }
+      };
+    });
+  },
+  activeIds() {
+    return ((this._session || {}).active || []).slice();
+  },
 };
 
 document.addEventListener('DOMContentLoaded', () => {

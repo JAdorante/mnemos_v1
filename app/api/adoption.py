@@ -107,36 +107,280 @@ def first_run_unlock_ack() -> dict:
 
 
 @router.get("/exhaust/status")
-def exhaust_status() -> dict:
-    from app.services import exhaust_ingest as ex
-    return ex.status()
+def exhaust_status(request: Request) -> dict:
+    from app.services.connectors import get as get_connector, request_public_base
+    c = get_connector("google")
+    st = c.status() if c else {}
+    live = request_public_base(request)
+    # Back-compat shape expected by onboarding JS.
+    return {
+        "enabled": st.get("enabled", True),
+        "oauth_configured": st.get("configured", False),
+        "connected": st.get("connected", False),
+        "days": st.get("days"),
+        "scopes": st.get("scopes") or [],
+        "progress": st.get("progress") or {},
+        "ledger": st.get("ledger", False),
+        "oauth_mode": "redirect" if live else st.get("oauth_mode"),
+        "public_base": live or st.get("public_base"),
+        "connector": "google",
+    }
 
 
 @router.post("/exhaust/connect")
-def exhaust_connect() -> dict:
-    from app.services import exhaust_ingest as ex
-    return ex.start_oauth_loopback()
-
-
-def _exhaust_worker():
-    from app.services import exhaust_ingest as ex
-    ex.run_ingest(fetch=True)
+def exhaust_connect(request: Request) -> dict:
+    from app.services.connectors import get as get_connector, request_public_base
+    from app.services.connectors.base import _normalize_https_origin
+    c = get_connector("google")
+    if not c:
+        return {"ok": False, "error": "google connector missing"}
+    # Optional client hint (onboarding sends window.location.origin).
+    hint = _normalize_https_origin(request.headers.get("x-public-base"))
+    return c.begin_connect(public_base=hint or request_public_base(request),
+                           return_path=request.headers.get("x-return-path"))
 
 
 @router.post("/exhaust/refresh")
 def exhaust_refresh() -> dict:
-    from app.services import exhaust_ingest as ex
-    if ex.progress().get("running"):
-        return {"ok": True, "running": True, **ex.progress()}
-    t = threading.Thread(target=_exhaust_worker, name="exhaust-ingest", daemon=True)
-    t.start()
-    return {"ok": True, "started": True}
+    from app.services.connectors import get as get_connector
+    c = get_connector("google")
+    if not c:
+        return {"ok": False, "error": "google connector missing"}
+    return c.sync()
 
 
 @router.post("/exhaust/purge")
 def exhaust_purge() -> dict:
+    from app.services.connectors import get as get_connector
+    c = get_connector("google")
+    if not c:
+        return {"ok": False, "error": "google connector missing"}
+    purge = getattr(c, "purge", None)
+    if not callable(purge):
+        return {"ok": False, "error": "purge not supported"}
+    return purge()
+
+
+@router.get("/connectors")
+def connectors_list(request: Request) -> dict:
+    from app.services.connectors import (
+        list_status, request_public_base, tool_status_map,
+    )
+    from app.services.connectors import prefs, session
+    live = request_public_base(request)
+    connectors = list_status()
+    if live:
+        for row in connectors:
+            if row.get("id") == "google":
+                row["oauth_mode"] = "redirect"
+                row["public_base"] = live
+    return {
+        "connectors": connectors,
+        "tools": tool_status_map(),
+        "public_base": live,
+        "tool_access": prefs.tool_access(),
+        "team": prefs.team_policy(),
+        "session": session.status(),
+    }
+
+
+@router.get("/connectors/directory")
+def connectors_directory(request: Request) -> dict:
+    """Browse catalog by category (Claude-style Manage connectors)."""
+    from app.services.connectors import directory, request_public_base
+    payload = directory()
+    live = request_public_base(request)
+    if live:
+        for row in payload.get("connectors") or []:
+            if row.get("id") == "google":
+                row["oauth_mode"] = "redirect"
+                row["public_base"] = live
+    payload["public_base"] = live
+    return payload
+
+
+class ConnectorToolAccessIn(BaseModel):
+    tool_access: str  # auto | on_demand
+
+
+@router.post("/connectors/tool-access")
+def connectors_tool_access(body: ConnectorToolAccessIn) -> dict:
+    from app.services.connectors import prefs
+    return prefs.set_tool_access(body.tool_access)
+
+
+class ConnectorTeamIn(BaseModel):
+    enabled: bool | None = None
+    allowed: list[str] | None = None
+
+
+@router.post("/connectors/team")
+def connectors_team(body: ConnectorTeamIn) -> dict:
+    """Owner-style allowlist: enabling for the org does not grant access —
+    each person still authenticates individually."""
+    from app.services.connectors import prefs
+    return prefs.set_team_policy(enabled=body.enabled, allowed=body.allowed)
+
+
+@router.get("/connectors/session")
+def connectors_session_get() -> dict:
+    from app.services.connectors import session
+    return session.status()
+
+
+class ConnectorSessionIn(BaseModel):
+    id: str
+    enabled: bool
+
+
+@router.post("/connectors/session")
+def connectors_session_set(body: ConnectorSessionIn) -> dict:
+    """Per-conversation toggle — connected in settings ≠ available in this chat."""
+    from app.services.connectors import session
+    return session.set_enabled(body.id, bool(body.enabled))
+
+
+class ConnectorCustomIn(BaseModel):
+    label: str
+    url: str
+    id: str | None = None
+    oauth_client_id: str | None = None
+    oauth_client_secret: str | None = None
+    description: str | None = None
+
+
+@router.post("/connectors/custom")
+def connectors_custom_add(body: ConnectorCustomIn) -> dict:
+    from app.services.connectors import custom as custom_mod
+    return custom_mod.add(
+        label=body.label,
+        url=body.url,
+        connector_id=body.id,
+        oauth_client_id=body.oauth_client_id,
+        oauth_client_secret=body.oauth_client_secret,
+        description=body.description,
+    )
+
+
+@router.delete("/connectors/custom/{connector_id}")
+def connectors_custom_delete(connector_id: str) -> dict:
+    from app.services.connectors import custom as custom_mod
+    from app.services.connectors import session
+    r = custom_mod.remove(connector_id)
+    if r.get("ok"):
+        session.set_enabled(connector_id, False)
+    return r
+
+
+@router.get("/connectors/{connector_id}")
+def connector_one(connector_id: str, request: Request) -> dict:
+    from app.services.connectors import get as get_connector, request_public_base
+    c = get_connector(connector_id)
+    if not c:
+        raise HTTPException(404, f"unknown connector: {connector_id}")
+    st = c.status()
+    live = request_public_base(request)
+    if live and connector_id == "google":
+        st = {**st, "oauth_mode": "redirect", "public_base": live}
+    return st
+
+
+@router.post("/connectors/{connector_id}/connect")
+def connector_connect(connector_id: str, request: Request) -> dict:
+    from app.services.connectors import get as get_connector, request_public_base
+    from app.services.connectors import prefs
+    from app.services.connectors.base import _normalize_https_origin
+    c = get_connector(connector_id)
+    if not c:
+        raise HTTPException(404, f"unknown connector: {connector_id}")
+    if not prefs.is_team_allowed(connector_id):
+        return {
+            "ok": False,
+            "error": "This connector is not enabled for your team yet. "
+                     "An owner must add it under Connectors → Team first.",
+            "team_blocked": True,
+        }
+    hint = _normalize_https_origin(request.headers.get("x-public-base"))
+    # The Connections sheet sends the page the user pressed Connect on, so the
+    # browser comes back there instead of landing in the onboarding wizard.
+    return c.begin_connect(public_base=hint or request_public_base(request),
+                           return_path=request.headers.get("x-return-path"))
+
+
+@router.post("/connectors/{connector_id}/sync")
+def connector_sync(connector_id: str) -> dict:
+    from app.services.connectors import get as get_connector
+    c = get_connector(connector_id)
+    if not c:
+        raise HTTPException(404, f"unknown connector: {connector_id}")
+    return c.sync()
+
+
+@router.post("/connectors/{connector_id}/disconnect")
+def connector_disconnect(connector_id: str) -> dict:
+    from app.services.connectors import get as get_connector
+    c = get_connector(connector_id)
+    if not c:
+        raise HTTPException(404, f"unknown connector: {connector_id}")
+    return c.disconnect()
+
+
+@router.get("/oauth/google/callback")
+def google_oauth_callback(request: Request,
+                          code: str | None = None,
+                          state: str | None = None,
+                          error: str | None = None):
+    """Google web-redirect landing — also the relay for the other seats.
+
+    One redirect URI is registered with Google (``QUILL_OAUTH_REDIRECT_BASE``,
+    a stable hostname). Whichever instance it routes to lands here. If this
+    instance did not mint ``state``, the flow started on some other rotating
+    hostname: bounce code and state there untouched and let it finish. Token
+    exchange uses the redirect_uri stored with ``state`` at connect time, not
+    a possibly-stale env base URL.
+    """
+    from urllib.parse import quote, urlencode
+    from fastapi.responses import RedirectResponse
     from app.services import exhaust_ingest as ex
-    return ex.purge()
+    from app.services.connectors import get as get_connector, request_public_base
+    from app.services.connectors.base import DEFAULT_RETURN_PATH
+
+    def _dest(path: str, key: str, value: str) -> str:
+        sep = "&" if "?" in path else "?"
+        return f"{path}{sep}{key}={quote(value)}"
+
+    # Where the user pressed Connect (Connections sheet, onboarding, …).
+    back = ex.peek_oauth_state(state or "").get("return_path") or DEFAULT_RETURN_PATH
+
+    if state and not ex.has_oauth_state(state):
+        origin = ex.state_return_origin(state)
+        # origin == ours means the state simply expired here — fall through to
+        # the normal mismatch error rather than redirecting to ourselves.
+        if origin and origin != request_public_base(request):
+            qs = urlencode({k: v for k, v in
+                            (("code", code), ("state", state), ("error", error))
+                            if v})
+            return RedirectResponse(f"{origin}/oauth/google/callback?{qs}",
+                                    status_code=302)
+
+    if error:
+        return RedirectResponse(_dest(back, "oauth_error", error),
+                                status_code=302)
+    c = get_connector("google")
+    if not c:
+        return RedirectResponse(
+            _dest(back, "oauth_error", "google connector missing"),
+            status_code=302)
+    # Empty redirect_uri → exhaust uses the URI saved with oauth state
+    # (minted from the live Origin/Host at connect time).
+    result = c.complete_connect(code or "", state or "", redirect_uri="")
+    # complete_connect consumed the state; prefer the path it carried.
+    back = result.get("return_path") or back
+    if not result.get("ok"):
+        return RedirectResponse(
+            _dest(back, "oauth_error", str(result.get("error") or "oauth failed")),
+            status_code=302)
+    return RedirectResponse(_dest(back, "connected", "google"), status_code=302)
 
 
 @router.get("/mcp/tools")

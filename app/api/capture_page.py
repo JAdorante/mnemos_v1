@@ -6,11 +6,19 @@ Privacy sheet, a live "last heard" ticker as proof capture works, and a
 visible warning the moment audio stops flowing. Capture itself is an
 AudioWorklet that resamples to 16 kHz mono s16le and streams over the
 WebSocket; all intelligence stays server-side.
+
+The capture engine (worklet, VAD, SourceChannel, screen sampler) lives in
+CAPTURE_CORE_JS so the compact dock window (capture_dock.py) runs the SAME
+code path — a MediaStream dies with the document that created it, so the dock
+is a separate top-level window that survives navigation in the main app. Both
+pages give the engine the element ids it paints into; `$` returns a detached
+stub for ids a given page omits, so each surface can carry only the controls
+it wants.
 """
 
 from app.api.mnemos_theme import apply as _mnemos
 
-CAPTURE_PAGE = _mnemos(r"""<!doctype html>
+_PAGE_HEAD = r"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -190,8 +198,18 @@ button:disabled{opacity:.45;cursor:default}
 </div>
 
 <script>
-"use strict";
-const $ = id => document.getElementById(id);
+"""
+
+# --- shared capture engine (see module docstring) --------------------------
+# Painted into whatever of these ids the host page defines:
+#   dot-<kind> st-<kind> start-<kind> pause-<kind> stop-<kind> meter-<kind>
+#   priv-<kind> for kind in (mic, tab, screen), plus `offline` and
+#   `no-tab-audio`. Missing ids resolve to a detached stub and no-op.
+CAPTURE_CORE_JS = r""""use strict";
+// A detached stub keeps the engine independent of which controls a given
+// surface renders (the dock omits enrollment, the ticker, etc.).
+const _stub = document.createElement('span');
+const $ = id => document.getElementById(id) || _stub;
 const FRAME = 512;                       // 32 ms @ 16 kHz — Silero's window
 const BATCH_DEFAULT = 4;                 // frames per WS message (~128 ms)
 const BATCH_THROTTLED = 16;
@@ -534,8 +552,11 @@ const SCREEN_SEND_S = 5, SCREEN_MAX_W = 1280;
 const scr = {
   on: false, stream: null, video: null, timer: null, sent: 0, kept: 0,
   async start() {
-    const stream = await navigator.mediaDevices.getDisplayMedia(
-      {video: {frameRate: 5}, audio: false});
+    const stream = await navigator.mediaDevices.getDisplayMedia({
+      video: {frameRate: 5}, audio: false,
+      selfBrowserSurface: 'exclude',      // never capture Sparrow itself
+      surfaceSwitching: 'include',
+    });
     this.stream = stream;
     const track = stream.getVideoTracks()[0];
     track.onended = () => this.stop();      // browser "Stop sharing" button
@@ -615,19 +636,67 @@ async function startMic() {
   }});
   await mic.start(stream);
 }
+/* --- what the share picker actually returned ------------------------------
+   The difference between a working meeting capture and a silent one, on
+   every conferencing site. Chrome only carries audio for a TAB share (and
+   whole-screen on Windows/ChromeOS), so a missing audio track nearly always
+   means the user picked the wrong surface or left "Also share tab audio"
+   unticked — NOT that the browser can't do it. Saying "this browser can't
+   share tab audio" there sends people to fix the wrong thing. */
+function shareInfo(stream) {
+  const v = stream.getVideoTracks()[0];
+  const s = (v && v.getSettings) ? v.getSettings() : {};
+  return {
+    surface: s.displaySurface || '',      // browser | window | monitor
+    label: (v && v.label) || '',          // tab title, for a tab share
+    hasAudio: stream.getAudioTracks().length > 0,
+  };
+}
+function tabAudioAdvice(info) {
+  if (info.surface === 'window') {
+    return 'A window share never carries audio. Share again and pick the '
+      + 'meeting TAB, then tick “Also share tab audio”.';
+  }
+  if (info.surface === 'monitor') {
+    return 'A whole-screen share doesn’t carry the meeting’s audio here. '
+      + 'Share again, pick the meeting TAB, and tick “Also share tab audio”.';
+  }
+  if (info.surface === 'browser') {
+    return 'That tab was shared without its audio. Share it again and tick '
+      + '“Also share tab audio” in the picker.';
+  }
+  return 'This browser can’t share tab audio (Chromium only). Mic-only mode '
+    + 'still works — use headphones so the mic hears the far side.';
+}
+// What the user last shared, so surfaces can name the meeting they captured.
+let LAST_SHARE = {surface: '', label: ''};
+
 async function startTab() {
   // Video must be requested for the picker; we only keep the audio track.
-  const stream = await navigator.mediaDevices.getDisplayMedia(
-    {video: true, audio: true});
+  // selfBrowserSurface: never offer Sparrow's own window as the source.
+  // surfaceSwitching: let them switch tabs mid-call without stopping.
+  const stream = await navigator.mediaDevices.getDisplayMedia({
+    video: true, audio: true,
+    selfBrowserSurface: 'exclude',
+    surfaceSwitching: 'include',
+    systemAudio: 'include',
+  });
+  const info = shareInfo(stream);
   stream.getVideoTracks().forEach(t => t.stop());
-  if (!stream.getAudioTracks().length) {
+  if (!info.hasAudio) {
+    stream.getTracks().forEach(t => t.stop());   // release the picked surface
+    $('no-tab-audio').textContent = tabAudioAdvice(info);
     $('no-tab-audio').classList.add('show');
     throw new Error('no tab audio');
   }
+  LAST_SHARE = {surface: info.surface, label: info.label};
   $('no-tab-audio').classList.remove('show');
+  if (typeof onShareStarted === 'function') onShareStarted(LAST_SHARE);
   await tab.start(stream);
 }
+"""
 
+_PAGE_TAIL = r"""
 $('optin-mic').onclick = async () => {
   await post('/capture/consent', {mic: true}); refreshConsent(); };
 $('optin-tab').onclick = async () => {
@@ -764,4 +833,6 @@ setInterval(tick, 4000);
 refreshConsent();
 </script>
 </body></html>
-""")
+"""
+
+CAPTURE_PAGE = _mnemos(_PAGE_HEAD + CAPTURE_CORE_JS + _PAGE_TAIL)

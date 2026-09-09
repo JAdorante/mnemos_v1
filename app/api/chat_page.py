@@ -455,6 +455,30 @@ body{
   transform:none;box-shadow:none;
 }
 #ctxBtn.on{color:var(--navy);border-color:var(--acc-45);background:var(--acc-08)}
+.conn-chat-wrap{position:relative}
+#connChatBtn{
+  background:transparent;color:var(--mut);border:1px solid transparent;
+  border-radius:var(--radius-sm);padding:var(--sp-2) var(--sp-3);
+  font:inherit;font-size:12px;cursor:pointer;
+  transition:color var(--dur-fast) var(--ease-io),
+    background var(--dur-fast) var(--ease-io),border-color var(--dur-fast) var(--ease-io);
+}
+#connChatBtn:hover,#connChatBtn.on{
+  color:var(--navy);border-color:var(--line);background:var(--ink-04);
+}
+#connChatPanel{
+  display:none;position:absolute;bottom:calc(100% + 8px);left:0;z-index:var(--z-float);
+  min-width:240px;max-width:min(320px,80vw);padding:10px 12px;
+  background:var(--float);border:1px solid var(--line);border-radius:var(--radius);
+  box-shadow:var(--shadow-workspace);
+}
+#connChatPanel.open{display:block}
+.conn-chat-head{font-size:11px;color:var(--mut);margin-bottom:6px}
+.conn-chat-row{display:flex;align-items:center;gap:8px;font-size:13px;padding:4px 0;cursor:pointer}
+.conn-chat-hint,.conn-chat-empty{font-size:11px;color:var(--mut);margin-top:8px;line-height:1.4}
+.conn-chat-empty .linkish,#connChatPanel .linkish{
+  background:none;border:none;color:var(--acc);cursor:pointer;font:inherit;font-size:inherit;padding:0;
+}
 #ctxBtn.has{color:var(--ok);border-color:rgba(92,189,143,.35)}
 .composer-footer .grow{flex:1;min-width:4px}
 #ctxPanel{
@@ -669,6 +693,10 @@ body{
       <textarea id="box" placeholder="Ask @@BRAND@@ anything…" rows="2"></textarea>
       <div class="composer-footer">
         <button type="button" id="ctxBtn" title="Add notes, documents, or photos for the next message">+ Context</button>
+        <div class="conn-chat-wrap">
+          <button type="button" id="connChatBtn" title="Toggle connectors for this conversation">Connectors</button>
+          <div id="connChatPanel" role="dialog" aria-label="Conversation connectors" hidden></div>
+        </div>
         <select id="studyMode" title="Study mode — how the assistant coaches this session">
           <option value="general">General</option>
           <option value="lecture_notes">Lecture notes</option>
@@ -754,6 +782,36 @@ MnemosMemory.set('lastRoute','/chat');
   }
   resizeBox();
 })();
+const connChatBtn=document.getElementById('connChatBtn');
+const connChatPanel=document.getElementById('connChatPanel');
+if(connChatBtn&&connChatPanel&&window.MnemosConnectors){
+  MnemosConnectors.load().then(()=>{
+    // Nothing connected yet → Connectors opens Manage (closable modal).
+    // Once accounts exist, it toggles the per-chat enable popover.
+  });
+  connChatBtn.onclick=async (e)=>{
+    e.preventDefault();
+    e.stopPropagation();
+    await MnemosConnectors.load();
+    if(!MnemosConnectors.connectedCount()){
+      connChatPanel.classList.remove('open');
+      connChatBtn.classList.remove('on');
+      connChatPanel.hidden=true;
+      MnemosConnectors.openManage();
+      return;
+    }
+    const open=connChatPanel.classList.toggle('open');
+    connChatBtn.classList.toggle('on',open);
+    connChatPanel.hidden=!open;
+  };
+  document.addEventListener('click',(e)=>{
+    if(!connChatPanel.classList.contains('open')) return;
+    if(connChatPanel.contains(e.target)||connChatBtn.contains(e.target)) return;
+    connChatPanel.classList.remove('open');
+    connChatBtn.classList.remove('on');
+    connChatPanel.hidden=true;
+  });
+}
 function persistChat(){
   MnemosMemory.set('chat',{
     dry:document.getElementById('dry').value||'',

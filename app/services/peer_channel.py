@@ -12,7 +12,10 @@ sends a token it minted for us alongside the claim, and receives ours back —
 one round trip leaves both sides able to authenticate the other.
 
 Flow (A = answerer/desktop that started pairing, B = joiner):
-  A: start_pairing()            -> short-lived 6-digit code (told to B's user)
+  A: start_pairing()            -> short-lived 6-digit code, plus the same code
+                                   and address packed into ONE pasteable invite
+                                   (`sparrow://pair/...`, see make_invite) so B
+                                   never retypes a hostname.
   B: join(a_url, code)          -> POST /peer/pair/claim on A with B's name,
                                    base_url, and a token B minted for A.
                                    A returns a token for B. Both store records.
@@ -51,12 +54,20 @@ Phase 3 (partial): peer <-> Person linking is USER-ASSERTED only (no auto-mint
 on pair — junk-people risk). Disclosure stays keyed by peer_id. Chat "ask Name:"
 may match linked Person aliases only when that person maps to a still-paired peer.
 
+Addressing: a peer record can hold TWO addresses. `base_url` is the public one
+(tunnel / tailnet); `internal_url` is optional and only advertised by instances
+that share a private network with us (containers on one box, a LAN). Outbound
+calls go through _post_peer, which tries the internal address first and falls
+back to the public one — so on-box pairs survive a tunnel hostname change and
+their traffic never leaves the machine.
+
 Team layer (services/team_layer.py): presence pings + offline mailbox, relationship
 policy packs, named peer groups (`ask #platform:`), shared loop IDs on handoffs,
 and meeting-attendee pairing offers. Still no shared memory.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
@@ -65,6 +76,7 @@ import secrets
 import socket
 import threading
 import time
+import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
@@ -143,6 +155,32 @@ def my_base_url() -> str:
     return env or f"http://{lan_ip()}:{settings.port}"
 
 
+def my_internal_url() -> str:
+    """A second address for peers that share our private network — the compose
+    network on a hosted box, a LAN. Peers try it BEFORE the public URL, so an
+    on-box pair keeps working when a quick-tunnel hostname churns and never
+    leaves the machine. Empty unless QUILL_PEER_INTERNAL_URL is set."""
+    import os
+    url = (os.environ.get("QUILL_PEER_INTERNAL_URL") or "").strip().rstrip("/")
+    return url if url.startswith(("http://", "https://")) else ""
+
+
+def _accept_internal(url: str | None) -> str:
+    """Validate an internal address a peer advertised. Private-network hops
+    still carry a bearer token, so QUILL_PEER_REQUIRE_TLS applies here too —
+    a refused internal URL just means we keep using the public one."""
+    u = (url or "").strip().rstrip("/")
+    if not u.startswith(("http://", "https://")):
+        return ""
+    try:
+        from app.services.team_layer import url_transport
+        if not url_transport(u).get("ok"):
+            return ""
+    except Exception:
+        return ""
+    return u
+
+
 # --- pairing -----------------------------------------------------------------
 def start_pairing() -> dict:
     """Begin (or restart) pairing: one active, short-lived, single-use code.
@@ -157,7 +195,59 @@ def start_pairing() -> dict:
                     "attempts": 0}
     return {"ok": True, "code": code, "expires_at": _pairing["expires_at"],
             "ttl_s": settings.peer.pair_ttl_s, "base_url": my_base_url(),
+            "internal_url": my_internal_url(),
+            "invite": make_invite(code, _pairing["expires_at"]),
             "name": instance_name(), "tls": _start_tls_note()}
+
+
+# --- invites (one paste instead of address + code) ---------------------------
+_INVITE_PREFIX = "sparrow://pair/"
+
+
+def make_invite(code: str, expires_at: float) -> str:
+    """Pack everything the teammate would otherwise retype — our address, our
+    name, the code — into one token they paste in a single field.
+
+    Packaging only: the code inside is the same single-use, expiring,
+    lockout-guarded secret claim_pairing() checks, so an invite is exactly as
+    sensitive as the code and no more powerful."""
+    body = {"v": 1, "u": my_base_url(), "c": code,
+            "n": instance_name(), "e": int(expires_at)}
+    internal = my_internal_url()
+    if internal:
+        body["i"] = internal
+    blob = base64.urlsafe_b64encode(
+        json.dumps(body, separators=(",", ":")).encode("utf-8")).decode("ascii")
+    return _INVITE_PREFIX + blob.rstrip("=")
+
+
+def parse_invite(text: str) -> dict:
+    """Decode an invite token. Whitespace anywhere is ignored — these get
+    pasted out of chat clients that wrap lines."""
+    raw = "".join((text or "").split())
+    if not raw.lower().startswith(_INVITE_PREFIX):
+        return {"ok": False,
+                "error": "that is not an invite — paste the whole "
+                         "sparrow://pair/… line they sent you"}
+    blob = raw[len(_INVITE_PREFIX):]
+    try:
+        decoded = base64.urlsafe_b64decode(blob + "=" * (-len(blob) % 4))
+        body = json.loads(decoded.decode("utf-8"))
+    except Exception:
+        return {"ok": False, "error": "invite is damaged — ask them to copy it again"}
+    if not isinstance(body, dict):
+        return {"ok": False, "error": "invite is damaged — ask them to copy it again"}
+    url = str(body.get("u") or "").strip().rstrip("/")
+    code = str(body.get("c") or "").strip()[:32]
+    if not url.startswith(("http://", "https://")) or not code:
+        return {"ok": False, "error": "invite is missing an address or a code"}
+    expires_at = float(body.get("e") or 0)
+    if expires_at and expires_at <= time.time():
+        return {"ok": False, "error": "invite expired — ask them for a fresh one"}
+    return {"ok": True, "url": url, "code": code,
+            "name": str(body.get("n") or "").strip()[:60],
+            "internal_url": _accept_internal(body.get("i")),
+            "expires_at": expires_at}
 
 
 def _start_tls_note() -> dict:
@@ -174,13 +264,14 @@ def pairing_active() -> bool:
 
 
 def claim_pairing(code: str, name: str, base_url: str,
-                  token_for_caller: str) -> dict:
+                  token_for_caller: str, internal_url: str = "") -> dict:
     """A joining peer trades a valid code for OUR token (returned exactly once)
     and hands us THEIRS — after this one call both sides can authenticate.
 
     `token_for_caller` is what WE will present when calling THEM (stored
     plaintext — it is our credential to their server); the token we mint is
-    what THEY present to us (stored hash-only)."""
+    what THEY present to us (stored hash-only). `internal_url` is optional: a
+    private-network address we prefer over `base_url` when reaching them."""
     global _pairing
     if not settings.peer.enabled:
         return {"ok": False, "error": "peer channel disabled"}
@@ -213,6 +304,7 @@ def claim_pairing(code: str, name: str, base_url: str,
         peers[peer_id] = {
             "name": (name or "peer").strip()[:60] or "peer",
             "base_url": base_url,
+            "internal_url": _accept_internal(internal_url),
             "token_sha256": _hash(token),          # what they present to us
             "outbound_token": token_for_caller.strip(),  # what we present to them
             "created_at": time.time(),
@@ -226,10 +318,11 @@ def claim_pairing(code: str, name: str, base_url: str,
         name_out = peers[peer_id]["name"]
     print(f"[peer] paired with {name_out} ({base_url}).")
     return {"ok": True, "peer_id": peer_id, "name": instance_name(),
+            "base_url": my_base_url(), "internal_url": my_internal_url(),
             "token": token}
 
 
-def join(url: str, code: str) -> dict:
+def join(url: str, code: str, internal_url: str | None = None) -> dict:
     """Driver side of pairing: claim `code` on the remote instance at `url`.
 
     Mints the token the remote will use to call US (stored hash-only), sends
@@ -254,6 +347,7 @@ def join(url: str, code: str) -> dict:
             "code": (code or "").strip(),
             "name": instance_name(),
             "base_url": my_base_url(),
+            "internal_url": my_internal_url(),
             "token_for_caller": inbound_token,
         }, token=None)
     except Exception as exc:
@@ -266,6 +360,9 @@ def join(url: str, code: str) -> dict:
         peers[peer_id] = {
             "name": str(res.get("name") or "peer").strip()[:60] or "peer",
             "base_url": url,
+            # The claim response is fresher than anything the invite carried.
+            "internal_url": _accept_internal(res.get("internal_url")
+                                             or internal_url),
             "token_sha256": _hash(inbound_token),
             "outbound_token": str(res.get("token") or ""),
             "created_at": time.time(),
@@ -278,6 +375,15 @@ def join(url: str, code: str) -> dict:
         name = peers[peer_id]["name"]
     print(f"[peer] joined {name} ({url}).")
     return {"ok": True, "peer_id": peer_id, "name": name}
+
+
+def join_invite(invite: str) -> dict:
+    """Join from a pasted invite — same claim, one field instead of two."""
+    parsed = parse_invite(invite)
+    if not parsed.get("ok"):
+        return {"ok": False, "error": parsed.get("error", "invalid invite")}
+    return join(parsed["url"], parsed["code"],
+                internal_url=parsed.get("internal_url"))
 
 
 # --- authentication ----------------------------------------------------------
@@ -341,6 +447,7 @@ def peers() -> list[dict]:
             pid = None
         out.append({"peer_id": peer_id, "name": rec.get("name", "?"),
                     "base_url": rec.get("base_url", ""),
+                    "internal_url": rec.get("internal_url", ""),
                     "created_at": rec.get("created_at"),
                     "last_seen": rec.get("last_seen"),
                     "asks": int(rec.get("asks") or 0),
@@ -455,21 +562,29 @@ def _touch(peer_id: str, counter: str | None = None) -> None:
         pass  # bookkeeping only
 
 
-def refresh_peer_base_url(peer_id: str, base_url: str | None) -> bool:
-    """Update a peer's callback URL when they advertise a new one.
+def refresh_peer_base_url(peer_id: str, base_url: str | None,
+                          internal_url: str | None = None) -> bool:
+    """Update a peer's addresses when they advertise new ones.
 
-    Docker bridge IPs change on every recreate; peers should send
-    `base_url` (or `callback_url`) on ask/ping with a stable host-port
-    URL so delivery keeps working after rebuilds.
+    Docker bridge IPs change on every recreate and quick-tunnel hostnames
+    change on every tunnel restart; peers send `base_url` (or `callback_url`)
+    and optionally `internal_url` on ask/ping so delivery keeps working after
+    a rebuild without anyone editing peers.json.
     """
     url = (base_url or "").strip().rstrip("/")
-    if not peer_id or not url.startswith(("http://", "https://")):
+    if not peer_id:
         return False
-    try:
-        from app.services.team_layer import url_transport
-        if not url_transport(url).get("ok"):
-            return False
-    except Exception:
+    if url.startswith(("http://", "https://")):
+        try:
+            from app.services.team_layer import url_transport
+            if not url_transport(url).get("ok"):
+                url = ""
+        except Exception:
+            url = ""
+    else:
+        url = ""
+    internal = _accept_internal(internal_url) if internal_url is not None else None
+    if not url and not internal:
         return False
     try:
         with _lock:
@@ -477,12 +592,19 @@ def refresh_peer_base_url(peer_id: str, base_url: str | None) -> bool:
             rec = registry.get(peer_id)
             if rec is None:
                 return False
-            if (rec.get("base_url") or "").rstrip("/") == url:
+            changed = False
+            if url and (rec.get("base_url") or "").rstrip("/") != url:
+                old = rec.get("base_url")
+                rec["base_url"] = url
+                changed = True
+                print(f"[peer] refreshed callback for {peer_id}: {old} → {url}")
+            if internal and (rec.get("internal_url") or "").rstrip("/") != internal:
+                rec["internal_url"] = internal
+                changed = True
+                print(f"[peer] refreshed private address for {peer_id}: {internal}")
+            if not changed:
                 return False
-            old = rec.get("base_url")
-            rec["base_url"] = url
             _save(_peers_path(), registry)
-        print(f"[peer] refreshed callback for {peer_id}: {old} → {url}")
         return True
     except OSError:
         return False
@@ -499,6 +621,58 @@ def _post_json(url: str, payload: dict, token: str | None,
     wait = settings.peer.http_timeout_s if timeout is None else float(timeout)
     with urllib.request.urlopen(req, timeout=wait) as r:
         return json.loads(r.read().decode("utf-8"))
+
+
+def peer_urls(rec: dict) -> list[str]:
+    """Where to call a peer, best first: the private-network address they
+    advertised (same box / same LAN, immune to tunnel churn), then the public
+    one. Deduped, so a peer with one address costs one attempt."""
+    out: list[str] = []
+    for candidate in (rec.get("internal_url"), rec.get("base_url")):
+        url = (candidate or "").strip().rstrip("/")
+        if url and url not in out:
+            out.append(url)
+    return out
+
+
+# Addresses that just failed at the transport layer, url -> retry after ts.
+# A peer advertises its private address to everyone, but only teammates on the
+# same network can use it — without this, an off-box peer would burn a failed
+# connection on every single call. Process-local: a restart retries everything.
+_addr_cooldown: dict[str, float] = {}
+_ADDR_COOLDOWN_S = 300.0
+
+
+def _post_peer(rec: dict, path: str, payload: dict,
+               timeout: float | None = None) -> dict:
+    """POST to a peer over the first address that answers.
+
+    A transport failure on the private address falls through to the public one
+    (and parks that address for a few minutes, so a peer who can never reach it
+    stops paying for the attempt); an HTTP status means the peer DID answer
+    (auth, 404, 5xx), so it is raised as-is rather than retried elsewhere."""
+    token = rec.get("outbound_token")
+    urls = peer_urls(rec)
+    now = time.time()
+    live = [u for u in urls if _addr_cooldown.get(u, 0.0) <= now] or urls
+    last: Exception | None = None
+    for i, base in enumerate(live):
+        try:
+            if timeout is None:
+                res = _post_json(f"{base}{path}", payload, token=token)
+            else:
+                res = _post_json(f"{base}{path}", payload, token=token,
+                                 timeout=timeout)
+            _addr_cooldown.pop(base, None)
+            return res
+        except urllib.error.HTTPError:
+            raise
+        except Exception as exc:
+            last = exc
+            _addr_cooldown[base] = time.time() + _ADDR_COOLDOWN_S
+            if i + 1 < len(live):
+                print(f"[peer] {base} unreachable ({exc}); trying the next address.")
+    raise last if last is not None else ValueError("peer has no address")
 
 
 def _publish_event(source: str, text: str, meta: dict, tier=None) -> None:
@@ -884,7 +1058,8 @@ def handle_ask(peer: dict, payload: dict) -> dict:
     peer_id = peer.get("peer_id", "")
     _touch(peer_id, "asks")
     refresh_peer_base_url(
-        peer_id, payload.get("base_url") or payload.get("callback_url"))
+        peer_id, payload.get("base_url") or payload.get("callback_url"),
+        payload.get("internal_url"))
     _publish_event("peer.ask", question,
                    {"peer_id": peer_id, "peer": peer.get("name", ""),
                     "ask_id": ask_id})
@@ -1070,8 +1245,7 @@ def _accept_handoff(name: str, peer_id: str, ask_id: str, task: str,
 
 def _deliver(peer_rec: dict, payload: dict) -> bool:
     try:
-        res = _post_json(f"{peer_rec['base_url']}/peer/answer", payload,
-                         token=peer_rec.get("outbound_token"))
+        res = _post_peer(peer_rec, "/peer/answer", payload)
         return bool(res.get("ok"))
     except Exception as exc:
         print(f"[peer] answer delivery failed ({exc}).")
@@ -1245,12 +1419,11 @@ def _dispatch_ask(peer_rec: dict, peer_id: str, ask_id: str, question: str,
                   kind: str, loop_id: str | None,
                   from_mailbox: bool = False) -> dict:
     payload = {"ask_id": ask_id, "question": question, "kind": kind,
-               "base_url": my_base_url()}
+               "base_url": my_base_url(), "internal_url": my_internal_url()}
     if loop_id:
         payload["loop_id"] = loop_id
     try:
-        res = _post_json(f"{peer_rec['base_url']}/peer/ask", payload,
-                         token=peer_rec.get("outbound_token"))
+        res = _post_peer(peer_rec, "/peer/ask", payload)
     except Exception as exc:
         _queue_offline(peer_id, ask_id, question, kind, loop_id, exc)
         return {"ok": True, "status": "queued", "ask_id": ask_id,
@@ -2010,6 +2183,7 @@ def status() -> dict:
             "auto_answer": settings.peer.auto_answer,
             "name": instance_name(),
             "base_url": my_base_url(),
+            "internal_url": my_internal_url(),
             "classes": list(CLASSES),
             "actions": list(ACTIONS),
             "peers": peers(),

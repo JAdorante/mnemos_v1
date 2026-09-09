@@ -73,6 +73,12 @@ def derive_edges(store: Store | None = None, *,
         for ident in ev.get("identifiers") or []:
             norm = str((ident or {}).get("norm") or "").strip()
             kind = str((ident or {}).get("kind") or "")
+            # Third of the three kind filters (see the comment above
+            # identifiers.entity_candidate_names). kind="domain" is
+            # deliberately NOT here: an observed_on_screen edge per frame per
+            # domain would weight a browser-heavy day by tab count, and this
+            # path resolves with record=False so a domain could never earn its
+            # binding through recurrence the way the anchor path lets it.
             if not norm or kind not in ("repo", "title_segment", "path"):
                 continue
             key = norm.lower()

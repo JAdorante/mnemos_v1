@@ -66,6 +66,10 @@ datas = [
     (str(ROOT / "data" / "score_config.json"), "data"),
     (str(ROOT / "docs"), "docs"),
     (str(ROOT / "app" / "static"), "app/static"),
+    # WS2d: the vendored public suffix list. psl.py reads it off disk, so a
+    # missing entry here fails at first browser URL parse on the tester's
+    # machine, not at build time.
+    (str(ROOT / "app" / "perception" / "data"), "app/perception/data"),
 ]
 for pkg in ("silero_vad", "sentence_transformers", "lancedb", "faster_whisper",
             # pywebview ships JS bridge files it reads off disk at runtime.

@@ -1,12 +1,15 @@
 """Gmail + Calendar *metadata* cold-start for the people graph (Workstream 2).
 
-Read-only OAuth (installed-app loopback). Headers and attendees only — never
-bodies, never attachments. Derivation is pure (no LLM). People v2 mints
-candidates + asserted ``works_at``; commitments/claims are policy-denied.
+Read-only OAuth — desktop loopback or hosted HTTPS redirect
+(``/oauth/google/callback`` via the google connector). Headers and attendees
+only — never bodies, never attachments. Derivation is pure (no LLM). People
+v2 mints candidates + asserted ``works_at``; commitments/claims are
+policy-denied.
 
-Ingest is one-shot plus ``POST /exhaust/refresh``. ``POST /exhaust/purge``
-removes every exhaust-sourced event, edge, and person that exhaust created
-and nobody else cited.
+Ingest is one-shot plus ``POST /exhaust/refresh`` (or
+``POST /connectors/google/sync``). ``POST /exhaust/purge`` removes every
+exhaust-sourced event, edge, and person that exhaust created and nobody else
+cited.
 """
 from __future__ import annotations
 
@@ -57,6 +60,14 @@ def _token_path() -> Path:
     return Path(settings.exhaust.token_path)
 
 
+def _legacy_token_path() -> Path:
+    return Path(settings.exhaust.legacy_token_path)
+
+
+def _oauth_state_path() -> Path:
+    return Path(settings.exhaust.oauth_state_path)
+
+
 def _load_json(path: Path, default):
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -70,6 +81,59 @@ def _save_json(path: Path, data) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     write_json(path, data)
 
+
+_OAUTH_STATE_TTL_S = 600
+
+
+def _prune_oauth_states(states: dict) -> dict:
+    now = time.time()
+    return {
+        k: v for k, v in (states or {}).items()
+        if isinstance(v, dict)
+        and (now - float(v.get("created_at") or 0)) < _OAUTH_STATE_TTL_S
+    }
+
+
+def _encode_state(return_origin: str) -> str:
+    """``<random>.<b64url(origin)>`` — the origin travels through Google.
+
+    The registered callback may live on a different host (a stable relay
+    anchor) than the rotating hostname the user started on. Google echoes
+    ``state`` back verbatim, so it is the only channel that survives the
+    round trip when the relay container holds no state of its own.
+    """
+    import base64
+    import secrets
+    tail = base64.urlsafe_b64encode(
+        (return_origin or "").encode("utf-8")).decode("ascii").rstrip("=")
+    return f"{secrets.token_urlsafe(16)}.{tail}"
+
+
+def state_return_origin(state: str) -> str | None:
+    """Origin encoded into ``state`` at connect time, or None."""
+    import base64
+    _, _, tail = (state or "").partition(".")
+    if not tail:
+        return None
+    try:
+        pad = "=" * (-len(tail) % 4)
+        origin = base64.urlsafe_b64decode(tail + pad).decode("utf-8").strip()
+    except Exception:
+        return None
+    return origin.rstrip("/") if origin.lower().startswith("https://") else None
+
+
+def peek_oauth_state(state: str) -> dict:
+    """The live state entry without consuming it (``{}`` when unknown)."""
+    if not state:
+        return {}
+    entry = _prune_oauth_states(_load_json(_oauth_state_path(), {})).get(state)
+    return dict(entry) if isinstance(entry, dict) else {}
+
+
+def has_oauth_state(state: str) -> bool:
+    """True when this instance minted ``state`` (so it can do the exchange)."""
+    return bool(peek_oauth_state(state))
 
 def progress() -> dict[str, Any]:
     with _lock:
@@ -291,12 +355,105 @@ def _refresh_token(refresh: str) -> dict:
 
 
 def load_tokens() -> dict:
-    return _load_json(_token_path(), {})
+    tok = _load_json(_token_path(), {})
+    if tok:
+        return tok
+    # One-line legacy fallback (pre-connectors path).
+    return _load_json(_legacy_token_path(), {})
 
 
 def connected() -> bool:
     tok = load_tokens()
     return bool(tok.get("access_token") or tok.get("refresh_token"))
+
+
+def clear_tokens() -> dict[str, Any]:
+    """Drop stored Google OAuth tokens (connectors disconnect)."""
+    removed = []
+    for path in (_token_path(), _legacy_token_path()):
+        try:
+            if path.is_file():
+                path.unlink()
+                removed.append(str(path))
+        except OSError:
+            pass
+    return {"ok": True, "removed": removed}
+
+
+def _save_tokens(tokens: dict) -> None:
+    tokens = dict(tokens)
+    tokens["obtained_at"] = time.time()
+    _save_json(_token_path(), tokens)
+
+
+def start_oauth_redirect(public_base: str,
+                         *, redirect_base: str | None = None,
+                         return_path: str | None = None) -> dict[str, Any]:
+    """Hosted / HTTPS OAuth: return an auth_url for the user's browser.
+
+    Does not open a server-side browser. ``public_base`` is the live origin
+    the browser is on — where the user is sent back at the end.
+    ``redirect_base`` is the one origin registered with Google; when it
+    differs, its ``/oauth/google/callback`` relays the code back here using
+    the origin carried in ``state``. Registering one URI covers every
+    rotating hostname and every container. ``return_path`` is the same-site
+    page to land on afterwards — the Connections sheet sends whatever page
+    the user pressed Connect on, so they are not dumped into onboarding.
+    """
+    from app.services.connectors.base import safe_return_path
+    if not enabled():
+        return {"ok": False, "error": "exhaust ingest disabled"}
+    if not oauth_configured():
+        return {"ok": False, "error": "GOOGLE_OAUTH_CLIENT_ID not set",
+                "skip": True}
+    base = (public_base or "").strip().rstrip("/")
+    if not base.lower().startswith("https://"):
+        return {"ok": False, "error": "public_base must be https://"}
+    anchor = (redirect_base or "").strip().rstrip("/")
+    if not anchor.lower().startswith("https://"):
+        anchor = base
+    state = _encode_state(base)
+    redirect = f"{anchor}/oauth/google/callback"
+    states = _prune_oauth_states(_load_json(_oauth_state_path(), {}))
+    states[state] = {"created_at": time.time(), "redirect_uri": redirect,
+                     "return_origin": base,
+                     "return_path": safe_return_path(return_path)}
+    _save_json(_oauth_state_path(), states)
+    return {
+        "ok": True,
+        "mode": "redirect",
+        "auth_url": _auth_url(redirect, state),
+        "redirect_uri": redirect,
+        "return_origin": base,
+        "return_path": states[state]["return_path"],
+        "state": state,
+    }
+
+
+def complete_oauth_redirect(code: str, state: str, *,
+                            redirect_uri: str | None = None) -> dict[str, Any]:
+    """Exchange a web-redirect authorization code after callback."""
+    if not oauth_configured():
+        return {"ok": False, "error": "GOOGLE_OAUTH_CLIENT_ID not set"}
+    states = _prune_oauth_states(_load_json(_oauth_state_path(), {}))
+    entry = states.pop(state or "", None)
+    _save_json(_oauth_state_path(), states)
+    if not entry:
+        return {"ok": False, "error": "oauth state mismatch or expired"}
+    redirect = redirect_uri or entry.get("redirect_uri") or ""
+    if not redirect:
+        return {"ok": False, "error": "missing redirect_uri"}
+    if not code:
+        return {"ok": False, "error": "no oauth code"}
+    try:
+        tokens = _exchange_code(code, redirect)
+    except PermissionError as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:
+        return {"ok": False, "error": f"token exchange failed: {exc}"}
+    _save_tokens(tokens)
+    return {"ok": True, "scopes": tokens.get("scope"), "mode": "redirect",
+            "return_path": entry.get("return_path")}
 
 
 def start_oauth_loopback() -> dict[str, Any]:
@@ -354,10 +511,8 @@ def start_oauth_loopback() -> dict[str, Any]:
         return {"ok": False, "error": str(exc)}
     except Exception as exc:
         return {"ok": False, "error": f"token exchange failed: {exc}"}
-    tokens["obtained_at"] = time.time()
-    _save_json(_token_path(), tokens)
-    return {"ok": True, "scopes": tokens.get("scope")}
-
+    _save_tokens(tokens)
+    return {"ok": True, "scopes": tokens.get("scope"), "mode": "loopback"}
 
 def _access_token() -> str:
     tok = load_tokens()

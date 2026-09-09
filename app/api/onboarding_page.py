@@ -184,6 +184,20 @@ textarea{min-height:96px;resize:vertical}
   background:var(--ink-08);color:var(--mut);
 }
 .tool-count{font-size:.85rem;color:var(--mut);margin:4px 0 12px}
+.tool-pick button .conn-badge{
+  font-size:.65rem;font-weight:700;letter-spacing:.03em;text-transform:uppercase;
+  padding:2px 6px;border-radius:999px;margin-left:2px;
+  background:var(--ink-08);color:var(--mut);line-height:1.2;
+}
+.tool-pick button .conn-badge.connected{
+  background:rgba(92,189,143,.16);color:var(--ok);
+}
+.tool-pick button .conn-badge.available{
+  background:var(--acc-dim);color:var(--acc);
+}
+.tool-pick button .conn-badge.planned{
+  background:var(--ink-08);color:var(--mut);opacity:.85;
+}
 
 .nav-btns{display:flex;justify-content:space-between;gap:12px;margin-top:22px;flex-wrap:wrap}
 .err{color:var(--danger);font-size:.9rem;margin-top:10px;min-height:1.2em}
@@ -517,6 +531,8 @@ const TOOL_GROUPS = [
   {label:"Finance", tools:["QuickBooks","Ramp","Stripe"]},
 ];
 const PRESET_TOOLS = TOOL_GROUPS.flatMap(g => g.tools);
+/** tool display name → {connector_id, availability, configured, connected, label} */
+let connectorTools = {};
 
 // Brand mark via site favicon (colored logo). Fallback letter if the fetch fails.
 const TOOL_DOMAINS = {
@@ -573,6 +589,18 @@ function toolIconUrl(name){
   return "https://www.google.com/s2/favicons?domain="+encodeURIComponent(d)+"&sz=64";
 }
 
+function connectorBadge(name){
+  const info=connectorTools[name];
+  if(!info) return null;
+  let cls="conn-badge planned", text="Planned";
+  if(info.connected){ cls="conn-badge connected"; text="Connected"; }
+  else if(info.availability==="ready"){
+    cls="conn-badge available";
+    text = info.configured ? "Connect" : "Connector";
+  }
+  return el("span",{className:cls, text, title:info.label||""});
+}
+
 function toolButton(name){
   const kids=[];
   const url=toolIconUrl(name);
@@ -586,6 +614,8 @@ function toolButton(name){
     kids.push(el("span",{className:"tool-ico-fallback", text:(name[0]||"?").toUpperCase()}));
   }
   kids.push(document.createTextNode(name));
+  const badge=connectorBadge(name);
+  if(badge) kids.push(badge);
   return el("button",{
     type:"button",
     className: toolSelected(name) ? "on" : "",
@@ -1151,6 +1181,33 @@ document.getElementById("keyBtn").onclick=async ()=>{
   btn.disabled=false;
 };
 
+async function loadConnectors(){
+  try{
+    const j=await (await fetch("/connectors")).json();
+    connectorTools = j.tools || {};
+    renderTools();
+  }catch(e){ connectorTools = {}; }
+}
+
+function ensureGoogleToolsSelected(){
+  for(const name of ["Gmail","Google Calendar"]){
+    if(!state.tools.some(t => t.toLowerCase()===name.toLowerCase()))
+      state.tools.push(name);
+  }
+  renderTools();
+}
+
+async function pollExhaustProgress(btn){
+  const poll=setInterval(async ()=>{
+    if(document.hidden) return;
+    const s=await (await fetch("/exhaust/status")).json();
+    const p=s.progress||{};
+    document.getElementById("exProg").textContent=
+      (p.running?"Scanning… ":"Done. ")+(p.contacts||0)+" contacts, "+(p.events||0)+" events.";
+    if(!p.running){ clearInterval(poll); if(btn) btn.disabled=false; loadNextMeeting(); loadConnectors(); }
+  },1500);
+}
+
 async function refreshExhaust(){
   try{
     const s=await (await fetch("/exhaust/status")).json();
@@ -1160,7 +1217,10 @@ async function refreshExhaust(){
       document.getElementById("exBtn").disabled=true;
       return;
     }
-    el.textContent = s.connected ? "Google connected. Click to import the last 90 days of headers + calendar attendees." : "Not connected yet.";
+    const mode = s.oauth_mode === "redirect" ? " (hosted sign-in)" : "";
+    el.textContent = s.connected
+      ? "Google connected. Click to import the last 90 days of headers + calendar attendees."
+      : "Not connected yet"+mode+".";
     const p=s.progress||{};
     if(p.running) document.getElementById("exProg").textContent=
       "Scanning… "+(p.contacts||0)+" contacts, "+(p.events||0)+" events.";
@@ -1168,23 +1228,26 @@ async function refreshExhaust(){
 }
 document.getElementById("exBtn").onclick=async ()=>{
   const msg=document.getElementById("exMsg"), btn=document.getElementById("exBtn");
-  msg.textContent="A browser window will open for Google consent (metadata only).";
+  msg.textContent="Connecting Google (metadata only)…";
   btn.disabled=true;
   try{
-    const st=await (await fetch("/exhaust/status")).json();
+    const st=await (await fetch("/connectors/google")).json();
     if(!st.connected){
-      const r=await (await fetch("/exhaust/connect",{method:"POST"})).json();
+      const r=await (await fetch("/connectors/google/connect",{
+        method:"POST",
+        headers:{"X-Public-Base": location.origin}
+      })).json();
       if(!r.ok){ msg.textContent=r.error||"Could not connect"; btn.disabled=false; return; }
+      if(r.mode==="redirect" && r.auth_url){
+        msg.textContent="Redirecting to Google…";
+        window.location = r.auth_url;
+        return;
+      }
+      // loopback completed in-process
+      ensureGoogleToolsSelected();
     }
-    await fetch("/exhaust/refresh",{method:"POST"});
-    const poll=setInterval(async ()=>{
-      if(document.hidden) return;
-      const s=await (await fetch("/exhaust/status")).json();
-      const p=s.progress||{};
-      document.getElementById("exProg").textContent=
-        (p.running?"Scanning… ":"Done. ")+(p.contacts||0)+" contacts, "+(p.events||0)+" events.";
-      if(!p.running){ clearInterval(poll); btn.disabled=false; loadNextMeeting(); }
-    },1500);
+    await fetch("/connectors/google/sync",{method:"POST"});
+    await pollExhaustProgress(btn);
   }catch(e){ msg.textContent="Network error"; btn.disabled=false; }
 };
 
@@ -1199,16 +1262,44 @@ async function loadNextMeeting(){
     document.getElementById("nextMeetWhen").textContent=when;
   }catch(e){}
 }
+async function handleOAuthReturn(){
+  try{
+    const qp=new URLSearchParams(location.search);
+    const err=qp.get("oauth_error");
+    if(err){
+      const msg=document.getElementById("exMsg");
+      if(msg) msg.textContent="Google connect failed: "+err;
+      return;
+    }
+    if(qp.get("connected")==="google"){
+      ensureGoogleToolsSelected();
+      const msg=document.getElementById("exMsg");
+      if(msg) msg.textContent="Google connected. Importing metadata…";
+      await fetch("/connectors/google/sync",{method:"POST"});
+      await pollExhaustProgress(document.getElementById("exBtn"));
+      // Clean query so a refresh does not re-kick sync.
+      try{
+        const u=new URL(location.href);
+        u.searchParams.delete("connected");
+        history.replaceState({}, "", u.pathname + (u.search||"") + u.hash);
+      }catch(e){}
+    }
+  }catch(e){}
+}
+
+loadConnectors();
 refreshExhaust();
 loadNextMeeting();
 boot().then(()=>{
   try{
     const qp=new URLSearchParams(location.search);
     const h=location.hash.replace(/^#/,'');
-    if(qp.get('step') || (h && STEPS.some(s=>s.toLowerCase()===h.toLowerCase()))){
+    if(qp.get('step') || qp.get('connected') || qp.get('oauth_error')
+       || (h && STEPS.some(s=>s.toLowerCase()===h.toLowerCase()))){
       openWizard();
     }
   }catch(e){}
+  handleOAuthReturn();
 });
 </script>
 </body>

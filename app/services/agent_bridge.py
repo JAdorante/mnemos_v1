@@ -239,6 +239,28 @@ def _make_memory_provider(limit: int = 5, min_score: float = 0.15, sink=None):
                                min_score=min_score,
                                email_guard=emailish)
         block = g["block"]
+        # Drop connector-backed memories the user toggled off for this chat.
+        try:
+            from app.services.connectors import session as _conn_session
+            blocked = _conn_session.blocked_source_prefixes()
+        except Exception:
+            blocked = ()
+        if blocked and block:
+            # Sources list + block lines that cite blocked prefixes.
+            kept_sources = []
+            for src in (g.get("sources") or []):
+                blob = " ".join(str(x) for x in (src.get("items") or []))
+                blob = blob + " " + str(src.get("label") or "")
+                if any(p in blob for p in blocked):
+                    continue
+                kept_sources.append(src)
+            lines = []
+            for ln in block.splitlines():
+                if any(p in ln for p in blocked):
+                    continue
+                lines.append(ln)
+            block = "\n".join(lines).strip()
+            g = {**g, "block": block, "sources": kept_sources}
         if sink is not None:
             sink["sources"] = g.get("sources") or []
             sink["block"] = block or ""

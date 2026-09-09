@@ -16,10 +16,13 @@ Honest gaps ("machine is on" is defined here, not inferred downstream):
 Lock screen is NOT a gap: the session is alive and L0 keeps honestly
 recording the lock surface as the foreground state.
 
-`browser_url` is None in Phase A (url_unavailable) — the UIA URL read has
-returned wrong content on this codebase before, and a missing URL is honest
-where a wrong one is poison. Phase B adds the full-URL + registrable-domain
-parse with the graceful unavailable path.
+`browser_url` was None for the whole of Phase A (url_unavailable) — the UIA
+URL read has returned wrong content on this codebase before, and a missing URL
+is honest where a wrong one is poison. WS2d adds it back behind
+QUILL_PERCEPTION_URL (default off) through `uia_url`, which is cache-backed and
+NON-BLOCKING so this tick — the liveness clock for gap detection — never waits
+on a cross-process COM call. Default storage is the registrable domain only;
+the full path needs QUILL_PERCEPTION_URL_FULL and is stripped and redacted.
 """
 from __future__ import annotations
 
@@ -78,7 +81,10 @@ def win32_provider() -> dict:
             "app_exe_path": exe,
             "window_id": str(int(hwnd)),
             "window_title": title,
-            "browser_url": None,       # Phase B (url_unavailable is honest)
+            # Filled by the tick from the uia_url cache — never read here,
+            # because this provider runs ON the 1 Hz thread.
+            "browser_url": None,
+            "hwnd": int(hwnd),
             "doc_path": None,
             "display_hash": hashlib.sha1(topo.encode()).hexdigest()[:12],
         }
@@ -311,6 +317,18 @@ class L0Monitor:
         k, m = self._inputs.take()
         self._acc_keys += k
         self._acc_mouse += m
+        # WS2d: committed browser URL. Cache-backed and non-blocking — a miss
+        # returns None now and resolves on a later tick rather than stalling
+        # the liveness clock (see uia_url).
+        if info and info.get("browser_url") is None:
+            try:
+                from app.perception import uia_url
+                info["browser_url"] = uia_url.current_url(
+                    info.get("hwnd") or info.get("window_id"),
+                    info.get("window_title") or "",
+                    info.get("app_name") or "")
+            except Exception:
+                pass
 
         state = (info.get("app_name") or "",
                  self._exe_hash(info.get("app_exe_path") or ""),
@@ -358,7 +376,8 @@ class L0Monitor:
             session_id=self.session_id, seq=self.seq,
             ts_utc=int(now * 1000), utc_offset_minutes=self._utc_off,
             app_name=state[0], app_exe_hash=state[1], window_id=state[2],
-            window_title=title, browser_url=info.get("browser_url"),
+            window_title=title,
+            browser_url=self._storable_url(info.get("browser_url")),
             url_domain=state[4], doc_path=state[5],
             key_count=self._acc_keys, mouse_count=self._acc_mouse,
             is_idle=bool(idle_age is not None and idle_age >= self.idle_s),
@@ -405,15 +424,28 @@ class L0Monitor:
 
     @staticmethod
     def _domain(url: str | None) -> str | None:
-        """Registrable-ish domain from a URL; None when unavailable. Phase B
-        replaces this with a proper public-suffix parse."""
+        """Registrable domain from a URL; None when unavailable. Backed by the
+        vendored public suffix list — the old last-two-labels split gave
+        "co.uk" for bbc.co.uk and "github.io" for owner.github.io, both of
+        which would key a privacy rule or an activity block on the registry
+        instead of the site."""
         if not url:
             return None
         try:
-            host = url.split("//", 1)[-1].split("/", 1)[0].split("@")[-1]
-            host = host.split(":")[0].strip().lower()
-            parts = [p for p in host.split(".") if p]
-            return ".".join(parts[-2:]) if len(parts) >= 2 else (host or None)
+            from app.perception import psl
+            return psl.registrable_domain(url)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _storable_url(url: str | None) -> str | None:
+        """The domain is what attribution and the gate need; the full path is
+        a separate, flagged decision (QUILL_PERCEPTION_URL_FULL)."""
+        if not url:
+            return None
+        try:
+            from app.perception import uia_url
+            return uia_url.storable_url(url)
         except Exception:
             return None
 

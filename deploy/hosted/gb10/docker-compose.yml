@@ -28,6 +28,15 @@ x-env: &sparrow-env
   OLLAMA_HOST: host.docker.internal:11435
   # The app's default local model (llama3.2) isn't pulled on this box.
   QUILL_TEXT_LOCAL_MODEL: qwen2.5:7b-instruct
+  # Google connector (Gmail + Calendar metadata).
+  GOOGLE_OAUTH_CLIENT_ID: "${GOOGLE_OAUTH_CLIENT_ID:-}"
+  GOOGLE_OAUTH_CLIENT_SECRET: "${GOOGLE_OAUTH_CLIENT_SECRET:-}"
+  # The ONE redirect URI registered with Google — a stable Tailscale Funnel
+  # hostname, not a quick tunnel. Whichever container the funnel points at
+  # relays the code back to the seat that started the flow (the live origin
+  # rides in the OAuth state), so rotating *.trycloudflare.com hostnames
+  # never need re-registering. Unset → per-hostname registration, as before.
+  QUILL_OAUTH_REDIRECT_BASE: "${SPARROW_OAUTH_REDIRECT_BASE:-}"
 
 services:
   # Host Ollama binds 127.0.0.1 only and changing that needs root; this
@@ -50,10 +59,18 @@ services:
       <<: *sparrow-env
       QUILL_API_TOKEN: "${SPARROW_USER1_TOKEN:?set a per-user token in .env}"
       QUILL_LORA_TAG_SUFFIX: user1
+      # Private address on this compose network. Peers try it BEFORE
+      # QUILL_PEER_BASE_URL, so on-box pairs keep working when a quick
+      # tunnel restarts under a new hostname, and their traffic never
+      # leaves the box. Off-box peers (the desktop at 10.0.0.81) are
+      # unaffected — they only ever get the public URL.
+      QUILL_PEER_INTERNAL_URL: http://sparrow-user1:8000
       # Public Cloudflare tunnel URL — peers (and other devices) must call us
       # back over HTTPS. Loopback 127.0.0.1 only works on this host and shows
       # teammates as offline from a remote browser / other containers.
-      # Quick-tunnel hostnames change on tunnel restart; refresh here + peers.json.
+      # Quick-tunnel hostnames change on tunnel restart: refresh here for
+      # off-box peers; on-box pairs ride QUILL_PEER_INTERNAL_URL and heal
+      # themselves (peers also re-advertise both addresses on every ping).
       QUILL_PEER_BASE_URL: https://mac-cheapest-experiment-division.trycloudflare.com
       # Web-goal pilot: cloud routing + browser agent for this user only.
       # Optional (defaults empty) so the other users stay local-only chat.
@@ -69,6 +86,7 @@ services:
       <<: *sparrow-env
       QUILL_API_TOKEN: "${SPARROW_USER2_TOKEN:?set a per-user token in .env}"
       QUILL_LORA_TAG_SUFFIX: user2
+      QUILL_PEER_INTERNAL_URL: http://sparrow-user2:8000
       QUILL_PEER_BASE_URL: https://pastor-meant-penalty-poster.trycloudflare.com
 
   sparrow-user3:
@@ -81,6 +99,7 @@ services:
       <<: *sparrow-env
       QUILL_API_TOKEN: "${SPARROW_USER3_TOKEN:?set a per-user token in .env}"
       QUILL_LORA_TAG_SUFFIX: user3
+      QUILL_PEER_INTERNAL_URL: http://sparrow-user3:8000
       QUILL_PEER_BASE_URL: https://beyond-fool-finances-accessibility.trycloudflare.com
 
   sparrow-user4:
@@ -93,6 +112,7 @@ services:
       <<: *sparrow-env
       QUILL_API_TOKEN: "${SPARROW_USER4_TOKEN:?set a per-user token in .env}"
       QUILL_LORA_TAG_SUFFIX: user4
+      QUILL_PEER_INTERNAL_URL: http://sparrow-user4:8000
       QUILL_PEER_BASE_URL: https://orchestra-cement-guest-districts.trycloudflare.com
 
   sparrow-user5:
@@ -105,6 +125,7 @@ services:
       <<: *sparrow-env
       QUILL_API_TOKEN: "${SPARROW_USER5_TOKEN:?set a per-user token in .env}"
       QUILL_LORA_TAG_SUFFIX: user5
+      QUILL_PEER_INTERNAL_URL: http://sparrow-user5:8000
       QUILL_PEER_BASE_URL: https://how-notifications-complicated-minister.trycloudflare.com
 
   sparrow-user6:
@@ -117,7 +138,8 @@ services:
       <<: *sparrow-env
       QUILL_API_TOKEN: "${SPARROW_USER6_TOKEN:?set a per-user token in .env}"
       QUILL_LORA_TAG_SUFFIX: user6
-      QUILL_PEER_BASE_URL: http://127.0.0.1:8006
+      QUILL_PEER_INTERNAL_URL: http://sparrow-user6:8000
+      QUILL_PEER_BASE_URL: https://vegetarian-bought-ground-queensland.trycloudflare.com
 
 volumes:
   sparrow-user1-data:

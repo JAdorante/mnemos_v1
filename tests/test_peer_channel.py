@@ -48,7 +48,8 @@ class PeerChannelBase(unittest.TestCase):
         for key in ("QUILL_PEER_REGISTRY", "QUILL_PEER_ASKS",
                     "QUILL_PEER_SENT", "QUILL_PEER_INGEST",
                     "QUILL_PEER_MAILBOX", "QUILL_PEER_TEAMS",
-                    "QUILL_PEER_LOOPS", "QUILL_PEER_REQUIRE_TLS"):
+                    "QUILL_PEER_LOOPS", "QUILL_PEER_REQUIRE_TLS",
+                    "QUILL_PEER_BASE_URL", "QUILL_PEER_INTERNAL_URL"):
             os.environ.pop(key, None)
         bus._subscribers.remove(self._collect)
         pch._pairing = None
@@ -866,6 +867,204 @@ class PeerPersonLinkTests(PeerChannelBase):
         self.assertEqual(pch.get_policy(self.pid)["work"], "deny")
         peer = pch.authenticate(f"Bearer {self._claim['token']}")
         self.assertEqual(peer["peer_id"], self.pid)
+
+
+class InviteTests(PeerChannelBase):
+    """One pasteable token replaces "read my hostname over the phone" — and
+    carries no more authority than the code already inside it."""
+
+    def test_invite_carries_address_code_and_name(self) -> None:
+        os.environ["QUILL_PEER_BASE_URL"] = "https://a.trycloudflare.com"
+        os.environ["QUILL_PEER_INTERNAL_URL"] = "http://sparrow-user1:8000"
+        with mock.patch.object(pch, "instance_name", return_value="Justin"):
+            start = pch.start_pairing()
+        parsed = pch.parse_invite(start["invite"])
+        self.assertTrue(parsed["ok"], parsed)
+        self.assertEqual(parsed["url"], "https://a.trycloudflare.com")
+        self.assertEqual(parsed["code"], start["code"])
+        self.assertEqual(parsed["name"], "Justin")
+        self.assertEqual(parsed["internal_url"], "http://sparrow-user1:8000")
+
+    def test_pasted_whitespace_survives(self) -> None:
+        """Chat clients wrap long lines; the paste must still decode."""
+        start = pch.start_pairing()
+        wrapped = start["invite"][:20] + "\n  " + start["invite"][20:]
+        self.assertTrue(pch.parse_invite(wrapped)["ok"])
+
+    def test_garbage_and_expired_invites_refused(self) -> None:
+        self.assertFalse(pch.parse_invite("http://192.0.2.9:8000")["ok"])
+        self.assertFalse(pch.parse_invite("sparrow://pair/not-base64!!")["ok"])
+        stale = pch.make_invite("123456", expires_at=1.0)
+        res = pch.parse_invite(stale)
+        self.assertFalse(res["ok"])
+        self.assertIn("expired", res["error"])
+
+    def test_join_invite_claims_the_same_code(self) -> None:
+        sent: list = []
+
+        def fake_post(url, payload, token=None):
+            sent.append((url, payload))
+            return {"ok": True, "name": "Justin", "token": "their-token-for-us",
+                    "internal_url": "http://sparrow-user1:8000"}
+
+        os.environ["QUILL_PEER_BASE_URL"] = "https://a.trycloudflare.com"
+        os.environ["QUILL_PEER_INTERNAL_URL"] = "http://sparrow-user1:8000"
+        invite = pch.start_pairing()["invite"]
+        os.environ["QUILL_PEER_BASE_URL"] = "https://b.trycloudflare.com"
+        os.environ["QUILL_PEER_INTERNAL_URL"] = "http://sparrow-user2:8000"
+        with mock.patch.object(pch, "_post_json", side_effect=fake_post):
+            res = pch.join_invite(invite)
+        self.assertTrue(res["ok"], res)
+        url, payload = sent[0]
+        self.assertEqual(url, "https://a.trycloudflare.com/peer/pair/claim")
+        self.assertEqual(payload["internal_url"], "http://sparrow-user2:8000")
+        rec = self._registry()[res["peer_id"]]
+        self.assertEqual(rec["base_url"], "https://a.trycloudflare.com")
+        self.assertEqual(rec["internal_url"], "http://sparrow-user1:8000")
+
+    def test_invite_is_still_single_use_and_expiring(self) -> None:
+        """The invite is packaging: the code inside obeys every pairing rule."""
+        start = pch.start_pairing()
+        parsed = pch.parse_invite(start["invite"])
+        first = pch.claim_pairing(parsed["code"], "Sarah",
+                                  "http://198.51.100.7:8000", "t" * 20)
+        self.assertTrue(first["ok"], first)
+        again = pch.claim_pairing(parsed["code"], "Sarah",
+                                  "http://198.51.100.7:8000", "t" * 20)
+        self.assertFalse(again["ok"])
+
+
+class InternalAddressTests(PeerChannelBase):
+    """A peer on our own box is reached over the private network first, so a
+    churning tunnel hostname cannot break an on-box pair."""
+
+    def _peer_with_internal(self, internal: str = "http://sparrow-user3:8000") -> str:
+        start = pch.start_pairing()
+        claim = pch.claim_pairing(start["code"], "Dave",
+                                  "https://c.trycloudflare.com", "t" * 20,
+                                  internal)
+        self.assertTrue(claim["ok"], claim)
+        return claim["peer_id"]
+
+    def test_private_address_is_tried_first(self) -> None:
+        peer_id = self._peer_with_internal()
+        rec = self._registry()[peer_id]
+        self.assertEqual(pch.peer_urls(rec),
+                         ["http://sparrow-user3:8000", "https://c.trycloudflare.com"])
+        tried: list = []
+
+        def fake_post(url, payload, token=None):
+            tried.append(url)
+            return {"ok": True}
+
+        with mock.patch.object(pch, "_post_json", side_effect=fake_post):
+            pch._post_peer(rec, "/peer/ping", {})
+        self.assertEqual(tried, ["http://sparrow-user3:8000/peer/ping"])
+
+    def test_unreachable_private_address_falls_back_to_public(self) -> None:
+        peer_id = self._peer_with_internal()
+        rec = self._registry()[peer_id]
+        tried: list = []
+
+        def fake_post(url, payload, token=None):
+            tried.append(url)
+            if url.startswith("http://sparrow-user3"):
+                raise OSError("no route to host")
+            return {"ok": True}
+
+        with mock.patch.object(pch, "_post_json", side_effect=fake_post):
+            res = pch._post_peer(rec, "/peer/ask", {})
+        self.assertTrue(res["ok"])
+        self.assertEqual(tried[-1], "https://c.trycloudflare.com/peer/ask")
+
+    def test_http_status_is_not_retried_elsewhere(self) -> None:
+        """A 401 means the peer ANSWERED — retrying the public URL would only
+        replay the same rejected token."""
+        import urllib.error
+        peer_id = self._peer_with_internal()
+        rec = self._registry()[peer_id]
+        tried: list = []
+
+        def fake_post(url, payload, token=None):
+            tried.append(url)
+            raise urllib.error.HTTPError(url, 401, "Unauthorized", {}, None)
+
+        with mock.patch.object(pch, "_post_json", side_effect=fake_post):
+            with self.assertRaises(urllib.error.HTTPError):
+                pch._post_peer(rec, "/peer/ask", {})
+        self.assertEqual(len(tried), 1)
+
+    def test_dead_private_address_is_parked_not_retried_every_call(self) -> None:
+        """An off-box peer can never reach our compose-network name; it should
+        pay for that once, not on every ask."""
+        peer_id = self._peer_with_internal()
+        rec = self._registry()[peer_id]
+        tried: list = []
+
+        def fake_post(url, payload, token=None):
+            tried.append(url)
+            if url.startswith("http://sparrow-user3"):
+                raise OSError("name or service not known")
+            return {"ok": True}
+
+        pch._addr_cooldown.clear()
+        try:
+            with mock.patch.object(pch, "_post_json", side_effect=fake_post):
+                pch._post_peer(rec, "/peer/ask", {})
+                pch._post_peer(rec, "/peer/ask", {})
+            self.assertEqual(tried.count("http://sparrow-user3:8000/peer/ask"), 1)
+            self.assertEqual(tried.count("https://c.trycloudflare.com/peer/ask"), 2)
+        finally:
+            pch._addr_cooldown.clear()
+
+    def test_a_working_private_address_stays_preferred(self) -> None:
+        peer_id = self._peer_with_internal()
+        rec = self._registry()[peer_id]
+        tried: list = []
+        pch._addr_cooldown.clear()
+        try:
+            with mock.patch.object(pch, "_post_json",
+                                   side_effect=lambda url, p, token=None:
+                                   (tried.append(url), {"ok": True})[1]):
+                pch._post_peer(rec, "/peer/ping", {})
+                pch._post_peer(rec, "/peer/ping", {})
+            self.assertEqual(tried, ["http://sparrow-user3:8000/peer/ping"] * 2)
+        finally:
+            pch._addr_cooldown.clear()
+
+    def test_require_tls_drops_a_plaintext_private_address(self) -> None:
+        os.environ["QUILL_PEER_REQUIRE_TLS"] = "1"
+        with mock.patch.object(
+                type(pch.settings.peer), "require_tls", property(lambda _: True)):
+            peer_id = self._peer_with_internal()
+            rec = self._registry()[peer_id]
+        self.assertEqual(rec["internal_url"], "")
+        self.assertEqual(pch.peer_urls(rec), ["https://c.trycloudflare.com"])
+
+    def test_ask_advertises_both_addresses(self) -> None:
+        os.environ["QUILL_PEER_BASE_URL"] = "https://b.trycloudflare.com"
+        os.environ["QUILL_PEER_INTERNAL_URL"] = "http://sparrow-user2:8000"
+        peer_id = self._peer_with_internal()
+        sent: list = []
+
+        def fake_post(url, payload, token=None):
+            sent.append(payload)
+            return {"ok": True, "status": "pending"}
+
+        with mock.patch.object(pch, "_post_json", side_effect=fake_post):
+            pch.ask(peer_id, "when is standup?")
+        self.assertEqual(sent[0]["base_url"], "https://b.trycloudflare.com")
+        self.assertEqual(sent[0]["internal_url"], "http://sparrow-user2:8000")
+
+    def test_inbound_ask_refreshes_a_changed_private_address(self) -> None:
+        peer_id = self._peer_with_internal()
+        peer = {"peer_id": peer_id, **self._registry()[peer_id]}
+        pch.handle_ask(peer, {"ask_id": "a1", "question": "hi?",
+                              "base_url": "https://c2.trycloudflare.com",
+                              "internal_url": "http://sparrow-user9:8000"})
+        rec = self._registry()[peer_id]
+        self.assertEqual(rec["base_url"], "https://c2.trycloudflare.com")
+        self.assertEqual(rec["internal_url"], "http://sparrow-user9:8000")
 
 
 if __name__ == "__main__":  # pragma: no cover

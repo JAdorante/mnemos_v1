@@ -436,7 +436,8 @@ def handle_ping(peer: dict, payload: dict | None = None) -> dict:
     if isinstance(payload, dict):
         peer_channel.refresh_peer_base_url(
             peer.get("peer_id") or "",
-            payload.get("base_url") or payload.get("callback_url"))
+            payload.get("base_url") or payload.get("callback_url"),
+            payload.get("internal_url"))
     # Their ping means they are reachable — try to deliver queued asks TO them.
     try:
         flush_mailbox(peer.get("peer_id"))
@@ -444,6 +445,7 @@ def handle_ping(peer: dict, payload: dict | None = None) -> dict:
         pass
     return {"ok": True, "name": peer_channel.instance_name(),
             "base_url": peer_channel.my_base_url(),
+            "internal_url": peer_channel.my_internal_url(),
             "ts": time.time()}
 
 
@@ -455,16 +457,18 @@ def ping_peer(peer_id: str) -> dict:
         return {"ok": False, "error": "unknown peer"}
     timeout = float(getattr(_peer_cfg(), "ping_timeout_s", 5) or 5)
     try:
-        res = peer_channel._post_json(
-            f"{rec['base_url']}/peer/ping",
-            {"base_url": peer_channel.my_base_url()},
-            token=rec.get("outbound_token"), timeout=timeout)
+        res = peer_channel._post_peer(
+            rec, "/peer/ping",
+            {"base_url": peer_channel.my_base_url(),
+             "internal_url": peer_channel.my_internal_url()},
+            timeout=timeout)
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
     if res.get("ok"):
         peer_channel._touch(peer_id, None)
-        # They may echo their current callback URL — keep ours fresh.
-        peer_channel.refresh_peer_base_url(peer_id, res.get("base_url"))
+        # They may echo their current addresses — keep ours fresh.
+        peer_channel.refresh_peer_base_url(peer_id, res.get("base_url"),
+                                           res.get("internal_url"))
         try:
             flush_mailbox(peer_id)
         except Exception:
