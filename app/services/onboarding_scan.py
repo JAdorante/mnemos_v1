@@ -24,6 +24,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 from pathlib import Path
 from urllib.parse import urlparse
@@ -69,6 +70,8 @@ _PROJECT_SKIP = frozenset({
     "build", "target", ".idea", ".vscode", "site-packages",
 })
 _MAX_PROJECTS = 30
+# What a project entry looks like in the reviewable wizard draft.
+_DRAFT_PROJECT_FIELDS = ("name", "kind", "aliases", "note")
 _MAX_CHILDREN_PER_ROOT = 300
 
 
@@ -187,6 +190,27 @@ def _run_git(args: list[str]) -> str:
         return ""
 
 
+def git_meta(directory, run=None) -> dict:
+    """{'remote','branch'} for a working copy, or {} — the identity signals a
+    project folder carries. Cheap: only called for dirs that hold a `.git`.
+
+    The remote is the durable one. Folder names get renamed and cloned twice;
+    `github.com/owner/repo` is assigned by an authority and never drifts, which
+    is what makes it bindable on first sight rather than after a week of
+    corroboration.
+    """
+    run = run or _run_git
+    d = str(directory)
+    out = {}
+    remote = run(["-C", d, "config", "--get", "remote.origin.url"])
+    if remote:
+        out["remote"] = remote.strip()[:400]
+    branch = run(["-C", d, "rev-parse", "--abbrev-ref", "HEAD"])
+    if branch and branch.strip() != "HEAD":
+        out["branch"] = branch.strip()[:200]
+    return out
+
+
 def git_identity(run=None) -> dict:
     """{'name','email'} from global git config, or {} — a strong, cheap read of
     who the developer is. `run` is injectable for tests."""
@@ -249,8 +273,17 @@ def dev_projects(roots: list[Path] | None = None) -> list[dict]:
                 if key in seen or not _is_project_dir(child):
                     continue
                 seen.add(key)
-                found.append({"name": nm, "kind": "project", "aliases": [],
-                              "note": ""})
+                entry = {"name": nm, "kind": "project", "aliases": [],
+                         "note": "", "path": str(child)}
+                # Binding metadata for the CAL seeder. The wizard draft strips
+                # these back out (see `scan`) so the posted profile shape is
+                # unchanged; they exist for `seed_bindings`.
+                try:
+                    if (child / ".git").exists():
+                        entry.update(git_meta(child))
+                except Exception:
+                    pass
+                found.append(entry)
                 if len(found) >= _MAX_PROJECTS:
                     return found
         except Exception:
@@ -289,16 +322,35 @@ _BOOKMARK_TOOLS: dict[str, str] = {
 _MAX_BOOKMARK_URLS = 8000
 
 
+def _browser_user_data_dirs() -> list[Path]:
+    """Chromium-family user-data roots for this OS.
+
+    Windows keeps these under LOCALAPPDATA, macOS under Application Support,
+    Linux under ~/.config — and every tester on a Mac is a tester whose
+    bookmarks (and the tool bindings seeded from them) are invisible if only
+    the Windows layout is checked.
+    """
+    home = Path.home()
+    la = os.environ.get("LOCALAPPDATA", "")
+    if os.name == "nt" or la:
+        base = Path(la) if la else home / "AppData" / "Local"
+        return [base / "Google" / "Chrome" / "User Data",
+                base / "Microsoft" / "Edge" / "User Data",
+                base / "BraveSoftware" / "Brave-Browser" / "User Data",
+                base / "Chromium" / "User Data"]
+    if sys.platform == "darwin":
+        sup = home / "Library" / "Application Support"
+        return [sup / "Google" / "Chrome", sup / "Microsoft Edge",
+                sup / "BraveSoftware" / "Brave-Browser", sup / "Chromium",
+                sup / "Arc" / "User Data"]
+    cfg = Path(os.environ.get("XDG_CONFIG_HOME") or (home / ".config"))
+    return [cfg / "google-chrome", cfg / "chromium", cfg / "microsoft-edge",
+            cfg / "BraveSoftware" / "Brave-Browser", cfg / "vivaldi"]
+
+
 def _bookmark_files() -> list[Path]:
     """Chromium-family Bookmarks JSON files across installed browsers/profiles."""
-    la = os.environ.get("LOCALAPPDATA", "")
-    if not la:
-        return []
-    bases = [
-        Path(la) / "Google" / "Chrome" / "User Data",
-        Path(la) / "Microsoft" / "Edge" / "User Data",
-        Path(la) / "BraveSoftware" / "Brave-Browser" / "User Data",
-    ]
+    bases = _browser_user_data_dirs()
     files: list[Path] = []
     for base in bases:
         try:
@@ -411,7 +463,11 @@ def scan(sources=None) -> dict:
 
     if "projects" in allowed:
         ran.append("projects")
-        projs = dev_projects()
+        # The wizard posts this draft straight back to /onboarding/ingest, so it
+        # gets exactly the fields it had before CAL — path/remote/branch are
+        # seeding inputs, not things to ask a human to review.
+        projs = [{k: v for k, v in p.items() if k in _DRAFT_PROJECT_FIELDS}
+                 for p in dev_projects()]
         if projs:
             profile["projects"] = projs
             found["projects"] = len(projs)
@@ -556,10 +612,204 @@ def enrich(sources=None, store=None) -> dict:
                   "identity")
             counts["identity"] += 1
 
+    # --- CAL Stage 0: seed the binding table ---------------------------------
+    # Enrichment above teaches the graph WHAT exists. This teaches it which
+    # observable identifiers MEAN those things, which is the difference between
+    # a new tester's first day costing a model call per event and costing none.
+    bindings = seed_bindings(sources=allowed, store=store, ts=now)
+
     if new_keys:
         state["item_keys"] = sorted(seen)
         state["last_run"] = now
         _save_scan_state(state)
     added = counts["projects"] + counts["tools"] + counts["identity"]
     print(f"[onboarding_scan] enrich: {counts}")
-    return {"ok": True, "added": added, **counts}
+    return {"ok": True, "added": added, **counts,
+            "bindings": bindings.get("bindings", 0),
+            "bindings_minted": bindings.get("minted", 0)}
+
+
+# --- CAL Stage 0: seed kg_node_keys before the first event ------------------
+# Failure mode #10 in the CAL design is cold start: on day one nothing is bound,
+# so every event is ambiguous, every event escalates, and the tester's first
+# impression is a slow, expensive, wrong system. The fix is not smarter
+# inference — it's noticing that the machine already knows the answers. A git
+# remote, a project root, a bookmarked SaaS domain and the user's own mail
+# address are all sitting on disk, free to read, and each one is worth
+# thousands of events that now never reach a model.
+#
+# Only STRONG and MEDIUM keys are seeded. A supporting-tier key (a generic
+# domain, `main`, `~/Downloads`, a browser bundle id) may reweight candidates
+# but must never propose one, so writing it as a binding would be a category
+# error — see CAL §3.2.
+_SEED_KEY_TYPES = ("repo", "path", "branch", "domain", "email")
+
+
+def _tool_domains() -> dict[str, list[str]]:
+    """Tool name -> the domains that identify it, inverted from the curated map."""
+    out: dict[str, list[str]] = {}
+    for host, tool in _BOOKMARK_TOOLS.items():
+        out.setdefault(tool, []).append(host)
+    return out
+
+
+def seed_bindings(sources=None, store=None, ts: float | None = None) -> dict:
+    """Mint context-key bindings from what this machine already reveals.
+
+    Idempotent: a re-run is another OBSERVATION of the same keys, which is
+    exactly how a convention-class key (a project path) earns the right to bind
+    — repeated sightings across distinct days. Identity-class keys (git remotes,
+    mail addresses) bind on the first run.
+
+    Returns per-type counts; never raises.
+    """
+    from app.services.context import keys as ckeys
+    from app.storage import get_store
+
+    store = store or get_store()
+    allowed = set(sources) if sources is not None else set(
+        settings.onboarding.scan_sources)
+    if not settings.onboarding.scan_enabled:
+        # The flag disables reading the MACHINE. Projecting contact points the
+        # graph already holds is not a scan and stays on — turning it off would
+        # withhold nothing the user hasn't already given us.
+        allowed = set()
+    now = float(ts if ts is not None else time.time())
+    by_type: dict[str, int] = {}
+    minted = 0
+    nodes = 0
+
+    def bind(node_type: str, node_id: int, sk, *, origin: str = "derived",
+             key_class: str | None = None) -> None:
+        nonlocal minted
+        if sk is None or not node_id or sk.tier == ckeys.SUPPORTING:
+            return
+        try:
+            fresh_key = store.bind_node_key(
+                node_type, int(node_id), sk.key_type, sk.key_value,
+                strength=sk.strength,
+                key_class=key_class or sk.key_class,
+                origin=origin, ts=now)
+        except Exception as exc:
+            print(f"[onboarding_scan] bind skipped {sk.key} ({exc}).")
+            return
+        by_type[sk.key_type] = by_type.get(sk.key_type, 0) + 1
+        minted += 1 if fresh_key else 0
+
+    # --- projects: remote, root path, current branch -------------------------
+    if "projects" in allowed:
+        for proj in dev_projects():
+            name = (proj.get("name") or "").strip()
+            if not name:
+                continue
+            try:
+                eid = store.resolve_entity(name, "project", ts=now)
+            except Exception as exc:
+                print(f"[onboarding_scan] entity skipped {name!r} ({exc}).")
+                continue
+            if not eid:
+                continue
+            nodes += 1
+            repo = ckeys.remote(proj.get("remote") or "")
+            bind("entity", eid, repo)
+            # A repo ROOT path is an identity key by composition (CAL §3.2):
+            # it is the mount point of something globally unique. A project
+            # folder with only a build marker is a habit, so it stays
+            # convention-class and has to prove itself across days.
+            bind("entity", eid, ckeys.path(proj.get("path") or ""),
+                 key_class=ckeys.IDENTITY if repo else ckeys.CONVENTION)
+            if repo:
+                bind("entity", eid, ckeys.branch(repo, proj.get("branch") or ""))
+
+    # --- tools: the domains that identify them -------------------------------
+    if "bookmarks" in allowed:
+        domains = _tool_domains()
+        for tool in bookmark_tools():
+            try:
+                eid = store.resolve_entity(tool, "tool", ts=now)
+            except Exception as exc:
+                print(f"[onboarding_scan] entity skipped {tool!r} ({exc}).")
+                continue
+            if not eid:
+                continue
+            nodes += 1
+            for host in domains.get(tool, []):
+                bind("entity", eid, ckeys.domain(host))
+
+    # --- the user's own mail address -----------------------------------------
+    # Bound only when onboarding has already established who the user is. This
+    # module's contract is that it never mints a person from an inferred
+    # signal, and "whoever configured git on this box" is inferred.
+    if "git" in allowed:
+        addr = ckeys.email(git_identity().get("email") or "")
+        if addr is not None:
+            try:
+                from app.services.self_profile import self_person_id
+                pid = self_person_id(store)
+            except Exception as exc:
+                print(f"[onboarding_scan] self node unavailable ({exc}).")
+                pid = None
+            if pid:
+                nodes += 1
+                bind("person", pid, addr)
+
+    # --- people already in the graph, made addressable ------------------------
+    # Not a machine scan and not behind `sources`: these addresses were ingested
+    # under their own consent long before this ran. All this does is make them
+    # resolvable in one indexed read instead of a fuzzy name match — which is
+    # precisely what lets an email at 11:03 land on the same person who spoke in
+    # Slack at 10:02 without a model being asked who they are.
+    nodes += _seed_contact_points(store, bind)
+
+    total = sum(by_type.values())
+    print(f"[onboarding_scan] seed_bindings: {total} keys "
+          f"({minted} new) over {nodes} nodes {by_type}")
+    return {"ok": True, "bindings": total, "minted": minted,
+            "nodes": nodes, "by_type": by_type}
+
+
+# A contact point carries two different uncertainties: an email address is an
+# identity by construction, but "this address belongs to this person" is an
+# attribution that may be weak. The key class reflects the former; the strength
+# is capped by the latter.
+_CONTACT_MIN_CONFIDENCE = 0.5
+
+
+def _seed_contact_points(store, bind) -> int:
+    """Bind `email:` keys for people the graph already knows. Returns node count."""
+    from app.services.context import keys as ckeys
+
+    try:
+        people = store.all_people()
+    except Exception as exc:
+        print(f"[onboarding_scan] contact seeding skipped ({exc}).")
+        return 0
+    seeded = 0
+    for person in people:
+        pid = person.get("id")
+        if not pid or person.get("hide_from_people"):
+            continue
+        # An absorbed row is not a person any more — bind to the survivor, or
+        # the same address would resolve to a node nothing else points at.
+        pid = int(person.get("canonical_person_id") or pid)
+        try:
+            points = store.list_contact_points(int(person["id"]), type_="email")
+        except Exception:
+            continue
+        bound = False
+        for cp in points:
+            conf = float(cp.get("confidence") or 0.0)
+            if conf < _CONTACT_MIN_CONFIDENCE:
+                continue
+            sk = ckeys.email(cp.get("value_normalized")
+                             or cp.get("value_display") or "")
+            if sk is None:
+                continue
+            verified = (cp.get("verification_status") or "") == "verified"
+            bind("person", pid,
+                 ckeys.SignalKey(sk.key_type, sk.key_value, sk.key_class,
+                                 sk.tier, min(sk.strength, conf), sk.scope),
+                 origin="asserted" if verified else "derived")
+            bound = True
+        seeded += 1 if bound else 0
+    return seeded

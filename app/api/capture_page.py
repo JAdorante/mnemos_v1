@@ -563,11 +563,23 @@ const scr = {
     const v = document.createElement('video');
     v.muted = true; v.srcObject = stream; await v.play();
     this.video = v; this.on = true; this.sent = 0; this.kept = 0;
-    this.label = (track.label || 'shared screen').slice(0, 160);
+    this.track = track;
     this.timer = setInterval(() => this.snap().catch(()=>{}), SCREEN_SEND_S * 1000);
     this.snap().catch(()=>{});
     this.paint('sharing');
     updateUnloadGuard();
+  },
+  /* Read the share label EVERY frame, not once at start.
+     `surfaceSwitching: 'include'` above lets the user change what they are
+     sharing mid-session without restarting, so a label captured at start()
+     goes stale silently and every later frame is filed under the wrong
+     surface. `displaySurface` travels with it because a monitor's label is a
+     DISPLAY name ("Primary Monitor"), not a window title — the server needs
+     to know which it is rather than guess. */
+  shareNow() {
+    const t = this.track, s = (t && t.getSettings) ? t.getSettings() : {};
+    return {label: ((t && t.label) || 'shared screen').slice(0, 160),
+            surface: s.displaySurface || ''};
   },
   async snap() {
     if (!this.on || !this.video || this.video.videoWidth === 0) return;
@@ -578,7 +590,11 @@ const scr = {
     c.getContext('2d').drawImage(this.video, 0, 0, w, h);
     const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.75));
     if (!blob) return;
-    const q = '?ts=' + (Date.now() / 1000) + '&title=' + encodeURIComponent(this.label);
+    const now = this.shareNow();
+    this.label = now.label;
+    const q = '?ts=' + (Date.now() / 1000)
+      + '&title=' + encodeURIComponent(now.label)
+      + '&surface=' + encodeURIComponent(now.surface);
     const r = await fetch('/ingest/frame' + q, {method: 'POST', body: blob});
     if (r.status === 403) { this.stop(); alert('Screen consent was revoked.'); return; }
     const res = await r.json().catch(() => ({}));

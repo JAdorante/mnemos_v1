@@ -20,6 +20,7 @@ executes. No LLM, no threads, no I/O.
 """
 from __future__ import annotations
 
+import hashlib
 import re
 
 # ------------------------------ regex families ------------------------------
@@ -209,7 +210,20 @@ def _trusted_url(url: str | None) -> tuple[str, list[str]] | None:
         path = rest.split("/", 1)[1] if "/" in rest else ""
         segs = [x for x in path.split("/") if x]
         keep = 2 if host in _REPO_HOSTS else 1
-        return host, segs[:keep]
+        # CAL: the RESOURCE digest. The registrable domain is too coarse to
+        # identify SaaS work — `drive.google.com` names no document and
+        # `claude.ai` names no conversation, while
+        # `drive.google.com/document/d/1AbC…` is globally unique and assigned
+        # by an external authority, which is the definition of an identity key.
+        # Storing that path would reopen what QUILL_PERCEPTION_URL_FULL closes,
+        # so we keep the IDENTITY and discard the CONTENT: a digest binds on
+        # first sight and reads back as nothing. Computed here, where the full
+        # URL is still in hand and the truncation decision already lives.
+        res = ""
+        if len(segs) > keep:
+            res = hashlib.sha256(
+                ("/".join([host, *segs])).encode("utf-8")).hexdigest()[:16]
+        return host, segs[:keep], res
     except Exception:
         return None
 
@@ -257,12 +271,15 @@ def extract_identifiers(text: str, *, window: str = "",
     trusted = _trusted_url(browser_url)
     trusted_host = trusted[0] if trusted else None
     if trusted:
-        host, segs = trusted
+        host, segs, res = trusted
         value = "https://" + host + ("/" + "/".join(segs) if segs else "")
         norm = f"{host}/{segs[0]}" if segs else host
         if _on("urls"):
-            _seen_add(out, seen, {"kind": "url", "value": value, "norm": norm,
-                                  "src": "browser_url"}, cap)
+            row = {"kind": "url", "value": value, "norm": norm,
+                   "src": "browser_url"}
+            if res:
+                row["res"] = res       # opaque resource identity — see _trusted_url
+            _seen_add(out, seen, row, cap)
         if _on("repos") and host in _REPO_HOSTS and len(segs) >= 2:
             repo_name = re.sub(r"\.git$", "", segs[1])
             _seen_add(out, seen, {"kind": "repo",
@@ -347,10 +364,16 @@ def extract_identifiers(text: str, *, window: str = "",
                 if re.search(r"\.\w{1,4}$", owner):
                     continue
             # No host on a bare slug, so the host-collision rule above
-            # cannot reach these by construction.
+            # cannot reach these by construction. `src` distinguishes it from
+            # the host-anchored emission above: there the repo host is sitting
+            # right next to the slug, here there is only a slash in prose, and
+            # the guards above are heuristics rather than proof. Consumers that
+            # grade evidence (CAL's binding grammar) need to tell the two
+            # apart — a real pitch document on this corpus reached here as
+            # VC/PE, ASR/VLM and payload_hash/expires_at.
             if not _seen_add(out, seen, {"kind": "repo",
                                          "value": f"{owner}/{name}",
-                                         "norm": name, "src": "ocr"}, cap):
+                                         "norm": name, "src": "ocr_slug"}, cap):
                 break
 
     if _on("paths"):
@@ -462,6 +485,8 @@ def stamp_event(ev) -> None:
         meta = ev.meta if isinstance(getattr(ev, "meta", None), dict) else None
         if meta is None:
             return
+        if "identifiers" in meta:
+            return          # already stamped by the producer — idempotent
         window = str(meta.get("window") or "")
         raw = getattr(ev, "raw", "") or ""
         if not raw and not window:

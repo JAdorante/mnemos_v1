@@ -131,6 +131,14 @@ def erase_event(event_id: int, *, store=None, vectors=None,
     out = store.erase_event(int(event_id))
     if not out.get("ok"):
         return out
+    # store.erase_event is authoritative; MemoryEngine._events is a separate
+    # in-memory mirror that all()/timeline read. Resync so erased rows cannot
+    # ghost until process restart.
+    try:
+        with memory._lock:
+            memory._events = store.all()
+    except Exception as exc:
+        out["memory_sync"] = {"error": str(exc)}
     if drop_vectors:
         if vectors is None:
             try:
@@ -271,6 +279,17 @@ class MemoryEngine:
             _ms.stamp_event(event)
         except Exception:
             pass
+        # Hard anchors for EVERY modality, not just the two producers that
+        # remembered to ask. Clicks carry a window title and a url_domain and
+        # were never stamped, so 59% of the stream reached the graph with no
+        # identifier — and any coverage number measured over it was
+        # uninterpretable. Idempotent: a producer that stamps its own event
+        # (desktop.screen, l1_capture) is left alone.
+        try:
+            from app.perception import identifiers as _idents
+            _idents.stamp_event(event)
+        except Exception as exc:
+            print(f"[memory] identifier stamp skipped ({exc}).")
         store = self._ensure_store()
         eid = store.insert(event)
         with self._lock:

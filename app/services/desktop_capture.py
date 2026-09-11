@@ -397,8 +397,37 @@ class DesktopCapturePipeline:
         self._sink(ev)
 
     # --------------------------- web frames ------------------------------
+    @staticmethod
+    def _web_share_win(title: str, surface: str) -> dict:
+        """What a browser share can honestly claim about the window.
+
+        `displaySurface` is `browser` (a tab), `window` (one app window) or
+        `monitor` (a whole display). Only the first two carry a TITLE; a
+        monitor's label is the display's name, and on the hosted pilot that
+        meant every frame of a six-hour day arrived as the same two words,
+        "Primary Monitor" — 145 identical "window titles" that looked like
+        signal to everything downstream and were a constant. It is recorded as
+        the display it is, and `window` is left empty, because an honest blank
+        is worth more than a field that is always the same lie.
+        """
+        label = str(title or "").strip()
+        surf = str(surface or "").strip().lower()
+        win = {"surface": "web_share", "display_surface": surf or "unknown"}
+        if not label:
+            return win
+        # Demote only on POSITIVE knowledge. Firefox has historically not
+        # exposed `displaySurface`, and an older cached capture page sends no
+        # surface at all — treating silence as "monitor" would throw away real
+        # titles from clients that simply cannot tell us.
+        if surf == "monitor":
+            win["display_label"] = label
+        else:
+            win["window"] = label
+        return win
+
     def feed_web_frame(self, rgb: np.ndarray, ts: float,
-                       title: str = "", wait: bool = False) -> dict:
+                       title: str = "", wait: bool = False,
+                       surface: str = "") -> dict:
         """One browser-shared frame (Web Perceive): the same ladder as the
         local screen loop — quality score, motion/interval gate, privacy
         gate, VLM, ingest filters — with the share picker's label standing
@@ -425,8 +454,7 @@ class DesktopCapturePipeline:
             try:
                 self._analyze_screen(
                     rgb, motion, ts, fq,
-                    win={"window": str(title or "shared screen"),
-                         "surface": "web_share"})
+                    win=self._web_share_win(title, surface))
             finally:
                 self._web_frame_busy.release()
 

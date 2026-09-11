@@ -47,6 +47,52 @@ class FeedWebFrameTests(unittest.TestCase):
         self.assertEqual(calls[0]["window"], "Meet — weekly")
         self.assertEqual(calls[0]["surface"], "web_share")
 
+    def test_a_monitor_label_is_not_a_window_title(self):
+        """A whole-screen share's label is the DISPLAY's name. On the hosted
+        pilot that meant every frame of a six-hour day arrived as the same two
+        words — 145 identical "window titles" that looked like signal to
+        everything downstream and were a constant."""
+        p = self._pipeline()
+        calls = []
+        with patch.object(
+                p, "_analyze_screen",
+                side_effect=lambda rgb, motion, ts, fq, win=None:
+                    calls.append(win)), \
+             patch.object(p.cfg.__class__, "min_interval_s", 0.0):
+            p.feed_web_frame(_rgb(200), ts=1.0, title="Primary Monitor",
+                             wait=True, surface="monitor")
+        self.assertNotIn("window", calls[0])
+        self.assertEqual(calls[0]["display_label"], "Primary Monitor")
+        self.assertEqual(calls[0]["display_surface"], "monitor")
+
+    def test_tab_and_window_shares_keep_their_title(self):
+        p = self._pipeline()
+        for surf in ("browser", "window"):
+            p = self._pipeline()
+            calls = []
+            with patch.object(
+                    p, "_analyze_screen",
+                    side_effect=lambda rgb, motion, ts, fq, win=None:
+                        calls.append(win)), \
+                 patch.object(p.cfg.__class__, "min_interval_s", 0.0):
+                p.feed_web_frame(_rgb(200), ts=1.0, title="Quarterly plan",
+                                 wait=True, surface=surf)
+            self.assertEqual(calls[0]["window"], "Quarterly plan", surf)
+
+    def test_an_unreported_surface_keeps_the_title(self):
+        """Firefox has not historically exposed displaySurface, and an older
+        cached capture page sends none — silence must not cost a real title."""
+        p = self._pipeline()
+        calls = []
+        with patch.object(
+                p, "_analyze_screen",
+                side_effect=lambda rgb, motion, ts, fq, win=None:
+                    calls.append(win)), \
+             patch.object(p.cfg.__class__, "min_interval_s", 0.0):
+            p.feed_web_frame(_rgb(200), ts=1.0, title="Docs tab", wait=True)
+        self.assertEqual(calls[0]["window"], "Docs tab")
+        self.assertEqual(calls[0]["display_surface"], "unknown")
+
     def test_unchanged_frame_is_dropped(self):
         p = self._pipeline()
         with patch.object(p, "_analyze_screen"), \
@@ -95,19 +141,21 @@ class IngestFrameEndpointTests(unittest.TestCase):
         from app.api import routes as routes_mod
         seen = {}
 
-        def fake_feed(rgb, ts, title):
-            seen.update(shape=rgb.shape, ts=ts, title=title)
+        def fake_feed(rgb, ts, title, wait=False, surface=""):
+            seen.update(shape=rgb.shape, ts=ts, title=title, surface=surface)
             return {"accepted": True, "motion": 255.0}
 
         with patch("app.services.capture_consent.allows", return_value=True), \
              patch.object(routes_mod._desktop_capture, "feed_web_frame",
                           side_effect=fake_feed):
             r = self.client.post(
-                "/ingest/frame?ts=42.5&title=Docs%20tab", content=_jpeg())
+                "/ingest/frame?ts=42.5&title=Docs%20tab&surface=browser",
+                content=_jpeg())
         self.assertEqual(r.status_code, 200)
         self.assertTrue(r.json()["accepted"])
         self.assertEqual(seen["ts"], 42.5)
         self.assertEqual(seen["title"], "Docs tab")
+        self.assertEqual(seen["surface"], "browser")
         self.assertEqual(seen["shape"], (48, 64, 3))
 
 

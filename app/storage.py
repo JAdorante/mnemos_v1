@@ -1082,8 +1082,21 @@ class Store:
                     node_type  TEXT NOT NULL,   -- person | entity
                     node_id    INTEGER NOT NULL,
                     key_type   TEXT NOT NULL,   -- norm_name | phonetic | domain | alias_norm
+                                                -- CAL adds: repo | path | file | branch |
+                                                -- email | thread | channel | calendar_uid |
+                                                -- issue | bundle
                     key_value  TEXT NOT NULL,
                     created_at REAL NOT NULL,
+                    -- CAL Stage 0 (see _migrate for the backfill on older DBs)
+                    strength   REAL    NOT NULL DEFAULT 0.5,
+                    key_class  TEXT    NOT NULL DEFAULT 'convention',
+                    origin     TEXT    NOT NULL DEFAULT 'derived',
+                    n_obs      INTEGER NOT NULL DEFAULT 1,
+                    seen_days  TEXT,
+                    last_seen  REAL,
+                    spread     REAL,
+                    confirmed  INTEGER NOT NULL DEFAULT 0,
+                    valid_to   REAL,
                     PRIMARY KEY (node_type, key_type, key_value, node_id)
                 )
                 """
@@ -1091,6 +1104,10 @@ class Store:
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_node_keys_lookup "
                 "ON kg_node_keys(node_type, key_type, key_value)")
+            # The partial binding index is created in _migrate, NOT here: on a
+            # pre-CAL database this table already exists without `valid_to`, and
+            # a partial index over a column that is one ALTER away would fail
+            # the open for every existing install.
 
             # KG v2 Change 2: temporal node attributes. valid_from IS NULL
             # means atemporal ("always/unknown"). SQLite permits NULLs inside
@@ -1517,6 +1534,106 @@ class Store:
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_kg_pred_stale "
                 "ON kg_predicates(posterior_stale)")
+            self._conn.commit()
+
+            # CAL Stage 2: frames and episodes. A frame is what the user is
+            # working ON; an episode is the stretch of stream it explains.
+            # `run_id` is replay provenance — the segmenter is a pure function
+            # over an ordered stream, so the same day can be re-segmented under
+            # different tuning and the results compared side by side instead of
+            # clobbering each other.
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS context_frames (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id        TEXT,
+                    seg_id        INTEGER NOT NULL,   -- id within its run
+                    node_type     TEXT,               -- NULL = honestly unbound
+                    node_id       TEXT,
+                    name          TEXT,
+                    started_at    REAL NOT NULL,
+                    ended_at      REAL,
+                    state         TEXT NOT NULL DEFAULT 'closed',
+                    parent_seg_id INTEGER,
+                    coherence     REAL,
+                    n_events      INTEGER NOT NULL DEFAULT 0,
+                    switch_reason TEXT,
+                    apps_json     TEXT,
+                    created_at    REAL NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_frames_span "
+                "ON context_frames(run_id, started_at)")
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS episodes (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id        TEXT,
+                    frame_seg_id  INTEGER,
+                    node_type     TEXT,
+                    node_id       TEXT,
+                    title         TEXT,
+                    kind          TEXT,
+                    started_at    REAL NOT NULL,
+                    ended_at      REAL,
+                    state         TEXT NOT NULL DEFAULT 'open',
+                    n_events      INTEGER NOT NULL DEFAULT 0,
+                    n_inherited   INTEGER NOT NULL DEFAULT 0,
+                    coherence     REAL,
+                    apps_json     TEXT,
+                    summary       TEXT,
+                    summary_model TEXT,
+                    summarized_at REAL,
+                    created_at    REAL NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_episodes_span "
+                "ON episodes(run_id, started_at)")
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS episode_events (
+                    episode_id INTEGER NOT NULL,
+                    event_id   INTEGER NOT NULL,
+                    inherited  INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (episode_id, event_id)
+                )
+                """
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_epev_event "
+                "ON episode_events(event_id)")
+            self._conn.commit()
+
+            # CAL Stage 0: kg_node_keys becomes a BINDING table, not just a
+            # blocking-key table. The pre-CAL columns say "this name might mean
+            # this node"; these say how much that is worth, where it came from,
+            # how often it has been seen, and whether it still holds. Existing
+            # blocking rows keep the defaults, which is exactly right for them:
+            # convention-class, medium strength, ambiguity expected.
+            nkcols = {r["name"] for r in self._conn.execute(
+                "PRAGMA table_info(kg_node_keys)").fetchall()}
+            for col, decl in (
+                ("strength",  "REAL NOT NULL DEFAULT 0.5"),
+                ("key_class", "TEXT NOT NULL DEFAULT 'convention'"),
+                ("origin",    "TEXT NOT NULL DEFAULT 'derived'"),
+                ("n_obs",     "INTEGER NOT NULL DEFAULT 1"),
+                ("seen_days", "TEXT"),
+                ("last_seen", "REAL"),
+                ("spread",    "REAL"),
+                ("confirmed", "INTEGER NOT NULL DEFAULT 0"),
+                ("valid_to",  "REAL"),
+            ):
+                if nkcols and col not in nkcols:
+                    self._conn.execute(
+                        f"ALTER TABLE kg_node_keys ADD COLUMN {col} {decl}")
+                    self._conn.commit()
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_nodekeys_binding "
+                "ON kg_node_keys(key_type, key_value) WHERE valid_to IS NULL")
             self._conn.commit()
 
             # Soft-hide for ambient/news orgs & tools (KG ambient cleanup).
@@ -5444,15 +5561,273 @@ class Store:
         return [dict(r) for r in rows]
 
     def copy_node_keys(self, node_type: str, from_id: int, to_id: int) -> None:
-        """Merge support: winner inherits the loser's keys; loser keeps its own."""
+        """Merge support: winner inherits the loser's keys; loser keeps its own.
+
+        The binding columns travel with the key. Copying only the name/value
+        pair would silently downgrade an inherited `repo:` binding from 0.95 to
+        the 0.5 default, and the winner would start re-escalating events the
+        loser had already paid to resolve.
+        """
         with self._lock:
             self._conn.execute(
                 "INSERT OR IGNORE INTO kg_node_keys "
-                "(node_type, node_id, key_type, key_value, created_at) "
-                "SELECT node_type, ?, key_type, key_value, created_at "
+                "(node_type, node_id, key_type, key_value, created_at, "
+                " strength, key_class, origin, n_obs, seen_days, last_seen, "
+                " spread, confirmed, valid_to) "
+                "SELECT node_type, ?, key_type, key_value, created_at, "
+                "       strength, key_class, origin, n_obs, seen_days, "
+                "       last_seen, spread, confirmed, valid_to "
                 "FROM kg_node_keys WHERE node_type=? AND node_id=?",
                 (int(to_id), node_type, int(from_id)))
             self._conn.commit()
+
+    # --- CAL Stage 0: kg_node_keys as a BINDING table ----------------------
+    # A binding answers "what does this identifier mean?" in one indexed read,
+    # which is the whole economic thesis of the association layer: cost scales
+    # with the number of NOVEL identifiers, not the number of events.
+    _ORIGIN_RANK = {"inferred": 0, "derived": 1, "asserted": 2}
+    _SEEN_DAYS_CAP = 64          # enough to prove habit; not an audit log
+    MIN_OBS_TO_BIND = 3          # convention-class only (CAL §3.1)
+    MIN_DAYS_TO_BIND = 2
+
+    def bind_node_key(self, node_type: str, node_id: int, key_type: str,
+                      key_value: str, *, strength: float = 0.5,
+                      key_class: str = "convention", origin: str = "derived",
+                      confirmed: bool = False, ts: float | None = None) -> bool:
+        """Record one observation of `key -> node`. Returns True if newly minted.
+
+        Idempotent and monotone: re-observing a key bumps `n_obs`, adds today to
+        `seen_days`, and keeps the STRONGEST claim seen so far (a user
+        confirmation must never be undone by a later weak sighting). Observing
+        an invalidated key revives it — the repo came back, the person returned.
+        """
+        import time as _time
+        key_value = (key_value or "").strip()
+        if not key_value or not key_type:
+            return False
+        now = float(ts if ts is not None else _time.time())
+        day = _time.strftime("%Y-%m-%d", _time.localtime(now))
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT strength, key_class, origin, n_obs, seen_days, "
+                "       last_seen, confirmed FROM kg_node_keys "
+                "WHERE node_type=? AND node_id=? AND key_type=? AND key_value=?",
+                (node_type, int(node_id), key_type, key_value)).fetchone()
+            if row is None:
+                self._conn.execute(
+                    "INSERT INTO kg_node_keys (node_type, node_id, key_type, "
+                    " key_value, created_at, strength, key_class, origin, "
+                    " n_obs, seen_days, last_seen, confirmed) "
+                    "VALUES (?,?,?,?,?,?,?,?,1,?,?,?)",
+                    (node_type, int(node_id), key_type, key_value, now,
+                     float(strength), key_class, origin,
+                     json.dumps([day]), now, 1 if confirmed else 0))
+                self._conn.commit()
+                return True
+            try:
+                days = list(json.loads(row["seen_days"] or "[]"))
+            except (TypeError, ValueError):
+                days = []
+            if day not in days:
+                days = sorted({*days, day})[-self._SEEN_DAYS_CAP:]
+            prev_origin = row["origin"] or "derived"
+            best_origin = max((origin, prev_origin),
+                              key=lambda o: self._ORIGIN_RANK.get(o, 1))
+            self._conn.execute(
+                "UPDATE kg_node_keys SET n_obs = n_obs + 1, seen_days = ?, "
+                " last_seen = ?, strength = ?, key_class = ?, origin = ?, "
+                " confirmed = ?, valid_to = NULL "
+                "WHERE node_type=? AND node_id=? AND key_type=? AND key_value=?",
+                (json.dumps(days), max(now, row["last_seen"] or 0.0),
+                 max(float(strength), float(row["strength"] or 0.0)),
+                 "identity" if "identity" in (key_class, row["key_class"])
+                 else (row["key_class"] or "convention"),
+                 best_origin,
+                 1 if (confirmed or row["confirmed"]) else 0,
+                 node_type, int(node_id), key_type, key_value))
+            self._conn.commit()
+        return False
+
+    @classmethod
+    def _bindable(cls, row) -> bool:
+        """Whether a key has earned the right to resolve an event on its own.
+
+        Identity-class keys bind on first sight — a git remote is assigned by an
+        authority, so there is nothing to disambiguate, only something to learn.
+        Convention-class keys are user habits and have to prove themselves
+        across distinct days, the same discipline `entity_aliases.seen_days`
+        already applies to names.
+        """
+        if row["confirmed"] or (row["key_class"] or "") == "identity":
+            return True
+        try:
+            days = len(set(json.loads(row["seen_days"] or "[]")))
+        except (TypeError, ValueError):
+            days = 0
+        return (int(row["n_obs"] or 0) >= cls.MIN_OBS_TO_BIND
+                and days >= cls.MIN_DAYS_TO_BIND)
+
+    def lookup_binding(self, key_type: str, key_value: str, *,
+                       node_type: str | None = None,
+                       bindable_only: bool = False) -> list[dict]:
+        """What one identifier means. Strongest first; ambiguity is expected.
+
+        Returning a list rather than a node is deliberate — a key that maps to
+        several nodes is the resolver's input, not an error.
+        """
+        sql = ("SELECT node_type, node_id, key_type, key_value, strength, "
+               "       key_class, origin, n_obs, seen_days, last_seen, spread, "
+               "       confirmed, created_at FROM kg_node_keys "
+               "WHERE key_type=? AND key_value=? AND valid_to IS NULL")
+        args: list = [key_type, (key_value or "").strip()]
+        if node_type:
+            sql += " AND node_type=?"
+            args.append(node_type)
+        sql += " ORDER BY strength DESC, n_obs DESC"
+        with self._lock:
+            rows = self._conn.execute(sql, args).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["bindable"] = self._bindable(r)
+            if bindable_only and not d["bindable"]:
+                continue
+            out.append(d)
+        return out
+
+    def invalidate_node_key(self, node_type: str, node_id: int, key_type: str,
+                            key_value: str, *, ts: float | None = None) -> int:
+        """Close a binding (repo renamed, person left, path deleted).
+
+        Sets `valid_to` rather than deleting: the events it already explained
+        keep their provenance, and a later re-observation revives the same row.
+        """
+        import time as _time
+        now = float(ts if ts is not None else _time.time())
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE kg_node_keys SET valid_to=? WHERE node_type=? AND "
+                "node_id=? AND key_type=? AND key_value=? AND valid_to IS NULL",
+                (now, node_type, int(node_id), key_type,
+                 (key_value or "").strip()))
+            self._conn.commit()
+        return int(cur.rowcount or 0)
+
+    # --- CAL Stage 2: frames and episodes ----------------------------------
+    def clear_context_run(self, run_id: str) -> None:
+        """Drop one replay's output. Re-segmenting a day must be idempotent."""
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM episode_events WHERE episode_id IN "
+                "(SELECT id FROM episodes WHERE run_id=?)", (run_id,))
+            self._conn.execute("DELETE FROM episodes WHERE run_id=?", (run_id,))
+            self._conn.execute("DELETE FROM context_frames WHERE run_id=?",
+                               (run_id,))
+            self._conn.commit()
+
+    def save_context_frames(self, frames, run_id: str,
+                            ts: float | None = None) -> int:
+        import time as _time
+        now = float(ts if ts is not None else _time.time())
+        rows = [(run_id, int(f.id),
+                 f.key[0] if f.key else None,
+                 str(f.key[1]) if f.key else None,
+                 f.name or None, float(f.started_at),
+                 float(f.ended_at) if f.ended_at is not None else None,
+                 f.state, f.parent_id, float(f.coherence), int(f.n_events),
+                 f.switch_reason or None, json.dumps(f.apps or {}), now)
+                for f in frames]
+        with self._lock:
+            self._conn.executemany(
+                "INSERT INTO context_frames (run_id, seg_id, node_type, "
+                " node_id, name, started_at, ended_at, state, parent_seg_id, "
+                " coherence, n_events, switch_reason, apps_json, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+            self._conn.commit()
+        return len(rows)
+
+    def save_episode(self, ep: dict, event_ids=None,
+                     ts: float | None = None) -> int:
+        import time as _time
+        now = float(ts if ts is not None else _time.time())
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO episodes (run_id, frame_seg_id, node_type, "
+                " node_id, title, kind, started_at, ended_at, state, n_events, "
+                " n_inherited, coherence, apps_json, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (ep.get("run_id"), ep.get("frame_seg_id"), ep.get("node_type"),
+                 ep.get("node_id"), ep.get("title"), ep.get("kind"),
+                 float(ep["started_at"]),
+                 float(ep["ended_at"]) if ep.get("ended_at") is not None else None,
+                 ep.get("state", "closed"), int(ep.get("n_events") or 0),
+                 int(ep.get("n_inherited") or 0), ep.get("coherence"),
+                 json.dumps(ep.get("apps") or {}), now))
+            eid = int(cur.lastrowid)
+            if event_ids:
+                self._conn.executemany(
+                    "INSERT OR IGNORE INTO episode_events "
+                    "(episode_id, event_id, inherited) VALUES (?,?,?)",
+                    [(eid, int(e), 1 if inh else 0) for e, inh in event_ids])
+            self._conn.commit()
+        return eid
+
+    def list_episodes(self, *, run_id: str | None = None,
+                      t0: float | None = None, t1: float | None = None,
+                      limit: int = 500) -> list[dict]:
+        sql = "SELECT * FROM episodes WHERE 1=1"
+        args: list = []
+        if run_id is not None:
+            sql += " AND run_id=?"
+            args.append(run_id)
+        if t0 is not None:
+            sql += " AND ended_at >= ?"
+            args.append(float(t0))
+        if t1 is not None:
+            sql += " AND started_at <= ?"
+            args.append(float(t1))
+        sql += " ORDER BY started_at ASC LIMIT ?"
+        args.append(int(limit))
+        with self._lock:
+            rows = self._conn.execute(sql, args).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["apps"] = json.loads(d.pop("apps_json") or "{}")
+            except Exception:
+                d["apps"] = {}
+            out.append(d)
+        return out
+
+    def episode_event_ids(self, episode_id: int) -> list[int]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT event_id FROM episode_events WHERE episode_id=? "
+                "ORDER BY event_id", (int(episode_id),)).fetchall()
+        return [int(r["event_id"]) for r in rows]
+
+    def binding_stats(self, key_types=None) -> dict:
+        """Per-key-type binding counts — the Stage 0/1 coverage instrument."""
+        sql = ("SELECT key_type, COUNT(*) AS n, "
+               "       SUM(CASE WHEN key_class='identity' THEN 1 ELSE 0 END) "
+               "         AS identity, "
+               "       SUM(CASE WHEN confirmed=1 THEN 1 ELSE 0 END) AS confirmed "
+               "FROM kg_node_keys WHERE valid_to IS NULL")
+        args: list = []
+        if key_types:
+            kt = list(key_types)
+            sql += f" AND key_type IN ({','.join('?' * len(kt))})"
+            args += kt
+        sql += " GROUP BY key_type ORDER BY n DESC"
+        with self._lock:
+            rows = self._conn.execute(sql, args).fetchall()
+        by_type = {r["key_type"]: {"n": int(r["n"]),
+                                   "identity": int(r["identity"] or 0),
+                                   "confirmed": int(r["confirmed"] or 0)}
+                   for r in rows}
+        return {"total": sum(v["n"] for v in by_type.values()),
+                "by_type": by_type}
 
     # --- KG v2 node attrs (Change 2) ---------------------------------------
     def set_node_attr(self, node_type: str, node_id: int, key: str,

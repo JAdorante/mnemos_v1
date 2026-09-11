@@ -199,7 +199,7 @@ def derive_contact_stats(
                 "interaction_count": 0, "last_seen": 0.0,
                 "outbound": 0, "inbound": 0, "direction_ratio": 0.0,
                 "co_attendance": 0, "from_calendar": False,
-                "message_ids": [], "event_ids": [],
+                "message_ids": [], "event_ids": [], "thread_ids": [],
             }
             stats[email] = r
         return r
@@ -228,6 +228,11 @@ def derive_contact_stats(
                 r["inbound"] += 1
             if mid:
                 r["message_ids"].append(mid)
+            tid = str(msg.get("thread_id") or "")
+            if tid and tid not in r["thread_ids"]:
+                # Two people on one thread is co-occurrence evidence that a
+                # flat message count cannot express.
+                r["thread_ids"].append(tid)
         # If we don't know self, treat From as inbound (they wrote us).
         if not self_set:
             for p in from_p:
@@ -579,7 +584,15 @@ def fetch_gmail_headers(*, days: int | None = None,
                     msg_ts = parsedate_to_datetime(headers["date"]).timestamp()
                 except Exception:
                     msg_ts = ts
+            # Gmail's own threadId comes back on the message resource we
+            # already fetched — same metadata format, no body, no extra scope.
+            # It is the authoritative conversation identity, stabler than
+            # rebuilding one from References/In-Reply-To (which are not even
+            # requested here). Note there is deliberately no per-message event
+            # in this module, so this is not yet a CAL `thread:` binding: it is
+            # the identity, carried rather than discarded, for whatever wants it.
             out.append({"id": headers.get("message-id") or mid,
+                        "thread_id": str(got.get("threadId") or "") or None,
                         "headers": headers, "ts": msg_ts})
         page = data.get("nextPageToken")
         if not page:
@@ -695,7 +708,9 @@ def apply_stats(
         store, source=SOURCE_GMAIL,
         raw="Gmail metadata ingest (From/To/Cc/Date/Message-ID).",
         summary="Seeded people from email headers (no bodies).",
-        ts=ts, meta={"n_messages": len(messages or [])},
+        ts=ts, meta={"n_messages": len(messages or []),
+                     "n_threads": len({m.get("thread_id") for m in (messages or [])
+                                       if m.get("thread_id")})},
     )
     cal_eid = _provenance_event(
         store, source=SOURCE_CAL,

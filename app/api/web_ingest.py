@@ -412,7 +412,8 @@ async def speakers_enroll_web(request: Request,
 @router.post("/ingest/frame")
 async def ingest_frame(request: Request,
                        ts: float | None = Query(default=None),
-                       title: str = Query(default="")) -> dict:
+                       title: str = Query(default=""),
+                       surface: str = Query(default="")) -> dict:
     """Web Perceive screen frames: the capture page samples the shared
     getDisplayMedia video track (~1 frame / few seconds) and posts each as
     a JPEG body. Rides the DESKTOP screen pipeline unchanged — quality
@@ -443,7 +444,8 @@ async def ingest_frame(request: Request,
     loop = asyncio.get_running_loop()
     # The VLM caption can take seconds — keep it off the event loop.
     result = await loop.run_in_executor(
-        None, _desktop_capture.feed_web_frame, rgb, when, title[:160])
+        None, _desktop_capture.feed_web_frame, rgb, when, title[:160],
+        False, surface[:32])
     return result
 
 

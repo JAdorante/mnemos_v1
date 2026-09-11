@@ -79,20 +79,31 @@ def self_person_id(store=None) -> int | None:
     """The user's own person row id — resolved from this install's identity
     (onboarding sheet / accepted memory), created on first use, cached.
     None while the user is still unknown (pre-onboarding)."""
-    if "pid" in _cache:
-        return _cache["pid"]
+    # Keyed by STORE, not globally. A person id means nothing outside the
+    # database it came from, so a process that opens more than one store — the
+    # test suite, a multi-seat host, any replay against a copy — would otherwise
+    # hand the first store's answer to every later one. That surfaces as code
+    # excluding or mislabelling an unrelated person, with nothing in the
+    # traceback pointing here.
+    try:
+        from app.storage import get_store
+        st = store if store is not None else get_store()
+    except Exception as exc:
+        print(f"[self_profile] self node unavailable ({exc}).")
+        return None
+    ck = ("pid", id(st))
+    if ck in _cache:
+        return _cache[ck]
     pid = None
     try:
         from app.services.identity import user_identity
-        from app.storage import get_store
-        st = store if store is not None else get_store()
         name = (user_identity(st).get("name") or "").strip()
         if name:
             pid = st.resolve_person(name, ts=time.time())
     except Exception as exc:
         print(f"[self_profile] self node unavailable ({exc}).")
         return None  # don't cache a transient failure
-    _cache["pid"] = pid
+    _cache[ck] = pid
     return pid
 
 
