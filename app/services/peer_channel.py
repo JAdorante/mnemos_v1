@@ -263,8 +263,33 @@ def pairing_active() -> bool:
         return _pairing is not None and _pairing["expires_at"] > time.time()
 
 
+def apply_initial_pack(peer_id: str, pack: str | None) -> str | None:
+    """Set a new pair's disclosure pack: the human's choice, else the
+    deployment default, else nothing (leaving all-offer).
+
+    Applied at PAIRING because that is the only moment both people are
+    thinking about this relationship. The packs UI lives on a settings table
+    nobody opens during a two-week trial, so a pack that can only be chosen
+    there is, in practice, never chosen.
+    """
+    want = (pack or "").strip().lower() or settings.peer.default_pack
+    if not want:
+        return None
+    try:
+        from app.services import team_layer
+        res = team_layer.apply_pack(peer_id, want)
+        if res.get("ok"):
+            print(f"[peer] new pair {peer_id} set to the '{want}' pack.")
+            return want
+        print(f"[peer] pack {want!r} not applied ({res.get('error')}).")
+    except Exception as exc:
+        print(f"[peer] pack {want!r} not applied ({exc}).")
+    return None
+
+
 def claim_pairing(code: str, name: str, base_url: str,
-                  token_for_caller: str, internal_url: str = "") -> dict:
+                  token_for_caller: str, internal_url: str = "",
+                  pack: str | None = None) -> dict:
     """A joining peer trades a valid code for OUR token (returned exactly once)
     and hands us THEIRS — after this one call both sides can authenticate.
 
@@ -317,17 +342,24 @@ def claim_pairing(code: str, name: str, base_url: str,
         _save(_peers_path(), peers)
         name_out = peers[peer_id]["name"]
     print(f"[peer] paired with {name_out} ({base_url}).")
+    applied = apply_initial_pack(peer_id, pack)
     return {"ok": True, "peer_id": peer_id, "name": instance_name(),
             "base_url": my_base_url(), "internal_url": my_internal_url(),
-            "token": token}
+            "token": token, "pack": applied}
 
 
-def join(url: str, code: str, internal_url: str | None = None) -> dict:
+def join(url: str, code: str, internal_url: str | None = None,
+         pack: str | None = None) -> dict:
     """Driver side of pairing: claim `code` on the remote instance at `url`.
 
     Mints the token the remote will use to call US (stored hash-only), sends
     it with the claim, stores the token the remote returns (plaintext — our
-    credential to them) plus their name/url as a peer record."""
+    credential to them) plus their name/url as a peer record.
+
+    `pack` is THIS side's disclosure choice about the peer being added. It is
+    deliberately not sent to them: what we will disclose is ours to decide,
+    and each side picks its own.
+    """
     if not settings.peer.enabled:
         return {"ok": False, "error": "peer channel disabled"}
     url = (url or "").strip().rstrip("/")
@@ -374,16 +406,17 @@ def join(url: str, code: str, internal_url: str | None = None) -> dict:
         _save(_peers_path(), peers)
         name = peers[peer_id]["name"]
     print(f"[peer] joined {name} ({url}).")
-    return {"ok": True, "peer_id": peer_id, "name": name}
+    applied = apply_initial_pack(peer_id, pack)
+    return {"ok": True, "peer_id": peer_id, "name": name, "pack": applied}
 
 
-def join_invite(invite: str) -> dict:
+def join_invite(invite: str, pack: str | None = None) -> dict:
     """Join from a pasted invite — same claim, one field instead of two."""
     parsed = parse_invite(invite)
     if not parsed.get("ok"):
         return {"ok": False, "error": parsed.get("error", "invalid invite")}
     return join(parsed["url"], parsed["code"],
-                internal_url=parsed.get("internal_url"))
+                internal_url=parsed.get("internal_url"), pack=pack)
 
 
 # --- authentication ----------------------------------------------------------
@@ -405,15 +438,24 @@ def authenticate(authorization: str | None) -> dict | None:
 
 
 def revoke(peer_id: str) -> bool:
-    """Forget a peer — both directions die: their token stops authenticating
-    and ours to them is discarded."""
+    """Forget a peer — every direction dies: their token stops authenticating,
+    ours to them is discarded, and any clip grant they still hold is killed.
+
+    That last one matters: a clip grant is a separate credential with its own
+    expiry, so unpairing without revoking it would leave a live key to this
+    tenant's recordings in the hands of someone who is no longer a peer."""
     with _lock:
         peers = _load(_peers_path(), {})
         if peer_id not in peers:
             return False
         del peers[peer_id]
         _save(_peers_path(), peers)
-        return True
+    try:
+        from app.services import peer_clip
+        peer_clip.revoke_for_peer(peer_id)
+    except Exception as exc:
+        print(f"[peer] clip grant revoke skipped ({exc}).")
+    return True
 
 
 def _person_display(person_id: int | None) -> str | None:
@@ -814,225 +856,137 @@ def _notify_chat(text: str) -> None:
 def compose_answer(question: str) -> dict:
     """Answer a teammate's question from OUR memory for peer egress.
 
-    Uses the peer memory composer (no llm.answer / answer_check evidence dumps).
-    Those dumps were crossing the wire as identity blocks and then poisoning
-    the asker's recall ("what did their Sparrow say?").
+    Phase 1: this is `compose_peer_claims` rendered for the wire. The answer
+    carries the claims it rests on and the date of its newest supporting
+    memory, so the asker can tell Tuesday from April. `text` stays for peers
+    running an older build.
+
+    The old path composed free prose from rendered grounding blobs, which is
+    why identity blocks and assistant hedges kept crossing and had to be
+    chased with substring filters. Untyped text is no longer a candidate.
     """
-    out = compose_peer_answer(question)
-    if out.get("text"):
-        return out
-    return {"text": "I don't have enough in my memory to answer that.",
-            "redacted": []}
-
-
-_PEER_UPDATE_SYSTEM = (
-    "You write a short status update one teammate sends to another. "
-    "Use ONLY the memories provided. Be concrete and brief "
-    "(a few bullets or short paragraphs). "
-    "Never mention Sparrow, AI, assistants, system prompts, ABOUT YOU blocks, "
-    "or who 'the user you are assisting' is. "
-    "The update is FOR the teammate: never include the sender's personal "
-    "reminders, to-dos, or 'remind me' asides — those stay on the sender's "
-    "side. "
-    "Never invent facts. If the memories do not cover the topic, reply with "
-    "exactly: NO_MEMORY "
-    "Do not use email headers (To/Subject/Body) or signatures."
-)
-
-_PEER_ANSWER_SYSTEM = (
-    "You answer a question from a teammate's Sparrow. "
-    "Use YOUR memories when they are about the same topic as the question. "
-    "A 'Context from my side' brief in the question is background only — "
-    "do NOT restate it as your answer, and do NOT invent details from it. "
-    "If you have no independent memory of the topic, reply exactly: NO_MEMORY "
-    "Do not attach unrelated tasks, commitments, prices, or people. "
-    "Never mention Sparrow, AI, assistants, system prompts, or ABOUT YOU blocks. "
-    "Do not use email headers (To/Subject/Body) or signatures."
-)
-
-_PEER_SKIP_SOURCE_LABELS = frozenset({
-    "identity", "clock", "user tools", "user profile",
-})
-
-
-_WORK_ITEM_RE = re.compile(r"^\[(?:task|commitment)\]", re.I)
-
-
-def _peer_memory_lines(sources: list | None, *, limit: int = 24,
-                       topic: str = "",
-                       skip_work_items: bool = False) -> list[str]:
-    """Topic memories only — never identity / profile instruction lines.
-
-    skip_work_items drops the sender's own open tasks/commitments — personal
-    work state that must not ride along inside a push update to a teammate
-    (audit: "tell Justin about the deal" shipped the sender's private
-    "[commitment] Send Andy an update…" reminder to the peer)."""
-    topic_tokens = [t for t in re.findall(r"[a-z0-9]{3,}", (topic or "").casefold())
-                    if t not in {"the", "and", "for", "about", "what", "know",
-                                 "said", "tell", "from", "with", "your", "this"}]
-    lines: list[str] = []
-    for s in sources or []:
-        label = str(s.get("label") or "").strip().lower()
-        if label in _PEER_SKIP_SOURCE_LABELS or label.startswith("drafting"):
-            continue
-        for it in s.get("items") or []:
-            t = (it or "").strip().lstrip("-•").strip()
-            if not t:
-                continue
-            low = t.lower()
-            if skip_work_items and (_WORK_ITEM_RE.match(t)
-                                    or low.startswith("open tasks")):
-                continue
-            if (t.startswith("ABOUT YOU")
-                    or low.startswith("you are ")
-                    or "user you are assisting" in low
-                    or low.startswith("address them by name")
-                    or t.startswith("USER PROFILE")
-                    or t.startswith("USER TOOLS")
-                    or t.startswith("DRAFTING RULE")
-                    or low.startswith("ask user")
-                    or low.startswith("what did user")
-                    or low.startswith("what do we")):
-                continue
-            # Drop chatty assistant hedges from prior answers.
-            # Keep each phrase as `… in low` — a bare string is always truthy.
-            if ("i can make a note" in low
-                    or "i don't have more specific" in low
-                    or "as of now, i don't" in low):
-                continue
-            if topic_tokens:
-                blob = low
-                if not any(tok in blob for tok in topic_tokens):
-                    continue
-            if t not in lines:
-                lines.append(t)
-            if len(lines) >= limit:
-                return lines
-    if topic_tokens and not lines:
-        # Nothing topic-tagged — fall back to non-identity lines rather than
-        # returning an empty brief (tests + sparse graphs).
-        return _peer_memory_lines(sources, limit=limit, topic="",
-                                  skip_work_items=skip_work_items)
-    return lines
-
-
-def _compose_peer_memory_text(topic: str, *, system: str,
-                              user_preamble: str,
-                              allow_empty_memories: bool = False,
-                              skip_work_items: bool = False) -> dict:
-    """Shared grounding + generate + leak-strip for peer egress."""
-    from app.services import redact
-    topic = (topic or "").strip()
-    if not topic:
-        return {"text": "", "redacted": []}
-
-    sources: list = []
-    ground_q = topic
-    marker = "(Context from my side"
-    if marker in topic:
-        ground_q = topic.split(marker, 1)[0].strip() or topic
-    try:
-        from app.services.grounding import compose
-        # Ground on the bare ask when a context brief is attached.
-        g = compose(ground_q, semantic_limit=8)
-        sources = g.get("sources") or []
-    except Exception as exc:
-        print(f"[peer] memory grounding skipped ({exc}).")
-        try:
-            from app.services.memory import memory
-            hits = memory.search(ground_q, limit=8)
-            sources = [{"label": "memories",
-                        "items": [h.get("raw") or "" for h in hits]}]
-        except Exception:
-            sources = []
-
-    mem_lines = _peer_memory_lines(sources, topic=ground_q,
-                                   skip_work_items=skip_work_items)
-    context = "\n".join(f"- {t}" for t in mem_lines)
-    text = ""
-    try:
-        from app.config import settings as _settings
-        if _settings.text_local.enabled and (context or allow_empty_memories):
-            from app.services.model_router import router
-            mem_block = context or (
-                "(none — answer only from the teammate's brief if present; "
-                "otherwise say you have no memory of this)")
-            reply = router.complete(
-                "chat",
-                system=system,
-                messages=[{"role": "user", "content":
-                           f"{user_preamble}:\n{topic}\n\n"
-                           f"Your memories:\n{mem_block}\n\n"
-                           "Respond now."}],
-                max_tokens=512,
-            ).strip()
-            if reply and not re.match(r"^\s*NO_MEMORY\b", reply, re.I):
-                text = reply
-    except Exception as exc:
-        print(f"[peer] memory generation skipped ({exc}).")
-
-    if not text and mem_lines:
-        text = "\n".join(f"- {t}" for t in mem_lines[:8])
-
-    text = _strip_notify_envelope(text)
-    text = _strip_peer_update_leaks(text)
-    text = text.strip()[: settings.peer.max_text_chars]
-    if not text:
-        return {"text": "", "redacted": []}
-    kinds = redact.scan(text)
-    return {"text": redact.redact_text(text), "redacted": kinds}
+    out = compose_peer_claims(question)
+    if out["claims"]:
+        return {"text": out["prose"], "claims": out["claims"],
+                "as_of": out["as_of"], "near_miss": out["near_miss"],
+                "redacted": out["redacted"]}
+    return {"text": "I don't have anything in my memory on that.",
+            "claims": [], "as_of": None, "near_miss": False, "redacted": []}
 
 
 def compose_peer_update(topic: str) -> dict:
     """Compose a teammate push-update from OUR memory.
 
-    The sender's own open tasks/commitments never ride along — a push update
-    is about the topic, not the sender's personal work state."""
-    return _compose_peer_memory_text(
-        topic, system=_PEER_UPDATE_SYSTEM,
-        user_preamble="Topic to cover",
-        skip_work_items=True)
-
-
-def compose_peer_answer(question: str) -> dict:
-    """Compose an answer to a teammate's question from OUR memory.
-
-    The question may include a context brief from the asker — when we have no
-    local memories we still answer from that brief (or say we don't know)
-    instead of inventing tools/projects.
+    Same typed egress path as an answer — a push update is egress too, and
+    splitting the two is how the sender's own tasks/commitments used to ride
+    along on one path after being filtered out of the other. EGRESS_KINDS
+    excludes work items structurally now, on both.
     """
-    return _compose_peer_memory_text(
-        question, system=_PEER_ANSWER_SYSTEM,
-        user_preamble="Question from a teammate (may include their context brief)",
-        allow_empty_memories=True)
+    out = compose_peer_claims(topic)
+    if not out["claims"] or out["near_miss"]:
+        # Nothing typed on the topic: send nothing rather than filler. A push
+        # update is unsolicited, so a near-miss is not worth a teammate's
+        # attention the way it is when they actually asked.
+        return {"text": "", "claims": [], "as_of": None, "redacted": []}
+    return {"text": out["prose"], "claims": out["claims"],
+            "as_of": out["as_of"], "redacted": out["redacted"]}
+
+
+def compose_peer_claims(question: str, *, store=None,
+                        now: float | None = None) -> dict:
+    """Phase 1.2 — the single peer-egress composer.
+
+    Returns {"claims": [...], "as_of": float|None, "prose": str,
+             "near_miss": bool, "redacted": [...]}. Each claim carries its own
+    text, fact id, source event id, speaker and timestamp, so the asker can
+    see WHEN something was true and WHERE it came from instead of receiving an
+    undated paragraph.
+
+    `prose` is rendered FROM the claims, never composed separately. That is
+    what makes this one egress path rather than two: there is no second route
+    by which untyped text can reach the wire, so the substring blocklists that
+    used to guard it have nothing left to guard.
+    """
+    from app.services import peer_retrieval as pr
+    from app.services import redact
+
+    question = (question or "").strip()
+    if not question:
+        return {"claims": [], "as_of": None, "prose": "", "near_miss": False,
+                "redacted": []}
+
+    # Ground on the bare ask when the asker attached a context brief — their
+    # brief is background, never something we echo back as our own knowledge.
+    topic = question
+    marker = "(Context from my side"
+    if marker in topic:
+        topic = topic.split(marker, 1)[0].strip() or question
+
+    now = time.time() if now is None else now
+    claims = pr.facts_for_topic(topic, store=store, now=now)
+    near_miss = False
+    if not claims:
+        # 1.6: a dated near-miss beats a refusal — it tells the asker whether
+        # to go find the human, which is itself a real answer.
+        claims = pr.near_miss(topic, store=store)
+        near_miss = bool(claims)
+
+    kinds: list[str] = []
+    out_claims: list[dict] = []
+    for c in claims:
+        clean = redact.redact_text(c["text"])
+        kinds.extend(redact.scan(c["text"]))
+        out_claims.append({**c, "text": clean,
+                           "when": pr.describe_age(c["ts"], now)})
+
+    return {
+        "claims": out_claims,
+        "as_of": pr.as_of(out_claims),
+        "prose": _render_claims(out_claims, near_miss=near_miss, now=now),
+        "near_miss": near_miss,
+        "redacted": sorted(set(kinds)),
+    }
+
+
+def _render_claims(claims: list[dict], *, near_miss: bool = False,
+                   now: float | None = None) -> str:
+    """Claims -> the text an unupgraded peer reads. Every line carries its own
+    date, so staleness is visible even without the structured payload."""
+    if not claims:
+        return ""
+    lines = []
+    if near_miss:
+        from app.services import peer_retrieval as pr
+        newest = pr.describe_age(claims[0].get("ts"), now)
+        lines.append(
+            f"I don't have anything on that specifically. The most recent "
+            f"thing I do have (from {newest}):" if newest else
+            "I don't have anything on that specifically. The closest I have:")
+    for c in claims:
+        who = c.get("speaker") or ""
+        when = c.get("when") or ""
+        stamp = " · ".join([p for p in (who, when) if p])
+        lines.append(f"- {c['text']}" + (f" ({stamp})" if stamp else ""))
+    return "\n".join(lines)
 
 
 def enrich_peer_question(question: str) -> str:
     """Attach a short factual brief from OUR memory so the teammate isn't cold.
 
-    Uses memory bullets only (no LLM) so we don't ship chatty hedges like
-    "I can make a note of it for you" as if they were project facts.
+    This is egress too — the brief is our memory, sent to them — so it runs the
+    same typed path as an answer. Dated, attributed claims only; the brief used
+    to be rendered grounding lines, which is how "I can make a note of that for
+    you" once crossed as if it were a project fact.
     """
     q = (question or "").strip()
     if not q or "Context from my side" in q:
         return q
-    sources: list = []
-    try:
-        from app.services.grounding import compose
-        g = compose(q, semantic_limit=8)
-        sources = g.get("sources") or []
-    except Exception:
-        try:
-            from app.services.memory import memory
-            hits = memory.search(q, limit=8)
-            sources = [{"label": "memories",
-                        "items": [h.get("raw") or "" for h in hits]}]
-        except Exception:
-            return q
-    bullets = _peer_memory_lines(sources, limit=6, topic=q)
-    if not bullets:
+    out = compose_peer_claims(q)
+    if not out["claims"] or out["near_miss"]:
         return q
-    text = "\n".join(f"- {b}" for b in bullets)[:600]
+    text = _render_claims(out["claims"])[:600]
+    if not text:
+        return q
     enriched = (
         f"{q}\n\n"
         f"(Context from my side — background only; add your own knowledge or "
@@ -1096,6 +1050,16 @@ def handle_ask(peer: dict, payload: dict) -> dict:
     else:
         action, topic = _decide_action(peer, question)
 
+    try:
+        from app.services import peer_telemetry
+        peer_telemetry.record(
+            "gate", ask_id=ask_id, peer_id=peer_id,
+            peer_name=peer.get("name", "?"), kind=kind,
+            action=action, topic=topic or "",
+            question_chars=len(question or ""))
+    except Exception as exc:
+        print(f"[peer] telemetry skipped ({exc}).")
+
     if action == "auto" and kind in ("org_digest", "org_priority"):
         _accept_org_packet(peer.get("name") or "a teammate", peer_id, ask_id,
                            question, kind)
@@ -1116,6 +1080,9 @@ def handle_ask(peer: dict, payload: dict) -> dict:
               f"({topic or 'dev flag'}): {question[:80]}")
         return {"ok": True, "status": "answered", "ask_id": ask_id,
                 "topic": topic, "answer": composed["text"],
+                "claims": composed.get("claims") or [],
+                "as_of": composed.get("as_of"),
+                "near_miss": composed.get("near_miss"),
                 "redacted": composed["redacted"]}
     if action == "deny":
         print(f"[peer] auto-declined {peer.get('name', '?')} "
@@ -1125,8 +1092,9 @@ def handle_ask(peer: dict, payload: dict) -> dict:
 
     with _lock:
         asks = _load(_asks_path(), [])
-        pending = [a for a in asks if a.get("status") == "pending"]
-        if len(pending) >= settings.peer.max_pending_asks:
+        # delivery_pending still occupies a slot until the outbound lands.
+        open_asks = [a for a in asks if a.get("status") in _OPEN_ASK_STATUSES]
+        if len(open_asks) >= settings.peer.max_pending_asks:
             return {"ok": False, "error": "ask queue full"}
         item = {"id": uuid.uuid4().hex[:12], "peer_id": peer_id,
                 "peer_name": peer.get("name", "?"), "ask_id": ask_id,
@@ -1137,23 +1105,65 @@ def handle_ask(peer: dict, payload: dict) -> dict:
         asks.append(item)
         _save(_asks_path(), asks)
     print(f"[peer] {kind} queued from {peer.get('name', '?')}: {question[:80]}")
-    who = peer.get("name", "A teammate")
-    if kind == "handoff":
-        _notify_chat(f"{who} wants to hand you a task: “{question[:200]}” — "
-                     "accept or decline on the Team page (/peer).")
-    elif kind == "notify":
-        _notify_chat(f"{who}'s Sparrow sent an update: “{question[:200]}” — "
-                     "accept or decline on the Team page (/peer).")
-    elif kind == "org_digest":
-        _notify_chat(f"{who} sent an org digest — review on Team (/peer).")
-    elif kind == "org_priority":
-        _notify_chat(f"{who} sent company priority guidance — review on Team (/peer).")
-    elif kind == "org_escalate":
-        _notify_chat(f"{who} escalated a strategic issue — review on Team (/peer).")
-    else:
-        _notify_chat(f"{who}'s Sparrow asks: “{question[:200]}” — approve or "
-                     "decline on the Team page (/peer).")
+    _announce_pending(item)
     return {"ok": True, "status": "pending", "ask_id": ask_id}
+
+
+# Asks arriving within this window are announced together. A teammate working
+# through a few questions produces a burst, and one interruption per ask is
+# how a disclosure queue trains someone to ignore it.
+_BATCH_WINDOW_S = 45.0
+
+
+def _ask_line(item: dict) -> str:
+    who = item.get("peer_name") or "A teammate"
+    q = str(item.get("question") or "")[:200]
+    kind = item.get("kind")
+    if kind == "handoff":
+        return f"{who} wants to hand you a task: “{q}”"
+    if kind == "notify":
+        return f"{who}'s Sparrow sent an update: “{q}”"
+    if kind == "org_digest":
+        return f"{who} sent an org digest"
+    if kind == "org_priority":
+        return f"{who} sent company priority guidance"
+    if kind == "org_escalate":
+        return f"{who} escalated a strategic issue"
+    return f"{who}'s Sparrow asks: “{q}”"
+
+
+def _announce_pending(item: dict) -> None:
+    """One prompt for everything waiting, not one per ask.
+
+    Re-announcing the whole queue (rather than only the newest) means the
+    latest line is always a complete picture of what is waiting, so the human
+    can act once instead of reconstructing it from a scroll of interruptions.
+    """
+    now = float(item.get("created_at") or time.time())
+    try:
+        with _lock:
+            asks = _load(_asks_path(), [])
+        waiting = [a for a in asks if a.get("status") == "pending"]
+    except Exception:
+        waiting = [item]
+    recent = [a for a in waiting
+              if now - float(a.get("created_at") or 0) <= _BATCH_WINDOW_S]
+    # The triggering ask is always included, even if the read raced.
+    if not any(a.get("id") == item.get("id") for a in recent):
+        recent.append(item)
+    recent.sort(key=lambda a: float(a.get("created_at") or 0))
+
+    if len(recent) == 1:
+        _notify_chat(f"{_ask_line(recent[0])} — approve or decline on the "
+                     "Team page (/peer).")
+        return
+    names = list(dict.fromkeys(a.get("peer_name") or "a teammate"
+                               for a in recent))
+    whose = names[0] if len(names) == 1 else f"{len(names)} teammates"
+    lines = "\n".join(f"• {_ask_line(a)}" for a in recent)
+    _notify_chat(
+        f"{len(recent)} things from {whose} are waiting on you:\n{lines}\n"
+        "Approve or decline them together on the Team page (/peer).")
 
 
 def pending_asks() -> list[dict]:
@@ -1252,6 +1262,41 @@ def _deliver(peer_rec: dict, payload: dict) -> bool:
         return False
 
 
+# Human still owes a verdict. delivery_pending means the human already decided
+# but the outbound /peer/answer POST failed — keep the row (and payload) until
+# retry_delivery_pending lands it. Never truncate these the way decided history
+# is truncated.
+_OPEN_ASK_STATUSES = frozenset({"pending", "delivery_pending"})
+_OUTSTANDING_SENT = frozenset({"sent", "pending", "queued"})
+
+
+def _mint_clip_grant(peer_id: str, ask_id: str, claims: list) -> dict | None:
+    """A scoped, expiring key to exactly the recordings behind `claims`.
+
+    Only claims that actually name a source event can be played, so the grant's
+    scope is the answer's own provenance — which is what Phase 1 put there.
+    """
+    try:
+        from app.services import peer_clip
+        if not peer_clip.enabled():
+            return None
+        # Each granted event carries the verbatim span its claim rests on, so
+        # the grant authorises the part of the recording that backs what was
+        # approved — not the whole captured moment around it.
+        scope = []
+        for c in claims or []:
+            eid = c.get("source_event_id")
+            # Only events that really have audio: a grant naming an unplayable
+            # event would tell the asker a clip exists when it does not.
+            if eid and peer_clip.playable_path(eid):
+                scope.append({"event_id": eid,
+                              "span": c.get("source_span") or c.get("text") or ""})
+        return peer_clip.mint(peer_id, ask_id, scope)
+    except Exception as exc:
+        print(f"[peer] clip grant skipped ({exc}).")
+        return None
+
+
 def decide_ask(local_id: str, approve: bool) -> dict:
     """The human's disclosure verdict on one queued ask. Approve composes the
     answer NOW (so the human's yes is to the question, and composition uses
@@ -1267,10 +1312,29 @@ def decide_ask(local_id: str, approve: bool) -> dict:
     if peer_rec is None:
         return {"ok": False, "error": "asking peer no longer paired"}
 
+    # How long the asker sat in dead air waiting on this human. On a hosted box
+    # where everyone is always online, this is the number that distinguishes a
+    # consent-latency problem from a retrieval one.
+    try:
+        from app.services import peer_telemetry
+        peer_telemetry.record(
+            "verdict", ask_id=item.get("ask_id", ""),
+            peer_id=item.get("peer_id", ""),
+            peer_name=peer_rec.get("name", "?"), kind=item.get("kind", ""),
+            verdict="approved" if approve else "declined",
+            topic=item.get("topic") or "",
+            waited_s=round(time.time() - float(item.get("created_at") or 0), 3))
+    except Exception as exc:
+        print(f"[peer] telemetry skipped ({exc}).")
+
     if not approve:
-        delivered = _deliver(peer_rec, {"ask_id": item["ask_id"],
-                                        "declined": True})
-        _finish_ask(local_id, "denied", None)
+        outbound = {"ask_id": item["ask_id"], "declined": True}
+        delivered = _deliver(peer_rec, outbound)
+        if delivered:
+            _finish_ask(local_id, "denied", None)
+        else:
+            _stash_delivery_pending(local_id, None, outbound,
+                                    success_status="denied")
         if item.get("loop_id"):
             try:
                 from app.services import team_layer
@@ -1287,45 +1351,95 @@ def decide_ask(local_id: str, approve: bool) -> dict:
                         item.get("peer_id", ""), item["ask_id"],
                         item["question"], loop_id=item.get("loop_id"))
         reply = "Accepted — added to my list."
-        delivered = _deliver(peer_rec, {"ask_id": item["ask_id"],
-                                        "answer": reply})
-        _finish_ask(local_id, "accepted" if delivered else "delivery_failed",
-                    reply)
-        return {"ok": delivered, "status": "accepted" if delivered else
-                "delivery_failed", "answer": reply}
+        outbound = {"ask_id": item["ask_id"], "answer": reply}
+        delivered = _deliver(peer_rec, outbound)
+        return _complete_or_retry_delivery(
+            local_id, delivered, reply, outbound, "accepted")
 
     if item.get("kind") == "notify":
         _accept_notify(peer_rec.get("name") or "a teammate",
                        item.get("peer_id", ""), item["ask_id"],
                        item["question"])
         reply = "Accepted update."
-        delivered = _deliver(peer_rec, {"ask_id": item["ask_id"],
-                                        "answer": reply})
-        _finish_ask(local_id, "accepted" if delivered else "delivery_failed",
-                    reply)
-        return {"ok": delivered, "status": "accepted" if delivered else
-                "delivery_failed", "answer": reply}
+        outbound = {"ask_id": item["ask_id"], "answer": reply}
+        delivered = _deliver(peer_rec, outbound)
+        return _complete_or_retry_delivery(
+            local_id, delivered, reply, outbound, "accepted")
 
     if item.get("kind") in ("org_digest", "org_priority", "org_escalate"):
         _accept_org_packet(peer_rec.get("name") or "a teammate",
                            item.get("peer_id", ""), item["ask_id"],
                            item["question"], item["kind"])
         reply = f"Accepted {item['kind']}."
-        delivered = _deliver(peer_rec, {"ask_id": item["ask_id"],
-                                        "answer": reply})
-        _finish_ask(local_id, "accepted" if delivered else "delivery_failed",
-                    reply)
-        return {"ok": delivered, "status": "accepted" if delivered else
-                "delivery_failed", "answer": reply}
+        outbound = {"ask_id": item["ask_id"], "answer": reply}
+        delivered = _deliver(peer_rec, outbound)
+        return _complete_or_retry_delivery(
+            local_id, delivered, reply, outbound, "accepted")
 
     composed = compose_answer(item["question"])
-    delivered = _deliver(peer_rec, {"ask_id": item["ask_id"],
-                                    "answer": composed["text"]})
-    _finish_ask(local_id, "answered" if delivered else "delivery_failed",
-                composed["text"])
-    return {"ok": delivered, "status": "answered" if delivered else
-            "delivery_failed", "answer": composed["text"],
-            "redacted": composed["redacted"]}
+    outbound = {"ask_id": item["ask_id"],
+                "answer": composed["text"],
+                "claims": composed.get("claims") or [],
+                "as_of": composed.get("as_of"),
+                "near_miss": composed.get("near_miss")}
+    # Phase 4.1: THIS is the moment a clip grant may be minted — a human just
+    # said yes to this specific answer. The grant covers only the events behind
+    # the claims they approved, and only for the peer who asked. The auto-
+    # answer path deliberately mints nothing: a policy pack is consent to
+    # answer questions, not consent to hand over recordings.
+    grant = _mint_clip_grant(item.get("peer_id", ""), item["ask_id"],
+                             composed.get("claims") or [])
+    if grant:
+        outbound["clip_grant"] = grant
+    delivered = _deliver(peer_rec, outbound)
+    out = _complete_or_retry_delivery(
+        local_id, delivered, composed["text"], outbound, "answered")
+    out["redacted"] = composed["redacted"]
+    return out
+
+
+def _complete_or_retry_delivery(local_id: str, delivered: bool,
+                                answer: str | None, outbound: dict,
+                                success_status: str) -> dict:
+    """Land a decided ask, or keep it open with a retryable outbound payload.
+
+    A failed POST used to call `_finish_ask(..., "delivery_failed")`, which
+    moved the row into decided history with no retry path anywhere in the
+    tree. The composed/accepted payload is already a human verdict — stash it
+    as delivery_pending and let presence flush re-POST.
+    """
+    if delivered:
+        _finish_ask(local_id, success_status, answer)
+        return {"ok": True, "status": success_status, "answer": answer}
+    _stash_delivery_pending(local_id, answer, outbound,
+                            success_status=success_status)
+    return {"ok": False, "status": "delivery_pending", "answer": answer}
+
+
+def _stash_delivery_pending(local_id: str, answer: str | None,
+                            outbound: dict, *,
+                            success_status: str) -> None:
+    with _lock:
+        asks = _load(_asks_path(), [])
+        for a in asks:
+            if a.get("id") == local_id:
+                a["status"] = "delivery_pending"
+                a["answer"] = answer
+                a["outbound"] = outbound
+                a["success_status"] = success_status
+                a["delivery_attempts"] = int(a.get("delivery_attempts") or 0) + 1
+                a["last_delivery_at"] = time.time()
+                a["decided_at"] = a.get("decided_at") or time.time()
+        _save_asks_partitioned(asks)
+    print(f"[peer] delivery pending for ask {local_id}; will retry on presence.")
+
+
+def _save_asks_partitioned(asks: list) -> None:
+    """Bound decided history; never drop pending or delivery_pending rows."""
+    open_asks = [a for a in asks if a.get("status") in _OPEN_ASK_STATUSES]
+    decided = [a for a in asks if a.get("status") not in _OPEN_ASK_STATUSES]
+    decided = decided[-settings.peer.history:]
+    _save(_asks_path(), decided + open_asks)
 
 
 def _finish_ask(local_id: str, status: str, answer: str | None) -> None:
@@ -1336,11 +1450,47 @@ def _finish_ask(local_id: str, status: str, answer: str | None) -> None:
                 a["status"] = status
                 a["answer"] = answer
                 a["decided_at"] = time.time()
-        # Keep bounded decided history for the audit trail.
-        pending = [a for a in asks if a.get("status") == "pending"]
-        decided = [a for a in asks if a.get("status") != "pending"]
-        decided = decided[-settings.peer.history:]
-        _save(_asks_path(), decided + pending)
+                a.pop("outbound", None)
+                a.pop("success_status", None)
+        _save_asks_partitioned(asks)
+
+
+def retry_delivery_pending(peer_id: str | None = None) -> dict:
+    """Re-POST stashed outbound answers whose first delivery failed.
+
+    Called from the presence/mailbox flush path. Does not re-compose and does
+    not re-ask the human — the verdict and payload are already on the row.
+    """
+    with _lock:
+        asks = _load(_asks_path(), [])
+        items = [dict(a) for a in asks
+                 if a.get("status") == "delivery_pending"
+                 and (peer_id is None or a.get("peer_id") == peer_id)]
+        registry = _load(_peers_path(), {})
+    flushed = 0
+    still = 0
+    for item in items:
+        local_id = item.get("id")
+        peer_rec = registry.get(item.get("peer_id", ""))
+        outbound = item.get("outbound")
+        if not local_id or not isinstance(outbound, dict) or peer_rec is None:
+            still += 1
+            continue
+        if _deliver(peer_rec, outbound):
+            _finish_ask(local_id, item.get("success_status") or "answered",
+                        item.get("answer"))
+            flushed += 1
+        else:
+            with _lock:
+                asks = _load(_asks_path(), [])
+                for a in asks:
+                    if a.get("id") == local_id:
+                        a["delivery_attempts"] = (
+                            int(a.get("delivery_attempts") or 0) + 1)
+                        a["last_delivery_at"] = time.time()
+                _save_asks_partitioned(asks)
+            still += 1
+    return {"ok": True, "flushed": flushed, "remaining": still}
 
 
 # --- asking side (outbound) --------------------------------------------------
@@ -1418,6 +1568,42 @@ def retry_queued(item: dict) -> dict:
 def _dispatch_ask(peer_rec: dict, peer_id: str, ask_id: str, question: str,
                   kind: str, loop_id: str | None,
                   from_mailbox: bool = False) -> dict:
+    """Send one ask and record the attempt. The telemetry wrapper sits here,
+    not in ask(), so mailbox retries are counted too."""
+    t0 = time.time()
+    res = _dispatch_ask_inner(peer_rec, peer_id, ask_id, question, kind,
+                              loop_id, from_mailbox=from_mailbox)
+    try:
+        from app.services import peer_telemetry
+        peer_telemetry.record(
+            "ask_sent", ask_id=ask_id, peer_id=peer_id,
+            peer_name=peer_rec.get("name", "?"), kind=kind,
+            status=res.get("status") or ("error" if not res.get("ok") else "?"),
+            question_chars=len(question or ""),
+            dispatch_s=round(time.time() - t0, 3),
+            from_mailbox=bool(from_mailbox),
+            followup=_is_followup(peer_id, ask_id))
+    except Exception as exc:
+        print(f"[peer] telemetry skipped ({exc}).")
+    return res
+
+
+def _is_followup(peer_id: str, ask_id: str) -> bool:
+    """True when this pair already had an answered ask before this one — the
+    repeat-use signal, read from the sent log we already keep."""
+    try:
+        for s in _load(_sent_path(), []):
+            if (s.get("peer_id") == peer_id and s.get("ask_id") != ask_id
+                    and s.get("status") == "answered"):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _dispatch_ask_inner(peer_rec: dict, peer_id: str, ask_id: str,
+                        question: str, kind: str, loop_id: str | None,
+                        from_mailbox: bool = False) -> dict:
     payload = {"ask_id": ask_id, "question": question, "kind": kind,
                "base_url": my_base_url(), "internal_url": my_internal_url()}
     if loop_id:
@@ -1425,10 +1611,16 @@ def _dispatch_ask(peer_rec: dict, peer_id: str, ask_id: str, question: str,
     try:
         res = _post_peer(peer_rec, "/peer/ask", payload)
     except Exception as exc:
-        _queue_offline(peer_id, ask_id, question, kind, loop_id, exc)
-        return {"ok": True, "status": "queued", "ask_id": ask_id,
+        queued = _queue_offline(peer_id, ask_id, question, kind, loop_id, exc)
+        if queued:
+            return {"ok": True, "status": "queued", "ask_id": ask_id,
+                    "peer": peer_rec.get("name", "?"),
+                    "error": (f"queued — {peer_rec.get('name', 'peer')} "
+                              "unreachable")}
+        return {"ok": False, "status": "sent", "ask_id": ask_id,
                 "peer": peer_rec.get("name", "?"),
-                "error": f"queued — {peer_rec.get('name', 'peer')} unreachable"}
+                "error": (f"unreachable and mailbox enqueue failed — "
+                          f"{peer_rec.get('name', 'peer')}")}
     if not res.get("ok"):
         _update_sent(ask_id, "refused", None)
         return {"ok": False, "ask_id": ask_id,
@@ -1436,9 +1628,18 @@ def _dispatch_ask(peer_rec: dict, peer_id: str, ask_id: str, question: str,
                 "peer": peer_rec.get("name", "?")}
     if res.get("status") == "answered":
         answer_text = str(res.get("answer") or "")[: settings.peer.max_text_chars]
-        _record_answer(peer_rec, peer_id, ask_id, answer_text)
+        claims = _sanitize_claims(res.get("claims"))
+        # A synchronous answer can carry a grant too — today only the human
+        # approval path mints one, but the asker must not silently drop it if
+        # a peer ever answers in-line with one attached.
+        _record_answer(peer_rec, peer_id, ask_id, answer_text, claims=claims,
+                       as_of=_coerce_as_of(res.get("as_of")),
+                       near_miss=bool(res.get("near_miss")),
+                       clip_grant=_sanitize_grant(res.get("clip_grant")))
         return {"ok": True, "status": "answered", "ask_id": ask_id,
-                "answer": answer_text, "peer": peer_rec.get("name", "?")}
+                "answer": answer_text, "claims": claims or [],
+                "as_of": _coerce_as_of(res.get("as_of")),
+                "peer": peer_rec.get("name", "?")}
     if res.get("status") == "declined":
         _record_answer(peer_rec, peer_id, ask_id, None, declined=True)
         return {"ok": True, "status": "declined", "ask_id": ask_id,
@@ -1448,20 +1649,94 @@ def _dispatch_ask(peer_rec: dict, peer_id: str, ask_id: str, question: str,
             "peer": peer_rec.get("name", "?")}
 
 
-def _queue_offline(peer_id, ask_id, question, kind, loop_id, exc) -> None:
-    _update_sent(ask_id, "queued", None)
+def _queue_offline(peer_id, ask_id, question, kind, loop_id, exc) -> bool:
+    """Mark queued only after the mailbox row is durable. Returns True on success.
+
+    Previously `_update_sent(..., "queued")` ran unconditionally and
+    `mailbox_enqueue` was swallowed — status said queued while flush_mailbox
+    had nothing to retry.
+    """
     try:
         from app.services import team_layer
         team_layer.mailbox_enqueue({
             "ask_id": ask_id, "peer_id": peer_id, "question": question,
             "kind": kind, "loop_id": loop_id,
         })
-    except Exception:
-        pass
+    except Exception as enq_exc:
+        # Leave the row as "sent" (already written at ask()) so a later
+        # presence pass / manual retry can still see an outstanding ask.
+        print(f"[peer] mailbox enqueue failed for {ask_id} ({enq_exc}); "
+              f"not marking queued after {exc}.")
+        return False
+    _update_sent(ask_id, "queued", None)
     print(f"[peer] queued ask {ask_id} for {peer_id} ({exc}).")
+    return True
 
 
-def _update_sent(ask_id: str, status: str, answer: str | None) -> None:
+def _trim_sent(sent: list) -> list:
+    """Bound decided history; never drop outstanding (sent/pending/queued).
+
+    Same durability policy as `_save_asks_partitioned` / `_finish_ask` — the
+    blind `sent[-N:]` trim used to drop still-open asks so a late answer hit
+    "no matching outstanding ask".
+    """
+    outstanding = [s for s in sent if s.get("status") in _OUTSTANDING_SENT]
+    done = [s for s in sent if s.get("status") not in _OUTSTANDING_SENT]
+    done = done[-settings.peer.history:]
+    return done + outstanding
+
+
+def nudge_stale_pending() -> list[dict]:
+    """Tell the asker when their question is sitting with a human who has not
+    looked at it. Called from the presence heartbeat.
+
+    Hosted removed the offline gap, and that changed what "pending" means. It
+    used to be a message waiting in someone's inbox, which needs no commentary.
+    Now the asker is usually waiting in real time, so silence past a couple of
+    minutes is dead air in the UI — and dead air is what teaches a tester the
+    feature does not work. This says it out loud, once per ask.
+    """
+    limit = float(settings.peer.pending_nudge_s or 0)
+    if limit <= 0:
+        return []
+    now = time.time()
+    nudged: list[dict] = []
+    with _lock:
+        sent = _load(_sent_path(), [])
+        for s in sent:
+            if s.get("status") != "pending" or s.get("nudged_at"):
+                continue
+            started = float(s.get("created_at") or 0)
+            if not started or (now - started) < limit:
+                continue
+            s["nudged_at"] = now
+            nudged.append(dict(s))
+        if nudged:
+            _save(_sent_path(), sent)
+    for s in nudged:
+        who = s.get("peer_name") or "Your teammate"
+        mins = max(1, int((now - float(s.get("created_at") or now)) // 60))
+        _emit_peer_result(
+            f"{who} hasn't responded yet — their Sparrow has your question "
+            f"(“{str(s.get('question') or '')[:120]}”) and is waiting "
+            f"on them to approve it. {mins} min so far; I'll tell you the "
+            f"moment it lands.")
+        try:
+            from app.services import peer_telemetry
+            peer_telemetry.record(
+                "pending_nudge", ask_id=s.get("ask_id", ""),
+                peer_id=s.get("peer_id", ""), peer_name=s.get("peer_name", ""),
+                kind=s.get("kind", ""), waited_s=round(now - float(
+                    s.get("created_at") or now), 3))
+        except Exception as exc:
+            print(f"[peer] telemetry skipped ({exc}).")
+    return nudged
+
+
+def _update_sent(ask_id: str, status: str, answer: str | None,
+                 claims: list | None = None, as_of: float | None = None,
+                 near_miss: bool = False,
+                 clip_grant: dict | None = None) -> None:
     with _lock:
         sent = _load(_sent_path(), [])
         for s in sent:
@@ -1470,35 +1745,162 @@ def _update_sent(ask_id: str, status: str, answer: str | None) -> None:
                 if answer is not None:
                     s["answer"] = answer
                     s["answered_at"] = time.time()
-        _save(_sent_path(), sent[-max(settings.peer.history,
-                                      settings.peer.max_pending_asks):])
+                # Provenance rides along in the sent log so the asker's UI and
+                # synthesize_topic_knowledge can date an answer later without
+                # re-asking. Absent for peers on an older build.
+                if claims is not None:
+                    s["claims"] = claims
+                    s["as_of"] = as_of
+                    s["near_miss"] = bool(near_miss)
+                # The grant is a credential to THEIR recordings; it lives with
+                # the answer it was issued for and dies with it.
+                if clip_grant is not None:
+                    s["clip_grant"] = clip_grant
+        _save(_sent_path(), _trim_sent(sent))
 
 
 def _record_answer(peer_rec: dict, peer_id: str, ask_id: str,
-                   answer_text: str | None, declined: bool = False) -> None:
+                   answer_text: str | None, declined: bool = False,
+                   claims: list | None = None, as_of: float | None = None,
+                   near_miss: bool = False,
+                   clip_grant: dict | None = None) -> None:
+    """Land one inbound answer. Phase 1.4: when the peer sent claims, they are
+    persisted with their own provenance and peer attribution, so
+    find_peer_answers and synthesize_topic_knowledge inherit dates and sources
+    with no further work."""
     status = "declined" if declined else "answered"
-    _update_sent(ask_id, status, answer_text or "")
+    _update_sent(ask_id, status, answer_text or "", claims=claims,
+                 as_of=as_of, near_miss=near_miss, clip_grant=clip_grant)
     _touch(peer_id, "answers")
+    usable = peer_answer_usable(answer_text or "", claims=claims)
+    try:
+        from app.services import peer_telemetry
+        peer_telemetry.record(
+            "answer", ask_id=ask_id, peer_id=peer_id,
+            peer_name=peer_rec.get("name", "?"),
+            status=status, answer_chars=len(answer_text or ""),
+            n_claims=len(claims) if claims is not None else None,
+            has_as_of=bool(as_of), near_miss=bool(near_miss),
+            usable=bool(usable) if answer_text else False)
+    except Exception as exc:
+        print(f"[peer] telemetry skipped ({exc}).")
     if answer_text:
         # Attribution in the raw text: this event grounds future chat answers,
         # and a fact learned from a teammate must read as theirs, not ours.
         name = peer_rec.get("name") or "a teammate"
-        # Never mint facts from identity dumps / empty hedges — that poisoned
-        # Venture Pulse into "internal CRM" on the asker's graph.
-        if not peer_answer_usable(answer_text):
-            print(f"[peer] skip ingest of unusable answer from {name}")
+        # A near-miss is an honest "nothing on that, here's what I do have" —
+        # a useful thing to SHOW the asker, but not knowledge about the topic
+        # they asked about, so it never mints facts.
+        if not usable or near_miss:
+            why = "near-miss" if near_miss else "unusable"
+            print(f"[peer] skip ingest of {why} answer from {name}")
             _publish_event(
                 "peer.answer",
                 f"[from {name}'s Sparrow — not ingested] {answer_text[:500]}",
                 {"peer_id": peer_id, "peer": name, "ask_id": ask_id,
-                 "ingested": False})
+                 "ingested": False, "near_miss": bool(near_miss)})
             return
         if ingest_enabled():
-            _ingest_answer(name, peer_id, ask_id, answer_text)
+            _ingest_answer(name, peer_id, ask_id, answer_text, claims=claims,
+                           as_of=as_of)
         else:
             _publish_event("peer.answer",
                            f"[from {name}'s Sparrow] {answer_text}",
-                           {"peer_id": peer_id, "peer": name, "ask_id": ask_id})
+                           {"peer_id": peer_id, "peer": name, "ask_id": ask_id,
+                            "claims": claims or [], "as_of": as_of})
+
+
+# A peer may send at most this many claims per answer, each this long. Bounds,
+# not trust: the payload is attacker-controlled in the same sense any paired
+# peer's input is.
+_MAX_PEER_CLAIMS = 12
+_MAX_CLAIM_CHARS = 600
+
+
+def _sanitize_claims(raw) -> list | None:
+    """Normalise an inbound `claims` array, or None when the peer sent none.
+
+    The ids inside a claim identify rows in THEIR database, never ours, so
+    they are renamed `peer_fact_id` / `peer_event_id` on the way in. A remote
+    id that kept the local name would eventually be read as a local fact id —
+    and a collision would attribute their memory to one of our own rows.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        return []
+    out: list[dict] = []
+    for item in raw[:_MAX_PEER_CLAIMS]:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text") or "").strip()[:_MAX_CLAIM_CHARS]
+        if not text:
+            continue
+        claim = {"text": text,
+                 "speaker": str(item.get("speaker") or "").strip()[:120],
+                 "when": str(item.get("when") or "").strip()[:40]}
+        for src, dst in (("fact_id", "peer_fact_id"),
+                         ("source_event_id", "peer_event_id")):
+            try:
+                if item.get(src) is not None:
+                    claim[dst] = int(item[src])
+            except (TypeError, ValueError):
+                pass
+        ts = _coerce_as_of(item.get("ts"))
+        if ts is not None:
+            claim["ts"] = ts
+        out.append(claim)
+    return out
+
+
+def sent_ask(ask_id: str) -> dict | None:
+    """One row from our outbound log, by ask_id."""
+    for s in _load(_sent_path(), []):
+        if s.get("ask_id") == ask_id:
+            return dict(s)
+    return None
+
+
+def peer_record(peer_id: str) -> dict | None:
+    """One paired peer's record, or None if we are no longer paired."""
+    rec = _load(_peers_path(), {}).get(peer_id)
+    return dict(rec) if rec else None
+
+
+def _sanitize_grant(raw) -> dict | None:
+    """Normalise an inbound clip grant: an opaque token plus the events it
+    covers, both bounded. Their event ids, like their fact ids, name rows in
+    THEIR store — we only ever hand them back to them."""
+    if not isinstance(raw, dict):
+        return None
+    token = str(raw.get("token") or "").strip()
+    if not token or len(token) > 200:
+        return None
+    events: list[int] = []
+    for eid in raw.get("events") or []:
+        try:
+            events.append(int(eid))
+        except (TypeError, ValueError):
+            continue
+    if not events:
+        return None
+    return {"token": token, "events": events[:12],
+            "expires_at": _coerce_as_of(raw.get("expires_at"))}
+
+
+def _coerce_as_of(value) -> float | None:
+    """A finite epoch seconds value, or None. Rejects a peer's clock skew far
+    enough out that a freshness stamp would mislead rather than inform."""
+    try:
+        ts = float(value)
+    except (TypeError, ValueError):
+        return None
+    if ts != ts or ts in (float("inf"), float("-inf")):  # NaN / inf
+        return None
+    now = time.time()
+    if ts <= 0 or ts > now + 86400:      # more than a day in the future
+        return None
+    return ts
 
 
 def handle_answer(peer: dict, payload: dict) -> dict:
@@ -1512,9 +1914,15 @@ def handle_answer(peer: dict, payload: dict) -> dict:
         sent = _load(_sent_path(), [])
         item = next((s for s in sent if s.get("ask_id") == ask_id
                      and s.get("peer_id") == peer.get("peer_id")
-                     and s.get("status") in ("sent", "pending")), None)
+                     and s.get("status") in _OUTSTANDING_SENT), None)
     if item is None:
         return {"ok": False, "error": "no matching outstanding ask"}
+    # Answer may land while we still show queued (mailbox not yet flushed).
+    try:
+        from app.services import team_layer
+        team_layer.mailbox_remove(ask_id)
+    except Exception:
+        pass
     if payload.get("declined"):
         _record_answer(peer, peer["peer_id"], ask_id, None, declined=True)
         _notify_chat(f"{peer.get('name', 'A teammate')}'s Sparrow declined "
@@ -1525,7 +1933,11 @@ def handle_answer(peer: dict, payload: dict) -> dict:
     if not answer_text:
         return {"ok": False, "error": "empty answer"}
     answer_text = answer_text[: settings.peer.max_text_chars]
-    _record_answer(peer, peer["peer_id"], ask_id, answer_text)
+    claims = _sanitize_claims(payload.get("claims"))
+    _record_answer(peer, peer["peer_id"], ask_id, answer_text,
+                   claims=claims, as_of=_coerce_as_of(payload.get("as_of")),
+                   near_miss=bool(payload.get("near_miss")),
+                   clip_grant=_sanitize_grant(payload.get("clip_grant")))
     print(f"[peer] answer from {peer.get('name', '?')}: {answer_text[:80]}")
     _notify_chat(f"{peer.get('name', 'A teammate')}'s Sparrow answered: "
                  f"“{answer_text[:400]}”")
@@ -1555,7 +1967,8 @@ def ingest_enabled() -> bool:
 
 
 def _ingest_answer(name: str, peer_id: str, ask_id: str,
-                   answer_text: str) -> None:
+                   answer_text: str, claims: list | None = None,
+                   as_of: float | None = None) -> None:
     """Store one answered ask as a TEXT event and queue fact extraction — the
     same chain typed chat takes (chat_ingest), with three deliberate downgrades
     for hearsay: OBSERVED tier (the teammate's ASSISTANT said it — this user
@@ -1571,11 +1984,20 @@ def _ingest_answer(name: str, peer_id: str, ask_id: str,
         from app.storage import get_store
 
         text = f"[from {name}'s Sparrow] {answer_text}"
+        # Phase 1.4: the peer's provenance rides in meta — their fact/event
+        # ids (peer-scoped, never confused with ours), who asserted each
+        # claim, and as_of. find_peer_answers and synthesize_topic_knowledge
+        # inherit dates and sources from here with no further work, so a stale
+        # teammate answer can be recognised as stale instead of read as current.
+        meta = {"origin": "peer", "peer_id": peer_id, "peer": name,
+                "ask_id": ask_id}
+        if claims:
+            meta["peer_claims"] = claims
+            meta["as_of"] = as_of
         ev = Event(
             time=time.time(), modality=Modality.TEXT, raw=text,
             summary=f"[peer.answer] {text[:120]}", source="peer.answer",
-            meta={"origin": "peer", "peer_id": peer_id, "peer": name,
-                  "ask_id": ask_id},
+            meta=meta,
         )
         _conf.attach(ev, _conf.OBSERVED)
         anchor = get_store().insert(ev)
@@ -1818,8 +2240,22 @@ def parse_peer_recall(text: str) -> dict | None:
             "topic": topic}
 
 
-def peer_answer_usable(answer: str, question: str = "") -> bool:
-    """True when a stored peer answer is worth showing/ingesting."""
+def peer_answer_usable(answer: str, question: str = "",
+                       claims: list | None = None) -> bool:
+    """True when a stored peer answer is worth showing/ingesting.
+
+    Phase 1.5 — structural: an answer is usable when it carries at least one
+    claim. `claims=[]` from an upgraded peer means "I have nothing typed on
+    this", which is honest but not knowledge, so it does not ingest.
+
+    `claims=None` means the peer did not send structure — an older build, or a
+    row stored before this phase. Those fall through to the legacy heuristic
+    below, which is the substring blocklist this phase exists to retire. It
+    stays for INGRESS compatibility only; nothing on the egress path consults
+    it, and it can be deleted once every paired instance sends claims.
+    """
+    if claims is not None:
+        return bool(claims)
     text = _strip_peer_update_leaks(answer or "").strip()
     if len(text) < 8:
         return False
@@ -1877,16 +2313,24 @@ def find_peer_answers(peer_id: str | None, topic: str, *, limit: int = 5) -> lis
         if topic_l and topic_l not in blob:
             if not tokens or not any(t in blob for t in tokens):
                 continue
-        cleaned = _strip_peer_update_leaks(a).strip()
+        claims = r.get("claims")
+        # Rows stored before Phase 1 (and answers from peers on an older
+        # build) have no claims, so they still get the legacy text cleanup.
+        cleaned = a.strip() if claims else _strip_peer_update_leaks(a).strip()
         out.append({
             "ask_id": r.get("ask_id"),
             "peer_name": r.get("peer_name") or "teammate",
             "question": q,
             "answer": cleaned,
+            "claims": claims or [],
+            "as_of": r.get("as_of"),
+            "near_miss": bool(r.get("near_miss")),
             "created_at": r.get("created_at") or r.get("answered_at") or 0,
-            "usable": peer_answer_usable(cleaned, q),
+            "usable": peer_answer_usable(cleaned, q, claims=claims),
         })
-    out.sort(key=lambda x: float(x.get("created_at") or 0))
+    # Newest last, and the caller takes the tail — but rank by the answer's
+    # own freshness when the peer told us one, not by when we happened to ask.
+    out.sort(key=lambda x: float(x.get("as_of") or x.get("created_at") or 0))
     return out[-limit:]
 
 
@@ -1913,17 +2357,28 @@ def synthesize_topic_knowledge(topic: str) -> str:
         return ""
     own: list[str] = []
     try:
-        from app.services.grounding import compose
-        g = compose(topic, semantic_limit=8)
-        own = _peer_memory_lines(g.get("sources") or [], limit=8, topic=topic)
-    except Exception:
-        pass
+        from app.services import peer_retrieval as pr
+        # Same typed path the egress composer uses, so "what do we know" is
+        # answered from dated facts rather than rendered grounding lines.
+        for c in pr.facts_for_topic(topic, limit=8):
+            when = pr.describe_age(c["ts"])
+            who = c.get("speaker") or ""
+            stamp = " · ".join([p for p in (who, when) if p])
+            own.append(f"{c['text']}" + (f" ({stamp})" if stamp else ""))
+    except Exception as exc:
+        print(f"[peer] topic synthesis grounding skipped ({exc}).")
     peer_bits: list[str] = []
     for h in find_peer_answers(None, topic, limit=8):
-        if not h.get("usable"):
+        if not h.get("usable") or h.get("near_miss"):
             continue
-        peer_bits.append(
-            f"From {h.get('peer_name') or 'a teammate'}'s Sparrow: {h['answer']}")
+        who = h.get("peer_name") or "a teammate"
+        # Their answer's own freshness, not when we asked — "as of Aug 14"
+        # changes how the reader uses it.
+        stamp = ""
+        if h.get("as_of"):
+            from app.services import peer_retrieval as pr
+            stamp = f" (as of {pr.describe_age(h['as_of'])})"
+        peer_bits.append(f"From {who}'s Sparrow{stamp}: {h['answer']}")
     lines: list[str] = []
     if own:
         lines.append("From our memory:")
@@ -2167,14 +2622,29 @@ def chat_tell_async(peer_id: str, peer_name: str, topic: str) -> None:
 
 
 def answers(ask_id: str | None = None) -> list[dict]:
-    """Sent asks with their current status/answers — for the UI and polling."""
+    """Sent asks with their current status/answers — for the UI and polling.
+
+    Carries the answer's freshness stamp and WHICH clips the teammate approved,
+    but never the grant token itself: `/peer/clip/play` looks that up server-
+    side by ask_id, so the credential has no reason to reach a browser.
+    """
     rows = _load(_sent_path(), [])
     if ask_id:
         rows = [r for r in rows if r.get("ask_id") == ask_id]
-    return [{k: r.get(k) for k in ("ask_id", "peer_name", "question", "status",
-                                   "answer", "created_at", "answered_at",
-                                   "kind", "loop_id", "team_slug", "team_ask_id")}
-            for r in rows]
+    out = []
+    for r in rows:
+        row = {k: r.get(k) for k in ("ask_id", "peer_name", "question",
+                                     "status", "answer", "created_at",
+                                     "answered_at", "kind", "loop_id",
+                                     "team_slug", "team_ask_id")}
+        row["as_of"] = r.get("as_of")
+        row["near_miss"] = bool(r.get("near_miss"))
+        grant = r.get("clip_grant") or {}
+        if grant.get("events"):
+            row["clip_grant"] = {"events": list(grant["events"]),
+                                 "expires_at": grant.get("expires_at")}
+        out.append(row)
+    return out
 
 
 def status() -> dict:

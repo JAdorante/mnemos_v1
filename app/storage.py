@@ -93,6 +93,9 @@ class Store:
             self.db_path, check_same_thread=False, timeout=30.0)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
+        # Match perception.db: WAL alone does not force a durable commit; FULL
+        # makes each commit the fsync unit (slower writers, fewer lost tails).
+        self._conn.execute("PRAGMA synchronous=FULL")
         self._conn.execute("PRAGMA busy_timeout=30000")
         self._init_schema()
 
@@ -2540,6 +2543,20 @@ class Store:
                 f"SELECT * FROM events WHERE id IN ({placeholders})", ids
             ).fetchall()
         return {int(r["id"]): self._row_to_event(r) for r in rows}
+
+    def event_ids_at(self, ts: float, limit: int = 4) -> list[int]:
+        """Event ids with exactly this timestamp, newest row first.
+
+        `Event.to_dict()` carries no row id, so a caller holding only a
+        rendered event payload (a semantic search hit) has no other way back
+        to the row. Timestamps are float seconds and effectively unique per
+        event; `limit` bounds the pathological tie. Uses idx_events_time.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id FROM events WHERE time = ? ORDER BY id DESC LIMIT ?",
+                (float(ts), int(limit))).fetchall()
+        return [int(r["id"]) for r in rows]
 
     def search(self, query: str, limit: int = 20) -> list[Event]:
         q = f"%{query.strip()}%"
@@ -7428,7 +7445,12 @@ class Store:
                 self._FACT_SELECT
                 + " WHERE f.state = 'active'"
                   " AND (f.review IS NULL OR f.review != 'dismissed')"
-                  " AND COALESCE(t.text, c.text, f.source_span) LIKE ?"
+                  # Match _FACT_SELECT's own coalesce order. Without
+                  # NULLIF(f.text,'') a claim that has text but no verbatim
+                  # span was invisible to substring retrieval while still
+                  # being visible everywhere else that reads facts.
+                  " AND COALESCE(t.text, c.text, NULLIF(f.text, ''),"
+                  "              f.source_span) LIKE ?"
                   " ORDER BY COALESCE(f.updated_at, f.extracted_at) DESC"
                   " LIMIT ?",
                 (q, limit)).fetchall()

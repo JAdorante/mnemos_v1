@@ -177,6 +177,17 @@ class MailboxTests(TeamLayerBase):
         self.assertEqual(tl.mailbox_list(pid), [])
         self.assertEqual(pch.answers(res["ask_id"])[0]["status"], "pending")
 
+    def test_mailbox_full_raises_instead_of_dropping(self) -> None:
+        """M6: refuse enqueue when full; never silently drop oldest."""
+        with mock.patch.object(tl, "_mailbox_cap", return_value=2):
+            tl.mailbox_enqueue({"ask_id": "a", "peer_id": "p", "question": "q1"})
+            tl.mailbox_enqueue({"ask_id": "b", "peer_id": "p", "question": "q2"})
+            with self.assertRaises(RuntimeError):
+                tl.mailbox_enqueue(
+                    {"ask_id": "c", "peer_id": "p", "question": "q3"})
+        ids = {b["ask_id"] for b in tl.mailbox_list()}
+        self.assertEqual(ids, {"a", "b"})
+
 
 class LoopTests(TeamLayerBase):
     def test_handoff_mints_loop_on_both_sides(self) -> None:

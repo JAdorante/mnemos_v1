@@ -5583,6 +5583,7 @@ class PeerJoinIn(BaseModel):
     url: str = ""     # the other instance, e.g. http://192.168.1.20:8000
     code: str = ""    # the 6-digit code their desktop is showing
     invite: str = ""  # or one pasted sparrow://pair/… token instead of both
+    pack: str = ""    # this side's disclosure choice for the new pair
 
 
 class PeerQueryIn(BaseModel):
@@ -5697,8 +5698,8 @@ def peer_pair_join(body: PeerJoinIn) -> dict:
     if not invite and body.url.strip().lower().startswith("sparrow://"):
         invite = body.url.strip()
     if invite:
-        return peer_channel.join_invite(invite)
-    return peer_channel.join(body.url, body.code)
+        return peer_channel.join_invite(invite, pack=body.pack)
+    return peer_channel.join(body.url, body.code, pack=body.pack)
 
 
 @router.post("/peer/ask")
@@ -5725,6 +5726,82 @@ def peer_ping_inbound(body: dict | None = None,
     if peer is None:
         raise HTTPException(status_code=401, detail="invalid or missing peer token")
     return team_layer.handle_ping(peer, body if isinstance(body, dict) else {})
+
+
+@router.get("/peer/clip/play")
+def peer_clip_play(ask_id: str = Query(...), event_id: int = Query(...)):
+    """Asker side: play the moment behind a teammate's answer.
+
+    Fetches over the peer channel using the grant that arrived with that
+    answer, then streams it to this user's browser. Nothing is cached to disk:
+    the recording belongs to the other tenant, the grant expires, and a copy
+    sitting in our data dir would outlive both.
+    """
+    from fastapi.responses import Response
+
+    from app.services import peer_channel, peer_clip
+
+    row = peer_channel.sent_ask(ask_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="no such answered ask")
+    grant = row.get("clip_grant")
+    if not grant:
+        raise HTTPException(status_code=404, detail="no clip grant for that answer")
+    if int(event_id) not in (grant.get("events") or []):
+        raise HTTPException(status_code=403, detail="that clip is not in the grant")
+    peer_rec = peer_channel.peer_record(row.get("peer_id", ""))
+    if peer_rec is None:
+        raise HTTPException(status_code=404, detail="no longer paired with that teammate")
+    got = peer_clip.fetch_from_peer(peer_rec, grant, int(event_id))
+    if got is None:
+        raise HTTPException(
+            status_code=502,
+            detail="their Sparrow did not return that clip — the grant may "
+                   "have expired, or they may have revoked it")
+    data, ctype = got
+    return Response(content=data, media_type=ctype)
+
+
+@router.post("/peer/clip")
+def peer_clip_inbound(body: dict, authorization: str | None = Header(None)):
+    """Serve ONE recording to a peer holding a valid capability grant.
+
+    The only route in the product that hands another tenant a file, and it
+    needs two independent credentials to do it: the pairing token (which
+    authenticates the peer, as everywhere else) AND a clip grant a human
+    minted when they approved a specific answer, scoped to the source events
+    behind that answer's claims.
+
+    Every failure returns the same 403 with the same text. A caller must not
+    be able to tell "expired" from "wrong event" from "never existed" —
+    that distinction turns this endpoint into an oracle for which recordings
+    this tenant holds.
+    """
+    from app.services import peer_channel, peer_clip
+
+    peer = peer_channel.authenticate(authorization)
+    if peer is None:
+        raise HTTPException(status_code=401, detail="invalid or missing peer token")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="body must be a JSON object")
+    ok, _reason, span = peer_clip.check_scope(peer["peer_id"],
+                                              str(body.get("token") or ""),
+                                              body.get("event_id"))
+    if not ok:
+        raise HTTPException(status_code=403, detail="no such clip grant")
+    # Trimmed to the words the claim rests on. The grant recorded that span at
+    # approval time, so what is sent is what the approver actually agreed to —
+    # not the surrounding conversation that happened to share a recording.
+    got = peer_clip.clip_bytes_for_send(body.get("event_id"), span)
+    if got is None:
+        # Granted but unsendable (deleted, compacted, or the span could not be
+        # located). Same opaque refusal: whether a clip still exists is also
+        # information about this tenant.
+        raise HTTPException(status_code=403, detail="no such clip grant")
+    data, media = got
+    print(f"[peer] served clip {body.get('event_id')} to "
+          f"{peer.get('name', '?')} ({len(data)} bytes).")
+    return Response(content=data, media_type=media)
 
 
 @router.post("/peer/answer")

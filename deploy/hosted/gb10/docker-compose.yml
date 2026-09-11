@@ -37,6 +37,29 @@ x-env: &sparrow-env
   # rides in the OAuth state), so rotating *.trycloudflare.com hostnames
   # never need re-registering. Unset → per-hostname registration, as before.
   QUILL_OAUTH_REDIRECT_BASE: "${SPARROW_OAUTH_REDIRECT_BASE:-}"
+  # Disclosure posture for NEW pairs on the trial (existing pairs keep whatever
+  # they already have). Everyone here is online at once, so an all-offer
+  # default mostly produces abandoned round trips: the asker waits in real
+  # time while a human is not looking at their screen. `pilot` auto-answers
+  # schedule and work, still asks on contact/other, and — like every pack, at
+  # every setting — never auto-answers `personal`. The pairing form shows the
+  # choice, so a tester can override this per teammate.
+  # Unset it to restore the all-offer default used off the trial.
+  QUILL_PEER_DEFAULT_PACK: pilot
+  # Agent posture for the trial: prepare freely, then STOP at the first
+  # irreversible step and hand back the packet without even prompting. The
+  # code default ("approval") pauses for a human at each commit gate, which is
+  # a real gate — but during a pilot nobody needs the agent to send, book, or
+  # buy anything, so the commit path is removed rather than guarded.
+  #
+  # Set on every seat, not just the one with a cloud key: if a key is ever
+  # added to another seat, it should land in this posture rather than inherit
+  # the more permissive default by omission.
+  #
+  # Costs no demo capability — routing, planning, browsing, sign-in handoff and
+  # draft-building all still run. Raise to "approval" (or unset) to restore
+  # human-gated commits; "navigate" is stricter still (no typing or clicking).
+  AGENT_DRY_RUN: draft
 
 services:
   # Host Ollama binds 127.0.0.1 only and changing that needs root; this
@@ -53,12 +76,36 @@ services:
     <<: *sparrow
     ports:
       - "127.0.0.1:8001:8000"
+    # LoRA pilot (user1 only): the idle trainer needs the GPU visible to the
+    # container. The box already has nvidia-container-toolkit wired, so this
+    # needs no daemon change. Other seats stay GPU-free until this proves out.
+    gpus: all
     volumes:
       - sparrow-user1-data:/srv/sparrow/data
+      # The training venv (unsloth + its own torch) lives OUTSIDE the image so
+      # it survives rebuilds. It must stay a separate venv: unsloth pins
+      # torch 2.12/transformers 5.5, and installing it into the app's system
+      # python would downgrade the stack the app serves from.
+      - sparrow-user1-lora-venv:/root/.mnemos-lora
+      # train_lora's PACKAGE stage shells out to `ollama create/show/list`.
+      # The CLI is only a client here (OLLAMA_HOST points at the shared host
+      # daemon via ollama-proxy), so the host binary mounted read-only is
+      # enough — no ~1GB ollama install baked into the image.
+      - /usr/local/bin/ollama:/usr/local/bin/ollama:ro
     environment:
       <<: *sparrow-env
       QUILL_API_TOKEN: "${SPARROW_USER1_TOKEN:?set a per-user token in .env}"
       QUILL_LORA_TAG_SUFFIX: user1
+      # Opt in to idle LoRA training. Everything else the hosted posture needs
+      # (capture-quiet idleness, no AC check) follows from QUILL_HEADLESS=1,
+      # which the Dockerfile already pins.
+      QUILL_IDLE_TRAIN: "1"
+      # The cold-start bootstrap runs ONCE (state['synth_done']) and generates
+      # min(need, QUILL_SYNTH_N) pairs. This seat has ~7 organic pairs, so the
+      # 45 default would stop at 52 — short of the 100-pair green light, with
+      # no second attempt, and training would never fire. Size it above the
+      # gap so the one shot actually closes it.
+      QUILL_SYNTH_N: "120"
       # Private address on this compose network. Peers try it BEFORE
       # QUILL_PEER_BASE_URL, so on-box pairs keep working when a quick
       # tunnel restarts under a new hostname, and their traffic never
@@ -143,6 +190,7 @@ services:
 
 volumes:
   sparrow-user1-data:
+  sparrow-user1-lora-venv:
   sparrow-user2-data:
   sparrow-user3-data:
   sparrow-user4-data:

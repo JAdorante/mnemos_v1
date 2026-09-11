@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,6 +27,14 @@ os.environ.setdefault("QUILL_DESKTOP_JAIL", tempfile.mkdtemp(prefix="quill_jail_
 
 from app.events import Modality, bus  # noqa: E402
 from app.services import peer_channel as pch  # noqa: E402
+
+# One typed egress claim, the shape Phase 1 puts on the wire: text plus the
+# provenance an asker needs to judge it (which fact, which source event, who
+# said it, when).
+_CLAIM = {"fact_id": 7, "text": "Friday Aug 7.", "source_event_id": 3,
+          "source_span": "Friday Aug 7.", "speaker": "Sarah",
+          "ts": 1_757_000_000.0, "kind": "claim", "confidence": 0.9,
+          "when": "Aug 7"}
 
 
 class PeerChannelBase(unittest.TestCase):
@@ -174,8 +183,11 @@ class InboundAskTests(PeerChannelBase):
             asks_path=os.environ["QUILL_PEER_ASKS"],
             sent_path=os.environ["QUILL_PEER_SENT"]))
         with mock.patch.object(pch, "settings", auto), \
-             mock.patch.object(pch, "compose_peer_answer",
-                               return_value={"text": "Friday Aug 7.",
+             mock.patch.object(pch, "compose_peer_claims",
+                               return_value={"claims": [_CLAIM],
+                                             "as_of": _CLAIM["ts"],
+                                             "prose": "Friday Aug 7.",
+                                             "near_miss": False,
                                              "redacted": []}):
             res = pch.handle_ask(peer, {"ask_id": "a2", "question": "when?"})
         self.assertEqual(res["status"], "answered")
@@ -187,14 +199,22 @@ class InboundAskTests(PeerChannelBase):
         pch.handle_ask(peer, {"ask_id": "a3", "question": "when?"})
         local_id = pch.pending_asks()[0]["id"]
         delivered: list = []
-        with mock.patch.object(pch, "compose_peer_answer",
-                               return_value={"text": "Friday Aug 7.",
+        with mock.patch.object(pch, "compose_peer_claims",
+                               return_value={"claims": [_CLAIM],
+                                             "as_of": _CLAIM["ts"],
+                                             "prose": "Friday Aug 7.",
+                                             "near_miss": False,
                                              "redacted": []}), \
              mock.patch.object(pch, "_deliver",
                                side_effect=lambda rec, p: delivered.append(p) or True):
             res = pch.decide_ask(local_id, approve=True)
         self.assertTrue(res["ok"], res)
-        self.assertEqual(delivered[0], {"ask_id": "a3", "answer": "Friday Aug 7."})
+        # Phase 1.3: the wire carries claims and a freshness stamp alongside
+        # the prose an unupgraded peer reads.
+        self.assertEqual(delivered[0]["ask_id"], "a3")
+        self.assertEqual(delivered[0]["answer"], "Friday Aug 7.")
+        self.assertEqual(delivered[0]["claims"], [_CLAIM])
+        self.assertEqual(delivered[0]["as_of"], _CLAIM["ts"])
         self.assertEqual(pch.pending_asks(), [])
 
     def test_deny_notifies_peer(self) -> None:
@@ -208,6 +228,83 @@ class InboundAskTests(PeerChannelBase):
         self.assertEqual(res["status"], "denied")
         self.assertEqual(delivered[0], {"ask_id": "a4", "declined": True})
         self.assertEqual(pch.pending_asks(), [])
+
+    def test_delivery_failure_stashes_for_retry(self) -> None:
+        """H4: failed outbound must not finish as terminal delivery_failed."""
+        peer = self._peer()
+        pch.handle_ask(peer, {"ask_id": "a5", "question": "when?"})
+        local_id = pch.pending_asks()[0]["id"]
+        with mock.patch.object(pch, "compose_peer_claims",
+                               return_value={"claims": [_CLAIM],
+                                             "as_of": _CLAIM["ts"],
+                                             "prose": "Friday Aug 7.",
+                                             "near_miss": False,
+                                             "redacted": []}), \
+             mock.patch.object(pch, "_deliver", return_value=False):
+            res = pch.decide_ask(local_id, approve=True)
+        self.assertEqual(res["status"], "delivery_pending")
+        self.assertFalse(res["ok"])
+        # Still open — not truncated into decided history, not needing re-approve.
+        self.assertEqual(pch.pending_asks(), [])
+        with pch._lock:
+            asks = pch._load(pch._asks_path(), [])
+        row = next(a for a in asks if a["id"] == local_id)
+        self.assertEqual(row["status"], "delivery_pending")
+        self.assertEqual(row["outbound"]["ask_id"], "a5")
+        self.assertEqual(row["success_status"], "answered")
+        # Presence flush retries the stashed payload without re-compose.
+        with mock.patch.object(pch, "_deliver", return_value=True) as deliver:
+            flushed = pch.retry_delivery_pending(peer["peer_id"])
+        self.assertEqual(flushed["flushed"], 1)
+        deliver.assert_called_once()
+        with pch._lock:
+            asks = pch._load(pch._asks_path(), [])
+        self.assertEqual(next(a for a in asks if a["id"] == local_id)["status"],
+                         "answered")
+
+    def test_queue_offline_fail_closed_when_mailbox_errors(self) -> None:
+        """H3: do not mark queued if mailbox_enqueue fails."""
+        pid = self._peer()["peer_id"]
+        with mock.patch.object(pch, "_post_json",
+                               side_effect=OSError("refused")), \
+             mock.patch("app.services.team_layer.mailbox_enqueue",
+                        side_effect=OSError("disk full")):
+            res = pch.ask(pid, "when?")
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["status"], "sent")
+        self.assertEqual(pch.answers(res["ask_id"])[0]["status"], "sent")
+
+    def test_handle_answer_accepts_queued(self) -> None:
+        """M2: answer may land while asker still shows queued."""
+        pid = self._peer()["peer_id"]
+        with mock.patch.object(pch, "_post_json",
+                               side_effect=OSError("refused")):
+            res = pch.ask(pid, "when?")
+        self.assertEqual(pch.answers(res["ask_id"])[0]["status"], "queued")
+        peer = {"peer_id": pid, "name": "Sarah"}
+        got = pch.handle_answer(peer, {"ask_id": res["ask_id"],
+                                      "answer": "Friday."})
+        self.assertTrue(got["ok"], got)
+        self.assertEqual(pch.answers(res["ask_id"])[0]["status"], "answered")
+
+    def test_sent_trim_keeps_outstanding(self) -> None:
+        """M1: decided history truncates; outstanding rows never fall off."""
+        sent = (
+            [{"ask_id": f"done{i}", "status": "answered", "peer_id": "p"}
+             for i in range(5)]
+            + [{"ask_id": "open1", "status": "queued", "peer_id": "p"},
+               {"ask_id": "open2", "status": "pending", "peer_id": "p"}]
+        )
+        peer_cfg = SimpleNamespace(
+            history=2, max_pending_asks=50, enabled=True)
+        with mock.patch.object(pch, "settings",
+                               SimpleNamespace(peer=peer_cfg)):
+            trimmed = pch._trim_sent(sent)
+        ids = [s["ask_id"] for s in trimmed]
+        self.assertIn("open1", ids)
+        self.assertIn("open2", ids)
+        self.assertEqual(len([s for s in trimmed
+                              if s["status"] == "answered"]), 2)
 
 
 class DisclosurePolicyTests(PeerChannelBase):
@@ -243,8 +340,11 @@ class DisclosurePolicyTests(PeerChannelBase):
         pch.set_policy(peer["peer_id"], {"availability": "auto"})
         with mock.patch.object(pch, "classify_question",
                                return_value="availability"), \
-             mock.patch.object(pch, "compose_peer_answer",
-                               return_value={"text": "Friday Aug 7.",
+             mock.patch.object(pch, "compose_peer_claims",
+                               return_value={"claims": [_CLAIM],
+                                             "as_of": _CLAIM["ts"],
+                                             "prose": "Friday Aug 7.",
+                                             "near_miss": False,
                                              "redacted": []}):
             res = pch.handle_ask(peer, {"ask_id": "p2",
                                         "question": "free thursday?"})
@@ -387,30 +487,41 @@ class ChatIntentTests(PeerChannelBase):
             self.assertFalse(got["question"].lstrip().startswith("2"),
                              got["question"])
 
-    def test_compose_answer_strips_identity_leaks(self) -> None:
-        leaked = (
-            "Here's what I found, with the evidence:\n"
-            "- You are Sparrow, the user's personal AI memory assistant.\n"
-            "- The user you are assisting is User 2.\n"
-            "- Venture Pulse is our internal CRM for deal tracking.\n"
-            ":::confirmed\n- Venture Pulse\n:::"
-        )
-        with mock.patch.object(pch, "compose_peer_answer",
-                               return_value={"text": pch._strip_peer_update_leaks(leaked),
-                                             "redacted": []}):
-            got = pch.compose_answer("what do you know about Venture Pulse")
-        # compose_answer wraps compose_peer_answer; when that returns empty
-        # after leaks, fall back to the honest empty-memory line.
-        cleaned = pch._strip_peer_update_leaks(leaked)
-        self.assertIn("Venture Pulse", cleaned)
-        self.assertNotIn("You are Sparrow", cleaned)
-        got2 = pch._strip_peer_update_leaks(leaked)
-        self.assertIn("Venture Pulse", got2)
-        self.assertNotIn(":::confirmed", got2)
-        with mock.patch.object(pch, "compose_peer_answer",
-                               return_value={"text": "", "redacted": []}):
-            empty = pch.compose_answer("what do you know about Venture Pulse")
-        self.assertIn("don't have enough", empty["text"].lower())
+    def test_compose_answer_carries_claims_and_a_freshness_stamp(self) -> None:
+        """Phase 1: an answer rests on typed claims and says how fresh it is."""
+        import tempfile
+        from pathlib import Path
+
+        from app.storage import Store
+        with tempfile.TemporaryDirectory() as td:
+            store = Store(Path(td) / "egress.db")
+            store.add_claim("Venture Pulse is our deal tracker",
+                            source_span="Venture Pulse is our deal tracker",
+                            confidence=0.9, extracted_at=time.time())
+            with mock.patch("app.storage.get_store", return_value=store), \
+                 mock.patch("app.services.memory.memory.search",
+                            return_value=[]):
+                got = pch.compose_answer("what do you know about Venture Pulse")
+        self.assertIn("Venture Pulse", got["text"])
+        self.assertTrue(got["claims"])
+        self.assertIsNotNone(got["as_of"])
+        self.assertIsNotNone(got["claims"][0]["fact_id"])
+        self.assertNotIn("You are Sparrow", got["text"])
+        self.assertNotIn(":::confirmed", got["text"])
+
+    def test_compose_answer_with_no_memory_at_all_is_honest(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from app.storage import Store
+        with tempfile.TemporaryDirectory() as td:
+            store = Store(Path(td) / "empty.db")
+            with mock.patch("app.storage.get_store", return_value=store), \
+                 mock.patch("app.services.memory.memory.search",
+                            return_value=[]):
+                empty = pch.compose_answer("what do you know about Venture Pulse")
+        self.assertEqual(empty["claims"], [])
+        self.assertIn("don't have anything", empty["text"].lower())
 
     def test_non_team_asks_fall_through(self) -> None:
         for text in ("ask me anything",
@@ -529,26 +640,31 @@ class ChatIntentTests(PeerChannelBase):
         send.assert_called_once_with(self.pid, "Mic still open.",
                                      kind="notify")
 
-    def test_update_compose_drops_senders_work_items(self) -> None:
-        sources = [
-            {"label": "memories", "items": [
-                '[text] "Andy is letting us use the compute, free."']},
-            {"label": "open tasks & commitments", "items": [
-                "OPEN TASKS & COMMITMENTS (from your reviewed memory):",
-                "- [commitment] Send Andy an update on our usage by Friday",
-                "- [task] Book the venue",
-            ]},
-        ]
-        kept = pch._peer_memory_lines(sources, skip_work_items=True)
-        joined = "\n".join(kept)
-        self.assertIn("letting us use the compute", joined)
-        self.assertNotIn("[commitment]", joined)
-        self.assertNotIn("[task]", joined)
-        self.assertNotIn("OPEN TASKS", joined)
-        # Answers keep work items — a teammate may be asking about exactly them.
-        kept_all = pch._peer_memory_lines(sources)
-        self.assertIn("[commitment] Send Andy an update on our usage by Friday",
-                      "\n".join(kept_all))
+    def test_egress_never_ships_the_senders_own_work_items(self) -> None:
+        """The sender's tasks/commitments are private work state. Phase 1 makes
+        that structural (EGRESS_KINDS) instead of a per-path flag that was once
+        set on push updates and forgotten on answers."""
+        import tempfile
+        from pathlib import Path
+
+        from app.services import peer_retrieval as pr
+        from app.storage import Store
+        now = time.time()
+        with tempfile.TemporaryDirectory() as td:
+            store = Store(Path(td) / "work.db")
+            store.add_claim("Andy is letting us use the compute, free",
+                            source_span="Andy is letting us use the compute",
+                            confidence=0.9, extracted_at=now)
+            store.add_task("Send Andy an update on our usage by Friday",
+                           confidence=0.9, extracted_at=now)
+            with mock.patch("app.services.memory.memory.search",
+                            return_value=[]):
+                got = pr.facts_for_topic("Andy compute usage update",
+                                         store=store)
+        texts = "\n".join(c["text"] for c in got)
+        self.assertIn("letting us use the compute", texts)
+        self.assertNotIn("Send Andy an update", texts)
+        self.assertTrue(all(c["kind"] == "claim" for c in got))
 
     def test_strip_self_reminders_from_tell_topic(self) -> None:
         topic = ("Andy Karos is letting us use Boost Run's compute, free. "
@@ -587,30 +703,29 @@ class ChatIntentTests(PeerChannelBase):
         self.assertIn("Mic still open", got)
         self.assertIn("Project X", got)
 
-    def test_compose_peer_update_skips_identity_sources(self) -> None:
-        sources = [
-            {"label": "identity", "items": [
-                "You are Sparrow, the user's personal AI memory assistant.",
-                "The user you are assisting is Dave Randel."]},
-            {"label": "user profile", "items": [
-                "I can trust the system's memory more than my own"]},
-            {"label": "open tasks & commitments", "items": [
-                "Project X pricing follow-up with Justin",
-                "Ship onboarding this week"]},
-        ]
-        with mock.patch("app.services.grounding.compose",
-                        return_value={"block": "x", "hits": [],
-                                      "sources": sources}), \
-             mock.patch("app.config.settings") as st:
-            st.text_local.enabled = False
-            st.peer.max_text_chars = 4000
-            # peer_channel imports settings at module level — patch the binding
-            with mock.patch.object(pch, "settings", st):
+    def test_compose_peer_update_ships_only_typed_facts(self) -> None:
+        """Phase 1 replaces the identity/profile BLOCKLIST with a whitelist:
+        identity blocks and profile instructions are not facts, so they are
+        never egress candidates in the first place."""
+        import tempfile
+        from pathlib import Path
+
+        from app.storage import Store
+        with tempfile.TemporaryDirectory() as td:
+            store = Store(Path(td) / "egress.db")
+            store.add_claim("Project X pricing follow-up with Justin",
+                            source_span="Project X pricing follow-up",
+                            confidence=0.9, extracted_at=time.time())
+            with mock.patch("app.storage.get_store", return_value=store), \
+                 mock.patch("app.services.memory.memory.search",
+                            return_value=[]):
                 out = pch.compose_peer_update("status of Project X")
         self.assertIn("Project X", out["text"])
+        self.assertTrue(out["claims"])
+        self.assertIsNotNone(out["as_of"])
+        # There is no code path by which an identity line could reach the wire.
         self.assertNotIn("You are Sparrow", out["text"])
         self.assertNotIn("Dave Randel", out["text"])
-        self.assertNotIn("trust the system's memory", out["text"])
 
     def test_explicit_channel_skips_peer_tell(self) -> None:
         for text in ("email Sarah about the slides",

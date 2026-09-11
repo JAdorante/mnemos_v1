@@ -38,6 +38,20 @@ POLICY_PACKS: dict[str, dict[str, str]] = {
         "availability": "auto", "work": "auto", "contact": "offer",
         "personal": "offer", "other": "offer",
     },
+    # Same grants as `manager`, deliberately NOT the same label: these are
+    # peer-to-peer trial pairs, and calling a colleague your manager in the
+    # UI misdescribes the relationship people are consenting to.
+    #
+    # Why auto at all: on a hosted box everyone is online at once, so a queued
+    # disclosure is not a message waiting in someone's inbox — it is the asker
+    # sitting in dead air while a human is not looking at their screen. All-
+    # offer is the right default for a real deployment and the wrong one for a
+    # two-week trial, where it mostly produces abandoned round trips.
+    # `personal` stays untouchable here as everywhere.
+    "pilot": {
+        "availability": "auto", "work": "auto", "contact": "offer",
+        "personal": "offer", "other": "offer",
+    },
     "company": {
         "availability": "offer", "work": "deny", "contact": "deny",
         "personal": "deny", "other": "deny",
@@ -51,8 +65,20 @@ POLICY_PACKS: dict[str, dict[str, str]] = {
 PACK_BLURB = {
     "teammate": "Same squad — ask you on every topic (the default).",
     "manager": "Auto-share schedule and work; still ask on contact/personal.",
+    "pilot": "Trial pair — answer schedule and work without waiting on you; "
+             "still ask on contact/personal.",
     "company": "Company directory — free/busy only; everything else declined.",
     "vendor": "Decline everything automatically.",
+}
+
+# Three words each, for the one choice offered during pairing. Anything longer
+# does not get read at the moment someone is trying to finish pairing.
+PACK_SHORT = {
+    "teammate": "Ask me first",
+    "manager": "My manager",
+    "pilot": "Answer work automatically",
+    "company": "Free/busy only",
+    "vendor": "Decline everything",
 }
 
 _SLUG_RE = re.compile(r"^[a-z][a-z0-9-]{0,40}$")
@@ -151,7 +177,8 @@ def my_transport() -> dict[str, Any]:
 
 # --- policy packs -----------------------------------------------------------
 def list_packs() -> list[dict]:
-    return [{"id": k, "policy": dict(v), "blurb": PACK_BLURB.get(k, "")}
+    return [{"id": k, "policy": dict(v), "blurb": PACK_BLURB.get(k, ""),
+             "short": PACK_SHORT.get(k, k)}
             for k, v in POLICY_PACKS.items()]
 
 
@@ -361,7 +388,17 @@ def maybe_rollup(team_ask_id: str | None) -> str | None:
 
 
 # --- mailbox (sender-side offline queue) ------------------------------------
+def _mailbox_cap() -> int:
+    cfg = _peer_cfg()
+    hist = int(getattr(cfg, "history", 200) or 200) if cfg else 200
+    pending = int(getattr(cfg, "max_pending_asks", 50) or 50) if cfg else 50
+    return max(hist, pending, 200)
+
+
 def mailbox_enqueue(item: dict) -> None:
+    """Append one offline ask. Fails closed when the box is full — never
+    silently drop the oldest still-queued row (that left sent-log saying
+    queued while flush_mailbox had nothing to retry)."""
     row = {
         "ask_id": item.get("ask_id"),
         "peer_id": item.get("peer_id"),
@@ -377,8 +414,11 @@ def mailbox_enqueue(item: dict) -> None:
         box = _load(_mailbox_path(), [])
         if any(b.get("ask_id") == row["ask_id"] for b in box):
             return
+        cap = _mailbox_cap()
+        if len(box) >= cap:
+            raise RuntimeError(f"peer mailbox full ({cap})")
         box.append(row)
-        _save(_mailbox_path(), box[-200:])
+        _save(_mailbox_path(), box)
 
 
 def mailbox_list(peer_id: str | None = None) -> list[dict]:
@@ -397,7 +437,7 @@ def mailbox_remove(ask_id: str) -> None:
 
 
 def flush_mailbox(peer_id: str | None = None) -> dict:
-    """Retry queued asks. Returns counts. Never raises."""
+    """Retry queued asks and failed outbound answer deliveries. Never raises."""
     items = mailbox_list(peer_id)
     flushed = 0
     still = 0
@@ -419,7 +459,15 @@ def flush_mailbox(peer_id: str | None = None) -> dict:
                     if b.get("ask_id") == item.get("ask_id"):
                         b["attempts"] = int(b.get("attempts") or 0) + 1
                 _save(_mailbox_path(), box)
-    return {"ok": True, "flushed": flushed, "remaining": still}
+    delivery = {"flushed": 0, "remaining": 0}
+    try:
+        delivery = peer_channel.retry_delivery_pending(peer_id)
+    except Exception:
+        pass
+    return {"ok": True, "flushed": flushed, "remaining": still,
+            "delivery_flushed": int(delivery.get("flushed") or 0),
+            "delivery_remaining": int(delivery.get("remaining") or 0)}
+
 
 
 # --- presence ---------------------------------------------------------------
@@ -524,6 +572,14 @@ def _ping_loop() -> None:
             ping_all()
         except Exception as exc:
             print(f"[peer] presence ping skipped ({exc}).")
+        try:
+            # Same tick: tell the asker when a question has been sitting with
+            # a human too long. Pending is dead air now that everyone is
+            # online, and silence is what teaches a tester it does not work.
+            from app.services import peer_channel
+            peer_channel.nudge_stale_pending()
+        except Exception as exc:
+            print(f"[peer] pending nudge skipped ({exc}).")
         if _stop.wait(interval):
             return
 
@@ -699,6 +755,10 @@ def status_bits() -> dict:
     transport = my_transport()
     return {
         "packs": list_packs(),
+        # What a new pair gets when the human picks nothing, so the pairing
+        # form can preselect it instead of guessing.
+        "default_pack": (getattr(_peer_cfg(), "default_pack", "")
+                         or "teammate"),
         "teams": list_teams(),
         "mailbox": mailbox_list()[-20:],
         "loops": loops()[:20],

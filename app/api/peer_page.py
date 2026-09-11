@@ -134,6 +134,12 @@ details.fallback summary{cursor:pointer;color:var(--mut);font-size:.9rem}
         <button class="btn btn-ghost" id="joinManualBtn" type="button">Join</button>
       </div>
     </details>
+    <div class="row" style="margin-top:10px;align-items:center">
+      <label class="muted" for="joinPack" style="white-space:nowrap">
+        When they ask me something:</label>
+      <select id="joinPack"></select>
+    </div>
+    <p class="muted" id="joinPackWhy" style="margin:4px 0 0"></p>
     <div id="pairMsg" class="muted"></div>
   </div>
 
@@ -206,6 +212,7 @@ async function refresh(){
   if(errEl) errEl.hidden=true;
   CLASSES=s.classes||[];ACTIONS=s.actions||[];
   PACKS=s.packs||[];TEAMS=s.teams||[];PEERS=s.peers||[];
+  DEFAULT_PACK=s.default_pack||'teammate';renderJoinPack();
   $('myUrl').textContent=s.base_url||'';
   const warn=(s.tls&&s.tls.warning)||'';
   $('tlsNote').hidden=!warn;if(warn)$('tlsNote').textContent=warn;
@@ -215,7 +222,7 @@ async function refresh(){
   }catch(e){ if(errEl) errEl.hidden=false; }
 }
 $('peerRetry')?.addEventListener('click',()=>refresh());
-let PACKS=[],TEAMS=[],PEERS=[];
+let PACKS=[],TEAMS=[],PEERS=[],DEFAULT_PACK='teammate';
 function renderAsks(asks){
   if(!asks.length){$('asksBox').textContent='Nothing waiting.';return}
   $('asksBox').innerHTML=asks.map(a=>{
@@ -349,7 +356,26 @@ function renderSent(rows){
   $('sentBox').innerHTML='<table><tr><th>To</th><th>Question</th><th>Status</th><th>Answer</th></tr>'+
     rows.slice().reverse().map(r=>`<tr><td>${esc(r.peer_name)}${r.team_slug?` <span class="tag">#${esc(r.team_slug)}</span>`:''}</td>
     <td>${esc(r.question)}${r.loop_id?`<div class="muted" style="font-family:var(--mono);font-size:.75rem">loop ${esc(r.loop_id)}</div>`:''}</td>
-    <td>${esc(r.status)}</td><td>${esc(r.answer||'')}</td></tr>`).join('')+'</table>';
+    <td>${esc(r.status)}</td><td>${esc(r.answer||'')}${answerExtras(r)}</td></tr>`).join('')+'</table>';
+}
+// Provenance the asker can act on: when the answer is dated, say so; when the
+// teammate also approved the recordings behind it, let them hear the moment.
+// The grant is theirs and expires, so a stale one simply stops playing.
+function answerExtras(r){
+  let out='';
+  if(r.as_of) out+=`<div class="muted" style="font-size:.75rem">as of ${esc(fmtDay(r.as_of))}</div>`;
+  const g=r.clip_grant;
+  if(g&&(g.events||[]).length){
+    out+='<div style="font-size:.75rem">'+g.events.map(id=>
+      `<audio controls preload="none" style="height:28px;vertical-align:middle"
+        src="/peer/clip/play?ask_id=${encodeURIComponent(r.ask_id)}&event_id=${encodeURIComponent(id)}"></audio>`
+    ).join(' ')+'</div>';
+  }
+  return out;
+}
+function fmtDay(ts){
+  try{ return new Date(ts*1000).toLocaleDateString(undefined,{month:'short',day:'numeric'}); }
+  catch(e){ return ''; }
 }
 $('startBtn').onclick=async()=>{
   const r=await post('/peer/pair/start');
@@ -376,8 +402,26 @@ async function doJoin(body){
   if(r.ok){$('joinInvite').value='';$('joinUrl').value='';$('joinCode').value='';}
   refresh();
 }
-$('joinBtn').onclick=()=>doJoin({invite:$('joinInvite').value.trim()});
-$('joinManualBtn').onclick=()=>doJoin({url:$('joinUrl').value.trim(),code:$('joinCode').value.trim()});
+// The pack choice belongs HERE, at pairing — it is the only moment someone is
+// thinking about this specific relationship. On the settings table below it is
+// one row in a list nobody opens during a short trial.
+function renderJoinPack(){
+  const sel=$('joinPack'); if(!sel||!PACKS.length)return;
+  const cur=sel.value||DEFAULT_PACK||'teammate';
+  sel.innerHTML=PACKS.map(pk=>
+    `<option value="${esc(pk.id)}" ${pk.id===cur?'selected':''}>${esc(pk.short||pk.id)}</option>`).join('');
+  joinPackWhy();
+}
+function joinPackWhy(){
+  const pk=PACKS.find(p=>p.id===$('joinPack').value);
+  $('joinPackWhy').textContent=pk?pk.blurb:'';
+}
+$('joinPack').onchange=joinPackWhy;
+$('joinBtn').onclick=()=>doJoin({invite:$('joinInvite').value.trim(),
+                                 pack:$('joinPack').value});
+$('joinManualBtn').onclick=()=>doJoin({url:$('joinUrl').value.trim(),
+                                       code:$('joinCode').value.trim(),
+                                       pack:$('joinPack').value});
 $('joinInvite').addEventListener('keydown',e=>{ if(e.key==='Enter')$('joinBtn').click(); });
 refresh();setInterval(()=>{ if(!document.hidden) refresh(); },5000);
 </script>

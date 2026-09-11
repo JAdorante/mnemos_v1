@@ -1150,6 +1150,67 @@ class PeerChannelConfig:
         return _get("QUILL_PEER_LOOPS",
                     f"{_get('QUILL_DATA_DIR', 'data')}/peer_loops.json")
 
+    # Disclosure pack applied to a NEW pair when the human picks none. Empty
+    # means "teammate" (all-offer), the safe posture, and that stays the
+    # default for every normal deployment. The hosted trial sets "pilot" so a
+    # two-week evaluation is not spent on abandoned round trips; `personal` is
+    # never auto in any pack, at any setting.
+    @property
+    def default_pack(self) -> str:
+        return _get("QUILL_PEER_DEFAULT_PACK", "").strip().lower()
+
+    # How long the asker waits before being told their question is sitting
+    # with a human who has not looked at it. On a box where everyone is
+    # online, silence past this is not "in transit", it is dead air.
+    @property
+    def pending_nudge_s(self) -> float:
+        return float(_get("QUILL_PEER_PENDING_NUDGE_S", "120"))
+
+    # Cross-tenant clip playback (services/peer_clip.py). Sending a teammate
+    # the actual recording behind a claim is a much larger disclosure than
+    # sending the claim, so it is opt-in, and a grant is minted only when a
+    # human approves an answer — never by an auto policy.
+    @property
+    def clip_playback(self) -> bool:
+        return _get("QUILL_PEER_CLIP_PLAYBACK", "0") in ("1", "true", "True")
+
+    @property
+    def clip_ttl_s(self) -> float:
+        return float(_get("QUILL_PEER_CLIP_TTL_S", "3600"))
+
+    # Send ONLY the span the approved claim rests on. A captured moment holds
+    # other speakers and adjacent conversation the approver never meant to
+    # disclose, so when the span cannot be located the clip is refused rather
+    # than sent whole. Set to 0 to fall back to the full recording.
+    @property
+    def clip_span_only(self) -> bool:
+        return _get("QUILL_PEER_CLIP_SPAN_ONLY", "1") not in ("0", "false",
+                                                              "False")
+
+    # Ceiling on one fetched clip. A conversation snippet is well under this;
+    # the cap stops a peer (or a compromised one) from streaming something
+    # unbounded into the asker's process.
+    @property
+    def clip_max_bytes(self) -> int:
+        return int(_get("QUILL_PEER_CLIP_MAX_BYTES", str(25 * 1024 * 1024)))
+
+    @property
+    def clip_grants_path(self) -> str:
+        return _get("QUILL_PEER_CLIP_GRANTS",
+                    f"{_get('QUILL_DATA_DIR', 'data')}/peer_clip_grants.json")
+
+    # Peer round-trip telemetry (services/peer_telemetry.py). Metadata only —
+    # never question/answer text — so the trail can be read by whoever is
+    # running the pilot without reading either tenant's memory.
+    @property
+    def telemetry_enabled(self) -> bool:
+        return _get("QUILL_PEER_TELEMETRY", "1") not in ("0", "false", "False")
+
+    @property
+    def telemetry_path(self) -> str:
+        return _get("QUILL_PEER_TELEMETRY_PATH",
+                    f"{_get('QUILL_DATA_DIR', 'data')}/peer_telemetry.jsonl")
+
 
 @dataclass(frozen=True)
 class OrgNodeConfig:

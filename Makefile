@@ -6,7 +6,7 @@ PYTHON ?= python
 .PHONY: eval-asr eval-asr-check eval-asr-smoke eval-asr-bootstrap eval-asr-baseline
 .PHONY: listen-idle listen-idle-baseline
 .PHONY: asr-calibrate asr-calibration
-.PHONY: eval eval-live eval-people eval-people-live eval-grounding eval-planner eval-noise eval-context eval-ideas golden-commitments golden-entity-resolution golden-contact-attribution
+.PHONY: eval eval-live eval-people eval-people-live eval-grounding eval-planner eval-peer eval-peer-live eval-noise eval-context eval-ideas golden-commitments golden-entity-resolution golden-contact-attribution
 
 # Plan 2.2 + 2.3 + 2.4 + 3.3 + 5.2: golden thresholds (offline, no API key).
 eval: golden-commitments golden-entity-resolution golden-contact-attribution
@@ -53,6 +53,16 @@ eval-grounding:
 # Plan 5.2 — planner graduation (core gate + global default + multi-step packets).
 eval-planner:
 	$(PYTHON) scripts/eval_planner_routing.py
+
+# Peer Phase 0.2 — peer answer quality (citation / freshness / recency / leaks).
+# Goldens assert on CLAIMS, not prose, so they survive Phase 1's shape change.
+# Offline and deterministic: no model, no network.
+eval-peer:
+	$(PYTHON) scripts/eval_peer.py
+
+# Same goldens against real embeddings + the local model (informational).
+eval-peer-live:
+	$(PYTHON) scripts/eval_peer.py --live
 
 golden-commitments:
 	$(PYTHON) scripts/gen_commitments_ownership_golden.py
