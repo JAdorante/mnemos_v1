@@ -10,7 +10,11 @@ from typing import Any
 
 def write_json(path: Path | str, data: Any, *, indent: int | None = 2,
                sort_keys: bool = False) -> None:
-    """Write JSON via temp file + os.replace so readers never see a truncate."""
+    """Write JSON via temp file + os.replace so readers never see a truncate.
+
+    Flush + fsync the temp before replace so a crash mid-write cannot leave
+    the destination pointing at a zero-length or partially-synced file.
+    """
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(data, indent=indent, sort_keys=sort_keys)
@@ -21,6 +25,8 @@ def write_json(path: Path | str, data: Any, *, indent: int | None = 2,
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
             f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, p)
     except Exception:
         try:

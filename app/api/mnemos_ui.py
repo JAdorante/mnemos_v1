@@ -646,6 +646,7 @@ window.MnemosConstellation = {
       linkFrom: null,
       edit: false,
       showFilaments: false,
+      loopsOnly: false,       // field filtered to systems with unfinished work
       softIds: null,       // margin hover soft-highlight set
       emphasizeIds: null,  // margin click emphasis
       raf: 0,
@@ -655,7 +656,7 @@ window.MnemosConstellation = {
       detailMode: !!(opts && opts.detailMode),
       rangeCutoff: null,
       persistKey: isThumb ? null
-        : (((opts && opts.persistKey) || 'constellation.cam') + '.v7'),
+        : (((opts && opts.persistKey) || 'constellation.cam') + '.v8'),
       mode: mode,
       _fittedOnce: false,
     };
@@ -666,14 +667,20 @@ window.MnemosConstellation = {
       if (wrap && !toolbar) {
         toolbar = document.createElement('div');
         toolbar.className = 'const-tools';
+        // The constellation is the hero: two controls stay out, everything
+        // graph-shaped moves behind the overflow.
         toolbar.innerHTML =
-          '<button type="button" data-act="focus" title="Focus mode (F)">Focus</button>'
-          + '<button type="button" data-act="filaments" title="Show relationships">Links</button>'
-          + '<button type="button" data-act="correct" title="Correct connections">Correct</button>'
-          + '<button type="button" data-act="diff" title="Changes since yesterday">Since yesterday</button>'
-          + '<button type="button" data-act="out" title="Zoom out">−</button>'
-          + '<button type="button" data-act="fit" title="Fit">Fit</button>'
-          + '<button type="button" data-act="in" title="Zoom in">+</button>';
+          '<button type="button" data-act="loops" title="Only what has unfinished work">Open loops</button>'
+          + '<button type="button" data-act="fit" title="Recenter the field">Recenter</button>'
+          + '<details class="const-more"><summary title="More">•••</summary>'
+          + '<div class="const-more-menu">'
+          + '<button type="button" data-act="focus">Focus mode (F)</button>'
+          + '<button type="button" data-act="filaments">Show every link</button>'
+          + '<button type="button" data-act="correct">Correct connections</button>'
+          + '<button type="button" data-act="diff">Since yesterday</button>'
+          + '<button type="button" data-act="in">Zoom in</button>'
+          + '<button type="button" data-act="out">Zoom out</button>'
+          + '</div></details>';
         wrap.appendChild(toolbar);
       }
       panel = wrap && wrap.querySelector('.const-edit');
@@ -705,8 +712,12 @@ window.MnemosConstellation = {
         // pages without touching two CSS blocks. Non-interactive (never eats a drag).
         legendEl.style.cssText = 'position:absolute;left:10px;top:10px;z-index:var(--z-base);'
           + 'display:flex;flex-wrap:wrap;gap:3px 10px;max-width:min(360px,72%);'
-          + 'padding:6px 9px;border-radius:10px;background:rgba(22,22,27,.94);'
-          + 'border:1px solid rgba(232,231,244,.14);box-shadow:0 1px 6px rgba(0,0,0,.4);'
+          + 'padding:7px 11px;border-radius:14px;'
+          + 'background:var(--chrome-bg,rgba(22,22,27,.94));'
+          + 'backdrop-filter:var(--glass);-webkit-backdrop-filter:var(--glass);'
+          + 'border:1px solid rgba(232,231,244,.12);'
+          + 'box-shadow:inset 0 1px 0 rgba(233,231,226,.13),'
+          + '0 1px 2px rgba(0,0,0,.36),0 14px 34px -16px rgba(0,0,0,.6);'
           + 'font:11px ui-sans-serif,system-ui,sans-serif;color:rgba(233,231,226,.8);'
           + 'pointer-events:none';
         wrap.appendChild(legendEl);
@@ -731,16 +742,178 @@ window.MnemosConstellation = {
     function kindColor(kind, alpha) {
       return 'rgba(' + (KIND_RGB[kind] || KIND_RGB.idea) + ',' + alpha + ')';
     }
+
+    /* --- The attention field ------------------------------------------------
+       The field answers "what deserves attention right now", not "how does
+       Ravenry store this". Three ideas carry that:
+
+         systems  — a primary (you, a person, a project, an org) plus the work
+                    and context that hangs off it. One object at rest; it opens
+                    on demand. Progressive disclosure, not a full graph dump.
+         zones    — importance becomes distance. self at the centre, then NOW,
+                    ACTIVE, PERIPHERAL, DORMANT. Never drawn as rings: the
+                    gravity well and node opacity are what say where a band is.
+         tiers    — primaries are large and always named; everything else is one
+                    quiet satellite mark; evidence is never a star at all.
+
+       The backend keeps every distinction it has. The field just doesn't give
+       them equal visual weight. */
+    const PRIMARY_KINDS = { person: 1, project: 1, org: 1 };
+    const LOOP_KINDS = { task: 1, commitment: 1 };
+    const ZONE_RING = { self: 0, now: 0.27, active: 0.53, peripheral: 0.79, dormant: 0.95 };
+    const ZONE_DIM = { self: 1, now: 1, active: 0.8, peripheral: 0.32, dormant: 0.15 };
+    // Things you should notice, could notice, and everything else — the field
+    // is a compression, and this is where the ratio is set.
+    const NOW_MIN = 3, NOW_MAX = 5;
+    const SAT_RGB = '146,152,163';
+
+    function isPrimary(n) { return !!(n && PRIMARY_KINDS[n.kind || 'idea']); }
+    function isLoop(n) { return !!(n && LOOP_KINDS[n.kind || 'idea']); }
+
+    /* Every satellite attaches to the primary it is most strongly tied to —
+       edge weight × confidence, with the primary's own gravity breaking ties.
+       A task that belongs to a project stops being a sixth star and becomes
+       part of that project's system. */
+    function buildSystems(st) {
+      const prim = new Set();
+      let selfId = null;
+      st.nodes.forEach(n => {
+        n._host = null; n._members = null; n._loops = 0;
+        if (n.is_self) { selfId = n.id; prim.add(n.id); }
+        else if (isPrimary(n)) prim.add(n.id);
+      });
+      st.nodes.forEach(n => {
+        if (prim.has(n.id)) return;
+        let best = null, bestW = 0;
+        (st.edges || []).forEach(e => {
+          let other = null;
+          if (e.source === n.id) other = e.target;
+          else if (e.target === n.id) other = e.source;
+          if (!other || !prim.has(other)) return;
+          // "You" holds your own promises, but any real project or person
+          // claims the work first — otherwise the whole field collapses into
+          // one star at the centre.
+          if (other === selfId && !isLoop(n)) return;
+          const host = st.byId[other];
+          const w = ((e.weight || 1) * (e.confidence != null ? e.confidence : 0.6)
+            + (host ? (host.gravity || 0) * 0.4 : 0))
+            * (other === selfId ? 0.7 : 1);
+          if (w > bestW) { bestW = w; best = other; }
+        });
+        n._host = best;
+      });
+      st.nodes.forEach(n => { if (prim.has(n.id)) n._members = []; });
+      st.nodes.forEach(n => {
+        const h = n._host ? st.byId[n._host] : null;
+        if (!h || !h._members) { n._host = null; return; }
+        h._members.push(n.id);
+        if (isLoop(n)) h._loops++;
+      });
+    }
+
+    /* Zones come off the server's own ranking: focus vs periphery is its call,
+       and gravity order splits focus into the handful that define NOW. */
+    function assignZones(st) {
+      const prims = st.nodes.filter(n => isPrimary(n) && !n.is_self)
+        .sort((a, b) => (b.gravity || 0) - (a.gravity || 0)
+          || (a.id < b.id ? -1 : 1));
+      const focused = prims.filter(n => n.layer === 'focus');
+      const nowN = Math.min(NOW_MAX, Math.max(NOW_MIN, Math.round(focused.length * 0.45)));
+      let taken = 0;
+      prims.forEach(n => {
+        if (n.layer === 'focus' && taken < nowN) { n._zone = 'now'; taken++; return; }
+        if (n.layer === 'focus') { n._zone = 'active'; return; }
+        const strength = n.memory_strength != null ? n.memory_strength : 0.5;
+        n._zone = (strength < 0.35 || (n.gravity || 0) < 0.22) ? 'dormant' : 'peripheral';
+      });
+      st.nodes.forEach(n => {
+        if (n.is_self) { n._zone = 'self'; return; }
+        if (isPrimary(n)) return;
+        if (n._host) { n._zone = (st.byId[n._host] || {})._zone || 'active'; return; }
+        // A homeless open loop is exactly the thing that must stay findable.
+        n._zone = isLoop(n) ? 'peripheral' : 'dormant';
+      });
+    }
+
+    function refield(st) {
+      buildSystems(st);
+      assignZones(st);
+      layout(st);
+    }
+
+    function sizeFor(n) {
+      const g = Math.max(0.15, Math.min(1.15, n.gravity || 0.35));
+      if (n.is_self) return 8;
+      if (!isPrimary(n)) return 3.6 + g * 2.2;
+      if (n._zone === 'now') return 12.5 + g * 6;
+      if (n._zone === 'active') return 9.5 + g * 4;
+      if (n._zone === 'peripheral') return 6.5 + g * 2.5;
+      return 4.5 + g * 1.5;
+    }
+
+    /* A system is open while it, or one of its satellites, is the active
+       object — hover, selection or focus. Correct mode and "show all links"
+       open everything, because both are about the structure itself. */
+    function systemOpen(st, host) {
+      if (!host || !host._members || !host._members.length) return false;
+      if (st.showFilaments || st.edit) return true;
+      const act = st.focusId || st.selected || st.hover;
+      if (!act) return false;
+      if (act === host.id) return true;
+      const a = st.byId[act];
+      return !!(a && a._host === host.id);
+    }
+
+    function nodeVisible(st, n) {
+      if (!n) return false;
+      if (n.is_self || isPrimary(n)) return true;
+      if (!n._host) {
+        return isLoop(n) || st.showFilaments || st.edit
+          || st.hover === n.id || st.selected === n.id || st.focusId === n.id;
+      }
+      return systemOpen(st, st.byId[n._host]);
+    }
+
+    function zoneAlpha(st, n) {
+      if (n.is_self) return 0.95;
+      const base = ZONE_DIM[n._zone || 'peripheral'] || 0.3;
+      const ms = n.memory_strength != null ? (0.65 + n.memory_strength * 0.35) : 1;
+      const tier = isPrimary(n) ? 1 : (isLoop(n) ? 0.92 : 0.68);
+      return Math.max(0.05, Math.min(1, base * ms * tier));
+    }
+
+    /* Illuminate one constellation at a time: the active object, whatever it
+       links to, and the system it belongs to. Everything else falls away. */
+    function lensSet(st, id) {
+      const set = new Set([id]);
+      const n = st.byId[id];
+      if (!n) return set;
+      (st.edges || []).forEach(e => {
+        if (e.source === id) set.add(e.target);
+        else if (e.target === id) set.add(e.source);
+      });
+      const host = n._host ? st.byId[n._host] : n;
+      if (host) {
+        set.add(host.id);
+        (host._members || []).forEach(m => set.add(m));
+      }
+      return set;
+    }
+
+    function loopish(st, n) {
+      if (isLoop(n)) return true;
+      if ((n._loops || 0) > 0) return true;
+      const h = n._host ? st.byId[n._host] : null;
+      return !!(h && (h._loops || 0) > 0);
+    }
     // Legend key: glyph swatch (matches drawKind) + label, per node kind present.
+    // Three entries, because there are three tiers. Anything finer belongs in
+    // the inspector, not in a key the user has to memorise.
     const LEGEND = [
-      ['person', 'circle', kindColor('person', .95)],
-      ['org', 'hex', kindColor('org', .92)],
-      ['project', 'diamond', kindColor('project', .9)],
-      ['tool', 'round', kindColor('tool', .92)],
-      ['place', 'triUp', kindColor('place', .9)],
-      ['task', 'triRight', kindColor('task', .95)],
-      ['commitment', 'triRight', kindColor('commitment', .95)],
-      ['idea', 'dot', kindColor('idea', .55)],
+      ['You', 'circle', 'rgba(' + SELF_RGB + ',.95)'],
+      ['People', 'circle', kindColor('person', .95)],
+      ['Projects & orgs', 'diamond', kindColor('project', .92)],
+      ['Open loops', 'dot', kindColor('task', .95)],
     ];
     function legendSwatch(shape, color) {
       const base = 'display:inline-block;vertical-align:middle;';
@@ -754,9 +927,14 @@ window.MnemosConstellation = {
     }
     function renderLegend() {
       if (!legendEl) return;
-      // Only show kinds actually on screen.
-      const present = new Set((state.nodes || []).map(n => n.kind || 'idea'));
-      const rows = LEGEND.filter(it => present.has(it[0]));
+      const nodes = state.nodes || [];
+      const has = {
+        'You': nodes.some(n => n.is_self),
+        'People': nodes.some(n => n.kind === 'person' && !n.is_self),
+        'Projects & orgs': nodes.some(n => n.kind === 'project' || n.kind === 'org'),
+        'Open loops': nodes.some(n => isLoop(n)),
+      };
+      const rows = LEGEND.filter(it => has[it[0]]);
       if (rows.length < 2) { legendEl.hidden = true; legendEl.innerHTML = ''; return; }
       legendEl.hidden = false;
       legendEl.innerHTML = rows.map(([label, shape, color]) =>
@@ -802,8 +980,15 @@ window.MnemosConstellation = {
       const why = (n.why && n.why.length) ? n.why.join(' · ') : '';
       const tipTitle = (n.meta && n.meta.full_text) || n.label || n.id;
       tip.hidden = false;
+      const held = [];
+      if ((n._loops || 0) > 0) {
+        held.push(n._loops + (n._loops === 1 ? ' open loop' : ' open loops'));
+      }
+      const rest = (n._members || []).length - (n._loops || 0);
+      if (rest > 0) held.push(rest + ' connected');
       tip.innerHTML = '<strong>' + MnemosEsc(tipTitle) + '</strong>'
-        + '<span class="const-tip-kind">' + MnemosEsc(n.kind || '') + '</span>'
+        + '<span class="const-tip-kind">'
+        + MnemosEsc(held.length ? held.join(' · ') : (n.kind || '')) + '</span>'
         + (why ? '<div class="const-tip-why">' + MnemosEsc(why) + '</div>' : '');
       if (wrap) {
         const r = wrap.getBoundingClientRect();
@@ -874,8 +1059,8 @@ window.MnemosConstellation = {
         (a, b) => Math.abs(b.value || 0) - Math.abs(a.value || 0));
       const total = Number(bd.total) || 0;
       const absSum = comps.reduce((s, c) => s + Math.abs(Number(c.value) || 0), 0) || 1;
-      let html = '<div class="const-rank">';
-      html += '<div class="const-rank-title">Why is this here?</div>';
+      let html = '<details class="const-rank">';
+      html += '<summary class="const-rank-title">Why this ranks here</summary>';
       if (bd.admitted_by === 'quota') {
         html += '<div class="const-rank-admit">Included to keep people in view.</div>';
       } else if (bd.admitted_by === 'pin') {
@@ -918,7 +1103,7 @@ window.MnemosConstellation = {
         }
         html += '</div>';
       });
-      html += '</div></div>';
+      html += '</div></details>';
       return html;
     }
 
@@ -1070,8 +1255,7 @@ window.MnemosConstellation = {
       state.breakdowns = data2.breakdowns || {};
       state.byId = {};
       state.nodes.forEach(n => { state.byId[n.id] = n; });
-      layout(state);
-      markAmbientEdges(state);
+      refield(state);
       renderInsights();
       renderLegend();
       if (state.selected) openEvidence(state.selected);
@@ -1113,10 +1297,20 @@ window.MnemosConstellation = {
     const clampCam = () => {
       // Wide enough that Fit can fill sparse fields; still bounded so pan/zoom
       // can't lose the map entirely.
-      state.cam.z = Math.max(0.55, Math.min(2.6, state.cam.z));
-      const maxPan = Math.min(state.w, state.h) * (0.42 / Math.max(0.75, state.cam.z));
-      state.cam.x = Math.max(-maxPan, Math.min(maxPan, state.cam.x));
-      state.cam.y = Math.max(-maxPan, Math.min(maxPan, state.cam.y));
+      const cam = state.cam;
+      // A stored camera is user data and the frame may not be measured yet.
+      // Both were load-bearing bugs: restoring a saved camera called this
+      // before the first resize(), where Math.min(undefined, undefined) is
+      // NaN — which travelled into cam.x/cam.y and blanked the whole field for
+      // every returning user who had ever panned or zoomed.
+      if (!Number.isFinite(cam.z)) cam.z = 1;
+      if (!Number.isFinite(cam.x)) cam.x = 0;
+      if (!Number.isFinite(cam.y)) cam.y = 0;
+      cam.z = Math.max(0.55, Math.min(2.6, cam.z));
+      if (!state.w || !state.h) return;
+      const maxPan = Math.min(state.w, state.h) * (0.42 / Math.max(0.75, cam.z));
+      cam.x = Math.max(-maxPan, Math.min(maxPan, cam.x));
+      cam.y = Math.max(-maxPan, Math.min(maxPan, cam.y));
     };
     const saveCam = () => {
       clampCam();
@@ -1125,7 +1319,8 @@ window.MnemosConstellation = {
     const fit = () => {
       // Zoom/pan to the live node bounds so a sparse field fills the frame
       // instead of sitting as a tight cluster in empty space.
-      const nodes = (state.nodes || []).filter(n => n._x != null && n._y != null);
+      const nodes = (state.nodes || []).filter(
+        n => n._x != null && n._y != null && nodeVisible(state, n));
       if (!nodes.length || !state.w || !state.h) {
         state.cam = { x: 0, y: 0, z: 1 };
         saveCam();
@@ -1134,10 +1329,12 @@ window.MnemosConstellation = {
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
       nodes.forEach(n => {
         const pad = (n._r || 8) + 28;
-        minX = Math.min(minX, n._x - pad);
+        // Primaries are always named, and a label runs well past its glyph.
+        const lab = (n.is_self || isPrimary(n)) ? 72 : 0;
+        minX = Math.min(minX, n._x - pad - ((n._labelSide || 1) < 0 ? lab : 0));
         minY = Math.min(minY, n._y - pad);
-        maxX = Math.max(maxX, n._x + pad);
-        maxY = Math.max(maxY, n._y + pad);
+        maxX = Math.max(maxX, n._x + pad + ((n._labelSide || 1) >= 0 ? lab : 0));
+        maxY = Math.max(maxY, n._y + pad + 18);
       });
       const bw = Math.max(40, maxX - minX);
       const bh = Math.max(40, maxY - minY);
@@ -1166,8 +1363,7 @@ window.MnemosConstellation = {
       canvas.height = Math.max(1, Math.floor(r.height * dpr));
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       state.w = r.width; state.h = r.height;
-      layout(state);
-      markAmbientEdges(state);
+      refield(state);
       if (!state._fittedOnce && !(saved && typeof saved.z === 'number')) {
         fit();
         state._fittedOnce = true;
@@ -1175,7 +1371,8 @@ window.MnemosConstellation = {
         clampCam();
       }
     };
-    if (saved && typeof saved.z === 'number') {
+    if (saved && Number.isFinite(saved.z)
+        && Number.isFinite(saved.x) && Number.isFinite(saved.y)) {
       state.cam = Object.assign(state.cam, saved);
       clampCam();
       state._fittedOnce = true;
@@ -1201,110 +1398,86 @@ window.MnemosConstellation = {
       const n = st.nodes.length;
       if (!n || !st.w) return;
       const cx = st.w / 2, cy = st.h / 2;
-      // Keep nodes clear of chrome overlays; Fit then crops empty margin.
       const pad = Math.max(36, Math.min(st.w, st.h) * 0.1);
       const maxR = Math.min(st.w, st.h) / 2 - pad;
-      // Node radius scales with the frame so a large canvas isn't a field of dots.
       const unit = Math.max(1, Math.min(st.w, st.h) / 380);
-      // People: stable polar anchors (spatial memory). Others: phyllotaxis seed,
-      // then soft attract along edges so related work clusters near people.
-      const people = st.nodes.filter(node => node.kind === 'person');
-      const others = st.nodes.filter(node => node.kind !== 'person');
-      // Sparse fields use a slightly wider ring so Fit has structure to zoom into.
-      const sparseBoost = n <= 16 ? 0.08 : (n <= 24 ? 0.04 : 0);
-      people.forEach((node) => {
-        const ang = (typeof node.anchor === 'number')
-          ? node.anchor
-          : ((sumCodes(node.id) % 997) / 997) * Math.PI * 2;
-        const gScore = Math.max(0.2, Math.min(1.1, node.gravity || 0.4));
-        const ring = (node.layer === 'focus' ? (0.38 + (1 - gScore) * 0.14) : 0.62)
-          + sparseBoost;
-        node._x = cx + Math.cos(ang) * (maxR * ring);
-        node._y = cy + Math.sin(ang) * (maxR * ring * 0.9);
-        node._fixed = true;
-        node._r = (7.5 + gScore * 6.5) * unit;
-        node._labelDy = 0;
-        node._labelSide = Math.cos(ang) >= 0 ? 1 : -1;
+      // Sparse fields push outward a little so Fit has structure to zoom into.
+      const spread = st.nodes.length <= 16 ? 0.07 : (st.nodes.length <= 24 ? 0.03 : 0);
+      // Angle is identity, radius is importance. Keeping the angle stable is
+      // what preserves spatial memory across renders; moving the radius is
+      // what lets the field say "this matters more today" without resizing
+      // every glyph.
+      const angleOf = (node) => (typeof node.anchor === 'number' && node.anchor)
+        ? node.anchor : ((sumCodes(node.id) % 997) / 997) * Math.PI * 2;
+
+      const self = st.nodes.find(node => node.is_self) || null;
+      if (self) {
+        self._x = cx; self._y = cy; self._r = 8 * unit;
+        self._labelSide = 1; self._labelDy = 0; self._zone = 'self';
+      }
+      // Ring members are the primaries plus any satellite with no home — an
+      // orphan open loop still has to be findable.
+      const rings = {};
+      st.nodes.forEach(node => {
+        if (node === self || node._host) return;
+        const z = node._zone || 'peripheral';
+        (rings[z] = rings[z] || []).push(node);
       });
-      const golden = Math.PI * (3 - Math.sqrt(5));
-      const rankedOthers = others.slice().sort((a, b) => {
-        const dg = (b.gravity || 0) - (a.gravity || 0);
-        if (Math.abs(dg) > 1e-6) return dg;
-        return a.id < b.id ? -1 : 1;
-      });
-      rankedOthers.forEach((node, i) => {
-        const t = rankedOthers.length === 1 ? 0.5 : Math.sqrt((i + 0.55) / rankedOthers.length);
-        const ang = i * golden + (sumCodes(node.id) % 23) * 0.011;
-        const ring = 0.32 + t * 0.66 + sparseBoost * 0.5;
-        node._x = cx + Math.cos(ang) * (maxR * ring);
-        node._y = cy + Math.sin(ang) * (maxR * ring * 0.9);
-        node._fixed = false;
-        const gScore = Math.max(0.2, Math.min(1.1, node.gravity || 0.4));
-        node._r = ((node.layer === 'periphery' ? 5 : 6.5)
-          + gScore * (node.layer === 'periphery' ? 2.8 : 5)) * unit;
-        node._labelDy = 0;
-        node._labelSide = node._x >= cx ? 1 : -1;
-      });
-      const all = st.nodes;
-      const minGap = Math.max(32, Math.min(st.w, st.h) * 0.07) * Math.min(1.15, unit);
-      for (let iter = 0; iter < 56; iter++) {
-        // Attract non-people along edges (toward people / related nodes).
-        (st.edges || []).forEach((e) => {
-          const a = st.byId[e.source], b = st.byId[e.target];
-          if (!a || !b) return;
-          let dx = b._x - a._x, dy = b._y - a._y;
-          const d = Math.hypot(dx, dy) || 0.01;
-          const pull = Math.min(2.2, d * 0.018 * Math.min(2, e.weight || 1));
-          dx /= d; dy /= d;
-          if (!a._fixed) { a._x += dx * pull; a._y += dy * pull; }
-          if (!b._fixed) { b._x -= dx * pull; b._y -= dy * pull; }
-        });
-        // Repel overlaps; people only nudge slightly so anchors stay meaningful.
-        for (let i = 0; i < all.length; i++) {
-          for (let j = i + 1; j < all.length; j++) {
-            const a = all[i], b = all[j];
-            let dx = b._x - a._x, dy = b._y - a._y;
-            let d = Math.hypot(dx, dy);
-            const need = minGap + (a._r + b._r) * 0.55;
-            if (d < 0.01) {
-              const jitter = ((sumCodes(a.id) + iter) % 7) * 0.4;
-              dx = Math.cos(jitter); dy = Math.sin(jitter); d = 1;
-            }
-            if (d >= need) continue;
-            const push = (need - d) * 0.5;
-            dx /= d; dy /= d;
-            const aw = a._fixed ? 0.15 : 1;
-            const bw = b._fixed ? 0.15 : 1;
-            const norm = aw + bw || 1;
-            a._x -= dx * push * (aw / norm) * 2;
-            a._y -= dy * push * (aw / norm) * 2;
-            b._x += dx * push * (bw / norm) * 2;
-            b._y += dy * push * (bw / norm) * 2;
+      Object.keys(rings).forEach(z => {
+        const arr = rings[z];
+        arr.forEach(node => { node._ang = angleOf(node); });
+        arr.sort((a, b) => a._ang - b._ang);
+        // Relax on angle only: nodes keep their side of the field, they just
+        // stop sitting on top of each other.
+        const gap = Math.min((Math.PI * 2) / Math.max(1, arr.length), 0.62);
+        for (let pass = 0; pass < 30 && arr.length > 1; pass++) {
+          for (let i = 0; i < arr.length; i++) {
+            const a = arr[i], b = arr[(i + 1) % arr.length];
+            let d = b._ang - a._ang;
+            while (d < 0) d += Math.PI * 2;
+            if (d >= gap) continue;
+            const push = (gap - d) / 2;
+            a._ang -= push; b._ang += push;
           }
         }
-        all.forEach((node) => {
-          if (node._fixed) {
-            // Soft clamp people toward their anchor home after nudges.
-            const ang = (typeof node.anchor === 'number')
-              ? node.anchor
-              : ((sumCodes(node.id) % 997) / 997) * Math.PI * 2;
-            const gScore = Math.max(0.2, Math.min(1.1, node.gravity || 0.4));
-            const ring = (node.layer === 'focus' ? (0.38 + (1 - gScore) * 0.14) : 0.62)
-              + sparseBoost;
-            const hx = cx + Math.cos(ang) * (maxR * ring);
-            const hy = cy + Math.sin(ang) * (maxR * ring * 0.9);
-            node._x = node._x * 0.72 + hx * 0.28;
-            node._y = node._y * 0.72 + hy * 0.28;
-          }
-          node._x = Math.max(pad, Math.min(st.w - pad, node._x));
-          node._y = Math.max(pad, Math.min(st.h - pad, node._y));
+        const ring = (ZONE_RING[z] != null ? ZONE_RING[z] : 0.78)
+          + (z === 'self' ? 0 : spread);
+        arr.forEach(node => {
+          node._x = cx + Math.cos(node._ang) * maxR * ring;
+          node._y = cy + Math.sin(node._ang) * maxR * ring * 0.86;
+          node._r = sizeFor(node) * unit;
+          node._labelSide = node._x >= cx ? 1 : -1;
+          node._labelDy = 0;
         });
-      }
-      const labeled = all.filter((node) => node.layer === 'focus');
+      });
+      // Satellites orbit their host on the side facing away from the centre,
+      // so an open system never spills back over the middle of the field.
+      st.nodes.forEach(node => {
+        const host = node._host ? st.byId[node._host] : null;
+        if (!host) return;
+        const sibs = host._members || [];
+        const k = Math.max(1, sibs.length);
+        const i = Math.max(0, sibs.indexOf(node.id));
+        const out = Math.atan2(host._y - cy, host._x - cx);
+        const arc = Math.min(Math.PI * 1.3, 0.6 + k * 0.3);
+        const a = out - arc / 2 + (k === 1 ? arc / 2 : arc * (i / (k - 1)));
+        const d = (host._r || 10) + (24 + (i % 2) * 10) * unit;
+        node._r = sizeFor(node) * unit;
+        node._x = host._x + Math.cos(a) * d;
+        node._y = host._y + Math.sin(a) * d * 0.9;
+        node._labelSide = Math.cos(a) >= 0 ? 1 : -1;
+        node._labelDy = 0;
+        node._zone = host._zone || 'active';
+      });
+      st.nodes.forEach(node => {
+        node._x = Math.max(pad * 0.6, Math.min(st.w - pad * 0.6, node._x));
+        node._y = Math.max(pad * 0.6, Math.min(st.h - pad * 0.6, node._y));
+      });
+      // Label de-collision runs over the always-named tier only.
+      const labeled = st.nodes.filter(node => node.is_self || isPrimary(node));
       labeled.sort((a, b) => a._y - b._y || a._x - b._x);
       for (let i = 0; i < labeled.length; i++) {
         const a = labeled[i];
-        a._labelSide = a._x >= cx ? 1 : -1;
         for (let j = 0; j < i; j++) {
           const b = labeled[j];
           if (a._labelSide !== b._labelSide) continue;
@@ -1313,18 +1486,21 @@ window.MnemosConstellation = {
             a._labelDy = b._labelDy + 18;
           }
         }
+        // Cap the cascade: a label 100px from its own star explains nothing.
+        a._labelDy = Math.max(-36, Math.min(36, a._labelDy));
       }
       st.t0 = performance.now();
     }
 
-    function drawLabel(x, y, text, side, emphasis) {
+    function drawLabel(x, y, text, side, emphasis, alpha) {
+      const a = alpha == null ? 1 : Math.max(0, Math.min(1, alpha));
       const label = shortLabel(text);
       ctx.font = (emphasis ? '600 ' : '500 ') + '12px "Iowan Old Style", Georgia, serif';
       const tw = ctx.measureText(label).width;
       const padX = 6;
       const lx = side >= 0 ? x + 10 : x - 10 - tw;
       const ly = y - 4;
-      ctx.fillStyle = emphasis ? 'rgba(22,22,27,.97)' : 'rgba(22,22,27,.9)';
+      ctx.fillStyle = 'rgba(22,22,27,' + ((emphasis ? 0.97 : 0.9) * a).toFixed(3) + ')';
       ctx.beginPath();
       const rw = tw + padX * 2, rh = 17, rx = lx - padX, ry = ly - 12;
       const rad = 7;
@@ -1335,11 +1511,28 @@ window.MnemosConstellation = {
       ctx.arcTo(rx, ry, rx + rw, ry, rad);
       ctx.closePath();
       ctx.fill();
-      ctx.fillStyle = emphasis ? 'rgba(242,241,247,.95)' : 'rgba(220,219,226,.88)';
+      ctx.fillStyle = emphasis
+        ? 'rgba(242,241,247,' + (0.95 * a).toFixed(3) + ')'
+        : 'rgba(220,219,226,' + (0.88 * a).toFixed(3) + ')';
       ctx.textAlign = 'left';
+      ctx.textBaseline = 'alphabetic';
       ctx.fillText(label, lx, ly);
     }
 
+    function roundRectPath(x, y, w, h, rad) {
+      ctx.beginPath();
+      ctx.moveTo(x + rad, y);
+      ctx.arcTo(x + w, y, x + w, y + h, rad);
+      ctx.arcTo(x + w, y + h, x, y + h, rad);
+      ctx.arcTo(x, y + h, x, y, rad);
+      ctx.arcTo(x, y, x + w, y, rad);
+      ctx.closePath();
+    }
+
+    /* Three tiers, not seven shapes. Primaries (you, people, projects, orgs)
+       are the objects of the field and keep a distinct silhouette; everything
+       else is one quiet satellite mark. The ontology still lives in the
+       database — it just doesn't need equal visual representation. */
     function drawKind(n, r, alpha) {
       const x = n._x, y = n._y;
       const kind = n.kind || 'idea';
@@ -1361,22 +1554,22 @@ window.MnemosConstellation = {
         }
       }
       ctx.save();
-      if (kind === 'person') {
+      if (n.is_self) {
         ctx.beginPath();
         ctx.arc(x, y, r, 0, Math.PI * 2);
-        ctx.fillStyle = n.is_self
-          ? 'rgba(' + SELF_RGB + ',' + alpha + ')'
-          : kindColor('person', alpha);
+        ctx.fillStyle = 'rgba(' + SELF_RGB + ',' + alpha + ')';
         ctx.fill();
-        if (n.is_self) {
-          ctx.beginPath();
-          ctx.arc(x, y, r + 4, 0, Math.PI * 2);
-          ctx.strokeStyle = 'rgba(' + SELF_RGB + ',.55)';
-          ctx.lineWidth = 1.4;
-          ctx.stroke();
-        }
+        ctx.beginPath();
+        ctx.arc(x, y, r + 4, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(' + SELF_RGB + ',' + (0.5 * alpha).toFixed(3) + ')';
+        ctx.lineWidth = 1.4;
+        ctx.stroke();
+      } else if (kind === 'person') {
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.fillStyle = kindColor('person', alpha);
+        ctx.fill();
       } else if (kind === 'org') {
-        // Hexagon — companies/orgs, distinct from project diamonds.
         const hr = r * 1.05;
         ctx.beginPath();
         for (let i = 0; i < 6; i++) {
@@ -1390,141 +1583,168 @@ window.MnemosConstellation = {
       } else if (kind === 'project') {
         ctx.translate(x, y);
         ctx.rotate(Math.PI / 4);
-        ctx.fillStyle = kindColor('project', alpha * 0.9);
-        ctx.fillRect(-r * 0.85, -r * 0.85, r * 1.7, r * 1.7);
-      } else if (kind === 'tool') {
-        // Rounded square — tools/platforms, not faint idea dots.
-        const s = r * 1.35;
-        ctx.fillStyle = kindColor('tool', alpha * 0.92);
-        ctx.beginPath();
-        const rx = x - s / 2, ry = y - s / 2, rad = 3.5;
-        ctx.moveTo(rx + rad, ry);
-        ctx.arcTo(rx + s, ry, rx + s, ry + s, rad);
-        ctx.arcTo(rx + s, ry + s, rx, ry + s, rad);
-        ctx.arcTo(rx, ry + s, rx, ry, rad);
-        ctx.arcTo(rx, ry, rx + s, ry, rad);
-        ctx.closePath();
-        ctx.fill();
-      } else if (kind === 'place') {
-        ctx.beginPath();
-        ctx.moveTo(x, y - r);
-        ctx.lineTo(x + r * 0.85, y + r * 0.7);
-        ctx.lineTo(x - r * 0.85, y + r * 0.7);
-        ctx.closePath();
-        ctx.fillStyle = kindColor('place', alpha * 0.85);
-        ctx.fill();
-      } else if (kind === 'commitment' || kind === 'task') {
-        // Same chevron, different hue: copper = to-do, burgundy = promise.
-        ctx.beginPath();
-        ctx.moveTo(x - r * 0.2, y - r);
-        ctx.lineTo(x + r * 0.9, y);
-        ctx.lineTo(x - r * 0.2, y + r);
-        ctx.closePath();
-        const risk = n.prospective_risk || 0;
-        ctx.fillStyle = kindColor(
-          kind, risk >= 0.7 ? (0.55 + alpha * 0.4) : alpha);
+        ctx.fillStyle = kindColor('project', alpha * 0.92);
+        roundRectPath(-r * 0.82, -r * 0.82, r * 1.64, r * 1.64, r * 0.28);
         ctx.fill();
       } else {
+        // One satellite mark for every secondary kind. Open work takes the
+        // attention hue; concepts, tools and places stay neutral so they read
+        // as context rather than as something to do.
+        const urge = Math.max(Number(n.prospective_risk) || 0, Number(n.aging) || 0);
         ctx.beginPath();
-        ctx.arc(x, y, r * 0.7, 0, Math.PI * 2);
-        ctx.fillStyle = kindColor('idea', alpha * 0.55);
+        ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.fillStyle = isLoop(n)
+          ? kindColor('task', Math.min(0.95, 0.5 + alpha * 0.5))
+          : 'rgba(' + SAT_RGB + ',' + (alpha * 0.75).toFixed(3) + ')';
         ctx.fill();
+        // Neglect is a warm ring that thickens — one encoding, amber, matching
+        // the halo hue an at-risk primary takes.
+        if (isLoop(n) && urge > 0.45) {
+          ctx.beginPath();
+          ctx.arc(x, y, r + 3 + urge * 2, 0, Math.PI * 2);
+          ctx.strokeStyle = 'rgba(223,179,94,' + (0.25 + urge * 0.4).toFixed(3) + ')';
+          ctx.lineWidth = 0.8 + urge * 1.4;
+          ctx.stroke();
+        }
       }
       ctx.restore();
     }
 
-    function edgeVisible(e, st) {
-      if (st.showFilaments || st.edit) return true;
-      if (st.focusId) {
-        return e.source === st.focusId || e.target === st.focusId;
-      }
-      if (st.hover) {
-        return e.source === st.hover || e.target === st.hover;
-      }
-      if (st.selected) {
-        return e.source === st.selected || e.target === st.selected;
-      }
-      // Ambient: keep the strongest co-appearance links so the field reads as
-      // connected without flipping Links on.
-      return !!e._ambient;
+    function drawEdgeLabel(x, y, rel) {
+      const text = String(rel || '').replace(/_/g, ' ').trim();
+      if (!text || text === 'related' || text === 'manual') return;
+      ctx.font = '500 10px ui-sans-serif, system-ui, sans-serif';
+      const tw = ctx.measureText(text).width;
+      ctx.fillStyle = 'rgba(22,22,27,.92)';
+      roundRectPath(x - tw / 2 - 5, y - 8, tw + 10, 15, 7);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(206,204,214,.92)';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'alphabetic';
+      ctx.fillText(text, x - tw / 2, y + 3.5);
     }
 
-    function markAmbientEdges(st) {
-      (st.edges || []).forEach(e => { e._ambient = false; });
-      const ranked = (st.edges || []).slice().sort((a, b) => {
-        const wa = (a.weight || 1) * (a.confidence != null ? a.confidence : 0.6);
-        const wb = (b.weight || 1) * (b.confidence != null ? b.confidence : 0.6);
-        return wb - wa;
-      });
-      const cap = Math.min(14, Math.max(4, Math.floor((st.nodes || []).length * 0.55)));
-      ranked.slice(0, cap).forEach(e => { e._ambient = true; });
+    /* A collapsed system carries its unfinished work as one count on its rim
+       — the app-icon idiom. The words ("3 open loops") live in the tooltip and
+       the inspector, where there is room for them. */
+    function drawLoopBadge(st, n, r, alpha) {
+      const text = n._loops > 9 ? '9+' : String(n._loops);
+      ctx.font = '600 10px ui-sans-serif, system-ui, sans-serif';
+      const tw = ctx.measureText(text).width;
+      const rad = Math.max(7.5, tw / 2 + 5);
+      // Sit on the rim, away from the centre of the field, where there is air.
+      const ox = n._x - st.w / 2, oy = n._y - st.h / 2;
+      const m = Math.hypot(ox, oy);
+      const ux = m > 8 ? ox / m : 0.7, uy = m > 8 ? oy / m : 0.7;
+      const bx = n._x + ux * (r + rad * 0.8);
+      const by = n._y + uy * (r + rad * 0.8);
+      ctx.beginPath();
+      ctx.arc(bx, by, rad, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(28,32,41,' + (0.95 * alpha).toFixed(3) + ')';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(223,179,94,' + (0.55 * alpha).toFixed(3) + ')';
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(223,179,94,' + (0.95 * alpha).toFixed(3) + ')';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(text, bx, by + 0.5);
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'alphabetic';
     }
+
+    function edgeVisible(e, st) {
+      // The resting field is stars, not wiring. One constellation is
+      // illuminated at a time: hover, selection, or focus.
+      if (st.showFilaments || st.edit) return true;
+      const act = st.focusId || st.selected || st.hover;
+      if (!act) return false;
+      if (e.source === act || e.target === act) return true;
+      const a = st.byId[act];
+      const host = (a && a._host) ? a._host : act;
+      return e.source === host || e.target === host;
+    }
+
 
     function draw(st, now) {
       const w = st.w, h = st.h;
       ctx.clearRect(0, 0, w, h);
-      const g = ctx.createRadialGradient(w / 2, h / 2, 8, w / 2, h / 2, Math.min(w, h) * 0.62);
-      g.addColorStop(0, 'rgba(141,133,242,.07)');
-      g.addColorStop(0.5, 'rgba(95,179,158,.035)');
-      g.addColorStop(1, 'rgba(10,10,11,0)');
-      ctx.fillStyle = g;
+      // The light IS the ranking. A gravity well sits under the centre,
+      // brightest where NOW lives and falling away through ACTIVE to the
+      // dormant rim — the zones are never drawn as rings. This well and the
+      // node opacity are the only things that say where a band ends.
+      const slab = ctx.createLinearGradient(0, 0, 0, h);
+      slab.addColorStop(0, 'rgba(233,231,226,.03)');
+      slab.addColorStop(0.55, 'rgba(233,231,226,0)');
+      slab.addColorStop(1, 'rgba(0,0,0,.14)');
+      ctx.fillStyle = slab;
       ctx.fillRect(0, 0, w, h);
+      const wx = w / 2 + st.cam.x, wy = h / 2 + st.cam.y;
+      const wr = Math.min(w, h) * 0.62 * Math.max(0.7, Math.min(1.8, st.cam.z));
+      const well = ctx.createRadialGradient(wx, wy, 4, wx, wy, wr);
+      well.addColorStop(0, 'rgba(141,133,242,.16)');
+      well.addColorStop(0.34, 'rgba(141,133,242,.055)');
+      well.addColorStop(1, 'rgba(10,10,11,0)');
+      ctx.fillStyle = well;
+      ctx.fillRect(0, 0, w, h);
+      // Off-axis warmth, so a centred well never reads as a bullseye.
+      const warm = ctx.createRadialGradient(
+        w * 0.12, h * 1.08, 8, w * 0.12, h * 1.08, Math.max(w, h) * 0.8);
+      warm.addColorStop(0, 'rgba(223,179,94,.055)');
+      warm.addColorStop(1, 'rgba(10,10,11,0)');
+      ctx.fillStyle = warm;
+      ctx.fillRect(0, 0, w, h);
+      // Selection ripple clock — stamped on change, decays below.
+      if (st._selSeen !== st.selected) { st._selSeen = st.selected; st._selT = now; }
 
       ctx.save();
       ctx.translate(w / 2 + st.cam.x, h / 2 + st.cam.y);
       ctx.scale(st.cam.z, st.cam.z);
       ctx.translate(-w / 2, -h / 2);
-      const breath = window.MnemosReduceMotion() ? 0
-        : Math.sin((now - st.t0) / 2800) * 0.006;
-      const dimFocus = !!st.focusId;
-      const filamentsOn = !!(st.showFilaments || st.edit);
+      const reduce = window.MnemosReduceMotion();
+      const act = st.focusId || st.selected || st.hover || null;
+      const lens = act ? lensSet(st, act) : null;
 
       st.edges.forEach((e) => {
         if (!edgeVisible(e, st)) return;
         const a = st.byId[e.source], b = st.byId[e.target];
-        if (!a || !b) return;
-        const hot = st.hover && (e.source === st.hover || e.target === st.hover);
-        const ambientOnly = e._ambient && !filamentsOn && !hot
-          && !st.focusId && !st.selected;
+        if (!a || !b || !nodeVisible(st, a) || !nodeVisible(st, b)) return;
+        const hot = !!act && (e.source === act || e.target === act);
         ctx.beginPath();
         ctx.moveTo(a._x, a._y);
         const mx = (a._x + b._x) / 2;
         const my = (a._y + b._y) / 2 - 8;
         ctx.quadraticCurveTo(mx, my, b._x, b._y);
         const conf = e.confidence != null ? e.confidence : 0.6;
-        if (e.style === 'dashed' || (!e.manual && conf < 0.75)) {
-          ctx.setLineDash([4, 4]);
-        } else if (e.style === 'dotted' || conf < 0.45) {
-          ctx.setLineDash([2, 4]);
-        } else {
-          ctx.setLineDash([]);
-        }
-        const isPromise = e.rel === 'promise' || e.rel === 'responsible_for';
-        let alpha;
-        if (hot || isPromise) alpha = 0.42 + (e.weight || 1) * 0.06;
-        else if (ambientOnly) alpha = 0.16 + conf * 0.1;
-        else alpha = 0.26 + conf * 0.2;
-        ctx.strokeStyle = hot || isPromise
-          ? 'rgba(141,133,242,' + alpha + ')'
-          : 'rgba(232,231,244,' + alpha + ')';
-        ctx.lineWidth = hot ? 2 : (ambientOnly ? 1.15 : (e.manual ? 1.7 : 1.35));
+        if (e.style === 'dashed' || (!e.manual && conf < 0.75)) ctx.setLineDash([4, 4]);
+        else if (e.style === 'dotted' || conf < 0.45) ctx.setLineDash([2, 4]);
+        else ctx.setLineDash([]);
+        const alpha = hot ? (0.34 + conf * 0.2) : 0.13;
+        ctx.strokeStyle = hot
+          ? 'rgba(141,133,242,' + alpha.toFixed(3) + ')'
+          : 'rgba(232,231,244,' + alpha.toFixed(3) + ')';
+        ctx.lineWidth = hot ? 1.7 : 1.05;
         ctx.stroke();
         ctx.setLineDash([]);
+        // Name the relationship while it is lit: the word is the explanation
+        // the bare line was withholding.
+        if (hot && st.cam.z > 0.62) {
+          // Offset the word perpendicular to the line, and skip it entirely
+          // when the two stars are too close to seat it clear of either glyph.
+          const ex = b._x - a._x, ey = b._y - a._y;
+          const len = Math.hypot(ex, ey);
+          if (len > (a._r || 8) + (b._r || 8) + 62) {
+            const nx = -ey / len, ny = ex / len;
+            drawEdgeLabel(mx + nx * 11, my + ny * 11, e.rel);
+          }
+        }
       });
 
       st.nodes.forEach(n => {
-        const gScore = Math.max(0.2, Math.min(1.2, n.gravity || 0.4));
-        const peri = n.layer === 'periphery';
-        let alpha = (peri ? 0.38 : 0.68) + gScore * 0.3;
-        alpha *= (n.memory_strength != null ? (0.6 + n.memory_strength * 0.4) : 1);
-        if (dimFocus && st.focusId !== n.id) {
-          const linked = st.edges.some(e =>
-            (e.source === st.focusId && e.target === n.id)
-            || (e.target === st.focusId && e.source === n.id));
-          if (!linked) alpha *= 0.18;
-          else alpha *= 0.75;
-        }
-        // Margin soft-highlight / emphasize — prose and sky share refs.
+        if (!nodeVisible(st, n)) return;
+        let alpha = zoneAlpha(st, n);
+        if (lens) alpha *= lens.has(n.id) ? 1 : 0.18;
+        if (st.loopsOnly) alpha *= loopish(st, n) ? 1 : 0.12;
         if (st.softIds && st.softIds.size) {
           if (st.softIds.has(n.id)) alpha = Math.max(alpha, 0.95);
           else alpha *= 0.22;
@@ -1533,36 +1753,63 @@ window.MnemosConstellation = {
           if (st.emphasizeIds.has(n.id)) alpha = Math.max(alpha, 1.0);
           else alpha *= 0.28;
         }
-        let r = n._r || ((peri ? 3.5 : 5.5) + gScore * (peri ? 3 : 5.5));
-        if (st.rangeCutoff && n.ts && n.ts < st.rangeCutoff) {
-          alpha *= 0.3;
-          r *= 0.72;
-        }
-        const scale = 1 + breath * (n.prospective_risk >= 0.7 ? 0.9 : 0.25);
-        // Soft aura — keep tight so neighbors don't melt into one blob.
-        ctx.beginPath();
-        ctx.arc(n._x, n._y, r * scale * 1.45, 0, Math.PI * 2);
-        ctx.fillStyle = kindColor(
-          n.kind, n.kind === 'person' ? (0.06 + alpha * 0.07)
-                                      : (0.045 + alpha * 0.055));
-        ctx.fill();
-        // Aging halo — warm amber ring that grows with neglect (one encoding).
-        const aging = Number(n.aging) || 0;
-        if (aging > 0.05 && (n.kind === 'task' || n.kind === 'commitment')) {
-          const halo = r * scale * (1.55 + aging * 0.55);
+        if (st.rangeCutoff && n.ts && n.ts < st.rangeCutoff) alpha *= 0.3;
+        if (alpha < 0.035) return;
+        const r = n._r || 8;
+        // Urgency breathes; it never moves the node. A due date closing in and
+        // a promise gaining age both speed the cycle up.
+        const urge = Math.max(Number(n.prospective_risk) || 0, Number(n.aging) || 0);
+        const period = 3400 - urge * 1700;
+        const breath = reduce ? 0
+          : Math.sin((now - st.t0) / period) * (0.008 + urge * 0.022);
+        const want = st.hover === n.id ? 1 : 0;
+        n._lift = reduce ? 0 : (n._lift || 0) + (want - (n._lift || 0)) * 0.18;
+        const scale = (1 + breath) * (1 + n._lift * 0.16);
+        // Gravity halo — the ranking made visible with no number in sight.
+        if (n.is_self || isPrimary(n)) {
+          const g = Math.max(0.15, Math.min(1.15, n.gravity || 0.35));
+          const hr = r * scale * (1.9 + g * 1.4);
+          const hue = urge >= 0.55 ? '223,179,94'
+            : (n.is_self ? SELF_RGB : '141,133,242');
+          const halo = ctx.createRadialGradient(
+            n._x, n._y, r * scale * 0.75, n._x, n._y, hr);
+          halo.addColorStop(0, 'rgba(' + hue + ','
+            + ((0.06 + g * 0.1) * alpha).toFixed(3) + ')');
+          halo.addColorStop(1, 'rgba(' + hue + ',0)');
+          ctx.fillStyle = halo;
           ctx.beginPath();
-          ctx.arc(n._x, n._y, halo, 0, Math.PI * 2);
-          ctx.strokeStyle = 'rgba(141,133,242,' + (0.22 + aging * 0.45).toFixed(2) + ')';
-          ctx.lineWidth = 1 + aging * 1.5;
-          ctx.stroke();
+          ctx.arc(n._x, n._y, hr, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        const lit = st.hover === n.id || st.selected === n.id || st.focusId === n.id;
+        if (lit) {
+          ctx.save();
+          ctx.shadowColor = n.is_self
+            ? 'rgba(' + SELF_RGB + ',.6)' : kindColor(n.kind, 0.6);
+          ctx.shadowBlur = 10 + n._lift * 8;
         }
         drawKind(n, r * scale, Math.min(0.96, alpha));
+        if (lit) ctx.restore();
+        // Selection ripple — the field acknowledges the click, then settles.
+        if (st.selected === n.id && st._selT && !reduce) {
+          const age = (now - st._selT) / 900;
+          if (age < 1) {
+            ctx.beginPath();
+            ctx.arc(n._x, n._y, r * scale + 4 + age * 26, 0, Math.PI * 2);
+            ctx.strokeStyle = 'rgba(141,133,242,' + (0.5 * (1 - age)).toFixed(3) + ')';
+            ctx.lineWidth = 1.4 * (1 - age) + 0.3;
+            ctx.stroke();
+          }
+        }
         if (st.selected === n.id || st.focusId === n.id || st.hover === n.id || n.pinned) {
           ctx.beginPath();
           ctx.arc(n._x, n._y, r * scale + 3.5, 0, Math.PI * 2);
           ctx.strokeStyle = 'rgba(141,133,242,.82)';
           ctx.lineWidth = 1.6;
           ctx.stroke();
+        }
+        if (!systemOpen(st, n) && (n._loops || 0) > 0) {
+          drawLoopBadge(st, n, r * scale, alpha);
         }
         // Diff mode: rising/falling arrow on hover only (calm default).
         if (st.diffMode && st.hover === n.id
@@ -1577,43 +1824,28 @@ window.MnemosConstellation = {
           ctx.fillStyle = up ? 'rgba(95,179,158,.7)' : 'rgba(224,113,106,.65)';
           ctx.fill();
         }
-        // Cluster chip — absorbed near-duplicates ("+7 related")
-        if (n.layer === 'focus' && (n.cluster_n || 0) > 1) {
-          const chip = '+' + (n.cluster_n - 1);
-          ctx.font = '600 9px ui-sans-serif, system-ui, sans-serif';
-          const tw = ctx.measureText(chip).width;
-          const bx = n._x + r * scale * 0.55;
-          const by = n._y - r * scale * 0.85;
-          const pw = tw + 6, ph = 11;
-          ctx.fillStyle = 'rgba(28,32,41,0.92)';
-          ctx.fillRect(bx, by - ph + 2, pw, ph);
-          ctx.fillStyle = 'rgba(233,231,226,0.95)';
-          ctx.textBaseline = 'middle';
-          ctx.fillText(chip, bx + 3, by - ph / 2 + 3);
-        }
       });
 
-      /* Label policy: sparse fields and focus people stay named; denser fields
-         reveal the rest on hover/selection so labels can't collide. */
-      const fewNodes = st.nodes.length <= 18;
+      /* Labels follow the tiers: the primaries are always named, satellites
+         only while their system is open or under the cursor. */
       st.nodes.forEach(n => {
-        const focusPerson = n.layer === 'focus'
-          && (n.kind === 'person' || n.is_self);
-        const show = fewNodes || focusPerson || st.hover === n.id
-          || st.selected === n.id || st.focusId === n.id || n.pinned;
-        if (!show) return;
-        if (dimFocus && st.focusId !== n.id) {
-          const linked = st.edges.some(e =>
-            (e.source === st.focusId && e.target === n.id)
-            || (e.target === st.focusId && e.source === n.id));
-          if (!linked) return;
-        }
+        if (!nodeVisible(st, n)) return;
+        const named = n.is_self || isPrimary(n)
+          || (isLoop(n) && !n._host)
+          || st.hover === n.id || st.selected === n.id || st.focusId === n.id
+          || (n._host && systemOpen(st, st.byId[n._host]));
+        if (!named) return;
+        let alpha = zoneAlpha(st, n);
+        if (lens && !lens.has(n.id)) alpha *= 0.18;
+        if (st.loopsOnly && !loopish(st, n)) alpha *= 0.12;
+        if (alpha < 0.14) return;
         const r = n._r || 8;
         drawLabel(
           n._x + (n._labelSide || 1) * (r + 3),
           n._y + (n._labelDy || 0),
           n.label + (n.is_self ? ' — you' : ''), n._labelSide || 1,
-          st.hover === n.id || st.selected === n.id || st.focusId === n.id);
+          st.hover === n.id || st.selected === n.id || st.focusId === n.id,
+          alpha);
       });
       ctx.restore();
     }
@@ -1655,8 +1887,16 @@ window.MnemosConstellation = {
       }
     } else if (toolbar) {
       toolbar.onclick = (e) => {
-        const act = e.target && e.target.getAttribute('data-act');
-        if (act === 'fit') fit();
+        const btn = (e.target && e.target.closest)
+          ? e.target.closest('[data-act]') : null;
+        const act = btn && btn.getAttribute('data-act');
+        if (!act) return;
+        const more = toolbar.querySelector('.const-more');
+        if (more && more.open && btn.closest('.const-more')) more.open = false;
+        if (act === 'loops') {
+          state.loopsOnly = !state.loopsOnly;
+          btn.classList.toggle('on', state.loopsOnly);
+        } else if (act === 'fit') fit();
         else if (act === 'in') { state.cam.z = Math.min(2.6, state.cam.z * 1.12); saveCam(); }
         else if (act === 'out') { state.cam.z = Math.max(0.55, state.cam.z / 1.12); saveCam(); }
         else if (act === 'correct') setEdit(!state.edit);
@@ -1767,6 +2007,7 @@ window.MnemosConstellation = {
         + state.h / 2;
       let hit = null;
       state.nodes.forEach(n => {
+        if (!nodeVisible(state, n)) return;
         const dx = n._x - mx, dy = n._y - my;
         const hitR = Math.max(20, (n._r || 8) + 12);
         if (dx * dx + dy * dy < hitR * hitR) hit = n.id;
@@ -1896,8 +2137,7 @@ window.MnemosConstellation = {
         if (state.focusId && !state.byId[state.focusId]) state.focusId = null;
         if (state.hover && !state.byId[state.hover]) state.hover = null;
         if (state.linkFrom && !state.byId[state.linkFrom]) state.linkFrom = null;
-        layout(state);
-        markAmbientEdges(state);
+        refield(state);
         nodes.forEach(n => {
           const o = oldPos[n.id];
           if (!o) return;   // newcomer: appears at its layout spot, ringed
@@ -1935,10 +2175,28 @@ window.MnemosConstellation = {
           state.onSelect(id ? state.byId[id] : null);
         }
       },
+      focus(id) {
+        state.focusId = (state.focusId === id) ? null : (id || null);
+        const b = toolbar && toolbar.querySelector('[data-act=focus]');
+        if (b) b.classList.toggle('on', !!state.focusId);
+      },
       setRange(cutoffTs) {
         state.rangeCutoff = cutoffTs || null;
       },
       node(id) { return state.byId[id]; },
+      /* What the field decided about a node: which zone it sits in, what its
+         system holds, and who hosts it. The inspector speaks from this. */
+      info(id) {
+        const n = state.byId[id];
+        if (!n) return null;
+        return {
+          zone: n._zone || 'peripheral',
+          loops: n._loops || 0,
+          members: (n._members || []).slice(),
+          host: n._host || null,
+          primary: isPrimary(n) || !!n.is_self,
+        };
+      },
       data() { return { nodes: state.nodes, edges: state.edges }; },
       destroy() {
         cancelAnimationFrame(state.raf);

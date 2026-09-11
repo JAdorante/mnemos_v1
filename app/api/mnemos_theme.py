@@ -14,6 +14,9 @@ Design system (UI refactor spec, sparrow-today-redesign.html):
     No ALL-CAPS eyebrows, no letterspaced labels.
   - Radii: three tiers mapped to hierarchy — 14 section cards, 10 nested
     panels/inputs, 7 buttons/small controls.
+  - Material: flat by default. A surface may opt into light instead (--card-hi
+    / --device-hi top edge + --lift-* two-layer shadow), which is how the
+    constellation reads as an object you can handle rather than a diagram.
 
 Legacy aliases (--paper, --navy, --acc, --panel, ...) keep older page CSS on
 the same palette; new code should use the spec names. --navy = strongest ink,
@@ -166,6 +169,19 @@ ROOT_TOKENS = """\
   --shadow-folio:none;
   --shadow-float:none;
   --shadow-press:none;
+  /* Material — for surfaces that opt into light (today: the constellation).
+     The flat --shadow-* tokens above stay the page default; a lit surface adds
+     a one-pixel bright edge at its top plus a two-layer shadow — a tight
+     contact shadow and a wide, faint ambient one — so the card reads as an
+     object under a light from above. A surface takes one or the other. */
+  --card-hi:color-mix(in srgb,var(--navy) 8%,transparent);
+  --device-hi:color-mix(in srgb,var(--navy) 13%,transparent);
+  --lift-1:0 1px 2px rgb(0 0 0 / .34);
+  --lift-2:0 1px 2px rgb(0 0 0 / .36),0 14px 34px -16px rgb(0 0 0 / .6);
+  --lift-3:0 2px 5px rgb(0 0 0 / .42),0 24px 56px -20px rgb(0 0 0 / .7);
+  /* The accent gets dimension, not more presence: gloss on top, its own hue
+     in the ambient shadow. One primary control per surface. */
+  --lift-acc:0 1px 2px rgb(0 0 0 / .4),0 10px 22px -12px var(--acc-45);
   /* Motion — fast to start, long to settle; springs only for the mark. */
   --ease:cubic-bezier(.22,1,.36,1);
   --ease-io:cubic-bezier(.4,0,.2,1);

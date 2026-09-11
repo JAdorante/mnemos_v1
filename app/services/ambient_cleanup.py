@@ -261,8 +261,10 @@ def _known_person_names(store) -> set[str]:
 
     Only PLAUSIBLE person names count — otherwise a mis-minted person like
     "Venture Pulse" would cause the real project of the same name to be hidden.
-    First tokens of multi-word people (≥4 letters) are included so
-    "Justin"[project] collides with "Justin Adorante".
+
+    First tokens of multi-word people are NOT inferred into this set: that made
+    "Justin"[project] collide with "Justin Adorante" even when Justin was never
+    an alias. Explicit aliases still match; soft-hide stays reversible either way.
     """
     names: set[str] = set()
     try:
@@ -277,11 +279,6 @@ def _known_person_names(store) -> set[str]:
             compact = "".join(raw.lower().split())
             if len(compact) >= 3:
                 names.add(compact)
-            words = raw.split()
-            if len(words) >= 2:
-                first = words[0].lower()
-                if len(first) >= 4 and first.isalpha():
-                    names.add(first)
     return names
 
 

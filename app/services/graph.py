@@ -1413,6 +1413,11 @@ def constellation(store: Store | None = None, limit: int = 28,
             "anchor": n.get("anchor", 0),
             "why": n.get("why") or [],
         }
+        # The field is the user's — "you" anchors its centre, so the flag has
+        # to survive into the payload (it was set on the candidate and dropped
+        # here, which left every self-branch in the renderer dead).
+        if n.get("is_self"):
+            row["is_self"] = True
         if n.get("age_days") is not None:
             row["age_days"] = n["age_days"]
         if float(n.get("aging") or 0) > 0:

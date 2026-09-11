@@ -319,6 +319,31 @@ class BatchHygieneTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_first_name_not_inferred_as_person_collision(self) -> None:
+        """L1: multi-word people must not soft-hide projects via first token."""
+        from app.services import ambient_cleanup as ac
+        from app.storage import Store
+
+        with tempfile.TemporaryDirectory() as td:
+            store = Store(Path(td) / "t.db")
+            try:
+                with store._lock:
+                    store._conn.execute(
+                        "INSERT INTO people (canonical_name, aliases, first_seen, "
+                        "last_seen, promotion_state, canonical_id) "
+                        "VALUES ('Justin Adorante', '[]', 1, 1, "
+                        "'recognized', lower(hex(randomblob(16))))")
+                    store._conn.execute(
+                        "INSERT INTO entities (canonical_name, kind, aliases, "
+                        "first_seen, last_seen, canonical_id) "
+                        "VALUES ('Justin', 'project', '[]', 1, 1, "
+                        "lower(hex(randomblob(16))))")
+                    store._conn.commit()
+                ents = {e["name"]: e for e in ac.plan_entities(store, limit=100)}
+                self.assertNotIn("Justin", ents)
+            finally:
+                store.close()
+
     def test_recognized_speech_act_still_planned(self):
         """Recognized promotion must not shield speech-act junk people."""
         from unittest.mock import patch

@@ -52,6 +52,10 @@ COPY app ./app
 # Chromium (installed above) only launches on the first routed web goal.
 COPY browser_agent ./browser_agent
 COPY run_all.py .
+# The idle LoRA trainer shells out to scripts/train_lora.py (which in turn
+# imports distill_curate and synthetic_pairs); without them the trainer's
+# pair count reads 0 forever and every run fails into the backoff.
+COPY scripts ./scripts
 # The source-policy table ships with the repo but /srv/sparrow/data is a
 # per-user volume that starts empty; without the file the app runs on the
 # restrictive fallback (no people/commitment minting, no contacts). Stage it

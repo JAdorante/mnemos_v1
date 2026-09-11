@@ -37,18 +37,36 @@ body{
   grid-template-columns:minmax(0,1fr) 340px;gap:24px;align-items:start;
 }
 @media(max-width:900px){.const-grid{grid-template-columns:1fr}}
+/* The constellation opts into light (see mnemos_theme "Material"): every
+   surface here carries a one-pixel lit top edge and a two-layer shadow, so the
+   field reads as an object on the page rather than another flat panel. */
 .const-card{
-  background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);
-  padding:16px;
+  position:relative;
+  background:linear-gradient(180deg,color-mix(in srgb,var(--navy) 2.5%,var(--surface)),var(--surface));
+  border:1px solid var(--line);border-radius:var(--radius-xl);
+  padding:16px;box-shadow:var(--lift-2);
+  animation:fadeUp var(--dur-slow) var(--ease) both;
 }
-aside.const-card{padding:20px 22px}
+.const-card::before{
+  content:"";position:absolute;left:16px;right:16px;top:0;height:1px;pointer-events:none;
+  background:linear-gradient(90deg,transparent,var(--card-hi),transparent);
+}
+aside.const-card{padding:20px 22px;animation-delay:.07s}
 #constPane .const-frame{
-  position:relative;width:100%;height:min(560px,64vh);
-  border-radius:var(--r-md);background:var(--surface);overflow:hidden;
+  position:relative;width:100%;height:clamp(300px,46vh,560px);overflow:hidden;
+  border-radius:var(--radius-lg);
+  /* A lit slab, not a flat rectangle: bright top edge, hairline seat, and a
+     soft floor so the sky sits inside the card. The star field's own ambient
+     light is painted on the canvas (MnemosConstellation.draw). */
+  background:linear-gradient(180deg,color-mix(in srgb,var(--navy) 3%,var(--ink)),var(--ink));
+  box-shadow:inset 0 1px 0 var(--device-hi),inset 0 0 0 1px var(--hairline),
+    inset 0 -60px 90px -70px rgb(0 0 0 / .85);
 }
 .const-hint{
-  position:absolute;right:12px;top:10px;z-index:var(--z-base);
-  color:var(--faint);font-size:12.5px;pointer-events:none;
+  position:absolute;right:10px;top:10px;z-index:var(--z-base);pointer-events:none;
+  color:var(--mut);font-size:12px;padding:5px 11px;border-radius:var(--radius-full);
+  background:var(--chrome-bg);backdrop-filter:var(--glass);-webkit-backdrop-filter:var(--glass);
+  box-shadow:inset 0 1px 0 var(--device-hi),var(--lift-1);
 }
 .const-key{
   display:flex;gap:16px;flex-wrap:wrap;align-items:center;
@@ -57,13 +75,17 @@ aside.const-card{padding:20px 22px}
 .const-key span{display:inline-flex;align-items:center;gap:6px}
 .const-key .kd{width:8px;height:8px;border-radius:50%;display:inline-block}
 .const-key .kd.person{background:var(--violet)}
-.const-key .kd.entity{background:var(--amber);border-radius:2px}
+.const-key .kd.entity{background:var(--amber);border-radius:2px;transform:rotate(45deg)}
 .const-key .kd.you{background:var(--green)}
+.const-key .kd.loop{background:var(--amber);width:6px;height:6px}
 /* Detail card */
 #constDetail .cd-empty{
-  border:1px dashed var(--line);border-radius:var(--r-md);
+  border:1px dashed var(--line);border-radius:var(--radius-lg);
   padding:16px;color:var(--mut);font-size:13.5px;line-height:1.5;
 }
+/* Detail re-renders on every star click — fade it up so the eye is led to the
+   change instead of catching a swap. */
+#constDetail > *{animation:fadeUp var(--dur) var(--ease) both}
 .cd-head{display:flex;align-items:center;gap:10px;margin:0 0 4px}
 .cd-head .d{width:9px;height:9px;flex:none}
 .cd-head h2{font-family:var(--serif);font-weight:500;font-size:21px;margin:0;color:var(--text);
@@ -80,9 +102,63 @@ aside.const-card{padding:20px 22px}
 .cd-mem:first-of-type{border-top:0;padding-top:2px}
 .cd-mem p{font-size:13.5px;line-height:1.5;margin:0;color:var(--text)}
 .cd-mem .when{color:var(--faint);font-size:12.5px;margin-top:3px;display:block}
-.cd-link{display:inline-block;margin-top:12px;color:var(--violet);
-  font:600 13.5px var(--sans);text-decoration:none}
-.cd-link:hover{text-decoration:underline}
+/* The one primary control on this surface: gloss on top, its own hue in the
+   ambient shadow, so it looks pressable. */
+.cd-link{
+  display:inline-flex;align-items:center;margin-top:14px;
+  padding:7px 15px;border-radius:var(--radius-full);
+  background:linear-gradient(180deg,color-mix(in srgb,var(--navy) 16%,var(--acc)),var(--acc));
+  color:var(--acc-fg);font:600 13.5px var(--sans);text-decoration:none;
+  box-shadow:var(--lift-acc);
+  transition:transform var(--dur-fast) var(--ease-io),box-shadow var(--dur-fast) var(--ease-io);
+}
+.cd-link:hover{text-decoration:none;transform:translateY(-1px);
+  box-shadow:var(--lift-acc),0 0 0 1px var(--acc-25)}
+.cd-link:active{transform:translateY(0)}
+/* Inspector: zone, reason, unfinished work, then numbers only if asked. */
+.cd-zone{color:var(--acc);font-size:13px;font-weight:600;margin:0 0 2px}
+.cd-why{color:var(--mut);font-size:13.5px;line-height:1.5;margin:0 0 16px}
+.cd-folded{color:var(--faint);font-size:12.5px;margin:-8px 0 12px}
+.cd-loops{display:flex;flex-direction:column;gap:4px;margin:0 0 18px}
+.cd-loop{
+  display:flex;align-items:flex-start;gap:9px;width:100%;text-align:left;
+  border:1px solid var(--line);border-radius:var(--radius-sm);
+  background:var(--panel);padding:9px 11px;cursor:pointer;
+  font:var(--fs-footnote)/1.45 var(--sans);color:var(--text);
+  box-shadow:inset 0 1px 0 var(--card-hi),var(--lift-1);
+  transition:transform var(--dur-fast) var(--ease-io),border-color var(--dur-fast) var(--ease-io);
+}
+.cd-loop:hover{border-color:var(--acc-40);transform:translateY(-1px)}
+.cd-loop-dot{width:7px;height:7px;border-radius:50%;background:var(--amber);
+  flex:none;margin-top:6px}
+.cd-loop-t{flex:1;min-width:0}
+.cd-urgent{color:var(--danger);font-weight:600;white-space:nowrap}
+.cd-warm{color:var(--amber);white-space:nowrap}
+.cd-rank{margin:4px 0 14px;border-top:1px solid var(--line);padding-top:10px}
+.cd-rank > summary{
+  list-style:none;cursor:pointer;color:var(--faint);font-size:12.5px;
+}
+.cd-rank > summary::-webkit-details-marker,
+.cd-rank > summary::marker{display:none;content:""}
+.cd-rank > summary:hover{color:var(--mut)}
+.cd-rank > summary::after{content:" ›";opacity:.7}
+.cd-rank[open] > summary::after{content:" ⌄"}
+.cd-rank-body{margin-top:8px}
+.cd-rank-body .cd-rank-row{
+  display:flex;justify-content:space-between;gap:10px;
+  font:12.5px var(--sans);color:var(--mut);padding:3px 0;
+}
+.cd-rank-body .cd-rank-row b{color:var(--text);font-variant-numeric:tabular-nums}
+.cd-rank-body .cd-rank-sum{border-top:1px solid var(--line);margin-top:4px;padding-top:6px}
+.cd-actions{display:flex;gap:6px;margin:14px 0 0;flex-wrap:wrap}
+.cd-act{
+  border:1px solid var(--line);background:var(--panel);color:var(--mut);
+  border-radius:var(--radius-full);padding:6px 13px;cursor:pointer;
+  font:500 var(--fs-footnote) var(--sans);
+  box-shadow:inset 0 1px 0 var(--card-hi),var(--lift-1);
+}
+.cd-act:hover{color:var(--navy);border-color:var(--line-strong)}
+@media(prefers-reduced-motion:reduce){.cd-loop:hover{transform:none}}
 /* Page head */
 .page-head{
   max-width:1120px;margin:0 auto;width:100%;
@@ -94,28 +170,62 @@ aside.const-card{padding:20px 22px}
   color:var(--text);margin:0;line-height:1.15;
 }
 .page-head .counts{color:var(--mut);font-size:14px}
+.page-head .field-sub{color:var(--faint);font-size:14px;font-style:italic;
+  flex:1 1 100%;margin-top:-2px}
 #constPane canvas{width:100%;height:100%;display:block;touch-action:none}
 .const-tools{
-  position:absolute;right:10px;bottom:10px;z-index:var(--z-base);display:flex;gap:var(--sp-1);
-  background:rgba(18,18,22,.92);border:1px solid var(--line);border-radius:var(--radius-sm);
-  padding:var(--sp-1);box-shadow:var(--shadow-workspace);
+  position:absolute;right:10px;bottom:10px;z-index:var(--z-base);display:flex;gap:2px;
+  background:var(--chrome-bg);backdrop-filter:var(--glass);-webkit-backdrop-filter:var(--glass);
+  border:1px solid var(--line);border-radius:var(--radius-full);
+  padding:4px;box-shadow:inset 0 1px 0 var(--device-hi),var(--lift-2);
 }
 .const-tools button{
-  width:32px;height:28px;border:0;background:transparent;border-radius:var(--radius-xs);
+  width:32px;height:28px;border:0;background:transparent;border-radius:var(--radius-full);
   font:600 var(--fs-footnote) var(--font);color:var(--navy);cursor:pointer;padding:0;
   box-shadow:none;transform:none;
 }
-.const-tools button:hover{background:var(--ink-04);transform:none;box-shadow:none}
-.const-tools button[data-act="fit"],
-.const-tools button[data-act="focus"],
-.const-tools button[data-act="filaments"],
-.const-tools button[data-act="correct"],
-.const-tools button[data-act="diff"]{width:auto;padding:0 10px;font-size:var(--fs-caption);font-weight:500;color:var(--mut)}
-.const-tools button.on{color:var(--navy);background:var(--ink-06)}
+.const-tools button:hover{background:var(--ink-08);transform:none;box-shadow:none}
+.const-tools button[data-act="loops"],
+.const-tools button[data-act="fit"]{
+  width:auto;padding:0 12px;white-space:nowrap;
+  font-size:var(--fs-caption);font-weight:500;color:var(--mut);
+}
+/* Everything graph-shaped lives behind the overflow so the field is the hero. */
+.const-more{position:relative}
+.const-more > summary{
+  list-style:none;cursor:pointer;user-select:none;
+  display:flex;align-items:center;justify-content:center;
+  width:30px;height:28px;border-radius:var(--radius-full);
+  color:var(--mut);font-size:13px;letter-spacing:.08em;line-height:1;
+}
+.const-more > summary::-webkit-details-marker,
+.const-more > summary::marker{display:none;content:""}
+.const-more > summary:hover,.const-more[open] > summary{color:var(--navy);background:var(--ink-08)}
+.const-more-menu{
+  position:absolute;right:0;bottom:calc(100% + 8px);z-index:var(--z-popover);
+  min-width:186px;display:flex;flex-direction:column;gap:1px;padding:5px;
+  border-radius:var(--radius-lg);border:1px solid var(--line);
+  background:color-mix(in srgb,var(--ink) 96%,transparent);
+  backdrop-filter:var(--glass);-webkit-backdrop-filter:var(--glass);
+  box-shadow:inset 0 1px 0 var(--device-hi),var(--lift-3);
+}
+.const-more-menu button{
+  width:100%!important;height:auto!important;text-align:left;
+  padding:7px 10px!important;border-radius:var(--radius-sm)!important;
+  font:500 var(--fs-footnote) var(--sans)!important;color:var(--mut)!important;
+  white-space:nowrap;
+}
+.const-more-menu button:hover{color:var(--navy)!important;background:var(--ink-08)}
+/* Selected control is a tinted pill, not a different-coloured label. */
+.const-tools button.on{color:var(--acc);background:var(--acc-15);
+  box-shadow:inset 0 0 0 1px var(--acc-25)}
 .const-tip{
   position:absolute;z-index:var(--z-raised);max-width:200px;padding:var(--sp-2) var(--sp-3);
-  border-radius:var(--radius-sm);
-  background:rgba(18,18,22,.96);border:1px solid var(--line);box-shadow:var(--shadow-float);
+  border-radius:var(--radius-lg);
+  background:color-mix(in srgb,var(--ink) 94%,transparent);
+  backdrop-filter:var(--glass);-webkit-backdrop-filter:var(--glass);
+  border:1px solid var(--line);
+  box-shadow:inset 0 1px 0 var(--device-hi),var(--lift-3);
   font-size:var(--fs-caption);pointer-events:none;line-height:var(--lh-snug);
 }
 .const-tip strong{display:block;font-family:var(--display);font-weight:400;font-size:1rem;color:var(--navy)}
@@ -127,15 +237,25 @@ aside.const-card{padding:20px 22px}
   display:flex;flex-direction:column;gap:6px;
 }
 .const-insight-btn{
-  text-align:left;border:1px solid var(--line);background:rgba(18,18,22,.94);
-  border-radius:var(--radius-sm);padding:var(--sp-2) var(--sp-3);
+  text-align:left;border:1px solid var(--line);
+  background:var(--chrome-bg);backdrop-filter:var(--glass);-webkit-backdrop-filter:var(--glass);
+  border-radius:var(--radius-lg);padding:var(--sp-2) var(--sp-3);
   font:var(--fs-caption)/var(--lh-snug) var(--font);color:var(--navy);cursor:pointer;
-  box-shadow:var(--shadow-workspace);
+  box-shadow:inset 0 1px 0 var(--device-hi),var(--lift-1);
 }
-.const-insight-btn:hover{border-color:var(--acc-40)}
+/* Lifts on hover — the one signal that says "I'm interactive". */
+.const-insight-btn:hover{border-color:var(--acc-40);transform:translateY(-1px);
+  box-shadow:inset 0 1px 0 var(--device-hi),var(--lift-2)}
+.const-insight-btn:active{transform:translateY(0)}
 .const-why{margin:6px 0;color:var(--mut);font-style:italic;line-height:1.4}
 .const-rank{margin:8px 0 10px;padding-top:6px;border-top:1px solid var(--line)}
-.const-rank-title{font:600 12px var(--sans);color:var(--mut);margin-bottom:var(--sp-1)}
+.const-rank-title{font:500 12px var(--sans);color:var(--faint);margin-bottom:var(--sp-1);
+  list-style:none;cursor:pointer}
+.const-rank-title::-webkit-details-marker,
+.const-rank-title::marker{display:none;content:""}
+.const-rank-title::after{content:" ›";opacity:.7}
+.const-rank[open] .const-rank-title{color:var(--mut)}
+.const-rank[open] .const-rank-title::after{content:" ⌄"}
 .const-rank-admit{color:var(--navy);font-style:italic;margin:0 0 6px;line-height:1.35}
 .const-rank-bar{display:flex;height:8px;border-radius:4px;overflow:hidden;
   background:var(--ink-06);gap:1px;margin:4px 0 2px}
@@ -161,13 +281,17 @@ mark.span-hl{
   background:var(--acc-22);color:inherit;padding:0 .12em;border-radius:2px;
 }
 .const-kind-select{
-  width:100%;margin-top:var(--sp-1);padding:7px 10px;border-radius:var(--radius-xs);border:1px solid var(--line);
+  width:100%;margin-top:var(--sp-1);padding:7px 10px;border-radius:var(--radius-sm);border:1px solid var(--line);
   background:var(--panel);color:var(--navy);font:var(--fs-footnote) var(--font);
 }
 .const-edit{
   position:absolute;left:10px;top:10px;z-index:var(--z-raised);width:min(260px,72%);
-  background:rgba(18,18,22,.97);border:1px solid var(--line);border-radius:var(--radius-sm);
-  box-shadow:var(--shadow-folio);padding:var(--sp-3);font-size:var(--fs-caption);max-height:78%;overflow:auto;
+  background:color-mix(in srgb,var(--ink) 96%,transparent);
+  backdrop-filter:var(--glass);-webkit-backdrop-filter:var(--glass);
+  border:1px solid var(--line);border-radius:var(--radius-xl);
+  box-shadow:inset 0 1px 0 var(--device-hi),var(--lift-3);
+  padding:var(--sp-3);font-size:var(--fs-caption);max-height:78%;overflow:auto;
+  animation:fadeUp var(--dur) var(--ease) both;
 }
 .const-edit-head{display:flex;justify-content:space-between;gap:8px;align-items:baseline;
   font-family:var(--display);font-size:1.05rem;color:var(--navy);margin-bottom:6px}
@@ -176,14 +300,24 @@ mark.span-hl{
 .const-edit-row{display:flex;justify-content:space-between;gap:8px;align-items:center;
   padding:6px 0;border-top:1px solid var(--line)}
 .const-edit-row button,.const-link-btn{
-  border:1px solid var(--line);background:var(--panel);border-radius:var(--radius-xs);padding:var(--sp-1) var(--sp-2);
-  font:var(--fs-caption) var(--font);cursor:pointer;color:var(--navy);box-shadow:none;transform:none;
+  border:1px solid var(--line);background:var(--panel);border-radius:var(--radius-full);
+  padding:var(--sp-1) var(--sp-3);
+  font:var(--fs-caption) var(--font);cursor:pointer;color:var(--navy);
+  box-shadow:inset 0 1px 0 var(--card-hi),var(--lift-1);transform:none;
 }
 .const-edit-row button:hover{border-color:rgba(224,113,106,.45);color:var(--danger)}
 .const-link-btn{width:100%;margin-top:4px}
 .const-link-btn:hover{border-color:var(--acc-45);color:var(--acc)}
 .const-edit .linkish{background:none;border:0;color:var(--mut);cursor:pointer;font:var(--fs-caption) var(--font);padding:0}
-.const-frame.editing{box-shadow:var(--shadow-folio),inset 0 0 0 1px var(--acc-18)}
+/* Correct mode tints the slab's own light rather than adding a second frame. */
+.const-frame.editing{
+  box-shadow:inset 0 1px 0 var(--device-hi),inset 0 0 0 1px var(--acc-28),
+    inset 0 -60px 90px -70px rgb(0 0 0 / .85),0 0 0 1px var(--acc-18),var(--lift-2);
+}
+@media(prefers-reduced-motion:reduce){
+  .const-card,.const-edit,#constDetail > *{animation:none}
+  .const-insight-btn:hover,.cd-link:hover{transform:none}
+}
 .mode-seg{display:inline-flex;gap:0;border:1px solid var(--line);border-radius:var(--r-sm);overflow:hidden;flex:0 0 auto}
 .mode-seg .chip{border:0;border-radius:0;margin:0;background:transparent;font:inherit;font-size:var(--fs-footnote)}
 .mode-seg .chip + .chip{border-left:1px solid var(--line)}
@@ -272,6 +406,33 @@ input,button,select{font:inherit}
 .chip.on{background:var(--ink-06);color:var(--navy);border-color:var(--ink-12)}
 .chip.on:hover{color:var(--navy);background:var(--ink-08)}
 .mode-caption{font:var(--fs-caption) var(--font);color:var(--mut);padding:2px 12px 6px;font-style:italic}
+.mode-pop{position:relative;display:inline-block}
+.mode-pop > summary{
+  list-style:none;cursor:pointer;user-select:none;display:inline-flex;
+  align-items:center;gap:5px;border:1px solid var(--line);
+  border-radius:var(--radius-full);padding:5px 13px;
+  font-size:var(--fs-footnote);color:var(--mut);background:transparent;
+}
+.mode-pop > summary::-webkit-details-marker,
+.mode-pop > summary::marker{display:none;content:""}
+.mode-pop > summary::after{content:"⌄";opacity:.7;margin-left:2px}
+.mode-pop > summary b{color:var(--text);font-weight:600}
+.mode-pop > summary:hover,.mode-pop[open] > summary{border-color:var(--line-strong);color:var(--navy)}
+.mode-pop .mode-auto{color:var(--faint);font-size:var(--fs-caption2)}
+.mode-menu{
+  position:absolute;left:0;top:calc(100% + 6px);z-index:var(--z-popover);
+  min-width:170px;display:flex;flex-direction:column;gap:1px;padding:5px;
+  border-radius:var(--radius-lg);border:1px solid var(--line);
+  background:color-mix(in srgb,var(--ink) 96%,transparent);
+  backdrop-filter:var(--glass);-webkit-backdrop-filter:var(--glass);
+  box-shadow:inset 0 1px 0 var(--device-hi),var(--lift-3);
+}
+.mode-menu button{
+  text-align:left;border:0;background:transparent;border-radius:var(--radius-sm);
+  padding:7px 10px;cursor:pointer;font:500 var(--fs-footnote) var(--sans);color:var(--mut);
+}
+.mode-menu button:hover{color:var(--navy);background:var(--ink-08)}
+.mode-menu button.on{color:var(--acc);background:var(--acc-12)}
 .ambient-note.actionable{cursor:pointer;background:transparent;border:0;text-align:left;width:100%;
   font:inherit;color:inherit;padding:0;display:block}
 .ambient-note.actionable:hover{color:var(--acc)}
@@ -399,7 +560,7 @@ img.thumb.big{max-height:none;max-width:100%}
   audio{max-width:100%}
   .dead-jobs-list{position:static;min-width:0;width:100%}
   #constPane{padding:10px 12px 16px}
-  #constPane .const-frame{height:min(360px,52vh)}
+  #constPane .const-frame{height:clamp(260px,44vh,360px)}
 }
 </style></head><body>
 <div class="chrome">
@@ -457,6 +618,7 @@ img.thumb.big{max-height:none;max-width:100%}
 <div class="page-head">
   <h1>Memory</h1>
   <span class="counts" id="memCounts"></span>
+  <span class="field-sub" id="constSub" hidden>What currently has your attention</span>
 </div>
 <div class="layout">
 <div style="display:flex;flex-direction:column;min-height:0;min-width:0;flex:1">
@@ -467,13 +629,14 @@ img.thumb.big{max-height:none;max-width:100%}
     <div class="const-card">
       <div class="const-frame">
         <canvas id="memConst"></canvas>
-        <div class="const-hint">Drag to pan · scroll to zoom · click a star for detail</div>
+        <div class="const-hint">Hover to light its links · click for detail · drag to pan</div>
       </div>
       <div class="const-key">
-        <span><i class="kd person"></i>People</span>
-        <span><i class="kd entity"></i>Topics &amp; entities</span>
         <span><i class="kd you"></i>You</span>
-        <span class="k-note">Size = activity in range · lines = appear together</span>
+        <span><i class="kd person"></i>People</span>
+        <span><i class="kd entity"></i>Projects &amp; orgs</span>
+        <span><i class="kd loop"></i>Open loops</span>
+        <span class="k-note">Nearer the centre = more of your attention</span>
       </div>
       <div id="constMsg" class="mut" style="font-size:12.5px;padding:8px 2px 0" hidden></div>
       <div id="modeChips" class="hsub" style="padding:8px 2px 0;gap:6px"></div>
@@ -537,6 +700,8 @@ function setLayer(name){
   layer=name; persistConsole();
   document.getElementById('list').style.display=layer==='archive'?'flex':'none';
   document.getElementById('constPane').classList.toggle('on', layer==='constellation');
+  const sub=document.getElementById('constSub');
+  if(sub) sub.hidden = layer!=='constellation';
   syncSegUI();
   try{
     const u=new URL(location.href);
@@ -556,30 +721,31 @@ async function constCheck(){
     constVersion=v;
   }catch(e){}
 }
+/* Attention mode was a whole row of chips under the field. It is one choice,
+   so it reads as one control — the list only appears when asked for. */
 function renderModeChips(data){
   const host=document.getElementById('modeChips');
   if(!host) return;
   const cur=(data&&data.mode)||{};
   const modes=(data&&data.modes)||[];
   if(!modes.length){ host.innerHTML=''; return; }
-  let cap=document.getElementById('modeCaption');
-  if(!cap){
-    cap=document.createElement('div');
-    cap.id='modeCaption';
-    cap.className='mode-caption';
-    host.parentElement.insertBefore(cap, host.nextSibling);
-  }
   const label=cur.label||(cur.id?String(cur.id):'Auto');
-  const src=cur.source==='manual'?'':(cur.source?(' · '+cur.source):'');
-  cap.textContent='Ranking for: '+label+src;
-  host.innerHTML=modes.map(m=>{
-    const on=m.id===cur.id;
-    return '<button type="button" class="chip'+(on?' on':'')+'" data-mode="'+m.id+'" title="Reweights gravity for this context — does not filter">'
-      +MnemosEsc(m.label||m.id)+'</button>';
-  }).join('')
-    +'<button type="button" class="chip'+(cur.source!=='manual'?' on':'')+'" data-mode="auto" title="Infer context from recent events">Auto</button>';
+  const auto=cur.source!=='manual';
+  host.innerHTML='<details class="mode-pop" id="modePop">'
+    +'<summary>Ranking for <b>'+MnemosEsc(label)+'</b>'
+    +(auto?' <span class="mode-auto">auto</span>':'')+'</summary>'
+    +'<div class="mode-menu">'
+    +'<button type="button" data-mode="auto"'+(auto?' class="on"':'')
+    +' title="Infer context from recent events">Auto</button>'
+    +modes.map(m=>'<button type="button" data-mode="'+MnemosEsc(m.id)+'"'
+      +(m.id===cur.id&&!auto?' class="on"':'')
+      +' title="Reweights gravity for this context — does not filter">'
+      +MnemosEsc(m.label||m.id)+'</button>').join('')
+    +'</div></details>';
   host.querySelectorAll('[data-mode]').forEach(btn=>{
     btn.onclick=async()=>{
+      const pop=document.getElementById('modePop');
+      if(pop) pop.open=false;
       try{
         await fetch('/field/mode',{method:'POST',
           headers:{'Content-Type':'application/json'},
@@ -625,40 +791,56 @@ function kindWord(n){
   const k=n.kind||'entity';
   return k==='person'?'Person':k.charAt(0).toUpperCase()+k.slice(1);
 }
-/* Side detail card (constellation mockup): identity, connection strength,
-   co-occurring nodes, and the memories behind the star. */
+/* The inspector — the explanation layer. It answers "why am I looking at
+   this", "what is unfinished", and "what is it connected to", in words. The
+   ranking machinery stays sophisticated; it just doesn't talk like a debugger,
+   so the numeric breakdown lives behind "Why this ranks here". */
+const ZONE_WORD={self:'The centre of your field',now:'Has your attention now',
+  active:'Active in your field',peripheral:'On the edge of your field',
+  dormant:'Dormant — not touched lately'};
+function loopLine(n){
+  const txt=(n.meta&&n.meta.full_text)||n.label||'';
+  const urge=Math.max(Number(n.prospective_risk)||0,Number(n.aging)||0);
+  const flag=urge>=0.7?' <span class="cd-urgent">at risk</span>'
+    :(urge>=0.45?' <span class="cd-warm">ageing</span>':'');
+  return '<button type="button" class="cd-loop" data-nid="'+MnemosEsc(n.id)+'">'
+    +'<span class="cd-loop-dot"></span><span class="cd-loop-t">'
+    +MnemosEsc(txt)+flag+'</span></button>';
+}
 async function renderConstDetail(node){
   const el=document.getElementById('constDetail');
   if(!el)return;
   if(!node){
-    el.innerHTML='<div class="cd-empty">Click a star for detail — its connections and the '
-      +'memories behind it appear here.</div>';
+    el.innerHTML='<div class="cd-empty">Click a star for detail — why it is in '
+      +'your field, what is still open, and the memories behind it.</div>';
     return;
   }
   const label=(node.label||'').replace(/ — you$/,'');
   const isPerson=node.kind==='person';
   const pid=isPerson?parseInt(String(node.id).split(':')[1],10):null;
-  let chips='';
-  try{
-    const data=constCtl?constCtl.data():{nodes:[],edges:[]};
-    const nb={};
-    (data.edges||[]).forEach(e=>{
-      let other=null;
-      if(e.source===node.id) other=e.target;
-      else if(e.target===node.id) other=e.source;
-      if(!other) return;
-      nb[other]=Math.max(nb[other]||0,e.weight||1);
-    });
-    const rows=Object.entries(nb)
-      .map(([id,w])=>({n:(data.nodes||[]).find(x=>x.id===id),w:w}))
-      .filter(r=>r.n)
-      .sort((a,b)=>b.w-a.w).slice(0,4);
-    chips=rows.map(r=>'<button type="button" class="echip" data-nid="'+MnemosEsc(r.n.id)+'">'
-      +'<span class="d '+dotFor(r.n)+'"></span>'
-      +'<span class="t">'+MnemosEsc(r.n.is_self?'You':(r.n.label||''))+'</span></button>').join('');
-  }catch(e){}
+  const info=(constCtl&&constCtl.info)?constCtl.info(node.id):null;
+  const data=constCtl?constCtl.data():{nodes:[],edges:[]};
+  const byId={};(data.nodes||[]).forEach(n=>{byId[n.id]=n;});
+  /* Neighbourhood, split the way a person thinks about it: things still open
+     vs. things this simply connects to. */
+  const nb={};
+  (data.edges||[]).forEach(e=>{
+    let other=null;
+    if(e.source===node.id)other=e.target;else if(e.target===node.id)other=e.source;
+    if(!other)return;
+    const w=(e.weight||1)*(e.confidence!=null?e.confidence:0.6);
+    nb[other]=Math.max(nb[other]||0,w);
+  });
+  (info&&info.members||[]).forEach(id=>{if(nb[id]==null)nb[id]=0.4;});
+  const rel=Object.entries(nb).map(([id,w])=>({n:byId[id],w:w}))
+    .filter(r=>r.n).sort((a,b)=>b.w-a.w);
+  const isLoopNode=n=>n.kind==='task'||n.kind==='commitment';
+  const loops=rel.filter(r=>isLoopNode(r.n)).slice(0,5);
+  const conn=rel.filter(r=>!isLoopNode(r.n)).slice(0,6);
+  // Why it is here — the server already writes these in English.
+  const why=(node.why||[]).slice(0,3);
   let meta=kindWord(node);
-  let conn='';
+  let conn_bars='';
   let openLink='';
   if(isPerson&&pid!=null&&!node.is_self){
     const people=await peopleById();
@@ -669,7 +851,7 @@ async function renderConstDetail(node){
       if(seen) meta+=' · '+seen;
       const st=Math.max(1,Math.min(4,pr.strength||1));
       const words=['new','steady','solid','strong'];
-      conn='<div class="cd-conn">Connection <span class="cd-bars">'
+      conn_bars='<div class="cd-conn">Connection <span class="cd-bars">'
         +[1,2,3,4].map(i=>'<i class="'+(i<=st?'on':'')+'"></i>').join('')
         +'</span> '+words[st-1]+'</div>';
     } else {
@@ -680,26 +862,77 @@ async function renderConstDetail(node){
     const seen=seenLabel(node.ts);
     if(seen) meta+=' · '+seen;
   }
+  const zone=(info&&ZONE_WORD[info.zone])||'';
+  // Near-duplicates the selector folded into this star used to be a "+7" chip
+  // on the canvas. It is a fact about the star, so it belongs in here.
+  const folded=(node.cluster_n||1)>1
+    ? '<p class="cd-folded">+'+(node.cluster_n-1)+' near-duplicate'
+      +(node.cluster_n>2?'s':'')+' folded in</p>' : '';
   el.innerHTML='<div class="cd-head"><span class="d '+dotFor(node)+'"></span>'
     +'<h2 title="'+MnemosEsc(label)+'">'+MnemosEsc(label)+'</h2></div>'
+    +(zone?'<p class="cd-zone">'+MnemosEsc(zone)+'</p>':'')
     +'<p class="cd-meta">'+MnemosEsc(meta)+'</p>'
-    +conn
-    +(chips?('<h3>Appears with</h3><div class="cd-chips">'+chips+'</div>'):'')
-    +'<h3>Recent memories</h3><div class="cd-recents" id="cdRecents">'
-    +'<div class="skel rows" aria-hidden="true"><span class="bone"></span><span class="bone"></span></div></div>'
+    +folded
+    +conn_bars
+    +(why.length?('<h3>Why you’re seeing this</h3>'
+      +'<p class="cd-why">'+MnemosEsc(why.join(' · '))+'</p>'):'')
+    +(loops.length?('<h3>Open loops</h3><div class="cd-loops">'
+      +loops.map(r=>loopLine(r.n)).join('')+'</div>'):'')
+    +(conn.length?('<h3>Connected</h3><div class="cd-chips">'
+      +conn.map(r=>'<button type="button" class="echip" data-nid="'+MnemosEsc(r.n.id)+'">'
+        +'<span class="d '+dotFor(r.n)+'"></span>'
+        +'<span class="t">'+MnemosEsc(r.n.is_self?'You':(r.n.label||''))+'</span></button>'
+      ).join('')+'</div>'):'')
+    +'<h3>Recent memory</h3><div class="cd-recents" id="cdRecents">'
+    +'<div class="skel rows" aria-hidden="true"><span class="bone"></span></div></div>'
+    +'<details class="cd-rank"><summary>Why this ranks here</summary>'
+    +'<div class="cd-rank-body" id="cdRank">…</div></details>'
+    +'<div class="cd-actions">'
+    +'<button type="button" class="cd-act" data-act="focus">Focus</button>'
+    +'<button type="button" class="cd-act" data-act="timeline">View timeline</button>'
+    +'</div>'
     +openLink;
   el.querySelectorAll('[data-nid]').forEach(b=>{
     b.onclick=()=>{ if(constCtl) constCtl.select(b.dataset.nid); };
   });
+  el.querySelectorAll('.cd-act').forEach(b=>{
+    b.onclick=()=>{
+      if(b.dataset.act==='focus'&&constCtl&&constCtl.focus) constCtl.focus(node.id);
+      else if(b.dataset.act==='timeline'){
+        setLayer('archive');
+        const q=document.getElementById('q');
+        if(q){ q.value=label; mod=''; load(); }
+      }
+    };
+  });
+  // Numbers stay collapsed: opened once, fetched once.
+  const rank=el.querySelector('.cd-rank');
+  if(rank) rank.addEventListener('toggle',async()=>{
+    const host=document.getElementById('cdRank');
+    if(!rank.open||!host||host.dataset.done)return;
+    host.dataset.done='1';
+    try{
+      const j=await MnemosJson('/graph/constellation/evidence?id='
+        +encodeURIComponent(node.id));
+      const bd=j&&j.breakdown;
+      const rows=(bd&&bd.components)||[];
+      host.innerHTML=rows.length?rows.map(c=>
+        '<div class="cd-rank-row"><span>'+MnemosEsc(c.label||c.key||'')+'</span>'
+        +'<b>'+(Math.round((c.value||0)*100)/100)+'</b></div>').join('')
+        +'<div class="cd-rank-row cd-rank-sum"><span>Total</span><b>'
+        +(Math.round((bd.total||0)*100)/100)+'</b></div>'
+        :'<p class="cd-why">No score decomposition recorded for this node.</p>';
+    }catch(e){ host.innerHTML='<p class="cd-why">Could not load the breakdown.</p>'; }
+  });
   try{
-    const j=await (await fetch('/console/events?q='+encodeURIComponent(label)+'&limit=3')).json();
+    const j=await (await fetch('/console/events?q='+encodeURIComponent(label)+'&limit=2')).json();
     const host=document.getElementById('cdRecents');
     if(!host) return;
-    const rows=(j.events||[]).slice(0,3);
+    const rows=(j.events||[]).slice(0,2);
     host.innerHTML=rows.length?rows.map(e=>
-      '<div class="cd-mem"><p>'+MnemosEsc(e.summary||e.text||'')+'</p>'
+      '<div class="cd-mem"><p>“'+MnemosEsc(e.summary||e.text||'')+'”</p>'
       +'<span class="when">'+MnemosEsc([srcLabel(e),memWhen(e.time)].filter(Boolean).join(' · '))+'</span></div>'
-    ).join(''):'<div class="cd-mem"><p style="color:var(--mut);font-size:13px">No related memories found yet.</p></div>';
+    ).join(''):'<div class="cd-mem"><p class="cd-why">Nothing recorded behind this yet.</p></div>';
   }catch(e){
     const host=document.getElementById('cdRecents');
     if(host) host.innerHTML='';
