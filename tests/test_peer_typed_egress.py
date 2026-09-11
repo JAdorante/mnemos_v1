@@ -117,6 +117,23 @@ class RetrievalShapeTests(TypedEgressBase):
         got = pr.facts_for_topic("Acme renewal", store=self.store, now=NOW)
         self.assertEqual(got, [])
 
+    def test_claims_without_source_event_do_not_cross(self) -> None:
+        """Pilot 2026-09-11: timestamp-only claims still crossed (6/8 sourced).
+        A claim the asker cannot audit must stay inside the tenant."""
+        ts = NOW - DAY
+        self.store.add_claim(
+            "Boost Run compute is free forever according to an unsourced note",
+            source_event_id=None, source_span="", confidence=0.9,
+            extracted_at=ts)
+        self._claim("Boost Run is giving us free compute for a few months",
+                    days_ago=2)
+        got = pr.facts_for_topic("Boost Run compute", store=self.store,
+                                 now=NOW)
+        texts = " ".join(c["text"] for c in got)
+        self.assertIn("giving us free compute for a few months", texts)
+        self.assertNotIn("free forever", texts)
+        self.assertTrue(all(c.get("source_event_id") for c in got))
+
     def test_empty_topic_retrieves_nothing(self) -> None:
         self._claim("Boost Run is giving us free compute")
         self.assertEqual(pr.facts_for_topic("", store=self.store), [])
@@ -125,6 +142,78 @@ class RetrievalShapeTests(TypedEgressBase):
         claims = [{"ts": NOW - 10 * DAY}, {"ts": NOW - DAY}, {"ts": None}]
         self.assertEqual(pr.as_of(claims), NOW - DAY)
         self.assertIsNone(pr.as_of([]))
+
+
+class PilotJunkEgressTests(TypedEgressBase):
+    """Live failure 2026-09-11: Dave asked Justin about Boost Run compute and
+    got chat questions + a news headline + an onboarding note, dated as if
+    they were the answer. Local chat knew the real fact; peer egress had no
+    claim for it and filled the hole with noise."""
+
+    def test_question_shaped_claims_do_not_cross(self) -> None:
+        self._claim("What's the latest on our compute / Boost Run situation?",
+                    days_ago=0.01)
+        self._claim("Tell me the status of the boostrun deal", days_ago=4)
+        self._claim("Andy Karos is letting us use Boost Run compute free",
+                    days_ago=10)
+        got = pr.facts_for_topic(
+            "What's the latest on our compute / Boost Run situation?",
+            store=self.store, now=NOW)
+        texts = " ".join(c["text"] for c in got)
+        self.assertIn("Andy Karos is letting us use Boost Run compute free",
+                      texts)
+        self.assertNotIn("What's the latest", texts)
+        self.assertNotIn("Tell me the status", texts)
+
+    def test_short_literal_token_does_not_pull_running_or_computer(self) -> None:
+        """'run' from 'Boost Run' used to LIKE-match 'running' and 'computer'."""
+        self._claim("Trump is running out of time as he tries to restrict "
+                    "mail voting", days_ago=5)
+        self._claim("The user has a code project named 'sparrow' on their "
+                    "computer.", days_ago=7)
+        got = pr.facts_for_topic(
+            "What's the latest on our compute / Boost Run situation?",
+            store=self.store, now=NOW)
+        self.assertEqual(got, [])
+
+    def test_honest_empty_when_only_chat_questions_exist(self) -> None:
+        """Justin had no Boost Run claim — only mis-filed chat questions.
+        The right peer answer is empty, not a recency dump of those asks."""
+        self._claim("What's the latest on our compute / Boost Run situation?",
+                    days_ago=0.01)
+        self._claim("Tell me the status of the boostrun deal", days_ago=4)
+        with mock.patch("app.storage.get_store", return_value=self.store):
+            out = pch.compose_answer(
+                "What's the latest on our compute / Boost Run situation?")
+        self.assertEqual(out["claims"], [])
+        self.assertIn("don't have anything", out["text"].lower())
+
+    def test_onboarding_and_peer_answer_sources_are_weak(self) -> None:
+        for source, text in (
+            ("onboarding.scan",
+             "The user has a code project named sparrow on their computer"),
+            ("peer.answer",
+             "Boost Run answered that compute is free for a few months"),
+        ):
+            ts = NOW - DAY
+            ev = Event(time=ts, modality=Modality.TEXT, raw=text,
+                       summary=text[:120], source=source)
+            eid = self.store.insert(ev)
+            self.store.add_claim(text, source_event_id=eid, source_span=text,
+                                 confidence=0.9, extracted_at=ts)
+        got = pr.facts_for_topic("Boost Run compute", store=self.store,
+                                 now=NOW)
+        self.assertEqual(got, [])
+
+    def test_is_question_shaped_catches_pilot_bullets(self) -> None:
+        self.assertTrue(pr.is_question_shaped(
+            "What's the latest on our compute / Boost Run situation?"))
+        self.assertTrue(pr.is_question_shaped(
+            "Tell me the status of the boostrun deal"))
+        self.assertTrue(pr.is_question_shaped(
+            "Ask Dave What's the latest on our compute / Boost Run situation?"))
+        self.assertFalse(pr.is_question_shaped(
+            "Andy Karos is letting us use Boost Run compute free"))
 
 
 class QueryExpansionTests(TypedEgressBase):

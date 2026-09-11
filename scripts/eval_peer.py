@@ -98,14 +98,17 @@ def _seed(store, case: dict) -> dict[str, dict]:
     for row in case.get("seed") or []:
         ts = NOW - float(row.get("days_ago", 0)) * DAY
         speaker = row.get("speaker") or ""
-        # Every fact hangs off a real captured event, the way production facts
-        # do. Without this the goldens cannot check the Phase 1 acceptance
-        # criterion — that an answer carries a source EVENT id, not just a
-        # fact id — and `speaker` would have nothing to resolve against.
-        ev = Event(time=ts, modality=Modality.TEXT, raw=row["text"],
-                   summary=row["text"][:120], source="audio.whisper",
-                   people=[speaker] if speaker else [])
-        eid = store.insert(ev)
+        # Default: every fact hangs off a real captured event, the way
+        # production facts do. `no_event: true` deliberately seeds an orphan
+        # claim so the suite can assert the egress gate drops it — without
+        # that fixture, sourced_ok stays 100% only because every golden was
+        # event-backed (pilot 2026-09-11 found the flatter).
+        eid = None
+        if not row.get("no_event"):
+            ev = Event(time=ts, modality=Modality.TEXT, raw=row["text"],
+                       summary=row["text"][:120], source="audio.whisper",
+                       people=[speaker] if speaker else [])
+            eid = store.insert(ev)
         # kind matters: a "remind me to…" memory is extracted as a task in
         # production and grounding renders it "- [commitment] …", which is the
         # shape the egress filters see. Seeding it as a claim would test a

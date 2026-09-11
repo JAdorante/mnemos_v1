@@ -37,6 +37,25 @@ _CLAIM = {"fact_id": 7, "text": "Friday Aug 7.", "source_event_id": 3,
           "when": "Aug 7"}
 
 
+def _seed_claim(store, text: str, *, kind: str = "claim", speaker: str = ""):
+    """Seed a fact the way production does: hanging off a captured event.
+
+    Egress requires a source event id — an orphan claim cannot be played back
+    or audited, so it is not eligible to cross. Tests that seed bare claims
+    are testing a shape the product never ships.
+    """
+    from app.events import Event, Modality
+    ts = time.time()
+    ev = Event(time=ts, modality=Modality.TEXT, raw=text, summary=text[:120],
+               source="audio.whisper", people=[speaker] if speaker else [])
+    eid = store.insert(ev)
+    if kind in ("task", "commitment"):
+        return store.add_task(text, source_event_id=eid, confidence=0.9,
+                              extracted_at=ts)
+    return store.add_claim(text, source_event_id=eid, source_span=text,
+                           confidence=0.9, extracted_at=ts)
+
+
 class PeerChannelBase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.mkdtemp(prefix="peer_")
@@ -505,9 +524,7 @@ class ChatIntentTests(PeerChannelBase):
         from app.storage import Store
         with tempfile.TemporaryDirectory() as td:
             store = Store(Path(td) / "egress.db")
-            store.add_claim("Venture Pulse is our deal tracker",
-                            source_span="Venture Pulse is our deal tracker",
-                            confidence=0.9, extracted_at=time.time())
+            _seed_claim(store, "Venture Pulse is our deal tracker")
             with mock.patch("app.storage.get_store", return_value=store), \
                  mock.patch("app.services.memory.memory.search",
                             return_value=[]):
@@ -662,11 +679,9 @@ class ChatIntentTests(PeerChannelBase):
         now = time.time()
         with tempfile.TemporaryDirectory() as td:
             store = Store(Path(td) / "work.db")
-            store.add_claim("Andy is letting us use the compute, free",
-                            source_span="Andy is letting us use the compute",
-                            confidence=0.9, extracted_at=now)
-            store.add_task("Send Andy an update on our usage by Friday",
-                           confidence=0.9, extracted_at=now)
+            _seed_claim(store, "Andy is letting us use the compute, free")
+            _seed_claim(store, "Send Andy an update on our usage by Friday",
+                        kind="task")
             with mock.patch("app.services.memory.memory.search",
                             return_value=[]):
                 got = pr.facts_for_topic("Andy compute usage update",
@@ -723,9 +738,7 @@ class ChatIntentTests(PeerChannelBase):
         from app.storage import Store
         with tempfile.TemporaryDirectory() as td:
             store = Store(Path(td) / "egress.db")
-            store.add_claim("Project X pricing follow-up with Justin",
-                            source_span="Project X pricing follow-up",
-                            confidence=0.9, extracted_at=time.time())
+            _seed_claim(store, "Project X pricing follow-up with Justin")
             with mock.patch("app.storage.get_store", return_value=store), \
                  mock.patch("app.services.memory.memory.search",
                             return_value=[]):
@@ -755,7 +768,7 @@ class ChatIntentTests(PeerChannelBase):
     def test_chat_ask_outcomes_surface_in_chat(self) -> None:
         lines: list[str] = []
         cases = [({"ok": True, "status": "answered", "peer": "Sarah Chen",
-                   "answer": "Done."}, "answered"),
+                   "answer": "- Done today."}, "answered"),
                  ({"ok": True, "status": "pending", "peer": "Sarah Chen"},
                   "waiting for their approval"),
                  ({"ok": True, "status": "declined", "peer": "Sarah Chen"},
@@ -765,10 +778,26 @@ class ChatIntentTests(PeerChannelBase):
         for res, expect in cases:
             lines.clear()
             with mock.patch.object(pch, "ask", return_value=res), \
-                 mock.patch.object(pch, "_notify_chat",
+                 mock.patch.object(pch, "_emit_peer_result",
                                    side_effect=lines.append):
                 pch._chat_ask_run(self.pid, "q")
-            self.assertTrue(any(expect in ln for ln in lines), (res, lines))
+            self.assertTrue(any(expect.lower() in ln.lower() for ln in lines),
+                            (res, lines))
+            if res.get("status") == "answered":
+                # Header + body, not one quoted system whisper.
+                self.assertTrue(any("\n\n" in ln and "- Done today." in ln
+                                    for ln in lines), lines)
+
+    def test_format_peer_answer_chat_splits_header_and_body(self) -> None:
+        text = pch._format_peer_answer_chat(
+            "Justin Adorante",
+            "- Boost Run is giving us free compute (today)")
+        self.assertTrue(text.startswith(
+            "Justin Adorante's Sparrow answered:\n\n"))
+        self.assertIn(
+            "- Boost Run is giving us free compute (today)", text)
+        self.assertNotIn("answered: “", text)
+        self.assertNotIn("answered: \"", text)
 
     def test_answer_event_carries_attribution(self) -> None:
         with mock.patch.object(pch, "_post_json",

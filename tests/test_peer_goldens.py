@@ -87,6 +87,10 @@ class GoldenFixtureTests(unittest.TestCase):
         self.assertTrue(any(c.get("forbid_tags") for c in self.cases))
         self.assertTrue(any(c.get("shape") == "status" for c in self.cases))
         self.assertTrue(any(c.get("expect_empty") for c in self.cases))
+        self.assertTrue(
+            any(any(r.get("no_event") for r in (c.get("seed") or []))
+                for c in self.cases),
+            "need at least one event-less seed so sourced_ok is not flattered")
 
 
 class ScorerTests(unittest.TestCase):

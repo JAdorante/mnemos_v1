@@ -852,6 +852,23 @@ def _notify_chat(text: str) -> None:
         pass
 
 
+def _format_peer_answer_chat(name: str, answer: str) -> str:
+    """Render a teammate answer for the asker's chat pane.
+
+    Old path stuffed the whole body into one quoted system whisper
+    (`Justin's Sparrow answered: "- claim (today)"`), which read as a raw
+    dump. Result-kind emit + a header/body split lets the response compiler
+    turn `- ` lines into a normal list.
+    """
+    who = (name or "A teammate").strip() or "A teammate"
+    body = (answer or "").strip()
+    if len(body) >= 2 and body[0] in "\"“'" and body[-1] in "\"”'":
+        body = body[1:-1].strip()
+    if not body:
+        return f"{who}'s Sparrow answered — but sent nothing back."
+    return f"{who}'s Sparrow answered:\n\n{body}"
+
+
 # --- answering side (inbound asks) ------------------------------------------
 def compose_answer(question: str) -> dict:
     """Answer a teammate's question from OUR memory for peer egress.
@@ -1925,8 +1942,9 @@ def handle_answer(peer: dict, payload: dict) -> dict:
         pass
     if payload.get("declined"):
         _record_answer(peer, peer["peer_id"], ask_id, None, declined=True)
-        _notify_chat(f"{peer.get('name', 'A teammate')}'s Sparrow declined "
-                     f"to answer: “{item.get('question', '')[:120]}”")
+        _emit_peer_result(
+            f"{peer.get('name', 'A teammate')}'s Sparrow declined to answer:\n\n"
+            f"“{item.get('question', '')[:120]}”")
         _after_answer(item, declined=True)
         return {"ok": True, "status": "declined"}
     answer_text = str(payload.get("answer") or "").strip()
@@ -1939,8 +1957,8 @@ def handle_answer(peer: dict, payload: dict) -> dict:
                    near_miss=bool(payload.get("near_miss")),
                    clip_grant=_sanitize_grant(payload.get("clip_grant")))
     print(f"[peer] answer from {peer.get('name', '?')}: {answer_text[:80]}")
-    _notify_chat(f"{peer.get('name', 'A teammate')}'s Sparrow answered: "
-                 f"“{answer_text[:400]}”")
+    _emit_peer_result(_format_peer_answer_chat(
+        peer.get("name", "A teammate"), answer_text))
     _after_answer(item, declined=False)
     return {"ok": True, "status": "recorded"}
 
@@ -2568,20 +2586,23 @@ def _chat_ask_run(peer_id: str, question: str, kind: str = "question") -> None:
                 f"({res.get('error', 'unknown error')}).")
         return
     if status == "answered":
-        _notify_chat(f"{name}'s Sparrow answered: “{res.get('answer', '')}”")
+        _emit_peer_result(_format_peer_answer_chat(
+            name, str(res.get("answer") or "")[:400]))
     elif status == "pending" and kind == "handoff":
-        _notify_chat(f"Handed off to {name} — waiting for them to accept.")
+        _emit_peer_result(f"Handed off to {name} — waiting for them to accept.")
     elif status == "pending":
-        _notify_chat(f"Asked {name}'s Sparrow — it's waiting for their "
-                     "approval; I'll surface the answer when it arrives.")
+        _emit_peer_result(
+            f"Asked {name}'s Sparrow — waiting for their approval. "
+            "I'll surface the answer here when it arrives.")
     elif status == "queued":
-        _notify_chat(f"{name}'s Sparrow isn't reachable — queued until "
-                     "they're online.")
+        _emit_peer_result(
+            f"{name}'s Sparrow isn't reachable — queued until they're online.")
     elif status == "declined":
-        _notify_chat(f"{name}'s Sparrow declined to answer that.")
+        _emit_peer_result(f"{name}'s Sparrow declined to answer that.")
     else:
-        _notify_chat(f"I couldn't reach {name}'s Sparrow "
-                     f"({res.get('error', 'unknown error')}).")
+        _emit_peer_result(
+            f"I couldn't reach {name}'s Sparrow "
+            f"({res.get('error', 'unknown error')}).")
 
 
 def _chat_tell_run(peer_id: str, peer_name: str, topic: str) -> None:

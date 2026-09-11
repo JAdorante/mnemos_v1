@@ -34,17 +34,49 @@ EGRESS_KINDS = ("claim",)
 # Sources whose text the user merely SAW rather than said or wrote. Weak
 # attribution is tolerable for a local board that a human prunes; it is not
 # tolerable for something asserted to another person as our knowledge.
-_WEAK_SOURCES = ("desktop.screen",)
+# onboarding.scan is the same class: machine-minted environment notes, not
+# something the user asserted. peer.answer is another tenant's prose that
+# landed in our store — re-shipping it as OUR knowledge is a loop.
+_WEAK_SOURCES = ("desktop.screen", "onboarding.scan", "peer.answer")
 
 # Prefix length for the near-miss's looser matching. Four characters keeps
 # "migration"/"migrations" and "compute"/"computing" together without
 # collapsing genuinely different words.
 _STEM = 4
 
+# Literal substring search needs a longer floor than topic tokenization.
+# Three-letter tokens like "run" match "running" and "computer" via LIKE
+# %run% and turned a Boost Run status ask into a news headline + an
+# onboarding note about a code project (pilot 2026-09-11).
+_LITERAL_MIN_TOKEN = 4
+
 _STOP = {"the", "and", "for", "about", "what", "know", "said", "tell", "from",
          "with", "your", "this", "our", "any", "update", "latest", "where",
          "did", "how", "who", "are", "was", "were", "have", "has", "you",
          "they", "their", "there", "that", "been", "being", "get", "got"}
+
+# Chat questions mis-filed as claims. The extractor puts open questions in
+# `questions`, but chat.user rows still land as kind=claim on the pilot —
+# and a status ask then ranks those questions as the "newest answer".
+_QUESTION_SHAPE = re.compile(
+    r"(?is)^\s*(?:"
+    r"what(?:'s|s|\s+is|\s+are|\s+do|\s+did|\s+was|\s+were|\s+about)?\b|"
+    r"who(?:'s|s|\s+is|\s+are|\s+did)?\b|"
+    r"where\b|when\b|why\b|how\b|"
+    r"tell\s+me\b|any\s+(?:update|news|progress)\b|"
+    r"ask\s+\w+\b|can\s+you\b|could\s+you\b|would\s+you\b"
+    r").{0,240}\??\s*$"
+)
+
+
+def is_question_shaped(text: str) -> bool:
+    """True when the 'claim' is still a question, not an asserted fact."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if t.endswith("?"):
+        return True
+    return bool(_QUESTION_SHAPE.match(t))
 
 
 def topic_tokens(text: str) -> list[str]:
@@ -98,7 +130,18 @@ def _eligible(row: dict) -> bool:
         return False
     if (row.get("event_source") or "") in _WEAK_SOURCES:
         return False
-    if not (row.get("text") or "").strip():
+    text = (row.get("text") or "").strip()
+    if not text:
+        return False
+    # A question is not a fact. Shipping it as one makes the asker's Sparrow
+    # echo their own question back dated "today".
+    if is_question_shaped(text):
+        return False
+    # Provenance the asker can audit: a timestamp alone is not enough. Pilot
+    # traffic showed claims with extracted_at but source_event_id=None still
+    # crossing (6/8 sourced on one seat). Without an event id there is nothing
+    # to play back or attribute, so the claim must not leave the tenant.
+    if not row.get("source_event_id"):
         return False
     # No timestamp means no freshness stamp, and an undated claim is exactly
     # what this phase exists to stop shipping.
@@ -385,17 +428,26 @@ def _facts_for_episode(hit: dict, store) -> list[dict]:
 
 def _literal_fact_rows(topic: str, limit: int, store) -> list[dict]:
     """Exact-substring tier. Keeps identifiers (codenames, surnames) that the
-    embedder loses, and covers facts whose event is not in the index."""
+    embedder loses, and covers facts whose event is not in the index.
+
+    Short tokens are skipped: LIKE %run% matches "running"/"computer". Hits
+    must also contain the token as a whole word so "boost" does not pull a
+    random "boosted" headline while "Boost Run" still matches.
+    """
     rows: list[dict] = []
     seen_q: set[str] = set()
     for tok in topic_tokens(topic)[:6]:
-        if tok in seen_q:
+        if len(tok) < _LITERAL_MIN_TOKEN or tok in seen_q:
             continue
         seen_q.add(tok)
         try:
-            rows.extend(store.search_facts_like(tok, limit=limit))
+            hits = store.search_facts_like(tok, limit=limit)
         except Exception:
             continue
+        boundary = re.compile(rf"(?i)\b{re.escape(tok)}\b")
+        for row in hits or []:
+            if boundary.search(row.get("text") or ""):
+                rows.append(row)
     return rows
 
 
@@ -443,6 +495,18 @@ def facts_for_topic(topic: str, *, limit: int = 8, store=None,
 
     out = list(by_id.values())
     now = time.time() if now is None else now
+
+    # Recency ranking is only meaningful among claims that are actually about
+    # the topic. Without this floor, any claim that leaked into the candidate
+    # pool (short-token literal hits, weak semantic neighbours) sorts to the
+    # top of a status ask purely by date.
+    if toks:
+        topical = [c for c in out
+                   if set(topic_tokens(c["text"])) & toks]
+        # Keep unfiltered only when nothing shares a token — graph-only hits
+        # can be about the entity with zero shared vocabulary (Phase 2.2).
+        if topical:
+            out = topical
 
     if is_status_question(topic):
         return _rank_by_recency(out, limit)
