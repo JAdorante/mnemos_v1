@@ -46,6 +46,52 @@ class TelemetryBase(PeerChannelBase):
         return {"peer_id": peer_id, **reg[peer_id]}
 
 
+class SandboxTests(TelemetryBase):
+    """The trail is the file the pilot operator reads to decide whether peer
+    is working. Fixture rows landing in it are not cosmetic — they are false
+    traffic in the only evidence there is."""
+
+    def test_driving_a_peer_path_writes_only_inside_the_sandbox(self) -> None:
+        real = Path("data/peer_telemetry.jsonl")
+        before = real.stat().st_mtime if real.exists() else None
+        self._claimed_peer()
+        peer_id = next(iter(self._registry()))
+        with mock.patch.object(pch, "_post_peer",
+                               return_value={"ok": True, "status": "pending"}):
+            pch.ask(peer_id, "does this land in the sandbox?")
+        self.assertTrue(tel.read_rows(), "the sandboxed trail got the row")
+        after = real.stat().st_mtime if real.exists() else None
+        self.assertEqual(before, after,
+                         "a peer test wrote to the REAL data dir's trail")
+
+    def test_every_test_that_sandboxes_peer_paths_sandboxes_the_trail(self) -> None:
+        """A lint over the suite, because chasing these one at a time is how
+        1,455 fixture rows reached the real trail in the first place.
+
+        Four separate modules hand-rolled their own peer sandbox and each had
+        to be found by noticing junk in data/. Any test file that redirects
+        QUILL_PEER_REGISTRY is driving code that also writes telemetry and
+        clip grants, so it must redirect those too.
+        """
+        offenders = []
+        for path in sorted(Path("tests").glob("test_*.py")):
+            src = path.read_text(encoding="utf-8")
+            if "QUILL_PEER_REGISTRY" not in src:
+                continue
+            for var in ("QUILL_PEER_TELEMETRY_PATH", "QUILL_PEER_CLIP_GRANTS"):
+                if var not in src:
+                    offenders.append(f"{path.name} is missing {var}")
+        self.assertEqual(offenders, [], "\n".join(offenders))
+
+    def test_the_shared_base_sandboxes_the_trail(self) -> None:
+        """Every peer test inherits PeerChannelBase, so the sandbox has to
+        live there rather than in each subclass that remembers."""
+        self.assertIn(self._tmp,
+                      os.environ.get("QUILL_PEER_TELEMETRY_PATH", ""))
+        self.assertIn(self._tmp,
+                      os.environ.get("QUILL_PEER_CLIP_GRANTS", ""))
+
+
 class RecordTests(TelemetryBase):
     def test_metadata_only_content_keys_are_dropped(self) -> None:
         """A call site that passes text must not be able to leak it."""

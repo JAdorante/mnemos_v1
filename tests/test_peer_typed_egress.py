@@ -35,6 +35,13 @@ class TypedEgressBase(unittest.TestCase):
     def setUp(self) -> None:
         self._td = tempfile.TemporaryDirectory()
         self.store = Store(Path(self._td.name) / "egress.db")
+        # Composing and recording an answer writes the telemetry trail; keep
+        # fixture rows out of the real data dir, which is also the file the
+        # pilot operator reads.
+        os.environ["QUILL_PEER_TELEMETRY_PATH"] = str(
+            Path(self._td.name) / "telemetry.jsonl")
+        os.environ["QUILL_PEER_CLIP_GRANTS"] = str(
+            Path(self._td.name) / "clip_grants.json")
         # No embedder in these tests: the literal tier alone exercises the
         # shape change, and a live index would make them depend on the
         # developer's real LanceDB.
@@ -44,6 +51,8 @@ class TypedEgressBase(unittest.TestCase):
 
     def tearDown(self) -> None:
         self._search.stop()
+        for key in ("QUILL_PEER_TELEMETRY_PATH", "QUILL_PEER_CLIP_GRANTS"):
+            os.environ.pop(key, None)
         self._td.cleanup()
 
     def _claim(self, text: str, *, speaker: str = "Andy Karos",
@@ -473,7 +482,9 @@ class RoundTripTests(unittest.TestCase):
                           ("QUILL_PEER_SENT", "sent.json"),
                           ("QUILL_PEER_MAILBOX", "mailbox.json"),
                           ("QUILL_PEER_TEAMS", "teams.json"),
-                          ("QUILL_PEER_LOOPS", "loops.json")):
+                          ("QUILL_PEER_LOOPS", "loops.json"),
+                          ("QUILL_PEER_TELEMETRY_PATH", "telemetry.jsonl"),
+                          ("QUILL_PEER_CLIP_GRANTS", "clip_grants.json")):
             os.environ[key] = str(Path(self._td.name) / name)
         os.environ["QUILL_PEER_INGEST"] = "0"
         pch._pairing = None
@@ -481,7 +492,8 @@ class RoundTripTests(unittest.TestCase):
     def tearDown(self) -> None:
         for key in ("QUILL_PEER_REGISTRY", "QUILL_PEER_ASKS", "QUILL_PEER_SENT",
                     "QUILL_PEER_MAILBOX", "QUILL_PEER_TEAMS",
-                    "QUILL_PEER_LOOPS", "QUILL_PEER_INGEST"):
+                    "QUILL_PEER_LOOPS", "QUILL_PEER_INGEST",
+                    "QUILL_PEER_TELEMETRY_PATH", "QUILL_PEER_CLIP_GRANTS"):
             os.environ.pop(key, None)
         pch._pairing = None
         self._td.cleanup()

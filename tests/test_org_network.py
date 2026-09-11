@@ -162,13 +162,20 @@ class PeerOrgKindTests(unittest.TestCase):
         os.environ["QUILL_PEER_ASKS"] = str(Path(self._tmp) / "asks.json")
         os.environ["QUILL_PEER_SENT"] = str(Path(self._tmp) / "sent.json")
         os.environ["QUILL_PEER_INGEST"] = "0"
+        # Driving a peer path also writes the telemetry trail: sandbox it, or
+        # fixture rows land in the real data/peer_telemetry.jsonl.
+        os.environ["QUILL_PEER_TELEMETRY_PATH"] = str(
+            Path(self._tmp) / "telemetry.jsonl")
+        os.environ["QUILL_PEER_CLIP_GRANTS"] = str(
+            Path(self._tmp) / "clip_grants.json")
         from app.services import peer_channel as pch
         self.pch = pch
         pch._pairing = None
 
     def tearDown(self) -> None:
         for k in ("QUILL_PEER_REGISTRY", "QUILL_PEER_ASKS",
-                  "QUILL_PEER_SENT", "QUILL_PEER_INGEST"):
+                  "QUILL_PEER_SENT", "QUILL_PEER_INGEST",
+                  "QUILL_PEER_TELEMETRY_PATH", "QUILL_PEER_CLIP_GRANTS"):
             os.environ.pop(k, None)
         self.pch._pairing = None
 

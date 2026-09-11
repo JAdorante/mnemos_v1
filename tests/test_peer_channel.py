@@ -46,6 +46,15 @@ class PeerChannelBase(unittest.TestCase):
         os.environ["QUILL_PEER_MAILBOX"] = str(Path(self._tmp) / "mailbox.json")
         os.environ["QUILL_PEER_TEAMS"] = str(Path(self._tmp) / "teams.json")
         os.environ["QUILL_PEER_LOOPS"] = str(Path(self._tmp) / "loops.json")
+        # Telemetry and clip grants are written by the SAME peer paths these
+        # tests drive, so they must be sandboxed here too. Without this every
+        # subclass appends fixture rows ("Sarah", "Marc") to the developer's
+        # real data/peer_telemetry.jsonl — which is also the file the pilot
+        # operator reads to decide whether peer is working.
+        os.environ["QUILL_PEER_TELEMETRY_PATH"] = str(
+            Path(self._tmp) / "telemetry.jsonl")
+        os.environ["QUILL_PEER_CLIP_GRANTS"] = str(
+            Path(self._tmp) / "clip_grants.json")
         # Keep answers as bus context events in these tests — the ingest path
         # (Phase 3) writes to the real store and is tested with mocks below.
         os.environ["QUILL_PEER_INGEST"] = "0"
@@ -58,7 +67,8 @@ class PeerChannelBase(unittest.TestCase):
                     "QUILL_PEER_SENT", "QUILL_PEER_INGEST",
                     "QUILL_PEER_MAILBOX", "QUILL_PEER_TEAMS",
                     "QUILL_PEER_LOOPS", "QUILL_PEER_REQUIRE_TLS",
-                    "QUILL_PEER_BASE_URL", "QUILL_PEER_INTERNAL_URL"):
+                    "QUILL_PEER_BASE_URL", "QUILL_PEER_INTERNAL_URL",
+                    "QUILL_PEER_TELEMETRY_PATH", "QUILL_PEER_CLIP_GRANTS"):
             os.environ.pop(key, None)
         bus._subscribers.remove(self._collect)
         pch._pairing = None

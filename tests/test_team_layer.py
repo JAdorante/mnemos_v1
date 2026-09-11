@@ -31,6 +31,12 @@ class TeamLayerBase(unittest.TestCase):
         os.environ["QUILL_PEER_TEAMS"] = str(Path(self._tmp) / "teams.json")
         os.environ["QUILL_PEER_LOOPS"] = str(Path(self._tmp) / "loops.json")
         os.environ["QUILL_PEER_INGEST"] = "0"
+        # Driving a peer path also writes the telemetry trail and clip grants;
+        # sandbox those too, or fixture rows land in the real data dir.
+        os.environ["QUILL_PEER_TELEMETRY_PATH"] = str(
+            Path(self._tmp) / "telemetry.jsonl")
+        os.environ["QUILL_PEER_CLIP_GRANTS"] = str(
+            Path(self._tmp) / "clip_grants.json")
         pch._pairing = None
 
     def tearDown(self) -> None:
