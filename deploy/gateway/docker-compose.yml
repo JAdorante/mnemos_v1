@@ -1,0 +1,68 @@
+# Sparrow multi-user deployment behind https://sparrow.ravenry.us
+#
+#   cp .env.example .env      # fill TUNNEL_TOKEN (+ optional invite code)
+#   docker build -f deploy/hosted/Dockerfile -t sparrow-hosted .   # from repo root
+#   docker compose -f deploy/gateway/docker-compose.yml up -d --build
+#
+# Seats are NOT declared here. The gateway creates one container per signup at
+# runtime (see provision.py) on the same sparrow-net, with no published port —
+# the gateway is the only route in.
+
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sparrow-gateway
+    restart: unless-stopped
+    networks: [sparrow-net]
+    volumes:
+      - gateway-data:/srv/gateway/data
+      # Seat provisioning needs the Docker API. This is root-equivalent on the
+      # host: the gateway is the only container given it, and it never passes
+      # user input into an image name, command, or bind mount.
+      - /var/run/docker.sock:/var/run/docker.sock
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      PUBLIC_HOST: sparrow.ravenry.us
+      SEAT_IMAGE: sparrow-hosted
+      SEAT_NETWORK: sparrow-net
+      MAX_SEATS: "${MAX_SEATS:-25}"
+      SEAT_MEM_LIMIT: "${SEAT_MEM_LIMIT:-6g}"
+      SEAT_CPUS: "${SEAT_CPUS:-2}"
+      # Leave empty for open signup; set it to gate who can create an account.
+      SIGNUP_INVITE_CODE: "${SIGNUP_INVITE_CODE:-}"
+      SEAT_ANTHROPIC_KEY: "${SPARROW_ANTHROPIC_KEY:-}"
+      GOOGLE_OAUTH_CLIENT_ID: "${GOOGLE_OAUTH_CLIENT_ID:-}"
+      GOOGLE_OAUTH_CLIENT_SECRET: "${GOOGLE_OAUTH_CLIENT_SECRET:-}"
+      SEAT_OAUTH_REDIRECT_BASE: "https://sparrow.ravenry.us"
+
+  # NOTE: the socat that republishes host Ollama on 11435 is NOT declared here,
+  # because the gb10 stack already runs one (gb10-ollama-proxy-1) on the host
+  # network — two would fight over the port and this stack would fail to start.
+  # If you retire the gb10 stack, uncomment this:
+  #
+  # ollama-proxy:
+  #   image: alpine/socat
+  #   restart: unless-stopped
+  #   network_mode: host
+  #   command: TCP-LISTEN:11435,fork,reuseaddr TCP:127.0.0.1:11434
+
+  # NAMED tunnel, not a quick tunnel: the hostname sparrow.ravenry.us is
+  # mapped to http://gateway:8080 in the Cloudflare Zero Trust dashboard, so
+  # it survives restarts. TLS terminates at Cloudflare, which satisfies
+  # getUserMedia's secure-context requirement on /capture.
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    networks: [sparrow-net]
+    command: tunnel --no-autoupdate run --token ${TUNNEL_TOKEN:?set TUNNEL_TOKEN in .env}
+    depends_on: [gateway]
+
+networks:
+  sparrow-net:
+    name: sparrow-net
+
+volumes:
+  gateway-data:
