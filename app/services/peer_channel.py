@@ -870,7 +870,7 @@ def _format_peer_answer_chat(name: str, answer: str) -> str:
 
 
 # --- answering side (inbound asks) ------------------------------------------
-def compose_answer(question: str) -> dict:
+def compose_answer(question: str, *, question_class: str | None = None) -> dict:
     """Answer a teammate's question from OUR memory for peer egress.
 
     Phase 1: this is `compose_peer_claims` rendered for the wire. The answer
@@ -882,7 +882,7 @@ def compose_answer(question: str) -> dict:
     why identity blocks and assistant hedges kept crossing and had to be
     chased with substring filters. Untyped text is no longer a candidate.
     """
-    out = compose_peer_claims(question)
+    out = compose_peer_claims(question, question_class=question_class)
     if out["claims"]:
         return {"text": out["prose"], "claims": out["claims"],
                 "as_of": out["as_of"], "near_miss": out["near_miss"],
@@ -909,8 +909,25 @@ def compose_peer_update(topic: str) -> dict:
             "as_of": out["as_of"], "redacted": out["redacted"]}
 
 
+def _egress_question_class(question: str,
+                           question_class: str | None) -> str | None:
+    """Resolved class for retrieval surface selection.
+
+    Prefer the disclosure classifier's label when present; otherwise a cheap
+    lexical detector for availability. Unrecognised → work-claim surface.
+    """
+    from app.services import peer_retrieval as pr
+    cls = (question_class or "").strip().lower() or None
+    if cls in CLASSES:
+        return cls
+    if pr.looks_like_availability(question):
+        return "availability"
+    return None
+
+
 def compose_peer_claims(question: str, *, store=None,
-                        now: float | None = None) -> dict:
+                        now: float | None = None,
+                        question_class: str | None = None) -> dict:
     """Phase 1.2 — the single peer-egress composer.
 
     Returns {"claims": [...], "as_of": float|None, "prose": str,
@@ -923,6 +940,9 @@ def compose_peer_claims(question: str, *, store=None,
     what makes this one egress path rather than two: there is no second route
     by which untyped text can reach the wire, so the substring blocklists that
     used to guard it have nothing left to guard.
+
+    Question class selects the retrieval surface: availability never falls
+    through to work claims (or work near-misses).
     """
     from app.services import peer_retrieval as pr
     from app.services import redact
@@ -940,13 +960,18 @@ def compose_peer_claims(question: str, *, store=None,
         topic = topic.split(marker, 1)[0].strip() or question
 
     now = time.time() if now is None else now
-    claims = pr.facts_for_topic(topic, store=store, now=now)
+    qclass = _egress_question_class(topic, question_class)
     near_miss = False
-    if not claims:
-        # 1.6: a dated near-miss beats a refusal — it tells the asker whether
-        # to go find the human, which is itself a real answer.
-        claims = pr.near_miss(topic, store=store)
-        near_miss = bool(claims)
+    if qclass == "availability":
+        # Class selects surface: schedule/free-busy, never project memory.
+        claims = pr.availability_facts(topic, store=store, now=now)
+    else:
+        claims = pr.facts_for_topic(topic, store=store, now=now)
+        if not claims:
+            # 1.6: a dated near-miss beats a refusal — it tells the asker
+            # whether to go find the human, which is itself a real answer.
+            claims = pr.near_miss(topic, store=store)
+            near_miss = bool(claims)
 
     kinds: list[str] = []
     out_claims: list[dict] = []
@@ -1092,7 +1117,7 @@ def handle_ask(peer: dict, payload: dict) -> dict:
                 "topic": topic, "answer": "accepted notify",
                 "redacted": []}
     if action == "auto":
-        composed = compose_answer(question)
+        composed = compose_answer(question, question_class=topic)
         print(f"[peer] auto-answered {peer.get('name', '?')} "
               f"({topic or 'dev flag'}): {question[:80]}")
         return {"ok": True, "status": "answered", "ask_id": ask_id,
@@ -1393,7 +1418,8 @@ def decide_ask(local_id: str, approve: bool) -> dict:
         return _complete_or_retry_delivery(
             local_id, delivered, reply, outbound, "accepted")
 
-    composed = compose_answer(item["question"])
+    composed = compose_answer(item["question"],
+                              question_class=item.get("topic"))
     outbound = {"ask_id": item["ask_id"],
                 "answer": composed["text"],
                 "claims": composed.get("claims") or [],

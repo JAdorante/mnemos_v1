@@ -16,9 +16,16 @@ id, speaker and timestamp. Three consequences followed from that one fact:
 typed facts are eligible, so raw grounding text can no longer reach the wire —
 the whitelist is structural, not a list to maintain.
 
-Retrieval quality is deliberately NOT this module's job yet: Phase 2 adds
-alias/graph query expansion and recency-weighted ranking for status questions.
-This is the shape change only.
+Egress hygiene invariants (apply to every ask, not prompt-specific patches):
+
+  * Anchor or refuse — ship only with graph anchors, lexical overlap, or
+    assert-strength semantic; weak nearest neighbours never become answers.
+  * No fail-open filters — empty topical overlap without a graph anchor does
+    not keep the unfiltered pool.
+  * Literal tier is for identifiers — closed-class / schedule words never
+    unlock LIKE search alone.
+  * Near-miss needs real relatedness — stem collisions on short tokens and
+    unresolved Title-Case names do not attach unrelated memory.
 """
 from __future__ import annotations
 
@@ -55,6 +62,16 @@ _STOP = {"the", "and", "for", "about", "what", "know", "said", "tell", "from",
          "did", "how", "who", "are", "was", "were", "have", "has", "you",
          "they", "their", "there", "that", "been", "being", "get", "got"}
 
+# High-ambiguity tokens: fine for topical overlap scoring, never for LIKE.
+# "free" matching "free compute" on an availability ask is the archetype.
+_LITERAL_AMBIGUOUS = {
+    "free", "busy", "open", "closed", "available", "availability",
+    "schedule", "calendar", "meeting", "meetings", "slot", "slots",
+    "today", "tomorrow", "tonight", "morning", "afternoon", "evening",
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday",
+    "sunday", "week", "weekend", "time", "when", "next", "this",
+}
+
 # Chat questions mis-filed as claims. The extractor puts open questions in
 # `questions`, but chat.user rows still land as kind=claim on the pilot —
 # and a status ask then ranks those questions as the "newest answer".
@@ -68,6 +85,31 @@ _QUESTION_SHAPE = re.compile(
     r").{0,240}\??\s*$"
 )
 
+# Aside / joke shapes that are not assertable knowledge for a teammate.
+_JUNK_SHAPE = re.compile(
+    r"(?is)(?:^|\b)(?:just\s+)?(?:kidding|joking)\b|\b(?:lol|lmao|haha|heh)\b|"
+    r"\b(?:never\s+mind|nvm)\b|\b(?:jk)\b"
+)
+
+# Title-Case multi-word spans look like project/codename referents.
+_PROPER_NAME = re.compile(r"\b[A-Z][a-z0-9]+(?:\s+[A-Z][a-z0-9]+)+\b")
+
+# Availability / schedule asks — class selects surface, not work claims.
+_AVAILABILITY_RE = re.compile(
+    r"(?is)"
+    r"(?:\b(?:free|busy|available)\b.{0,48}\b(?:monday|tuesday|wednesday|"
+    r"thursday|friday|saturday|sunday|today|tomorrow|tonight|this\s+week|"
+    r"next\s+week|morning|afternoon|evening)\b)"
+    r"|(?:\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
+    r"today|tomorrow|tonight)\b.{0,48}\b(?:free|busy|available)\b)"
+    r"|(?:\b(?:are|am|is)\s+(?:you|i|we|they|[A-Za-z]+)\s+"
+    r"(?:free|busy|available)\b)"
+    r"|(?:\b(?:free|busy|available)\s*\?)"
+    r"|(?:\b(?:my|your|our)\s+(?:calendar|schedule|availability)\b)"
+    r"|(?:\bwhen\s+are\s+you\s+(?:free|available)\b)"
+    r"|(?:\bfree\s*/\s*busy\b)"
+)
+
 
 def is_question_shaped(text: str) -> bool:
     """True when the 'claim' is still a question, not an asserted fact."""
@@ -79,9 +121,33 @@ def is_question_shaped(text: str) -> bool:
     return bool(_QUESTION_SHAPE.match(t))
 
 
+def is_junk_claim(text: str) -> bool:
+    """True when the text is an aside/joke, not assertable knowledge."""
+    t = (text or "").strip()
+    if not t:
+        return True
+    return bool(_JUNK_SHAPE.search(t))
+
+
+def looks_like_availability(question: str) -> bool:
+    """Cheap, high-precision schedule/free-busy detector (no model call)."""
+    return bool(_AVAILABILITY_RE.search(question or ""))
+
+
 def topic_tokens(text: str) -> list[str]:
     return [t for t in re.findall(r"[a-z0-9]{3,}", (text or "").casefold())
             if t not in _STOP]
+
+
+def _has_unresolved_proper_name(topic: str, expansion: dict) -> bool:
+    """Title-Case multi-word referent that did not bind to our graph.
+
+    General unknown-project gate: if the ask names something we cannot
+    resolve, weak semantic neighbours must not become asserted answers.
+    """
+    if expansion.get("entity_ids") or expansion.get("person_ids"):
+        return False
+    return bool(_PROPER_NAME.search(topic or ""))
 
 
 def _speaker_for(row: dict, store) -> str:
@@ -137,6 +203,8 @@ def _eligible(row: dict) -> bool:
     # echo their own question back dated "today".
     if is_question_shaped(text):
         return False
+    if is_junk_claim(text):
+        return False
     # Provenance the asker can audit: a timestamp alone is not enough. Pilot
     # traffic showed claims with extracted_at but source_event_id=None still
     # crossing (6/8 sourced on one seat). Without an event id there is nothing
@@ -150,7 +218,7 @@ def _eligible(row: dict) -> bool:
 
 def _normalize(row: dict, store) -> dict:
     ts = row.get("source_time") or row.get("extracted_at") or 0.0
-    return {
+    out = {
         "fact_id": int(row["fact_id"]),
         "text": (row.get("text") or "").strip(),
         "source_event_id": row.get("source_event_id"),
@@ -160,6 +228,15 @@ def _normalize(row: dict, store) -> dict:
         "kind": row.get("kind"),
         "confidence": row.get("confidence"),
     }
+    # Preserve semantic strength when present so "anchor or refuse" can tell
+    # assert-strength synonymy from weak nearest neighbours.
+    score = row.get("_sem_score", row.get("score"))
+    if score is not None:
+        try:
+            out["score"] = float(score)
+        except (TypeError, ValueError):
+            pass
+    return out
 
 
 def _squash(text: str) -> str:
@@ -359,6 +436,7 @@ def _semantic_fact_rows(topic: str, limit: int, store) -> list[dict]:
     for h in hits or []:
         if not isinstance(h, dict):
             continue
+        score = h.get("score")
         fid = h.get("fact_id")
         if fid is not None:
             try:
@@ -366,9 +444,22 @@ def _semantic_fact_rows(topic: str, limit: int, store) -> list[dict]:
             except Exception:
                 row = None
             if row:
+                row = dict(row)
+                if score is not None:
+                    try:
+                        row["_sem_score"] = float(score)
+                    except (TypeError, ValueError):
+                        pass
                 rows.append(row)
             continue
-        rows.extend(_facts_for_episode(h, store))
+        for fr in _facts_for_episode(h, store):
+            fr = dict(fr)
+            if score is not None:
+                try:
+                    fr["_sem_score"] = float(score)
+                except (TypeError, ValueError):
+                    pass
+            rows.append(fr)
     return rows
 
 
@@ -386,11 +477,18 @@ def _semantic_fact_rows(topic: str, limit: int, store) -> list[dict]:
 # 220k and he asked us to keep it quiet" at 0.17: above the absolute floor,
 # and a colleague's salary sent to another colleague.
 #
+# `_SEM_ASSERT` is the bar for shipping a hit with neither lexical overlap nor
+# a graph anchor. Synonymy answers (infrastructure↔compute ≈0.215) clear it;
+# lone weak neighbours of an unbound name do not. Combined with the unresolved
+# proper-name gate so Title-Case unknowns refuse even when a neighbour sits
+# just above this bar.
+#
 # The asymmetry justifies being stricter here than in local grounding: a false
 # negative costs one round trip, a false positive discloses something to
 # another person and cannot be taken back.
 _SEM_FLOOR = 0.15
 _SEM_RELATIVE = 0.35
+_SEM_ASSERT = 0.20
 
 
 def _above_floor(hits: list | None) -> list:
@@ -432,12 +530,14 @@ def _literal_fact_rows(topic: str, limit: int, store) -> list[dict]:
 
     Short tokens are skipped: LIKE %run% matches "running"/"computer". Hits
     must also contain the token as a whole word so "boost" does not pull a
-    random "boosted" headline while "Boost Run" still matches.
+    random "boosted" headline while "Boost Run" still matches. Ambiguous
+    closed-class / schedule words never search alone.
     """
     rows: list[dict] = []
     seen_q: set[str] = set()
     for tok in topic_tokens(topic)[:6]:
-        if len(tok) < _LITERAL_MIN_TOKEN or tok in seen_q:
+        if (len(tok) < _LITERAL_MIN_TOKEN or tok in seen_q
+                or tok in _LITERAL_AMBIGUOUS):
             continue
         seen_q.add(tok)
         try:
@@ -449,6 +549,67 @@ def _literal_fact_rows(topic: str, limit: int, store) -> list[dict]:
             if boundary.search(row.get("text") or ""):
                 rows.append(row)
     return rows
+
+
+def availability_facts(topic: str, *, store=None,
+                       now: float | None = None) -> list[dict]:
+    """Schedule / free-busy surface for availability-class asks.
+
+    Work-claim retrieval must not answer these. Returns typed claims when a
+    calendar egress surface is wired; empty means honest refusal upstream.
+    """
+    # Hook for calendar/free-busy egress. Until that surface ships typed
+    # provenance the same way claims do, availability asks refuse rather than
+    # falling through to project memory.
+    return []
+
+
+def _token_jaccard(a: str, b: str) -> float:
+    ta, tb = set(topic_tokens(a)), set(topic_tokens(b))
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / len(ta | tb)
+
+
+def _dedupe_near_duplicates(claims: list[dict],
+                            threshold: float = 0.75) -> list[dict]:
+    """Collapse near-duplicate bullets (same substance, different wording)."""
+    kept: list[dict] = []
+    for c in claims:
+        text = c.get("text") or ""
+        if any(_token_jaccard(text, k.get("text") or "") >= threshold
+               for k in kept):
+            continue
+        kept.append(c)
+    return kept
+
+
+def _anchor_or_refuse(out: list[dict], *, toks: set[str], anchored: bool,
+                      topic: str, expansion: dict) -> list[dict]:
+    """Keep only claims that share vocabulary, a graph anchor, or assert-strength
+    semantic. Empty topical overlap must not fail open to the whole pool.
+    """
+    if not out:
+        return out
+    if toks:
+        topical = [c for c in out
+                   if set(topic_tokens(c["text"])) & toks]
+        if topical:
+            return topical
+        # Graph-only hits can be about the entity with zero shared vocabulary
+        # (Phase 2.2). Without an anchor, refuse weak neighbours — unless a
+        # hit clears the assert bar and the ask did not name an unbound
+        # Title-Case referent.
+        if anchored:
+            return out
+        if _has_unresolved_proper_name(topic, expansion):
+            return []
+        strong = [c for c in out
+                  if c.get("score") is not None
+                  and float(c["score"]) >= _SEM_ASSERT]
+        return strong
+    # No content tokens at all — only graph-anchored rows may cross.
+    return out if anchored else []
 
 
 def facts_for_topic(topic: str, *, limit: int = 8, store=None,
@@ -476,6 +637,7 @@ def facts_for_topic(topic: str, *, limit: int = 8, store=None,
     expansion = expand_topic(topic, store)
     # Search our names alongside theirs, never instead of theirs.
     expanded = " ".join([topic, *expansion["terms"]])
+    anchored = bool(expansion.get("entity_ids") or expansion.get("person_ids"))
 
     raw = (_semantic_fact_rows(expanded, limit * 2, store)
            + _literal_fact_rows(expanded, limit, store)
@@ -490,33 +652,25 @@ def facts_for_topic(topic: str, *, limit: int = 8, store=None,
             continue
         fid = int(row["fact_id"])
         if fid in by_id:
+            # Prefer the copy that carries a semantic score.
+            if "score" not in by_id[fid] and row.get("_sem_score") is not None:
+                by_id[fid] = _normalize(row, store)
             continue
         by_id[fid] = _normalize(row, store)
 
-    out = list(by_id.values())
+    out = _anchor_or_refuse(list(by_id.values()), toks=toks, anchored=anchored,
+                            topic=topic, expansion=expansion)
     now = time.time() if now is None else now
 
-    # Recency ranking is only meaningful among claims that are actually about
-    # the topic. Without this floor, any claim that leaked into the candidate
-    # pool (short-token literal hits, weak semantic neighbours) sorts to the
-    # top of a status ask purely by date.
-    if toks:
-        topical = [c for c in out
-                   if set(topic_tokens(c["text"])) & toks]
-        # Keep unfiltered only when nothing shares a token — graph-only hits
-        # can be about the entity with zero shared vocabulary (Phase 2.2).
-        if topical:
-            out = topical
-
     if is_status_question(topic):
-        return _rank_by_recency(out, limit)
+        return _dedupe_near_duplicates(_rank_by_recency(out, limit))
 
     def _score(c: dict) -> tuple:
         overlap = len(toks & set(topic_tokens(c["text"])))
         return (-overlap, -(c["ts"] or 0.0))
 
     out.sort(key=_score)
-    return out[:limit]
+    return _dedupe_near_duplicates(out[:limit])
 
 
 # "What's the latest on X" is a different question from "what is X". The first
@@ -603,14 +757,20 @@ def near_miss(topic: str, *, store=None, limit: int = 1) -> list[dict]:
     The match is deliberately LOOSER than `facts_for_topic`'s: prefixes rather
     than whole tokens, so "how are the migrations going?" can still surface a
     memory about "the Helio migration". An exact-match fallback behind an
-    exact-match search would never fire.
+    exact-match search would never fire. Unresolved Title-Case names and
+    single short-stem collisions do not qualify.
     """
-    stems = {t[:_STEM] for t in topic_tokens(topic)}
+    topic = (topic or "").strip()
+    topic_toks = topic_tokens(topic)
+    stems = {t[:_STEM] for t in topic_toks}
     if not stems:
         return []
     if store is None:
         from app.storage import get_store
         store = get_store()
+    expansion = expand_topic(topic, store)
+    if _has_unresolved_proper_name(topic, expansion):
+        return []
     try:
         rows = store.list_facts(kind="claim", limit=200)
     except Exception:
@@ -620,10 +780,18 @@ def near_miss(topic: str, *, store=None, limit: int = 1) -> list[dict]:
         if not _eligible(r):
             continue
         c = _normalize(r, store)
-        if stems & {t[:_STEM] for t in topic_tokens(c["text"])}:
+        fact_toks = topic_tokens(c["text"])
+        fact_stems = {t[:_STEM] for t in fact_toks}
+        full = set(topic_toks) & set(fact_toks)
+        stem_hits = stems & fact_stems
+        # Full-token overlap, ≥2 stem hits, or one discriminative long stem
+        # (migrations↔migration). A lone 4-char stem from a short token is
+        # not enough relatedness to disclose.
+        long_stem = {t[:_STEM] for t in topic_toks if len(t) >= 6} & fact_stems
+        if full or len(stem_hits) >= 2 or long_stem:
             out.append(c)
     out.sort(key=lambda c: -(c["ts"] or 0.0))
-    return out[:limit]
+    return _dedupe_near_duplicates(out[:limit])
 
 
 def describe_age(ts: float | None, now: float | None = None) -> str:

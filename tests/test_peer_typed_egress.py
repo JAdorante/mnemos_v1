@@ -472,6 +472,103 @@ class NearMissTests(TypedEgressBase):
         self.assertFalse(pub.call_args.args[2]["ingested"])
 
 
+class EgressHygieneTests(TypedEgressBase):
+    """General-purpose egress invariants — not prompt-specific patches."""
+
+    def test_zero_overlap_semantic_without_anchor_does_not_fail_open(self) -> None:
+        """Weak nearest neighbours with no shared tokens must not ship."""
+        fid = self._claim(
+            "High Noon is blocked on the legal review of the partnership",
+            days_ago=1)
+        with mock.patch("app.services.memory.memory.search",
+                        return_value=[{"fact_id": fid, "raw": "x",
+                                       "score": 0.18, "is_fact": True}]):
+            got = pr.facts_for_topic(
+                "what do you know about Zephyr Moonbeam?",
+                store=self.store, now=NOW)
+        self.assertEqual(got, [])
+
+    def test_unresolved_proper_name_refuses_even_above_assert_bar(self) -> None:
+        fid = self._claim(
+            "High Noon owner is Dave and the blocker is legal", days_ago=1)
+        with mock.patch("app.services.memory.memory.search",
+                        return_value=[{"fact_id": fid, "raw": "x",
+                                       "score": 0.45, "is_fact": True}]):
+            got = pr.facts_for_topic(
+                "Tell me about Zephyr Moonbeam",
+                store=self.store, now=NOW)
+        self.assertEqual(got, [])
+
+    def test_assert_strength_synonymy_without_name_still_ships(self) -> None:
+        """Lexical-empty synonymy above _SEM_ASSERT remains a real answer."""
+        fid = self._claim(
+            "Andy Karos is giving us free compute to test Mnemos", days_ago=2)
+        with mock.patch("app.services.memory.memory.search",
+                        return_value=[{"fact_id": fid, "raw": "x",
+                                       "score": 0.215, "is_fact": True}]):
+            got = pr.facts_for_topic(
+                "who is covering our infrastructure costs?",
+                store=self.store, now=NOW)
+        self.assertTrue(any("free compute" in c["text"] for c in got))
+
+    def test_availability_ask_does_not_pull_work_claims(self) -> None:
+        self._claim("Boost Run is giving us free compute", days_ago=1)
+        with mock.patch("app.storage.get_store", return_value=self.store):
+            out = pch.compose_answer("Free Thursday?")
+        self.assertEqual(out["claims"], [])
+        self.assertIn("don't have anything", out["text"].lower())
+        self.assertNotIn("Boost Run", out["text"])
+        self.assertNotIn("compute", out["text"].lower())
+
+    def test_availability_class_skips_work_near_miss(self) -> None:
+        self._claim("Boost Run is giving us free compute", days_ago=1)
+        out = pch.compose_peer_claims(
+            "are you free tomorrow afternoon?",
+            store=self.store, now=NOW, question_class="availability")
+        self.assertEqual(out["claims"], [])
+        self.assertFalse(out["near_miss"])
+
+    def test_literal_ambiguous_token_does_not_search_alone(self) -> None:
+        self._claim("Boost Run is giving us free compute", days_ago=1)
+        got = pr.facts_for_topic("free", store=self.store, now=NOW)
+        self.assertEqual(got, [])
+
+    def test_looks_like_availability_is_high_precision(self) -> None:
+        self.assertTrue(pr.looks_like_availability("Free Thursday?"))
+        self.assertTrue(pr.looks_like_availability("are you free tomorrow?"))
+        self.assertFalse(pr.looks_like_availability(
+            "what's the latest on Boost Run?"))
+        self.assertFalse(pr.looks_like_availability(
+            "who is covering our infrastructure costs?"))
+
+    def test_near_duplicate_claims_collapse(self) -> None:
+        self._claim("Boost Run is giving us free compute for testing Mnemos",
+                    days_ago=2)
+        self._claim("Boost Run is giving us free compute for testing our stack",
+                    days_ago=1)
+        got = pr.facts_for_topic("Boost Run compute", store=self.store,
+                                 now=NOW)
+        self.assertEqual(len(got), 1)
+
+    def test_junk_aside_does_not_cross(self) -> None:
+        self._claim("Boost Run is giving us free compute", days_ago=2)
+        self._claim("lol just kidding about the whole compute thing",
+                    days_ago=1)
+        got = pr.facts_for_topic("Boost Run compute", store=self.store,
+                                 now=NOW)
+        texts = " ".join(c["text"] for c in got)
+        self.assertIn("giving us free compute", texts)
+        self.assertNotIn("just kidding", texts)
+
+    def test_unresolved_proper_name_is_not_a_near_miss(self) -> None:
+        self._claim("High Noon is blocked on legal review", days_ago=1)
+        out = pch.compose_peer_claims(
+            "any update on Zephyr Moonbeam?",
+            store=self.store, now=NOW)
+        self.assertEqual(out["claims"], [])
+        self.assertFalse(out["near_miss"])
+
+
 class ComposerTests(TypedEgressBase):
     def test_prose_is_rendered_from_the_claims(self) -> None:
         self._claim("Boost Run is giving us free compute", speaker="Andy Karos")
