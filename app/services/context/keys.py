@@ -105,6 +105,9 @@ class SignalKey:
     tier: str
     strength: float
     scope: str | None = None
+    # None = derive from type; False = vote only (OCR path/repo without a
+    # trusted URL). True is unused today — kept for an explicit override.
+    _nameable: bool | None = None
 
     @property
     def key(self) -> str:
@@ -113,6 +116,8 @@ class SignalKey:
     @property
     def nameable(self) -> bool:
         """May this key name a frame, or only contribute evidence to one?"""
+        if self._nameable is not None:
+            return self._nameable
         if self.tier == SUPPORTING:
             return False
         if self.key_type == "path":
@@ -385,6 +390,14 @@ def url(norm: str, *, resource: str = "") -> SignalKey | None:
 # different mechanism with a different failure mode.
 _IDENT_UNGRADED = frozenset({"title_segment", "email_subject"})
 
+# Path/repo/domain/url keys may NAME a stretch of work only when the identifier
+# came from a trusted surface (browser URL, later: connectors). Vision OCR
+# routinely invents `github.com/javascript/typescript`,
+# `/home/.../exceptions.CancelledError`, and `community.com` — real as strings,
+# fatal as titles.
+_NAME_TRUSTED_SRC = frozenset({"browser_url"})
+_NAME_TRUSTED_TYPES = frozenset({"path", "repo", "domain", "url"})
+
 
 def from_identifiers(idents, *, scope: SignalKey | str | None = None
                      ) -> list[SignalKey]:
@@ -406,6 +419,7 @@ def from_identifiers(idents, *, scope: SignalKey | str | None = None
             continue
         value = str(i.get("value") or "")
         norm = str(i.get("norm") or "")
+        src = str(i.get("src") or "")
         sk = None
         if kind == "url":
             sk = url(norm or value, resource=str(i.get("res") or ""))
@@ -417,7 +431,7 @@ def from_identifiers(idents, *, scope: SignalKey | str | None = None
             # guards let it through; minting `repo:github.com/vc/pe` from that
             # asserts a repository that does not exist. Those surfaces are not
             # identities — they go to entity resolution like any other name.
-            if str(i.get("src") or "") == "ocr_slug" or "/" not in value:
+            if src == "ocr_slug" or "/" not in value:
                 sk = None
             else:
                 sk = remote(f"https://github.com/{value}")
@@ -430,6 +444,9 @@ def from_identifiers(idents, *, scope: SignalKey | str | None = None
             sk = issue(value or norm)
         if sk is None or sk.key in seen:
             continue
+        # Vote, don't name: OCR (and legacy stamps with no src) identity keys.
+        if sk.key_type in _NAME_TRUSTED_TYPES and src not in _NAME_TRUSTED_SRC:
+            sk = replace(sk, _nameable=False)
         seen.add(sk.key)
         out.append(sk)
     if scope is not None:

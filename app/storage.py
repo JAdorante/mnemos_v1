@@ -79,12 +79,23 @@ def _blob_to_emb(b):
 
 
 class Store:
-    def __init__(self, db_path: Path | None = None, audio_dir: Path | None = None) -> None:
+    def __init__(self, db_path: Path | None = None, audio_dir: Path | None = None,
+                 *, readonly: bool = False) -> None:
         self.db_path = Path(db_path or settings.storage.db_path)
         self.audio_dir = Path(audio_dir or settings.storage.audio_dir)
+        self._readonly = bool(readonly)
+        self._lock = threading.Lock()
+        if self._readonly:
+            # Pilot seats are often mounted :ro for measurement. Schema init
+            # and journal PRAGMAs need a writable handle — skip both.
+            uri = f"file:{self.db_path.resolve()}?mode=ro"
+            self._conn = sqlite3.connect(
+                uri, uri=True, check_same_thread=False, timeout=30.0)
+            self._conn.row_factory = sqlite3.Row
+            self._conn.execute("PRAGMA busy_timeout=30000")
+            return
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.audio_dir.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
         # timeout=30: wait on writers from a second connection (export VACUUM,
         # restore drill, a leftover process) instead of failing in ~5s. WAL lets
         # readers proceed while a writer holds the write lock — same posture as
@@ -1609,6 +1620,54 @@ class Store:
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_epev_event "
                 "ON episode_events(event_id)")
+            self._conn.commit()
+
+            # CAL Stage 1: the per-event join and the decision log. Nothing
+            # else answers "what was event 41,882 about, and why" —
+            # context_attribution stamps FACTS, and an attribution whose
+            # reasoning is not stored can be argued with but not corrected.
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS event_context (
+                    event_id    INTEGER NOT NULL,
+                    node_type   TEXT    NOT NULL,   -- entity | person | key
+                    node_id     TEXT    NOT NULL,   -- TEXT: key anchors are strings
+                    role        TEXT    NOT NULL,   -- project|feature|participant|artifact
+                    confidence  REAL    NOT NULL,
+                    method      TEXT    NOT NULL,   -- key|scored|escalated|asserted|frame
+                    decision_id INTEGER,
+                    shadow      INTEGER NOT NULL DEFAULT 1,
+                    created_at  REAL    NOT NULL,
+                    PRIMARY KEY (event_id, node_type, node_id, role)
+                )
+                """
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_evctx_node "
+                "ON event_context(node_type, node_id, created_at)")
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS context_decisions (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_id        INTEGER NOT NULL,
+                    candidates_json TEXT    NOT NULL,
+                    features_json   TEXT    NOT NULL,
+                    chosen_type     TEXT,
+                    chosen_id       TEXT,
+                    confidence      REAL,
+                    margin          REAL,
+                    band            TEXT    NOT NULL,
+                    method          TEXT,
+                    model           TEXT,
+                    weights_version INTEGER,
+                    latency_ms      REAL,
+                    decided_at      REAL    NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ctxdec_event "
+                "ON context_decisions(event_id, decided_at)")
             self._conn.commit()
 
             # CAL Stage 0: kg_node_keys becomes a BINDING table, not just a
@@ -5729,6 +5788,120 @@ class Store:
                  (key_value or "").strip()))
             self._conn.commit()
         return int(cur.rowcount or 0)
+
+    # --- CAL Stage 1: event context + the decision log ----------------------
+    def record_context_decision(self, event_id: int, decision, *,
+                                latency_ms: float | None = None,
+                                model: str | None = None,
+                                weights_version: int | None = None,
+                                ts: float | None = None) -> int:
+        """Persist the WHY, not just the what.
+
+        `explain_predicate` can render a belief's history; nothing rendered an
+        attribution's. A user who can read why a guess was made will forgive a
+        wrong one, because they can see what to fix; a user who cannot will
+        distrust a right one.
+        """
+        import time as _time
+        now = float(ts if ts is not None else _time.time())
+        cands = [{"node_type": s.candidate.node_type,
+                  "node_id": str(s.candidate.node_id),
+                  "name": s.candidate.name,
+                  "p": round(float(s.p), 6),
+                  "strength": round(float(s.strength), 6),
+                  "clamped": bool(s.clamped),
+                  "features": {k: round(float(v), 6)
+                               for k, v in s.features.items()}}
+                 for s in (getattr(decision, "scored", ()) or ())]
+        chosen = (decision.chosen or (None,))[0]
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO context_decisions (event_id, candidates_json, "
+                " features_json, chosen_type, chosen_id, confidence, margin, "
+                " band, method, model, weights_version, latency_ms, decided_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (int(event_id), json.dumps(cands),
+                 json.dumps(cands[0]["features"] if cands else {}),
+                 chosen.node_type if chosen else None,
+                 str(chosen.node_id) if chosen else None,
+                 float(getattr(decision, "confidence", 0.0)),
+                 float(getattr(decision, "margin", 0.0)),
+                 getattr(decision, "band", "unbound"),
+                 getattr(decision, "method", None), model, weights_version,
+                 latency_ms, now))
+            self._conn.commit()
+        return int(cur.lastrowid)
+
+    def add_event_context(self, event_id: int, anchors, *,
+                          decision_id: int | None = None, shadow: bool = True,
+                          ts: float | None = None) -> int:
+        """Bind an event to the nodes it was about. `anchors` are dicts of
+        {node_type, node_id, role, confidence, method}."""
+        import time as _time
+        now = float(ts if ts is not None else _time.time())
+        rows = [(int(event_id), a["node_type"], str(a["node_id"]),
+                 a.get("role") or "project", float(a.get("confidence") or 0.0),
+                 a.get("method") or "key", decision_id,
+                 1 if shadow else 0, now)
+                for a in (anchors or [])]
+        if not rows:
+            return 0
+        with self._lock:
+            self._conn.executemany(
+                "INSERT OR REPLACE INTO event_context (event_id, node_type, "
+                " node_id, role, confidence, method, decision_id, shadow, "
+                " created_at) VALUES (?,?,?,?,?,?,?,?,?)", rows)
+            self._conn.commit()
+        return len(rows)
+
+    def context_for_event(self, event_id: int) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM event_context WHERE event_id=? ORDER BY confidence DESC",
+                (int(event_id),)).fetchall()
+        return [dict(r) for r in rows]
+
+    def events_for_node(self, node_type: str, node_id, *, limit: int = 200
+                        ) -> list[int]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT event_id FROM event_context WHERE node_type=? AND "
+                "node_id=? ORDER BY created_at DESC LIMIT ?",
+                (node_type, str(node_id), int(limit))).fetchall()
+        return [int(r["event_id"]) for r in rows]
+
+    def decision_for_event(self, event_id: int) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM context_decisions WHERE event_id=? "
+                "ORDER BY decided_at DESC LIMIT 1", (int(event_id),)).fetchone()
+        if row is None:
+            return None
+        d = dict(row)
+        for f in ("candidates_json", "features_json"):
+            try:
+                d[f[:-5]] = json.loads(d.pop(f) or "null")
+            except Exception:
+                d[f[:-5]] = None
+        return d
+
+    def context_band_stats(self, *, since: float | None = None) -> dict:
+        """Band mix — the Stage 1 instrument. An unbound rate of zero is a
+        failure, not a win."""
+        sql = "SELECT band, COUNT(*) n FROM context_decisions"
+        args: list = []
+        if since is not None:
+            sql += " WHERE decided_at >= ?"
+            args.append(float(since))
+        sql += " GROUP BY band"
+        with self._lock:
+            rows = self._conn.execute(sql, args).fetchall()
+        by = {r["band"]: int(r["n"]) for r in rows}
+        total = sum(by.values())
+        return {"total": total, "by_band": by,
+                "model_calls": by.get("escalated", 0) + by.get("pending", 0),
+                "unbound_rate": (by.get("unbound", 0) + by.get("provisional", 0))
+                                / total if total else 0.0}
 
     # --- CAL Stage 2: frames and episodes ----------------------------------
     def clear_context_run(self, run_id: str) -> None:

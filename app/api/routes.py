@@ -1354,6 +1354,96 @@ def console_activity_events(ids: str = "") -> dict:
     return {"count": len(rows), "events": rows}
 
 
+@router.get("/console/episodes")
+def console_episodes(day: str | None = None, since: float | None = None) -> dict:
+    """CAL work stretches for the Memory Console.
+
+    Named when a real anchor survives the naming guards; blank (`node_type`
+    null) when it does not. Runs the same pure segmenter as the CLI — no
+    model. Window defaults to local today; `since` is capped at 7 days so a
+    console refresh cannot re-segment a whole seat history inline.
+    """
+    import datetime as dt
+    import time as _time
+    from app.services.context import replay as rp
+
+    store = memory._ensure_store()
+    if day:
+        try:
+            d = dt.datetime.strptime(day, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="day must be YYYY-MM-DD")
+        t0 = d.timestamp()
+        t1 = t0 + 86400.0
+        label = day
+    else:
+        t1 = _time.time()
+        t0 = float(since) if since is not None else (t1 - 86400.0)
+        t0 = max(t0, t1 - 7 * 86400.0)
+        label = "live"
+    res = rp.replay(store, t0=t0, t1=t1, run_id=f"console:{label}", persist=False)
+    eps = []
+    for e in res["episodes"]:
+        ids = [int(eid) for eid, _inh in (e.get("_event_ids") or [])]
+        anchored = int(e["n_events"]) - int(e["n_inherited"])
+        eps.append({
+            "title": e.get("title") or "unbound",
+            "node_type": e.get("node_type"),
+            "node_id": e.get("node_id"),
+            "kind": e.get("kind"),
+            "started_at": e["started_at"],
+            "ended_at": e.get("ended_at"),
+            "n_events": e["n_events"],
+            "n_inherited": e["n_inherited"],
+            "n_anchored": anchored,
+            "coherence": e.get("coherence") or 0.0,
+            "apps": e.get("apps") or {},
+            "event_ids": ids[:200],
+        })
+    named = sum(1 for e in eps if e["node_type"])
+    span = sum(max(0.0, (e["ended_at"] or e["started_at"]) - e["started_at"])
+               for e in eps)
+    nspan = sum(max(0.0, (e["ended_at"] or e["started_at"]) - e["started_at"])
+                for e in eps if e["node_type"])
+    return {
+        "day": label,
+        "events": res["events"],
+        "frames": res["frames"],
+        "count": len(eps),
+        "named": named,
+        "attributable_s": nspan,
+        "span_s": span,
+        "episodes": eps,
+    }
+
+
+@router.post("/console/episodes/rebuild")
+def console_episodes_rebuild(day: str | None = None) -> dict:
+    """Persist a CAL run under `console:<day>` so the same day can be
+    compared across retunes instead of only held in memory."""
+    import datetime as dt
+    import time as _time
+    from app.services.context import replay as rp
+
+    store = memory._ensure_store()
+    if day:
+        try:
+            d = dt.datetime.strptime(day, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="day must be YYYY-MM-DD")
+        t0 = d.timestamp()
+        t1 = t0 + 86400.0
+        label = day
+    else:
+        t1 = _time.time()
+        t0 = t1 - 86400.0
+        label = dt.datetime.fromtimestamp(t0).strftime("%Y-%m-%d")
+    run_id = f"console:{label}"
+    res = rp.replay(store, t0=t0, t1=t1, run_id=run_id, persist=True)
+    return {"ok": True, "run_id": run_id, "episodes": len(res["episodes"]),
+            "events": res["events"], "frames": res["frames"]}
+
+
 @router.get("/console/jobs")
 def console_jobs(limit: int = 20) -> dict:
     """Background worker status: job counts by state, recent jobs, and the

@@ -130,6 +130,88 @@ class ReplayTests(unittest.TestCase):
         self.assertIn("— (Firefox)", out)
 
 
+class VlmTitleAnchorTests(unittest.TestCase):
+    """Hosted monitor share: no window title, VLM heading is the only signal."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="quill_vlm_"))
+        self.store = Store(db_path=self.tmp / "t.db", audio_dir=self.tmp / "a")
+        self.eid = self.store.resolve_entity("Boostrun", "org", ts=time.time())
+        from app.services.context import surfaces as sf
+        self.idx = sf.SurfaceIndex(self.store)
+
+    def test_bare_heading_anchors_without_app_suffix(self) -> None:
+        """title_candidates needs `Foo - Chrome`; VLM titles are bare."""
+        hits = self.idx.from_heading("Boostrun launch checklist")
+        self.assertEqual([h.node_id for h in hits], [self.eid])
+
+    def test_anchors_for_uses_vlm_title_when_window_blank(self) -> None:
+        anchors = rp.anchors_for(
+            "screen",
+            {"window": "", "vlm_title": "Boostrun Q3 plan",
+             "identifiers": []},
+            self.idx)
+        self.assertTrue(any(a.node_id == self.eid for a in anchors))
+        self.assertTrue(all(a.strength <= rp._VLM_STRENGTH_CAP for a in anchors
+                            if a.node_id == self.eid))
+
+    def test_vision_blob_title_is_enough_for_older_events(self) -> None:
+        anchors = rp.anchors_for(
+            "screen",
+            {"window": "", "vision": {"title": "Boostrun"},
+             "identifiers": []},
+            self.idx)
+        self.assertTrue(any(a.node_id == self.eid for a in anchors))
+
+    def test_real_window_beats_vlm_title(self) -> None:
+        other = self.store.resolve_entity("Nexus", "project", ts=time.time())
+        anchors = rp.anchors_for(
+            "screen",
+            {"window": "Nexus roadmap - Google Docs - Chromium",
+             "vlm_title": "Boostrun Q3 plan", "identifiers": []},
+            self.idx)
+        ids = {a.node_id for a in anchors}
+        self.assertIn(other, ids)
+        self.assertNotIn(self.eid, ids)
+
+    def test_monitor_label_falls_through_to_vlm(self) -> None:
+        """Pre-fix pilot days stamped every frame 'Primary Monitor' — that
+        is not a title, and must not block the VLM heading."""
+        anchors = rp.anchors_for(
+            "screen",
+            {"window": "Primary Monitor",
+             "vlm_title": "Boostrun Q3 plan", "identifiers": []},
+            self.idx)
+        self.assertTrue(any(a.node_id == self.eid for a in anchors))
+
+    def test_vlm_title_never_reaches_key_miner(self) -> None:
+        from unittest import mock
+        mined = []
+
+        def _extract(raw, window="", browser_url=None):
+            mined.append(window)
+            return []
+
+        with mock.patch("app.perception.identifiers.extract_identifiers",
+                        _extract):
+            rp.anchors_for(
+                "screen",
+                {"window": "", "vlm_title": "Boostrun / mnemos_v1"},
+                self.idx)
+        self.assertEqual(mined, [""])
+
+    def test_stream_carries_vlm_title_as_event_title(self) -> None:
+        t0 = 1_700_000_000.0
+        ev = Event(time=t0, modality=Modality.VISION, raw="x", summary="x",
+                   source="desktop.screen",
+                   meta={"window": "", "vlm_title": "Boostrun launch",
+                         "identifiers": []})
+        self.store.insert(ev)
+        evs = rp.stream_for(self.store, t0 - 1, t0 + 10)
+        self.assertEqual(evs[0].title, "Boostrun launch")
+        self.assertTrue(any(a.node_id == self.eid for a in evs[0].anchors))
+
+
 class SelfExclusionTests(unittest.TestCase):
     """The user's own name is in half their window titles and identifies
     nothing they are working on."""

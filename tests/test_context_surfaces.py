@@ -10,6 +10,7 @@ from __future__ import annotations
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from app.services.context import keys as k, surfaces as sf
@@ -30,13 +31,40 @@ class NormalizerTests(unittest.TestCase):
         self.assertEqual(out, [])
 
     def test_host_anchored_slug_is_authoritative(self) -> None:
-        for src in ("ocr", "browser_url"):
+        out = k.from_identifiers([{"kind": "repo", "src": "browser_url",
+                                   "value": "JAdorante/mnemos_v1",
+                                   "norm": "mnemos_v1"}])
+        self.assertEqual([s.key for s in out],
+                         ["repo:github.com/jadorante/mnemos_v1"])
+        self.assertEqual(out[0].tier, k.STRONG)
+        self.assertTrue(out[0].nameable)
+
+    def test_ocr_repo_votes_but_does_not_name(self) -> None:
+        """Vision OCR invents github.com/javascript/typescript — real string,
+        fatal as an episode title. Missing src is treated the same (legacy
+        stamps on the pilot day carried no src)."""
+        for src in ("ocr", ""):
             out = k.from_identifiers([{"kind": "repo", "src": src,
-                                       "value": "JAdorante/mnemos_v1",
-                                       "norm": "mnemos_v1"}])
-            self.assertEqual([s.key for s in out],
-                             ["repo:github.com/jadorante/mnemos_v1"], src)
-            self.assertEqual(out[0].tier, k.STRONG)
+                                       "value": "javascript/typescript",
+                                       "norm": "typescript"}])
+            self.assertEqual(len(out), 1, src)
+            self.assertFalse(out[0].nameable, src)
+            self.assertEqual(out[0].tier, k.STRONG, src)
+
+    def test_ocr_domain_votes_but_does_not_name(self) -> None:
+        out = k.from_identifiers([{"kind": "domain", "src": "ocr",
+                                   "value": "community.com"}])
+        self.assertEqual(len(out), 1)
+        self.assertFalse(out[0].nameable)
+
+    def test_ocr_path_votes_but_does_not_name(self) -> None:
+        out = k.from_identifiers([{
+            "kind": "path", "src": "ocr",
+            "value": "/home/x/opensearch/osauth/async/exceptions.CancelledError",
+            "norm": "home",
+        }])
+        self.assertEqual(len(out), 1)
+        self.assertFalse(out[0].nameable)
 
     def test_path_uses_value_not_the_root_word(self) -> None:
         """`norm` is the path's ROOT WORD. Feeding it to path() minted a key
@@ -97,6 +125,13 @@ class SurfaceResolutionTests(unittest.TestCase):
         self.tool = self.store.resolve_entity("Claude", "tool", ts=now)
         self.person = self.store.resolve_person("Andy Karos", ts=now)
         self.me = self.store.resolve_person("Justin Adorante", ts=now)
+        # This person is an ordinary contact HERE. The index also reads the
+        # machine's own onboarding profile and git identity to decide who is
+        # "self", so pin both blank or the test changes meaning with the box.
+        for name in ("_identity_name", "_git_name"):
+            patcher = mock.patch.object(sf.SurfaceIndex, name, lambda self: "")
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.idx = sf.SurfaceIndex(self.store)
 
     def test_org_inside_a_search_query_resolves(self) -> None:
@@ -162,6 +197,37 @@ class SurfaceResolutionTests(unittest.TestCase):
         idx = sf.SurfaceIndex(self.store)
         hits = idx.from_title("Andrew Andy Karos Boostrun - Google Search - X")
         self.assertNotIn("person", {h.node_type for h in hits})
+
+
+class VlmHeadingGuardTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="quill_vlm_h_"))
+        self.store = Store(db_path=self.tmp / "t.db", audio_dir=self.tmp / "a")
+        now = time.time()
+        self.org = self.store.resolve_entity("Boostrun", "org", ts=now)
+        self.junk = self.store.resolve_entity("Project X", "idea", ts=now)
+        self.team = self.store.resolve_entity("Your team", "idea", ts=now)
+        self.idx = sf.SurfaceIndex(self.store)
+
+    def test_questions_do_not_bind(self) -> None:
+        for h in ("What is Project X?",
+                  "Ask User 2 what do you know about Boostrun?",
+                  "Can you ask Justin the status of his open project?"):
+            self.assertFalse(sf.is_vlm_heading(h), h)
+            self.assertEqual(self.idx.from_heading(h), [], h)
+
+    def test_share_chrome_does_not_bind(self) -> None:
+        h = "You are sharing your entire screen. Stop Sharing"
+        self.assertFalse(sf.is_vlm_heading(h))
+        self.assertEqual(self.idx.from_heading(h), [])
+
+    def test_junk_names_do_not_bind(self) -> None:
+        self.assertEqual(self.idx.from_heading("Project X"), [])
+        self.assertEqual(self.idx.from_heading("Your team"), [])
+
+    def test_real_heading_still_binds(self) -> None:
+        hits = self.idx.from_heading("Boostrun launch checklist")
+        self.assertEqual([h.node_id for h in hits], [self.org])
 
 
 if __name__ == "__main__":       # pragma: no cover

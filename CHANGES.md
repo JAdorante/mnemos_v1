@@ -1,3 +1,81 @@
+# CAL — the model reader gets a feed, and reads the first labelled day, September 14 2026
+
+The design's expensive reader — a model shown a stretch of work and the projects the graph already knows, answering an index or null — was built in `escalate.py` and called by nothing. `naming.py` is the feed, as an offline pass: replay a day, take every episode the cheap path left blank, and offer it. Candidates are earned, not enumerated: the entities the stretch's own captured text mentions at least twice, ranked by count, never tools, places or ideas, never a name the graph has seen exactly once. No mention, no call. `evaluate score --escalate` runs it and grades each decision against the labelled majority of its stretch.
+
+Three things came out of running it on the first labelled day. It costs what the thesis says: two local calls for 287 events. Two of the three blank stretches had no screen text at all — this box captured no frames that day — so no reader can help there, and the report says so rather than guessing. And on the stretch that did carry text, the 7B model showed a position bias: the same evidence and the same two candidates gave null with a junk name listed first and the right organisation with the right one first, every time. So the reader now asks in both orders and accepts only what both agree on. With that in place it chose `Mnemos Labs` one way and `mnemos_v1` the other and returned null — which is correct, because those are the same project stored as two nodes, and a reader that cannot tell synonyms apart should say so rather than flip a coin.
+
+`escalate.prompt_for` takes an episode-sized `max_chars`. 9 tests in `test_context_naming`; 205 across the CAL suite.
+
+---
+
+# CAL — the §14 loop closes: a sheet to label and a command to grade it, September 14 2026
+
+Stage 5's harness had every metric and no way to feed it. `evaluate.py` now runs the whole loop from the command line: `sheet --day` writes one captured day as a CSV with the system's own prediction beside two blank label columns, and `score --labels` replays the day and grades it — boundary F1, attribution precision and recall, the unbound rate with its 5–15% health check, and the confusions (predicted → labelled, counted) so a wrong number says *how* it is wrong.
+
+Two conventions make the labelling an afternoon rather than a week. `=` in a label column accepts the prediction beside it, so agreeing is one keystroke; labels match case-insensitively, so a person typing `mnemos` against a title of `Mnemos` is not scored as a miss. The bias of showing the prediction is stated in the docstring and `--blind` is the control.
+
+The sheet for 2026-08-26 is generated under `data/cal_eval/` — gitignored, because it holds real screen text. Its predictions already say something: the segmenter attributes 135 of 287 events to the user's own name, which is the dev-box self-node bug seen from the other side.
+
+11 tests in `test_context_evaluate`, including a round trip that accepts every prediction and must score 1.0 on both axes; 192 across the CAL suite.
+
+---
+
+# CAL — the spine: cached lookup, `associate()`, and a stored reason, September 11 2026
+
+Stages 0 and 2 shipped; 3 to 5 were built and wired to nothing. This is the part that connects them, and the part that makes an attribution answerable rather than merely produced.
+
+**`bindings.py` — the hot path.** "What does this identifier mean?" is asked for every key on every event, and the whole economic argument depends on it answering in about a millisecond with no model. An LRU with a TTL sits in front of the indexed SELECT. It is correctness-sensitive in one direction only: a stale MISS costs an unnecessary escalation, which is merely expensive, while a stale HIT attributes an event to a node the graph no longer says it belongs to, which is wrong and invisible — so minting and invalidation punch the cache immediately and entries expire regardless, because a cache with no expiry is a second source of truth nobody reconciles. Cached lookup measures 0.43 µs.
+
+**`pipeline.associate()` — the entry point.** Normalize, extract, look up, and for most events stop there: a single bound strong identifier exits without the scorer ever running. Otherwise candidates are built, scored and banded. Three properties live here and nowhere else. `associate()` never calls a model — an ambiguous event is written `pending` and `escalate_pending()` runs it off the capture path, because a slow local model must not become a capture stall. Attribution is shadow by default, so coverage can be measured on real capture before anyone is shown a label. And a privacy-excluded event is not attributed, not scored, not escalated and not stored — not "attributed but hidden", because an event that never becomes a binding cannot leak through one later. Warm deterministic path: 0.10 ms/event against a 25 ms budget.
+
+**`event_context` and `context_decisions`.** `context_attribution` stamps facts; nothing stamped events, and nothing stored WHY. `explain_predicate` can render a belief's history — an attribution had none, which makes it arguable but not correctable. Decisions now persist their candidates, feature vectors, band, margin, weights version and latency, so §14's trace-completeness metric is reachable and a user who disagrees can see what to fix.
+
+**One distinction clarified, from a collision with in-flight work.** A colleague tightened `keys.py` so that path/repo/domain/url keys may NAME a stretch of work only when they came from a trusted surface — vision OCR routinely invents `github.com/javascript/typescript` and `community.com`, real as strings and fatal as titles. Correct, and it exposed that `associate()` was conflating two questions. Nameability governs whether a key may TITLE a frame; it must not gate whether a key may ATTRIBUTE an event. An invented identifier resolves to nothing anyway — the binding table is the filter, and a key that IS bound was minted by a trusted source, a confirmation, or the ratchet. Requiring nameability for attribution would have refused good attributions from exactly the surface that has the fewest.
+
+19 new tests in `test_context_pipeline`; 172 across the CAL suite.
+
+---
+
+# CAL Stages 3–5 — resolver, the ratchet, propagation, and a way to measure any of it, September 11 2026
+
+Stages 0–2 answer what an event carries and what stretch of work it belongs to. These answer the harder question — when several anchors are plausible, or none binds alone, which node is this about — and then the question behind that one: how would we know if it were wrong.
+
+**Stage 3, the resolver.** Log-linear over candidate nodes, softmax-normalized, hand-weighted. Two rules do most of the work of keeping it honest. Supporting evidence may REORDER candidates but never PROPOSE one, so a system that watched you code for an hour cannot decide your bank statement was about the repo that happened to be open. And the 0.30 clamp is enforced at scoring time: uncapped, the model learns to predict "whatever they were doing five minutes ago", which is right about 80% of the time and catastrophic the other 20%. A candidate floating on frame plus embedding plus base rate is scaled to nothing, because those signals agree with each other for reasons that have nothing to do with being right.
+
+`train()` raises `NotImplementedError` deliberately. Fitting weights against a corpus the system labelled itself would learn its own prior back; `WEIGHTS` is an explicit readable prior until a hand-labelled day exists.
+
+**Stage 3, escalation and the ratchet.** The model is handed a numbered list and must return an INDEX or null — never a name, never prose. That is what makes a 7B model sufficient and the output trivially validatable, and an out-of-range index is refused rather than repaired, because a repaired answer to a constrained question is a guess wearing a schema. Every resolved escalation then mints a binding, so the same ambiguity is never paid for twice: resolve `~/dev/ravenry` → Ravenry once and the next ten thousand events touching that path exit at the binding lookup with no model in sight. Minted bindings are `origin='inferred'` — weaker than a user confirmation, and barred from feeding another inference.
+
+**Stage 4, propagation on a short leash.** One hop, λ=0.4 times the source edge's own confidence, fan-out capped at 32 so a person in four hundred conversations cannot dominate every score they touch, and — the constraint usually missed — only `asserted` and `derived` edges propagate. An inferred edge may not serve as evidence for another inference. Without that rule a graph drifts into a confidently self-consistent fiction that nothing inside it can detect. `reweight()` takes candidates rather than producing them, so "propagation cannot mint" is a function signature rather than a comment.
+
+**Stage 4, compounding.** Key spread is measured as the normalized entropy of a key's node distribution — a key that points everywhere points nowhere — and bleeding keys are demoted stickily, while a user-confirmed binding is never demoted by a statistic. Evidence saturates within a bucket and adds across them: four hundred sightings of one file in one sitting is one observation, four sightings across four days is four. New-project detection needs four distinct co-occurring keys, twenty-five events and two distinct days, and produces a PROVISIONAL proposal — never a node, because an auto-created project is a guess with a name on it.
+
+**Stage 5 is mostly satisfied or deferred rather than skipped.** Multi-project disjointness shipped inside the resolver: two candidates resting on independent strong keys bind BOTH (a monorepo, a meeting spanning two initiatives), while the same ambiguous alias pointing two ways escalates instead. Org-level propagation is a caller pattern over `propagate` — person → org → project is two hops, which it refuses. Cross-episode causal chains and learned segmentation both require the labelled corpus, and the design gates learned segmentation explicitly on boundary F1 having a stable baseline to beat.
+
+So the Stage 5 deliverable is that prerequisite: `evaluate.py` computes boundary F1 with a tolerance window (human labellers do not agree to the second, and scoring exact equality would measure transcription accuracy), attribution precision and recall over ATTRIBUTABLE events only, the compounding metric, correction persistence, and a labelling sheet so the afternoon of hand-labelling is clicking rather than typing. A duplicated boundary cannot inflate recall. A 0% unbound rate is reported as UNHEALTHY, not as a win — a system that always produces a label is overconfident and its precision is measuring its own nerve.
+
+**Two corrections to the design, made while implementing it.** §5.2 bands on `P(top1)` from a softmax, but a softmax share over ONE candidate is always 1.0 however thin the evidence — that binds a lone supporting-only guess at confidence 1.00. Belief is now absolute (σ of the weighted sum) and the share is used only for margin. And §8.1's saturation formula, `min(1.0, 1 + 0.2·ln(n))`, is exactly 1.0 for every n ≥ 1: the cap sits on the wrong side of the growth term and would flatten all evidence to its base weight. Implemented as logarithmic growth under a ceiling.
+
+**Not wired into capture, on purpose.** The resolver would be handed almost no candidates: on the pilot surface 5% of events carry any anchor at all. Anchor supply first, then wire it — measuring a resolver on an empty candidate set teaches nothing.
+
+38 new tests in `test_context_resolver`.
+
+---
+
+# CAL — honest blanks in the product, September 11 2026
+
+Naming guards first: OCR path/repo/domain/url without `browser_url` may vote
+but not name; VLM headings that are questions, share-chrome, or junk names
+(`Your team`, `Project X`) do not bind. On user3's densest day that collapsed
+attributable time from a false 59% to **0%** — the instrument working.
+
+Then the retention surface: Memory Console → Filters → **Episodes**
+(`GET /console/episodes`, same segmenter as the CLI). Blanks stay blank;
+Rebuild persists under `console:<day>`. Activity still answers "which app";
+Episodes answers "what was I working on".
+
+---
+
 # Web Perceive — a monitor label is not a window title, September 11 2026
 
 Replaying a hosted pilot tester's densest captured day produced four episodes and a 59% attributable-time figure that was entirely false. Of 230 events, 12 carried any anchor; the two episodes that got named rested on coherence 0.04. The cause was one line of capture metadata.
@@ -8,7 +86,7 @@ Three fixes. The label and `displaySurface` are read from the live track on EVER
 
 This makes the pilot's titles honest, not informative — 145 fake titles become zero titles. Getting real ones is a product choice (nudging the picker toward a window or tab share buys titles and a URL at the cost of seeing only one app) and deliberately not made here.
 
-Noted while looking: `vlm.describe` already returns a `title` for every analyzed frame, and `desktop_capture` reads it only to build a summary string. Nothing downstream ever sees it, and 102 of that tester's 230 events carried VLM output. It is model output rather than a verbatim identifier, so it belongs at medium strength and must never mint a binding — but it is a title signal sitting unused on the exact surface the hosted pilot actually has.
+**Follow-on the same day:** that unused VLM per-frame `title` is now on the anchor path. `desktop_capture` stamps `meta["vlm_title"]`; when `window` is blank, `replay.anchors_for` resolves it through `surfaces.from_heading` (bare headings have no app suffix, so the window-title segmenter alone would miss them). Strength capped at 0.55, never passed to the key miner. Older events still work via `vision.title`. Re-measure on the real tester's day.
 
 Also: `test_capture_dock`'s web-state assertion fails when run after the other capture modules, with or without these changes — the WS connection state in `web_ingest` is module-global and something before it leaves it set.
 

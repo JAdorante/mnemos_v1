@@ -585,6 +585,7 @@ img.thumb.big{max-height:none;max-width:100%}
       <summary>Filters</summary>
       <div class="filters-menu" id="filtersMenu">
         <button type="button" data-view="activity">Activity</button>
+        <button type="button" data-view="episodes">Episodes</button>
         <button type="button" data-view="turns">Turns</button>
         <button type="button" data-view="sessions">Sessions</button>
         <button type="button" data-view="reflect">Reflection</button>
@@ -1053,8 +1054,10 @@ function syncSegUI(){
     if(sum) sum.textContent=nFilters?('Filters · '+nFilters):'Filters';
   }
   const rb=document.getElementById('rebuild');
-  rb.style.display=(!inConst&&(view==="turns"||view==="activity"||view==="sessions"))?'inline-block':'none';
-  rb.textContent=view==="activity"?'Rebuild activity':view==="sessions"?'Rebuild sessions':'Rebuild turns';
+  rb.style.display=(!inConst&&(view==="turns"||view==="activity"||view==="episodes"||view==="sessions"))?'inline-block':'none';
+  rb.textContent=view==="activity"?'Rebuild activity'
+    :view==="episodes"?'Rebuild episodes'
+    :view==="sessions"?'Rebuild sessions':'Rebuild turns';
   document.getElementById('reflectrun').style.display=(!inConst&&view==="reflect")?'inline-block':'none';
   q.style.display=(!inConst&&view==="raw")?'inline-block':'none';
   const ab=document.getElementById('archiveBtn');
@@ -1113,6 +1116,7 @@ document.addEventListener('click',e=>{
 });
 async function rebuild(){document.getElementById('stat').textContent='rebuilding…';
  const ep=view==="activity"?'/console/activity/rebuild'
+   :view==="episodes"?('/console/episodes/rebuild?day='+encodeURIComponent(localDay()))
    :view==="sessions"?'/console/sessions/rebuild':'/console/consolidate';
  await fetch(ep,{method:'POST'});load();}
 async function factAction(fact_id,verb){
@@ -1230,6 +1234,50 @@ async function loadActivity(){
   document.getElementById('stat').textContent=j.count+' activit'+(j.count===1?'y':'ies');
   list.innerHTML=acts.length?acts.map(actRow).join('')
     :'<div class="empty">no activity blocks yet — desktop capture folds them as you work.<br>Click “Rebuild activity” to fold existing desktop events.</div>';
+ }catch(e){ list.innerHTML='<div class="empty">error loading: '+e+'</div>'; }
+}
+function localDay(){
+  const d=new Date();
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')
+    +'-'+String(d.getDate()).padStart(2,'0');
+}
+// CAL work stretch: named only when a real anchor survives; blanks stay blank.
+function epRow(e){
+ const dur=((e.ended_at||e.started_at)-e.started_at);
+ const bits=[fmtTime(e.started_at)+(e.ended_at?(' → '+endTime(e.ended_at)):'')];
+ if(dur>0) bits.push(fmtDur(dur));
+ const anchored=e.n_anchored!=null?e.n_anchored:(e.n_events-(e.n_inherited||0));
+ bits.push(e.n_events+' event'+(e.n_events===1?'':'s')
+   +' · '+anchored+' anchored · coh '+(e.coherence||0).toFixed(2));
+ if(e.kind) bits.push('<span class="spk">'+MnemosEsc(e.kind)+'</span>');
+ const named=!!e.node_type;
+ const label=named?e.title:('— ('+(e.title||'unbound')+')');
+ const badge=named?'project':'blank';
+ const ids=(e.event_ids||[]);
+ const expand=ids.length?'<div class="acts"><button class="mini" onclick="actExpand(this,\''+ids.slice(0,100).join(',')+'\')">▸ '
+   +Math.min(ids.length,100)+' linked event'+(ids.length===1?'':'s')+'</button></div><div class="actev"></div>':'';
+ return '<div class="row"><span class="badge b-desktop">'+badge+'</span>'
+  +'<div class="body"><div class="text">'+MnemosEsc(label)+'</div>'
+  +'<div class="meta">'+bits.join('<span>·</span>')+'</div>'+expand+'</div></div>';
+}
+async function loadEpisodes(){
+ try{
+  let u='/console/episodes?';
+  if(range==='today'||range==='all'){
+    u+='day='+encodeURIComponent(localDay());
+  }else{
+    u+='since='+rangeCutoff();
+  }
+  const j=await (await fetch(u)).json();
+  const eps=j.episodes||[];
+  const atr=j.span_s?Math.round(100*(j.attributable_s||0)/j.span_s):0;
+  document.getElementById('stat').textContent=
+    (j.named||0)+' named · '+j.count+' episode'+(j.count===1?'':'s')
+    +' · '+atr+'% attributable';
+  list.innerHTML=eps.length?eps.map(epRow).join('')
+    :'<div class="empty">no work stretches yet for this range.<br>'
+    +'Capture needs real window titles or known projects on screen — '
+    +'honest blanks beat wrong names.</div>';
  }catch(e){ list.innerHTML='<div class="empty">error loading: '+e+'</div>'; }
 }
 function sessRow(s){
@@ -1941,6 +1989,7 @@ async function load(){
  if(view==="learning"){ return loadLearning(); }
  if(view==="turns"){ return loadTurns(); }
  if(view==="activity"){ return loadActivity(); }
+ if(view==="episodes"){ return loadEpisodes(); }
  if(view==="sessions"){ return loadSessions(); }
  const u='/console/events?limit=300&low_only='+low+'&modality='+encodeURIComponent(mod)
    +'&source='+encodeURIComponent(src)+'&q='+encodeURIComponent(q.value.trim())

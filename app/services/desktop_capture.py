@@ -339,9 +339,15 @@ class DesktopCapturePipeline:
                     entities.append("desktop_screen")
                 model_conf = res.get("confidence")
                 meta["vision"] = res
+                # First-class for CAL: a VLM heading is the only title-like
+                # signal on a monitor share. Replay reads this (and falls
+                # back to vision.title for older events); it must never mint.
+                _vlm_title = (res.get("title") or "").strip()
+                if _vlm_title:
+                    meta["vlm_title"] = _vlm_title[:160]
                 ctype = res.get("content_type") or "none"
                 if ctype and ctype != "none":
-                    title = (res.get("title") or "").strip()
+                    title = _vlm_title
                     items = res.get("items") or []
                     n = len(items)
                     label = ctype.replace("_", " ")
@@ -557,6 +563,9 @@ class DesktopCapturePipeline:
                             what = (res.get("description") or "").strip()
                             ocr = (res.get("ocr_text") or "").strip()
                             meta["vision"] = res
+                            _vlm_title = (res.get("title") or "").strip()
+                            if _vlm_title:
+                                meta["vlm_title"] = _vlm_title[:160]
                             model_conf = res.get("confidence")
                             if ocr and len(ocr) < 200:
                                 meta["ocr_text"] = ocr

@@ -47,6 +47,28 @@ CHROME = frozenset({
     "privacy", "billing", "subscription", "upgrade", "welcome", "overview",
 })
 
+# VLM titles that are the capture/chrome surface itself, not page content.
+_SHARE_CHROME = re.compile(
+    r"(?i)\b("
+    r"you are sharing|stop sharing|entire screen|screen session|"
+    r"primary monitor"
+    r")\b"
+)
+# Chat prompts and interrogatives — binding their nouns ("Project X",
+# "Venture Pulse") is self-confirmation against the UI that asked the question.
+_QUESTION = re.compile(
+    r"(?i)^(what|who|where|when|why|how|can you|could you|would you|"
+    r"ask |tell |do you |is there |are there |update for )\b|\?\s*$"
+)
+# Graph nodes that are UI/news furniture or placeholders. Exact match against
+# these from a VLM heading must not name (or even vote) — they are how
+# "Your team" / "Project X" titled hours on the pilot day.
+_VLM_JUNK_NAMES = frozenset({
+    "your team", "top stories", "project x", "up and down the org",
+    "memory", "team", "sparrow", "desktop", "code", "workspace",
+    "members", "google news", "fox news", "user 2", "unknown organization",
+})
+
 # Names too generic to match INSIDE a longer string. An exact whole-segment
 # match against them is still fine — if a segment is literally "MVP" then the
 # entity called MVP is what it names. Containment is the dangerous direction:
@@ -93,6 +115,20 @@ def is_chrome(segment: str) -> bool:
     """True for application furniture — Mail, Sign in, Google Search."""
     s = re.sub(r"\s+", " ", (segment or "")).strip().lower()
     return not s or s in CHROME
+
+
+def is_vlm_heading(heading: str) -> bool:
+    """False for questions, share-chrome, and empty/furniture headings.
+
+    A VLM title is model output about what is on screen. Chat prompts and
+    "You are sharing your entire screen" are not work identity.
+    """
+    h = re.sub(r"\s+", " ", (heading or "")).strip()
+    if not h or is_chrome(h):
+        return False
+    if _SHARE_CHROME.search(h) or _QUESTION.search(h):
+        return False
+    return True
 
 
 class SurfaceIndex:
@@ -254,11 +290,33 @@ class SurfaceIndex:
                     out.append(hit)
         return out
 
+    def from_heading(self, heading: str) -> list[SurfaceHit]:
+        """Bind-only resolution of a page heading (e.g. a VLM per-frame title).
+
+        Window-title grammar requires a trailing app segment (`Foo - Chrome`);
+        a VLM heading is usually bare (`Quarterly plan`, `Boostrun launch`).
+        Prefer the window-title segmenter when it fires, otherwise resolve the
+        whole heading as one surface string. Never mints. Refuses questions,
+        share-chrome, and hits whose name is known UI/news furniture.
+        """
+        h = re.sub(r"\s+", " ", (heading or "")).strip()
+        if not is_vlm_heading(h):
+            return []
+        via_title = self.from_title(h)
+        hits = via_title if via_title else self.resolve(h)
+        return [hit for hit in hits
+                if hit.name.strip().lower() not in _VLM_JUNK_NAMES]
+
 
 def from_title(window_title: str, *, store) -> list[SurfaceHit]:
     """One-shot convenience. Hot paths should hold a `SurfaceIndex` instead."""
     return SurfaceIndex(store).from_title(window_title)
 
 
-__all__ = ["SurfaceHit", "SurfaceIndex", "from_title", "is_chrome",
-           "CHROME", "STRENGTH"]
+def from_heading(heading: str, *, store) -> list[SurfaceHit]:
+    """One-shot convenience for VLM / page headings."""
+    return SurfaceIndex(store).from_heading(heading)
+
+
+__all__ = ["SurfaceHit", "SurfaceIndex", "from_title", "from_heading",
+           "is_chrome", "is_vlm_heading", "CHROME", "STRENGTH"]

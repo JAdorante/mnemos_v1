@@ -21,6 +21,26 @@ from app.services.context import keys as ckeys
 from app.services.context import surfaces as sf
 from app.services.context.frames import Anchor, Segmenter, StreamEvent
 
+# VLM titles are model output, not verbatim identifiers. Surfaces already
+# grade at 0.60–0.80; cap them so a heading never outranks a real window
+# segment of the same method, and so the tier stays medium at most.
+_VLM_STRENGTH_CAP = 0.55
+
+
+def vlm_title(meta: dict) -> str:
+    """Per-frame page heading from `vlm.describe`, if one was stored.
+
+    Prefer the first-class stamp (`vlm_title`); fall back to the vision blob
+    so days captured before the stamp still replay.
+    """
+    t = str(meta.get("vlm_title") or "").strip()
+    if t:
+        return t
+    vision = meta.get("vision")
+    if isinstance(vision, dict):
+        return str(vision.get("title") or "").strip()
+    return ""
+
 
 def anchors_for(raw: str, meta: dict, index: sf.SurfaceIndex) -> tuple[Anchor, ...]:
     """Every anchor an event carries — surfaces first, then binding keys.
@@ -28,20 +48,36 @@ def anchors_for(raw: str, meta: dict, index: sf.SurfaceIndex) -> tuple[Anchor, .
     Both paths feed the same field. A window title naming a known person and a
     git remote naming a repo are different KINDS of evidence, graded
     differently, but they compete for the same attention.
+
+    When the window is blank *or* carries no resolvable surface (the pre-fix
+    pilot day stamped every monitor-share frame `Primary Monitor`), the VLM
+    heading is the title-like signal. It feeds surfaces only — never the key
+    miner — so model output cannot mint a binding.
     """
     out: list[Anchor] = []
-    title = str(meta.get("window") or "")
-    if title:
-        for hit in index.from_title(title):
+    window = str(meta.get("window") or "")
+    surface_from_window = False
+    if window:
+        for hit in index.from_title(window):
+            surface_from_window = True
             out.append(Anchor(hit.node_type, hit.node_id, hit.name,
                               hit.strength, "medium", hit.nameable))
+    if not surface_from_window:
+        heading = vlm_title(meta)
+        if heading:
+            for hit in index.from_heading(heading):
+                out.append(Anchor(
+                    hit.node_type, hit.node_id, hit.name,
+                    min(hit.strength, _VLM_STRENGTH_CAP), "medium",
+                    hit.nameable))
     burl = meta.get("browser_url") or (
         f"https://{meta['url_domain']}" if meta.get("url_domain") else None)
     try:
         from app.perception import identifiers as idents
         mined = meta.get("identifiers")
         if not mined:
-            mined = idents.extract_identifiers(raw or "", window=title,
+            # Real window only — never a VLM heading — into the key miner.
+            mined = idents.extract_identifiers(raw or "", window=window,
                                                browser_url=burl)
     except Exception:
         mined = []
@@ -62,17 +98,25 @@ def stream_for(store, t0: float, t1: float) -> list[StreamEvent]:
             "WHERE time >= ? AND time < ? ORDER BY time ASC",
             (float(t0), float(t1))).fetchall()
     from app.services.activity import app_of
+    from app.services import context_anchor
     out: list[StreamEvent] = []
     for r in rows:
         try:
             meta = json.loads(r["meta"] or "{}")
         except Exception:
             meta = {}
-        title = str(meta.get("window") or "")
+        window = str(meta.get("window") or "")
+        heading = vlm_title(meta)
+        # Prefer a real window title; if it is not title-shaped (monitor label),
+        # show the VLM heading so the stream is honest about what was seen.
+        if window and context_anchor.title_candidates(window):
+            title = window
+        else:
+            title = heading or window
         out.append(StreamEvent(
             event_id=int(r["id"]), t=float(r["time"]),
             anchors=anchors_for(r["raw"] or "", meta, index),
-            app=(app_of(title) if title else "") or str(meta.get("app_name") or ""),
+            app=(app_of(window) if window else "") or str(meta.get("app_name") or ""),
             title=title))
     return out
 
@@ -122,9 +166,19 @@ def main(argv=None) -> int:
     ap.add_argument("--day", help="YYYY-MM-DD (local)")
     ap.add_argument("--run-id", default=None)
     ap.add_argument("--persist", action="store_true")
+    ap.add_argument("--db", default=None,
+                    help="Path to quill.db (default: QUILL_DATA_DIR). "
+                         "Opened read-only unless --persist.")
     a = ap.parse_args(argv)
-    from app.storage import get_store
-    store = get_store()
+    from pathlib import Path
+    from app.storage import Store, get_store
+    if a.persist:
+        store = Store(db_path=Path(a.db)) if a.db else get_store()
+    else:
+        # Measurement against a :ro pilot volume must not CREATE / PRAGMA-write.
+        db = Path(a.db) if a.db else Path(
+            __import__("app.config", fromlist=["settings"]).settings.storage.db_path)
+        store = Store(db_path=db, readonly=True)
     if a.day:
         d = dt.datetime.strptime(a.day, "%Y-%m-%d")
         t0 = d.timestamp()
