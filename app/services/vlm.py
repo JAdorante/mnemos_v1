@@ -166,6 +166,15 @@ def _parse_json(text: str) -> dict[str, Any]:
             "item_confidences": [], "confidence": 0.0}
 
 
+def _empty_read() -> dict:
+    """The shape of a read that produced nothing. A fresh dict every call —
+    callers mutate results (redaction, tagging)."""
+    return {"description": "", "ocr_text": "", "people_count": 0,
+            "objects": [], "scene_type": "", "content_type": "none",
+            "title": "", "items": [], "item_confidences": [],
+            "confidence": 0.0}
+
+
 class ClaudeVLM:
     """A paid Claude vision reader. The router keeps two: the accurate model
     (settings.vision.model) for high-stakes reads and the cheap fallback
@@ -343,6 +352,16 @@ class VLMRouter:
               f"{self._local_err_streak} consecutive errors ({exc}).")
 
     @staticmethod
+    def _empty(route_reason: str, **route) -> dict:
+        """A tagged empty read: every path that cannot produce a description
+        returns this same shape, so a consumer can tell "no analysis happened"
+        (provider `none`, a `reason`) from "the model looked and saw nothing"
+        (a real provider, empty text). Nothing downstream has to special-case
+        a missing dict."""
+        return VLMRouter._tag(_empty_read(), "none",
+                              {"reason": route_reason, **route})
+
+    @staticmethod
     def _budget_ok() -> bool:
         """Hard USD/day cap on ambient cloud vision (SECURITY #2). Checked
         BEFORE every cloud call; fails CLOSED — an unmetered cloud call is
@@ -422,28 +441,31 @@ class VLMRouter:
             if reason != "local_disabled" and \
                     not settings.vision.cloud_when_local_down:
                 return self._tag(
-                    {"description": "", "ocr_text": "", "people_count": 0,
-                     "objects": [], "scene_type": "", "content_type": "none",
-                     "title": "", "items": [], "item_confidences": [],
-                     "confidence": 0.0},
+                    _empty_read(),
                     "none", {"reason": reason + "_cloud_off"})
             if not escalate:
                 return self._tag(
-                    {"description": "", "ocr_text": "", "people_count": 0,
-                     "objects": [], "scene_type": "", "content_type": "none",
-                     "title": "", "items": [], "item_confidences": [],
-                     "confidence": 0.0},
+                    _empty_read(),
                     "none", {"reason": reason + "_no_escalate"})
             # Local is down/cooling — these frames just need a decent read, not
             # the accurate reader. The cheap tier covers them.
             if not self._budget_ok():
                 return self._tag(
-                    {"description": "", "ocr_text": "", "people_count": 0,
-                     "objects": [], "scene_type": "", "content_type": "none",
-                     "title": "", "items": [], "item_confidences": [],
-                     "confidence": 0.0},
+                    _empty_read(),
                     "none", {"reason": reason + "_budget_exhausted"})
-            parent = self.claude_lite.describe(jpeg_bytes)
+            try:
+                parent = self.claude_lite.describe(jpeg_bytes)
+            except Exception as exc:
+                # Both tiers are now down for this frame. Say so in the result
+                # rather than raising: an exception here escaped to the capture
+                # loop's catch-all, which stored the frame with no `vision` dict
+                # at all — indistinguishable from a model that saw nothing, and
+                # unattributable without log archaeology (user3, 2026-09-06:
+                # 43 of 145 frames, 30% of the day).
+                print(f"[vlm] Claude tier failed during {reason} "
+                      f"({type(exc).__name__}: {exc}); no analysis for this frame.")
+                return self._empty(reason + "_cloud_error",
+                                   error=type(exc).__name__)
             self._distill(reason=reason, parent=parent, local=None,
                           capture_quality=capture_quality, context=context,
                           parent_model=self.claude_lite.model)
@@ -457,31 +479,29 @@ class VLMRouter:
             if not escalate:
                 print(f"[vlm] local VLM error ({exc}); no escalate — skipping.")
                 return self._tag(
-                    {"description": "", "ocr_text": "", "people_count": 0,
-                     "objects": [], "scene_type": "", "content_type": "none",
-                     "title": "", "items": [], "item_confidences": [],
-                     "confidence": 0.0},
+                    _empty_read(),
                     "none", {"reason": "local_error_no_escalate"})
             if not settings.vision.cloud_when_local_down:
                 print(f"[vlm] local VLM error ({exc}); cloud-on-outage off — "
                       "skipping frame.")
                 return self._tag(
-                    {"description": "", "ocr_text": "", "people_count": 0,
-                     "objects": [], "scene_type": "", "content_type": "none",
-                     "title": "", "items": [], "item_confidences": [],
-                     "confidence": 0.0},
+                    _empty_read(),
                     "none", {"reason": "local_error_cloud_off"})
             if not self._budget_ok():
                 print(f"[vlm] local VLM error ({exc}); cloud budget exhausted "
                       "— skipping frame.")
                 return self._tag(
-                    {"description": "", "ocr_text": "", "people_count": 0,
-                     "objects": [], "scene_type": "", "content_type": "none",
-                     "title": "", "items": [], "item_confidences": [],
-                     "confidence": 0.0},
+                    _empty_read(),
                     "none", {"reason": "local_error_budget_exhausted"})
             print(f"[vlm] local VLM error ({exc}); falling back to Claude.")
-            parent = self.claude_lite.describe(jpeg_bytes)
+            try:
+                parent = self.claude_lite.describe(jpeg_bytes)
+            except Exception as cexc:
+                print(f"[vlm] Claude tier failed after local error "
+                      f"({type(cexc).__name__}: {cexc}); no analysis for this frame.")
+                return self._empty("local_error_cloud_error",
+                                   error=type(cexc).__name__,
+                                   local_error=type(exc).__name__)
             self._distill(reason="local_error", parent=parent, local=None,
                           capture_quality=capture_quality, local_error=str(exc),
                           context=context, parent_model=self.claude_lite.model)
@@ -529,7 +549,13 @@ class VLMRouter:
                     "reason": reason, "local_content_type": ctype,
                     "local_confidence": conf, "capture_quality": capture_quality})
             except Exception as exc:
+                # The local read stands (it is a real answer), but the tag must
+                # say escalation was attempted and failed — otherwise this frame
+                # is indistinguishable from one that never needed a second look.
                 print(f"[vlm] escalation to Claude failed ({exc}); keeping local.")
+                return self._tag(local, "ollama", {
+                    "reason": "escalate_failed", "error": type(exc).__name__,
+                    "local_content_type": ctype, "confidence": conf})
         return self._tag(local, "ollama", {"confidence": conf})
 
     def transcribe(self, jpeg_bytes: bytes) -> str:

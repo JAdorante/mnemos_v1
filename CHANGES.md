@@ -1,3 +1,13 @@
+# The last "known" test failures were bugs, and cloud-tier VLM failures get a name, September 14 2026
+
+Three failures had been carried as environment noise. Two were not. `effective_prompt_version()` added its `-ctx` suffix only when the base was literally `extract-v1`, so the bump to v3 made context-on and context-off stamp the same version for ten days — the one thing the stamp exists to prevent, and the test pinned the literal so it could not notice. Now `f"{base}-ctx"`, and the test pins the property plus a base-bump survival case. A first person mention was being promoted on mint, which skipped `person_adjudicator` and `ambient_cleanup` — both review only candidates — for every overheard name; and `_bump_promotion` fell through two rungs in one call, so a single sentence at relevance 0.85 made someone agent-contactable. No promotion on mint; one rung per resolve. The third, `test_lora_reposition`, was a stale test: the `CONFIDENCE:` trailer on training golds is deliberate (`training_contract`), so it now asserts through `split_confidence` and checks the trailer is present.
+
+Separately, on user3's 2026-09-06 pilot day 43 of 145 screen frames — 30% of the day — reached memory with no `vision` dict at all: the local VLM was cooling and the Claude fallback raised, and `describe()` let that escape into the capture loop's catch-all. Both bare `claude_lite.describe()` calls are now guarded and return a tagged `_provider: none` with `reason=*_cloud_error` and the exception class; escalation failures tag `escalate_failed` while keeping the local read; the six-times-copied empty literal is `_empty_read()`. Frames are still stored — not storing them is a capture-path decision — but they are now countable without log archaeology.
+
+Suite: 3385 tests, 0 failures, 0 errors.
+
+---
+
 # CAL — the model reader gets a feed, and reads the first labelled day, September 14 2026
 
 The design's expensive reader — a model shown a stretch of work and the projects the graph already knows, answering an index or null — was built in `escalate.py` and called by nothing. `naming.py` is the feed, as an offline pass: replay a day, take every episode the cheap path left blank, and offer it. Candidates are earned, not enumerated: the entities the stretch's own captured text mentions at least twice, ranked by count, never tools, places or ideas, never a name the graph has seen exactly once. No mention, no call. `evaluate score --escalate` runs it and grades each decision against the labelled majority of its stretch.

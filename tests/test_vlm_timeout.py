@@ -137,3 +137,81 @@ class LocalCooldownTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CloudTierFailureTests(unittest.TestCase):
+    """A Claude failure with no local answer must come back TAGGED, not raise.
+
+    Before this, the two branches that reach Claude without a local read
+    (local cooling/unreachable, local raised) called it bare. A 429 or a
+    network error escaped `describe()` into the capture loop's catch-all,
+    which stored the frame with no `vision` dict at all — indistinguishable
+    from a model that saw nothing. On user3's 2026-09-06 that was 43 of 145
+    frames, 30% of the day, and it took log archaeology to find out why.
+    """
+
+    @staticmethod
+    def _set_cloud(flag: bool) -> None:
+        from app.config import settings
+        object.__setattr__(settings.vision, "cloud_when_local_down", flag)
+
+    def setUp(self) -> None:
+        from app.config import settings
+        saved = settings.vision.cloud_when_local_down
+        self.addCleanup(self._set_cloud, saved)
+        self._set_cloud(True)
+
+    def _router(self, *, local, lite, cooling=False):
+        r = VLMRouter()
+        r.local, r.claude_lite, r.claude = local, lite, _FakeProvider()
+        r._local_ok = True
+        if cooling:
+            r._local_cool_until = time.time() + 600
+        return r
+
+    def test_cloud_failure_during_cooldown_is_tagged_not_raised(self) -> None:
+        lite = _FakeProvider(exc=RuntimeError("overloaded"))
+        r = self._router(local=_FakeProvider(), lite=lite, cooling=True)
+        out = r.describe(b"jpeg")                 # must not raise
+        self.assertEqual(out["_provider"], "none")
+        self.assertEqual(out["_route"]["reason"], "local_cooldown_cloud_error")
+        self.assertEqual(out["_route"]["error"], "RuntimeError")
+        self.assertEqual(out["ocr_text"], "")
+        self.assertEqual(lite.calls, 1)
+
+    def test_cloud_failure_after_local_error_is_tagged_not_raised(self) -> None:
+        local = _FakeProvider(exc=TimeoutError("timed out"))
+        lite = _FakeProvider(exc=ConnectionError("dns"))
+        r = self._router(local=local, lite=lite)
+        out = r.describe(b"jpeg")
+        self.assertEqual(out["_provider"], "none")
+        self.assertEqual(out["_route"]["reason"], "local_error_cloud_error")
+        self.assertEqual(out["_route"]["error"], "ConnectionError")
+        self.assertEqual(out["_route"]["local_error"], "TimeoutError")
+
+    def test_escalation_failure_keeps_local_and_says_so(self) -> None:
+        """The local read is a real answer and stands; but the tag must show
+        an escalation was attempted, or a frame that lost its second look is
+        indistinguishable from one that never needed it."""
+        local = _FakeProvider(_res("notes", 0.3))   # unsure -> escalates to lite
+        lite = _FakeProvider(exc=RuntimeError("429"))
+        r = self._router(local=local, lite=lite)
+        out = r.describe(b"jpeg")
+        self.assertEqual(out["_provider"], "ollama")
+        self.assertEqual(out["_route"]["reason"], "escalate_failed")
+        self.assertEqual(out["_route"]["error"], "RuntimeError")
+        self.assertEqual(out["description"], "x")   # the local answer survived
+        self.assertEqual(lite.calls, 1)
+
+    def test_every_bailout_returns_the_same_empty_shape(self) -> None:
+        """The empty read used to be a literal copied six times; one drifting
+        key would have broken a consumer on one path only."""
+        from app.services.vlm import _empty_read
+        expected = set(_res().keys())
+        self.assertEqual(set(_empty_read().keys()), expected)
+        tagged = VLMRouter._empty("probe", error="X")
+        self.assertEqual(tagged["_provider"], "none")
+        self.assertEqual(tagged["_route"], {"reason": "probe", "error": "X"})
+        self.assertEqual(set(tagged) - {"_provider", "_route"}, expected)
+        self.assertIsNot(_empty_read(), _empty_read())   # fresh dict each call
+

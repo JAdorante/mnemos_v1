@@ -245,6 +245,10 @@ class PeoplePipelineTests(unittest.TestCase):
         self.assertFalse(gate["allow"])
 
     def test_create_new_on_high_relevance(self):
+        """A first mention mints a CANDIDATE, whatever its relevance. Candidate
+        is the only state the person adjudicator reviews and ambient cleanup
+        may hide, and it is below the agent's contact gate — one overheard
+        sentence must clear none of those on its own."""
         res = pp.resolve_person_mention(
             "Avery Quinn", store=self.store, event_id=7,
             event_source="audio.whisper",
@@ -254,6 +258,49 @@ class PeoplePipelineTests(unittest.TestCase):
         self.assertIsNotNone(res.person_id)
         p = self.store.get_person(res.person_id)
         self.assertEqual(p.get("promotion_state"), "candidate")
+        gate = pp.agent_may_use_contact(self.store, res.person_id, "email")
+        self.assertFalse(gate["allow"])
+        self.assertTrue(gate["reason"].startswith("promotion_state="), gate)
+
+    def test_a_minted_person_is_still_adjudicable(self):
+        """The regression that motivated this: promoting on mint made every
+        overheard name skip the adjudicator, which only reviews candidates."""
+        from app.services import person_adjudicator as adj
+        res = pp.resolve_person_mention(
+            "Avery Quinn", store=self.store, event_id=7,
+            event_source="audio.whisper",
+            text="Avery Quinn owns the launch checklist",
+            now=NOW, relationship_boost=0.85)
+        p = self.store.get_person(res.person_id)
+        self.assertTrue(adj._eligible(p, self_pid=None, open_work=set()))
+
+    def test_promotion_is_earned_one_step_per_conclusive_resolve(self):
+        """Repeated conclusive resolves climb candidate -> recognized -> active,
+        one rung per resolve. `_bump_promotion` used to fall through both
+        branches in a single call."""
+        first = pp.resolve_person_mention(
+            "Avery Quinn", store=self.store, event_id=7,
+            event_source="audio.whisper",
+            text="Avery Quinn owns the launch checklist",
+            now=NOW, relationship_boost=0.85)
+        states = [self.store.get_person(first.person_id)["promotion_state"]]
+        for i in (8, 9):
+            again = pp.resolve_person_mention(
+                "Avery Quinn", store=self.store, event_id=i,
+                event_source="audio.whisper",
+                text="Avery Quinn will send the checklist Monday",
+                now=NOW + 60 * i, relationship_boost=0.85)
+            self.assertEqual(again.decision, "auto_resolve")
+            self.assertEqual(again.person_id, first.person_id)
+            states.append(self.store.get_person(first.person_id)["promotion_state"])
+        self.assertEqual(states, ["candidate", "recognized", "active"])
+
+    def test_bump_is_one_step_per_call(self):
+        pid = self.store.insert_person("Pat", ts=NOW, promotion_state="candidate")
+        pp._bump_promotion(self.store, pid, 0.99, NOW)
+        self.assertEqual(self.store.get_person(pid)["promotion_state"], "recognized")
+        pp._bump_promotion(self.store, pid, 0.99, NOW)
+        self.assertEqual(self.store.get_person(pid)["promotion_state"], "active")
 
     def test_single_token_does_not_create_new(self):
         before = {p["name"] for p in self.store.all_people()}

@@ -515,10 +515,13 @@ def resolve_person_mention(
             decision, chosen = "leave_open", None
         if chosen is not None and mint_name.lower() != display.lower():
             store.touch_person(chosen, ts, alias=display)
-        if chosen is not None and policy.create_person_candidates:
-            # User-asserted / allowed sources earn recognition immediately so
-            # the People tab (which hides candidates by default) shows them.
-            _bump_promotion(store, chosen, relevance, ts)
+        # Deliberately NO promotion on a mint. A first mention stays a
+        # `candidate` because that is the only state the person adjudicator
+        # reviews and ambient cleanup may hide — promoting here skipped both
+        # forever for every overheard name ("speech-act / brand junk often got
+        # auto-promoted to 'recognized'", per ambient_cleanup). The People tab
+        # hiding candidates is a tab concern (`include_candidates`), not a
+        # reason to hand out promotion state.
         if chosen is not None and mint_email:
             try:
                 store.upsert_contact_point(
@@ -836,11 +839,15 @@ def _bump_promotion(store, person_id: int, relevance: float, ts: float) -> None:
     state = p.get("promotion_state") or "candidate"
     if state in ("trusted", "archived", "rejected"):
         return
-    # Commitment/task ownership or repeated resolve → active
+    # One step per call, never two. `candidate -> recognized` is what a first
+    # strong mention earns: visible in the People tab, still not contactable.
+    # `recognized -> active` unlocks the agent's contact gate, and that takes
+    # a SECOND conclusive resolve — this used to fall through both branches in
+    # one call, so a single overheard sentence at relevance 0.85 made someone
+    # contactable on the spot.
     if state == "candidate" and relevance >= 0.7:
         store.set_person_promotion(person_id, "recognized", ts)
-        state = "recognized"
-    if state == "recognized" and relevance >= 0.85:
+    elif state == "recognized" and relevance >= 0.85:
         store.set_person_promotion(person_id, "active", ts)
 
 

@@ -105,12 +105,19 @@ def _extract_ideas_enabled() -> bool:
 
 
 def effective_prompt_version() -> str:
-    """Prompt version actually stamped on candidates: the context prior is a
-    prompt change, so enabled builds report `extract-v2-ctx` (goldens/replay
-    can pin which prompt produced the output)."""
+    """Prompt version actually stamped on candidates. The context prior is a
+    prompt change (a whole block appears in `_SYSTEM` when it is on), so an
+    enabled build stamps `<base>-ctx` — goldens/replay can then pin which
+    prompt produced the output.
+
+    Suffix, not a hardcoded successor: the first version of this mapped
+    `extract-v1` -> `extract-v2-ctx` and nothing else, so the bump to v3 made
+    context-on and context-off stamp the same string for ten days — the exact
+    ambiguity the stamp exists to prevent, and no test noticed because the
+    tests pinned the literals too."""
     v = EXTRACT_PROMPT_VERSION
-    if _extract_context_enabled() and v == "extract-v1":
-        return "extract-v2-ctx"
+    if _extract_context_enabled():
+        return f"{v}-ctx"
     return v
 
 

@@ -100,12 +100,27 @@ class ContextPriorTests(unittest.TestCase):
 
     # ---------------------------- versions --------------------------------
     def test_version_stamping(self):
+        """The context prior changes the prompt, so it must change the stamp —
+        for ANY base version. Pinned as a property, not literals: the literal
+        form (`extract-v1` -> `extract-v2-ctx`) let the v3 bump silently make
+        context-on and context-off stamp the same string."""
+        from app.services.extractor import EXTRACT_PROMPT_VERSION as base
         with patch.dict(os.environ, CTX_OFF):
-            self.assertEqual(effective_prompt_version(), "extract-v1")
+            off = effective_prompt_version()
         with patch.dict(os.environ, CTX_ON):
-            self.assertEqual(effective_prompt_version(), "extract-v2-ctx")
+            on = effective_prompt_version()
+        self.assertEqual(off, base)
+        self.assertEqual(on, f"{base}-ctx")
+        self.assertNotEqual(on, off)
         with patch.dict(os.environ, {"QUILL_EXTRACT_IDEAS": "1"}):
             self.assertEqual(effective_schema_version(), "facts-schema-v4")
+
+    def test_ctx_stamp_survives_a_base_version_bump(self):
+        """The regression itself: bump the base and the suffix must follow."""
+        from app.services import extractor as ex
+        with patch.object(ex, "EXTRACT_PROMPT_VERSION", "extract-v99"), \
+                patch.dict(os.environ, CTX_ON):
+            self.assertEqual(effective_prompt_version(), "extract-v99-ctx")
 
     def test_candidate_rows_carry_effective_version(self):
         turn = self._turn()
@@ -118,7 +133,9 @@ class ContextPriorTests(unittest.TestCase):
             self.ex._persist(turn, facts, NOW)
         rows = self.store.list_fact_candidates(turn_hash=turn_hash(turn))
         self.assertTrue(rows)
-        self.assertEqual(rows[0]["prompt_version"], "extract-v2-ctx")
+        with patch.dict(os.environ, CTX_ON):
+            self.assertEqual(rows[0]["prompt_version"], effective_prompt_version())
+        self.assertTrue(rows[0]["prompt_version"].endswith("-ctx"))
 
     # ---------------------------- observational ---------------------------
     def test_anchors_stamped_with_flag_off(self):

@@ -59,10 +59,22 @@ class CurationSourceTests(unittest.TestCase):
         self.assertEqual(stats["train_pairs"], 3)
         # Edits count double via upweighting (E.1).
         self.assertEqual(stats["train_examples_weighted"], 4)
-        # Targets survive as gold through the adapter.
-        golds = {ex["target"] for ex in stats["train"]}
+        # Targets survive as gold through the adapter — wearing the
+        # `CONFIDENCE: 0.NN` trailer `ollama_text.training_contract` adds on
+        # purpose: pairs trained without it taught the adapter to omit the
+        # trailer at inference, every answer parsed as "unsure", and all of
+        # them auto-escalated (the Aug 18 bench regression). So the content
+        # is checked stripped, and the trailer's presence is checked too.
+        from app.services.ollama_text import split_confidence
+        golds = {}
+        for ex in stats["train"]:
+            text, conf = split_confidence(ex["target"])
+            golds[text] = conf
         self.assertIn("Send deck number 1 to Sarah Kane", golds)
         self.assertIn("Send deck number 3 to Sarah Kane", golds)
+        self.assertTrue(all(c is not None for c in golds.values()),
+                        "a gold without a parseable trailer re-teaches the "
+                        f"Aug 18 regression: {golds}")
 
     def test_distill_join_wins_over_synth(self) -> None:
         import json
