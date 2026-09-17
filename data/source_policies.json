@@ -1,5 +1,5 @@
 {
-  "version": "1.6",
+  "version": "1.7",
   "classes": {
     "private_conversation": {
       "extract_mentions": true,
@@ -249,6 +249,50 @@
       "relationship_evidence": false,
       "extract_contacts": false,
       "create_commitments": true,
+      "create_claims": true,
+      "update_people": false,
+      "identity_evidence": false,
+      "knowledge_entities": true
+    },
+    "connector_mail": {
+      "extract_mentions": true,
+      "create_person_candidates": true,
+      "relationship_evidence": true,
+      "extract_contacts": true,
+      "create_commitments": true,
+      "create_claims": true,
+      "update_people": false,
+      "identity_evidence": false,
+      "knowledge_entities": true
+    },
+    "connector_calendar": {
+      "extract_mentions": true,
+      "create_person_candidates": true,
+      "relationship_evidence": true,
+      "extract_contacts": false,
+      "create_commitments": true,
+      "create_claims": true,
+      "update_people": false,
+      "identity_evidence": false,
+      "knowledge_entities": true
+    },
+    "connector_item": {
+      "extract_mentions": true,
+      "create_person_candidates": true,
+      "relationship_evidence": true,
+      "extract_contacts": false,
+      "create_commitments": true,
+      "create_claims": true,
+      "update_people": false,
+      "identity_evidence": false,
+      "knowledge_entities": true
+    },
+    "agent_fetch": {
+      "extract_mentions": true,
+      "create_person_candidates": false,
+      "relationship_evidence": false,
+      "extract_contacts": false,
+      "create_commitments": false,
       "create_claims": true,
       "update_people": false,
       "identity_evidence": false,

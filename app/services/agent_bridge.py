@@ -206,6 +206,48 @@ def _is_plain_verdict(text: str) -> bool | None:
     return None
 
 
+_FULFILLMENT_WORDS = {
+    "deliver": "deliver", "send": "deliver", "send it": "deliver",
+    "deliver it": "deliver", "yes deliver": "deliver",
+    "not it": "not it", "nope": "not it", "wrong": "not it", "not that": "not it",
+    "not yet": "not yet", "later": "not yet",
+    "undo": "undo", "stop": "undo", "cancel": "undo",
+    "search": "search", "a": "search", "option a": "search", "look": "search",
+    "source": "source", "b": "source", "option b": "source", "navigate": "source",
+    "open": "source", "salesforce": "source", "mail": "source", "drive": "source",
+    "team": "team", "c": "team", "option c": "team", "ask team": "team",
+    "ask the team": "team", "#team": "team",
+    "slot": "slot", "d": "slot", "leave a slot": "slot", "leave slot open": "slot",
+    "keep watching": "slot", "watch": "slot", "keep": "slot",
+}
+
+
+def _fulfillment_choice(text: str, kind: str, choices: list[str]) -> str | None:
+    """Map a short reply onto one of an offer's choices, or None."""
+    t = (text or "").strip().lower().rstrip(".!")
+    if not t or len(t) > 40:
+        return None
+    word = _FULFILLMENT_WORDS.get(t)
+    if word is None:
+        for k, v in _FULFILLMENT_WORDS.items():
+            if len(k) > 3 and t.startswith(k):
+                word = v
+                break
+    if word is None:
+        return None
+    if kind == "task_question":
+        return word if word in ("not yet",) else None
+    if kind == "slot_fill":
+        return word if word in ("deliver", "not it") else None
+    if kind == "slot_undo":
+        return word if word == "undo" else None
+    if kind == "slot_create":
+        return "yes" if word in ("slot", "deliver") else None
+    if kind == "peer_null_options":
+        return word if word in choices else None
+    return None
+
+
 _EMAILISH_GOAL = re.compile(
     r"\b(email|e-mail|gmail|draft|compose|send)\b|"
     r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
@@ -544,7 +586,8 @@ class AgentWorker:
     # --- emit / state ------------------------------------------------------
     def _emit(self, kind: str, text: str, *, distill_id: str | None = None,
               sources: list | None = None, packet: dict | None = None,
-              context: str | None = None, question: str | None = None) -> None:
+              context: str | None = None, question: str | None = None,
+              stream: dict | None = None) -> None:
         # Deterministic answer-check (plan 3.2) before compile — may rewrite text.
         check_meta = None
         if kind == "result" and (context or "").strip():
@@ -561,6 +604,12 @@ class AgentWorker:
                 check_meta = None
         with self.lock:
             ev: dict = {"id": self.next_id, "kind": kind, "text": text}
+            # Typed chat-stream message (task.completed, task.question,
+            # slot.fill_offer, peer.null_options, connector.salient_item…):
+            # carries task_id + the action set so the UI renders buttons
+            # without a second call.
+            if stream:
+                ev["stream"] = dict(stream)
             if distill_id:
                 ev["distill_id"] = distill_id
             if sources:
@@ -825,7 +874,7 @@ class AgentWorker:
             if nxt is None:
                 return False
             self.pending_todo = nxt
-        self._emit("ask", nxt["message"])
+        self._emit("ask", nxt["message"], stream=nxt.get("stream"))
         return True
 
     def _add_offer(self, offer: dict) -> bool:
@@ -846,7 +895,7 @@ class AgentWorker:
                 self.pending_todo = offer
                 shown = True
         if shown:
-            self._emit("ask", offer["message"])
+            self._emit("ask", offer["message"], stream=offer.get("stream"))
         # Attention ledger (P0 exit: field/grounding/offers): every surfaced or
         # queued interruption is an impression — accept/dismiss closes it later.
         try:
@@ -901,6 +950,18 @@ class AgentWorker:
         if kind == "homework":
             label = title or "homework problem"
             return f"Waiting: yes/no for homework help — {label}"
+        if kind == "task_question":
+            return f"Waiting: yes / not yet — {title or 'is this done?'}"
+        if kind == "slot_fill":
+            who = (pend.get("requester") or {}).get("name") or "you"
+            return f"Waiting: deliver to {who} / not it — {title or 'a match'}"
+        if kind == "slot_undo":
+            return f"Waiting: 'undo' stops the pre-approved delivery — {title}"
+        if kind == "slot_create":
+            return f"Waiting: yes/no to keep watching for — {title}"
+        if kind == "peer_null_options":
+            who = (pend.get("peer_name") or "").strip() or "a teammate"
+            return f"Waiting: search / source / team / slot for {who}'s ask"
         n = len(items)
         label = title or "to-do list"
         return f"Waiting: yes/no for {label} ({n} item{'s' if n != 1 else ''})"
@@ -977,7 +1038,7 @@ class AgentWorker:
                 f"Offer expired after {_OFFER_TTL_S:.0f}s — type a new request anytime.",
             )
         if nxt is not None:
-            self._emit("ask", nxt["message"])
+            self._emit("ask", nxt["message"], stream=nxt.get("stream"))
         return dropped
 
     def _record_offer_timeout(self, pend: dict) -> None:
@@ -1280,6 +1341,123 @@ class AgentWorker:
             "deliverable_only": True,
         })
 
+    # --- connector capture & task fulfillment offers (2026-09) -------------
+    def propose_task_question(self, candidate: dict) -> bool:
+        """Feature 2.4 — ONE yes/no when completion evidence is weak."""
+        q = (candidate.get("question") or "").strip() or "Is this done?"
+        fid = candidate.get("fact_id")
+        return self._add_offer({
+            "items": [candidate.get("text") or ""],
+            "title": (candidate.get("text") or "")[:80],
+            "message": f"{q}\n\nReply 'yes' to mark it done, or 'not yet' to leave it open.",
+            "kind": "task_question",
+            "fact_id": fid,
+            "event_id": candidate.get("event_id"),
+            "choices": ["yes", "not yet"],
+            "deliverable_only": True,
+            "stream": {"type": "task.question", "task_id": fid,
+                       "actions": [{"label": "Yes", "reply": "yes"},
+                                   {"label": "Not yet", "reply": "not yet"}]},
+        })
+
+    def propose_slot_fill(self, candidate: dict) -> bool:
+        """Feature 3.4 — a candidate fill is an offer: Deliver / Not it."""
+        req = candidate.get("requester") or {}
+        who = req.get("name") if req.get("kind") == "peer" else "you"
+        fid = candidate.get("fact_id")
+        return self._add_offer({
+            "items": [candidate.get("need") or ""],
+            "title": (candidate.get("need") or "")[:80],
+            "message": candidate.get("message") or "Deliver this?",
+            "kind": "slot_fill",
+            "fact_id": fid,
+            "event_id": candidate.get("event_id"),
+            "requester": req,
+            "score": candidate.get("score"),
+            "choices": ["deliver", "not it"],
+            "deliverable_only": True,
+            "stream": {"type": "slot.fill_offer", "task_id": fid,
+                       "event_id": candidate.get("event_id"),
+                       "actions": [{"label": f"Deliver to {who or 'them'}",
+                                    "reply": "deliver"},
+                                   {"label": "Not it", "reply": "not it"}]},
+        })
+
+    def propose_slot_undo(self, candidate: dict) -> bool:
+        """Pre-approved delivery: the offer is the undo window."""
+        fid = candidate.get("fact_id")
+        return self._add_offer({
+            "items": [candidate.get("need") or ""],
+            "title": (candidate.get("need") or "")[:80],
+            "message": (f"Delivering the {candidate.get('need') or 'match'} "
+                        "shortly — reply 'undo' to stop."),
+            "kind": "slot_undo",
+            "fact_id": fid,
+            "event_id": candidate.get("event_id"),
+            "choices": ["undo"],
+            "deliverable_only": True,
+            "stream": {"type": "slot.fill_offer", "task_id": fid, "auto": True,
+                       "actions": [{"label": "Undo", "reply": "undo"}]},
+        })
+
+    def propose_slot_create(self, candidate: dict) -> bool:
+        """Feature 3.1 — nothing watches without consent."""
+        need = (candidate.get("need") or "").strip()
+        who = candidate.get("requester_name") or "you"
+        return self._add_offer({
+            "items": [need],
+            "title": need[:80],
+            "message": (candidate.get("message") or
+                        f"I don't have the {need} yet. Keep an eye out for it "
+                        f"and deliver it to {who} when it shows up?\n\n"
+                        "Reply 'yes' to keep watching, or 'no' to leave it."),
+            "kind": "slot_create",
+            "slot": dict(candidate),
+            "choices": ["yes", "no"],
+            "deliverable_only": True,
+            "stream": {"type": "slot.offer", "need": need,
+                       "actions": [{"label": "Keep watching", "reply": "yes"},
+                                   {"label": "No", "reply": "no"}]},
+        })
+
+    def propose_peer_null_options(self, candidate: dict) -> bool:
+        """Feature 4.2 — a null peer ask is a decision, not a dead end."""
+        who = candidate.get("peer_name") or "A teammate"
+        need = candidate.get("need") or candidate.get("question") or ""
+        options = candidate.get("options") or ["search", "source", "team", "slot"]
+        lines = []
+        if "search" in options:
+            lines.append("• 'search' — look through memory and connected sources")
+        if "source" in options:
+            lines.append("• 'source' — open the app that holds it (approval first)")
+        if "team" in options:
+            lines.append("• 'team' — ask #team")
+        if "slot" in options:
+            lines.append("• 'slot' — leave a slot open and deliver it when it arrives")
+        msg = (f"{who}'s Sparrow asked about the {need} and I have nothing on it. "
+               "What should I do?\n" + "\n".join(lines) + "\n(or 'no' to leave it)")
+        labels = {"search": "Search", "source": "Open source", "team": "Ask team",
+                  "slot": "Leave slot open"}
+        return self._add_offer({
+            "items": [need],
+            "title": need[:80],
+            "message": msg,
+            "kind": "peer_null_options",
+            "peer_id": candidate.get("peer_id"),
+            "peer_name": who,
+            "ask_id": candidate.get("ask_id"),
+            "need": need,
+            "question": candidate.get("question"),
+            "origin_id": candidate.get("origin_id"),
+            "hop": candidate.get("hop"),
+            "options": list(options),
+            "choices": list(options),
+            "deliverable_only": True,
+            "stream": {"type": "peer.null_options", "ask_id": candidate.get("ask_id"),
+                       "actions": [{"label": labels[o], "reply": o}
+                                   for o in options if o in labels]},
+        })
+
     def propose_meeting_record(self, event: dict) -> bool:
         """First-class MeetingSession consent: skip / transcript / receipts."""
         title = (event.get("title") or "Meeting").strip()
@@ -1528,6 +1706,90 @@ class AgentWorker:
         self._advance_offers()
         return {"ok": True, "accepted": True, "created": bool(res.get("ok"))}
 
+    def _resolve_fulfillment(self, pend: dict, accept: bool,
+                             choice: str | None) -> dict:
+        """Yes/no/choice for the task-fulfillment offers. The durable state
+        lives in the store, so an expired chat offer loses nothing — the
+        Tasks board carries the same buttons."""
+        from app.storage import get_store
+        kind = pend.get("kind") or ""
+        fid = pend.get("fact_id")
+        ch = (choice or "").strip().lower()
+        store = get_store()
+        out: dict = {"ok": True, "accepted": bool(accept), "kind": kind}
+        try:
+            if kind == "task_question":
+                from app.services import task_completion as _tc
+                done = accept and ch not in ("not yet", "no", "later")
+                res = _tc.answer(store, int(fid), bool(done))
+                self._emit("system", "Okay — marked done." if done
+                           else "Okay — I'll keep it open.")
+                out.update(res)
+            elif kind == "slot_fill":
+                from app.services import slots as _slots
+                if accept and ch not in ("not it", "no", "reject"):
+                    res = _slots.deliver(store, int(fid), int(pend["event_id"]))
+                    if res.get("ok"):
+                        st = res.get("status")
+                        who = (pend.get("requester") or {}).get("name") or "you"
+                        self._emit("system",
+                                   f"Delivered to {who}." if st == "delivered"
+                                   else f"Kept locally — not sent ({st}).")
+                    else:
+                        self._emit("error", f"Couldn't deliver: {res.get('error')}")
+                    out.update(res)
+                else:
+                    res = _slots.reject_fill(store, int(fid), int(pend["event_id"]))
+                    self._emit("system", "Not it — still watching.")
+                    out.update(res)
+            elif kind == "slot_undo":
+                from app.services import slots as _slots
+                if (not accept) or ch in ("undo", "stop", "cancel"):
+                    stopped = _slots.undo(int(fid))
+                    self._emit("system", "Stopped — not delivered." if stopped
+                               else "Too late — it was already delivered.")
+                    out.update({"undone": stopped})
+                else:
+                    out.update({"undone": False})
+            elif kind == "slot_create":
+                from app.services import slots as _slots
+                cand = pend.get("slot") or {}
+                if accept:
+                    sid = _slots.create(
+                        store, cand.get("need") or "",
+                        requester=cand.get("requester"),
+                        created_from=cand.get("created_from"),
+                        counterparty=cand.get("counterparty"),
+                        deliver_on_fill=bool(cand.get("deliver_on_fill")),
+                        origin_id=cand.get("origin_id"),
+                        team_slug=cand.get("team_slug"))
+                    self._emit("system",
+                               f"Watching for the {cand.get('need')} — I'll offer "
+                               "it the moment it shows up." if sid else
+                               "That thread was declined earlier — not watching.")
+                    out.update({"fact_id": sid, "status": "awaiting_data" if sid
+                                else "declined"})
+                    if sid and cand.get("ask_id") and cand.get("peer_id"):
+                        try:
+                            from app.services import peer_channel
+                            peer_channel.note_slot_offered(
+                                cand["peer_id"], cand["ask_id"], sid)
+                        except Exception:
+                            pass
+                else:
+                    self._emit("system", "Okay — not watching for that.")
+            elif kind == "peer_null_options":
+                from app.services import peer_channel
+                opt = ch if ch in (pend.get("options") or []) else (
+                    None if not accept else "slot")
+                res = peer_channel.resolve_null_option(pend, opt)
+                out.update(res)
+        except Exception as exc:
+            self._emit("error", f"Couldn't apply that: {exc}")
+            out.update({"ok": False, "error": str(exc)})
+        self._advance_offers()
+        return out
+
     def resolve_todo(self, accept: bool, choice: str | None = None) -> dict:
         with self.lock:
             pend = self.pending_todo
@@ -1538,6 +1800,9 @@ class AgentWorker:
             return self._resolve_calendar(pend, accept)
         if pend.get("kind") == "peer_tell":
             return self._resolve_peer_tell(pend, accept)
+        if pend.get("kind") in ("task_question", "slot_fill", "slot_undo",
+                                "slot_create", "peer_null_options"):
+            return self._resolve_fulfillment(pend, accept, choice)
         if pend.get("kind") in ("meeting_record", "meeting_mode"):
             if choice:
                 from app.services import meeting_session as _ms
@@ -1836,6 +2101,16 @@ class AgentWorker:
             return {"ok": True, "routed": "agent_answer"}
 
         if has_todo:
+            with self.lock:
+                pkind = (self.pending_todo or {}).get("kind") or ""
+                pchoices = list((self.pending_todo or {}).get("choices") or [])
+            if pkind in ("task_question", "slot_fill", "slot_undo",
+                         "slot_create", "peer_null_options"):
+                ch = _fulfillment_choice(text, pkind, pchoices)
+                if ch is not None:
+                    accept = ch not in ("not it", "not yet", "no", "undo")
+                    return {"routed": "todo",
+                            **self.resolve_todo(accept, choice=ch)}
             if verdict is True:
                 return {"routed": "todo", **self.resolve_todo(True)}
             if verdict is False:
@@ -1919,6 +2194,12 @@ class AgentWorker:
                 "error": self.error,
                 "next": self.next_id,
                 "todo_pending": self.pending_todo is not None,
+                "offer": ({"kind": self.pending_todo.get("kind"),
+                           "fact_id": self.pending_todo.get("fact_id"),
+                           "choices": list(self.pending_todo.get("choices") or []),
+                           "actions": list((self.pending_todo.get("stream") or {})
+                                           .get("actions") or [])}
+                          if self.pending_todo is not None else None),
                 "waiting_on": waiting_on,
                 "mode": (mode.label if mode else None),
                 "study_mode": (study.get("label") if isinstance(study, dict)
@@ -1934,7 +2215,8 @@ class AgentWorker:
              surface: str | None = None, fact_id: int | None = None,
              display: str | None = None,
              study_mode: str | None = None,
-             source_fact_ids: list[int] | None = None) -> None:
+             source_fact_ids: list[int] | None = None,
+             fetch: dict | None = None) -> None:
         """Enqueue a goal. `text` is what the agent runs; `display` (optional)
         is what the chat UI shows as the user bubble — used when Add context
         merged notes into `text` but the bubble should stay short.
@@ -2002,13 +2284,19 @@ class AgentWorker:
                 study_mode = _smode.current()["id"]
             except Exception:
                 study_mode = None
+        if fetch:
+            # Option B (spec F4.3): a source-navigation goal is one browser
+            # task under the approval gate; never planned or fanned out. Its
+            # result lands as a DOCUMENT event (source=agent.fetch).
+            resolved, plan, multi = None, False, False
         cmd = {"type": "goal", "text": text, "dry_run": dry_run,
                "surface": resolved,
                "plan": plan,
                "fact_id": fact_id, "multi": multi,
                "display": (display if display is not None else text),
                "study_mode": study_mode,
-               "source_fact_ids": fids}
+               "source_fact_ids": fids,
+               "fetch": (dict(fetch) if fetch else None)}
         if resolved in ("desktop", "phone_link"):
             self.fast_q.put(cmd)
         else:
@@ -2070,6 +2358,15 @@ class AgentWorker:
         self._emit("result", result or f"(no answer — {status})",
                    distill_id=distill_id,
                    sources=sources, context=None, question=question)
+        if cmd.get("fetch"):
+            try:
+                from app.services import slots as _slots
+                eid = _slots.land_fetch_result(cmd["fetch"], result or "", status)
+                if eid:
+                    self._emit("progress", f"[fetch] landed as event {eid}")
+            except Exception as exc:
+                print(f"[slots] fetch landing skipped ({exc}).")
+            return result or "", status
         self._maybe_research_ingest(
             result or "", status, agent=self.agent,
             question=cmd.get("display") or cmd.get("text"))

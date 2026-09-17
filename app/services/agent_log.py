@@ -197,3 +197,31 @@ class Recorder:
                 self._s().record_agent_steps(self.current_run_id, steps)
         except Exception as exc:
             print(f"[agent-log] record_steps skipped ({exc}).")
+
+
+# --- peer / slot audit (connector capture & task fulfillment spec, F4.7) -----
+def audit(event: str, *, peer_ids: list[str] | None = None,
+          ask_id: str | None = None, status: str = "done",
+          store=None, **fields) -> int | None:
+    """Every ask, null, fan-out, and delivery writes an agent_runs row with
+    the peer ids, so the egress view can show exactly what left the machine
+    and to whom. Best-effort; never raises."""
+    try:
+        import json as _json
+        if store is None:
+            from app.storage import get_store
+            store = get_store()
+        goal = f"peer:{event}"
+        if ask_id:
+            goal += f" ask={ask_id}"
+        if peer_ids:
+            goal += " peers=" + ",".join(str(p) for p in peer_ids)
+        if fields:
+            goal += " " + _json.dumps(fields, default=str, sort_keys=True)[:400]
+        rid = store.start_agent_run(goal[:600], agent_type="peer",
+                                    surface="peer", intent=event)
+        store.finish_agent_run(rid, status=status)
+        return rid
+    except Exception as exc:
+        print(f"[agent-log] audit {event} skipped ({exc}).")
+        return None

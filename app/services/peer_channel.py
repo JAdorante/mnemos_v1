@@ -71,6 +71,7 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 import re
 import secrets
 import socket
@@ -730,6 +731,675 @@ def _publish_event(source: str, text: str, meta: dict, tier=None) -> None:
         print(f"[peer] event publish skipped ({exc}).")
 
 
+# --- typed null results, receiver options, fills (spec F3/F4, 2026-09) ------
+NULL_REASONS = ("no_memory", "policy_denied", "offline")
+MAX_HOP = int(os.environ.get("QUILL_PEER_MAX_HOP", "1"))
+NULL_OPTIONS = ("search", "source", "team", "slot")
+
+
+def null_result(reason: str, *, slot_offered: bool = False) -> dict:
+    """The wire shape for a miss that is NOT a denial:
+    {reason: no_memory | policy_denied | offline, slot_offered: bool}."""
+    r = (reason or "").strip().lower()
+    if r not in NULL_REASONS:
+        raise ValueError(f"unknown null reason {reason!r}")
+    return {"reason": r, "slot_offered": bool(slot_offered)}
+
+
+def _sanitize_null(raw) -> dict:
+    if not isinstance(raw, dict):
+        return null_result("no_memory")
+    reason = str(raw.get("reason") or "no_memory").strip().lower()
+    if reason not in NULL_REASONS:
+        reason = "no_memory"
+    return null_result(reason, slot_offered=bool(raw.get("slot_offered")))
+
+
+def audit(event: str, **fields) -> None:
+    try:
+        from app.services import agent_log
+        agent_log.audit(event, **fields)
+    except Exception:
+        pass
+
+
+def _origin_for(ask_id: str) -> str:
+    return ask_id
+
+
+def _format_null_chat(name: str, nr: dict, ask_id: str | None = None) -> str:
+    reason = nr.get("reason")
+    if reason == "policy_denied":
+        return (f"{name}'s Sparrow declined under their disclosure policy — "
+                "they have it or they don't, but it won't be shared.")
+    if reason == "offline":
+        return (f"{name}'s Sparrow isn't reachable — queued until they're "
+                "online. Waiting on them.")
+    tail = (" They've been offered to search, check the source, ask the "
+            "team, or keep a slot open — I'll show you what arrives."
+            if nr.get("slot_offered") else "")
+    return f"{name}'s Sparrow has nothing in memory on that.{tail}"
+
+
+def _in_meeting() -> bool:
+    try:
+        from app.services import meeting_mode
+        return bool(meeting_mode.status().get("active"))
+    except Exception:
+        return False
+
+
+def _offer_null_options(peer: dict, *, ask_id: str, question: str,
+                        origin_id: str | None, hop: int = 0,
+                        team_ask_id: str | None = None) -> bool:
+    """Receiver-side offer on no_memory: search / source / team / slot.
+    Each option is a tap; in meeting mode the offer is queued and surfaced
+    after the meeting ends. Returns whether an offer was posted or queued."""
+    try:
+        from app.services import slots as _slots
+        if not _slots.enabled():
+            return False
+        need = _slots.normalize_need(question)
+    except Exception:
+        return False
+    options = list(NULL_OPTIONS)
+    if hop >= MAX_HOP:
+        options.remove("team")   # a forwarded ask must not fan out again
+    cand = {"peer_id": peer.get("peer_id", ""), "peer_name": peer.get("name"),
+            "ask_id": ask_id, "question": question, "need": need,
+            "origin_id": origin_id or ask_id, "hop": hop,
+            "team_ask_id": team_ask_id, "options": options}
+    if _in_meeting():
+        with _lock:
+            deferred = _load(_deferred_path(), [])
+            deferred.append({**cand, "created_at": time.time()})
+            _save(_deferred_path(), deferred)
+        return True
+    try:
+        from app.services.agent_bridge import worker
+        worker.propose_peer_null_options(cand)
+        return True
+    except Exception as exc:
+        print(f"[peer] null options offer skipped ({exc}).")
+        return False
+
+
+def _deferred_path() -> Path:
+    return _asks_path().with_name(_asks_path().stem + "_deferred.json")
+
+
+def deferred_null_offers() -> list[dict]:
+    with _lock:
+        return list(_load(_deferred_path(), []))
+
+
+def flush_deferred_null_offers() -> int:
+    """Post null-option offers held during meeting mode. Returns how many."""
+    if _in_meeting():
+        return 0
+    with _lock:
+        pending = _load(_deferred_path(), [])
+        if pending:
+            _save(_deferred_path(), [])
+    n = 0
+    for cand in pending:
+        try:
+            from app.services.agent_bridge import worker
+            worker.propose_peer_null_options(cand)
+            n += 1
+        except Exception as exc:
+            print(f"[peer] deferred null offer skipped ({exc}).")
+    return n
+
+
+def resolve_null_option(pend: dict, option: str | None) -> dict:
+    """The receiving human tapped one of the four options (or none)."""
+    from app.storage import get_store
+    store = get_store()
+    need = pend.get("need") or ""
+    peer_id = pend.get("peer_id") or ""
+    peer_name = pend.get("peer_name") or "your teammate"
+    ask_id = pend.get("ask_id")
+    origin_id = pend.get("origin_id") or ask_id
+    requester = {"kind": "peer", "id": peer_id, "name": peer_name,
+                 "ask_id": ask_id}
+    out: dict = {"option": option, "ask_id": ask_id}
+    if option is None:
+        _notify_chat(f"Okay — leaving {peer_name}'s question unanswered.")
+        audit("null_option", peer_ids=[peer_id], ask_id=ask_id, option="none")
+        return {**out, "ok": True}
+    from app.services import slots as _slots
+    audit("null_option", peer_ids=[peer_id], ask_id=ask_id, option=option)
+    if option == "search":
+        hits = _slots.search_assist(store, need)
+        if hits:
+            # A hit short-circuits: open a slot and score the hit against it
+            # so the normal Deliver / Not it offer appears.
+            sid = _slots.create(store, need, requester=requester,
+                                origin_id=origin_id, actor="user")
+            note_slot_offered(peer_id, ask_id, sid)
+            offered = 0
+            for h in hits[:3]:
+                if h.get("event_id") is None:
+                    continue
+                ev = store.get_event(int(h["event_id"]))
+                if ev and _slots.evaluate_event(store, int(h["event_id"]), ev):
+                    offered += 1
+            if offered:
+                return {**out, "ok": True, "hits": len(hits), "slot_id": sid,
+                        "offered": offered}
+            _notify_chat(f"I found {len(hits)} possible match(es) but none "
+                         f"scored high enough for the {need} — still watching.")
+            return {**out, "ok": True, "hits": len(hits), "slot_id": sid,
+                    "offered": 0}
+        # Miss within the bound: offer C + slot.
+        cand = {**pend, "options": [o for o in ("team", "slot")
+                                    if o in (pend.get("options") or [])]}
+        cand["options"] = cand["options"] or ["slot"]
+        try:
+            from app.services.agent_bridge import worker
+            worker.propose_peer_null_options(cand)
+        except Exception:
+            pass
+        _notify_chat(f"Nothing in memory or connected sources for the {need}.")
+        return {**out, "ok": True, "hits": 0, "reoffered": cand["options"]}
+    if option == "source":
+        sid = _slots.create(store, need, requester=requester,
+                            origin_id=origin_id, actor="user")
+        note_slot_offered(peer_id, ask_id, sid)
+        hint = _app_hint_for(need, pend.get("question") or "")
+        res = _slots.navigate_to_source(store, sid, app_hint=hint, need=need)
+        if res.get("ok"):
+            _notify_chat(f"Opening {hint or 'the source'} to fetch the {need} — "
+                         "I'll ask before anything is opened.")
+        return {**out, **res, "slot_id": sid}
+    if option == "team":
+        from app.services import team_layer
+        teams = team_layer.list_teams()
+        if not teams:
+            _notify_chat("You have no team yet — create one on /peer, or "
+                         "reply 'slot' to keep watching.")
+            return {**out, "ok": False, "error": "no team"}
+        slug = teams[0]["slug"]
+        res = team_layer.fanout_ask(
+            slug, pend.get("question") or need, "question",
+            hop=int(pend.get("hop") or 0) + 1, origin_id=origin_id,
+            exclude_peer_ids=[peer_id], on_behalf_of=requester)
+        if res.get("ok"):
+            _notify_chat(f"Asked the {res.get('team_name')} team on "
+                         f"{peer_name}'s behalf ({res.get('asked')} teammates).")
+        else:
+            _notify_chat(f"Couldn't ask the team ({res.get('error')}).")
+        return {**out, **res}
+    if option == "slot":
+        sid = _slots.create(store, need, requester=requester,
+                            origin_id=origin_id, actor="user")
+        note_slot_offered(peer_id, ask_id, sid)
+        _notify_chat(f"Watching for the {need} — I'll offer to send it to "
+                     f"{peer_name} when it shows up.")
+        return {**out, "ok": True, "slot_id": sid, "status": "awaiting_data"}
+    return {**out, "ok": False, "error": f"unknown option {option!r}"}
+
+
+def _app_hint_for(need: str, question: str) -> str | None:
+    blob = f"{need} {question}".lower()
+    if re.search(r"\b(salesforce|crm|opportunity|deal|quote|account)\b", blob):
+        return "salesforce"
+    if re.search(r"\b(mail|email|inbox|thread|message)\b", blob):
+        return "mail"
+    if re.search(r"\b(drive|doc|document|sheet|deck|slides|folder)\b", blob):
+        return "drive"
+    return None
+
+
+def note_slot_offered(peer_id: str, ask_id: str | None, slot_id: int) -> None:
+    """Remember which local slot serves which inbound ask (for updates)."""
+    if not ask_id:
+        return
+    with _lock:
+        asks = _load(_asks_path(), [])
+        found = False
+        for a in asks:
+            if a.get("ask_id") == ask_id and a.get("peer_id") == peer_id:
+                a["slot_id"] = int(slot_id)
+                found = True
+        if not found:
+            asks.append({"id": uuid.uuid4().hex[:12], "peer_id": peer_id,
+                         "ask_id": ask_id, "kind": "question",
+                         "status": "slot", "slot_id": int(slot_id),
+                         "created_at": time.time()})
+        _save_asks_partitioned(asks)
+
+
+def _handle_slot_request(peer: dict, payload: dict, *, ask_id: str,
+                         question: str, origin_id: str | None,
+                         team_ask_id: str | None, hop: int) -> dict:
+    """After an all-null fan-out the asker asks each member to hold a slot.
+    Auto-accept only under the team's policy; otherwise it is an offer."""
+    from app.services import slots as _slots
+    if not _slots.enabled():
+        return {"ok": True, "status": "declined", "ask_id": ask_id,
+                "response_kind": "slot_declined"}
+    peer_id = peer.get("peer_id", "")
+    name = peer.get("name") or "a teammate"
+    need = _slots.normalize_need(question)
+    requester = {"kind": "peer", "id": peer_id, "name": name, "ask_id": ask_id}
+    auto = False
+    try:
+        from app.services import team_layer
+        auto = team_layer.auto_accept_slots_from(peer_id)
+    except Exception:
+        auto = False
+    if auto or settings.peer.auto_answer:
+        from app.storage import get_store
+        sid = _slots.create(get_store(), need, requester=requester,
+                            origin_id=origin_id or ask_id,
+                            team_slug=payload.get("team_slug"), actor="peer")
+        note_slot_offered(peer_id, ask_id, sid)
+        _notify_chat(f"Holding a slot for {name}: the {need} (team policy).")
+        audit("slot_request", peer_ids=[peer_id], ask_id=ask_id,
+              accepted=True, slot_id=sid)
+        return {"ok": True, "status": "answered", "ask_id": ask_id,
+                "answer": "slot held", "response_kind": "slot_offered",
+                "slot_id": sid}
+    try:
+        from app.services.agent_bridge import worker
+        worker.propose_slot_create({
+            "need": need, "requester": requester, "requester_name": name,
+            "origin_id": origin_id or ask_id, "peer_id": peer_id,
+            "ask_id": ask_id, "team_slug": payload.get("team_slug"),
+            "message": (f"{name} is waiting on the {need} and nobody on the "
+                        f"team had it. Keep an eye out and offer it to {name} "
+                        "when it shows up?\n\nReply 'yes' to keep watching, "
+                        "or 'no'.")})
+    except Exception as exc:
+        print(f"[peer] slot request offer skipped ({exc}).")
+    audit("slot_request", peer_ids=[peer_id], ask_id=ask_id, accepted=None)
+    return {"ok": True, "status": "pending", "ask_id": ask_id,
+            "response_kind": "slot_offered"}
+
+
+def _mint_waiting_row(peer_rec: dict, peer_id: str, ask_id: str,
+                      question: str, *, origin_id: str | None,
+                      team_ask_id: str | None) -> int:
+    from app.storage import get_store
+    from app.services import slots as _slots
+    name = peer_rec.get("name") or "a teammate"
+    store = get_store()
+    fid = store.add_commitment(
+        f"Waiting on {name}: {_slots.normalize_need(question)}",
+        extracted_at=time.time(), state="detected", task_kind="peer_ask",
+        counterparty_name=name, requester_kind="user",
+        slot={"need": _slots.normalize_need(question), "peer_ask_id": ask_id,
+              "peer_id": peer_id, "origin_id": origin_id,
+              "team_ask_id": team_ask_id, "waiting_on": name,
+              "asked_at": time.time()},
+        allow_declined_thread=True)
+    if fid:
+        store.transition_commitment(fid, "waiting", actor="user",
+                                    reason="peer_ask_sent")
+        try:
+            store.set_counterparty_expects(fid, True)
+        except Exception:
+            pass
+    return fid
+
+
+def _waiting_rows_for(ask_id: str | None = None,
+                      origin_id: str | None = None) -> list[dict]:
+    out = []
+    try:
+        from app.storage import get_store
+        rows = get_store().list_tasks(("open",))
+    except Exception:
+        return out
+    for r in rows:
+        if (r.get("task_kind") or "") != "peer_ask":
+            continue
+        slot = r.get("slot") or {}
+        if ask_id and slot.get("peer_ask_id") == ask_id:
+            out.append(r)
+        elif origin_id and not ask_id and slot.get("origin_id") == origin_id:
+            out.append(r)
+    return out
+
+
+def _settle_waiting_row(ask_id: str, *, status: str, answer: str | None = None,
+                        reason: str | None = None,
+                        evidence_event_id: int | None = None,
+                        origin_id: str | None = None) -> None:
+    """Best-effort bookkeeping on the asker's own board; a store hiccup
+    here must never break an answer that already arrived. A team fan-out
+    keeps ONE waiting row keyed by origin, so a fill settles that too."""
+    try:
+        from app.storage import get_store
+        store = get_store()
+    except Exception as exc:
+        print(f"[peer] waiting row settle skipped ({exc}).")
+        return
+    rows = _waiting_rows_for(ask_id=ask_id)
+    if origin_id and status == "answered":
+        seen = {int(r["fact_id"]) for r in rows}
+        rows += [r for r in _waiting_rows_for(origin_id=origin_id)
+                 if int(r["fact_id"]) not in seen]
+    for r in rows:
+        fid = int(r["fact_id"])
+        try:
+            if status == "answered":
+                store.transition_commitment(
+                    fid, "completed", actor="peer", reason="peer_answered",
+                    evidence={"source": "peer_answer", "ask_id": ask_id,
+                              "note": (answer or "")[:240],
+                              **({"evidence_event_id": int(evidence_event_id)}
+                                 if evidence_event_id else {})},
+                    evidence_id=evidence_event_id)
+            elif status == "declined":
+                store.transition_commitment(
+                    fid, "cancelled", actor="peer", reason=reason or "declined")
+            else:
+                # null / offline: still waiting on them (they may fill later).
+                store.set_counterparty_expects(fid, True)
+        except Exception as exc:
+            print(f"[peer] waiting row settle skipped ({exc}).")
+
+
+# --- outbound fill delivery (spec F3.5) ---------------------------------------------
+def deliver_fill(peer_id: str, slot_row: dict, event_row: dict) -> dict:
+    """Send a slot fill to the requesting peer as a peer.update, redacted
+    under OUR disclosure policy for THAT peer and the event's privacy_class.
+    A sensitive / never-send event fills the slot locally but is never
+    delivered; the requester gets policy_denied instead."""
+    from app.services import redact
+    with _lock:
+        registry = _load(_peers_path(), {})
+        peer_rec = registry.get(peer_id)
+    if peer_rec is None:
+        return {"ok": False, "error": "requesting peer no longer paired"}
+    slot = slot_row.get("slot") or {}
+    need = slot.get("need") or slot_row.get("text") or ""
+    req = slot.get("requester") or {}
+    ask_id = req.get("ask_id") or slot.get("origin_id")
+    try:
+        meta = json.loads(event_row.get("meta") or "{}")
+    except Exception:
+        meta = {}
+    privacy = str(meta.get("privacy_class") or "internal")
+    from app.services import privacy_class as _pc
+    denied_reason = None
+    if _pc.rank(privacy) >= _pc.rank(_pc.SENSITIVE):
+        denied_reason = f"privacy_class={privacy}"
+    else:
+        policy = get_policy(peer_id)
+        topic = classify_question(need) if not all(
+            a == "offer" for a in policy.values()) else None
+        if topic and policy.get(topic) == "deny":
+            denied_reason = f"policy denies {topic}"
+    if denied_reason:
+        outbound = {"ask_id": ask_id, "origin_id": slot.get("origin_id"),
+                    "slot_id": int(slot_row["fact_id"]),
+                    "response_kind": "null_result",
+                    "null_result": null_result("policy_denied")}
+        delivered = _deliver_update(peer_rec, outbound)
+        audit("fill_withheld", peer_ids=[peer_id], ask_id=ask_id,
+              reason=denied_reason, slot_id=int(slot_row["fact_id"]))
+        _egress("peer", peer_rec.get("name") or peer_id, privacy,
+                approving_action="user_tap", ok=False,
+                meta={"slot_id": int(slot_row["fact_id"]),
+                      "reason": denied_reason})
+        return {"ok": True, "status": "policy_denied", "delivered": delivered,
+                "reason": denied_reason}
+    text = " ".join(str(x) for x in (
+        meta.get("title") or "", event_row.get("summary") or "",
+        (event_row.get("raw") or "")[:1500]) if x).strip()
+    text = re.sub(r"\s+", " ", text)[: settings.peer.max_text_chars]
+    clean = redact.redact_text(text)
+    kinds = sorted(set(redact.scan(text)))
+    outbound = {"ask_id": ask_id, "origin_id": slot.get("origin_id"),
+                "slot_id": int(slot_row["fact_id"]), "need": need,
+                "answer": clean, "as_of": event_row.get("time"),
+                "response_kind": "fill", "redacted": kinds,
+                "source_kind": (event_row.get("source") or "").split(".")[0]}
+    delivered = _deliver_update(peer_rec, outbound)
+    audit("fill_delivered", peer_ids=[peer_id], ask_id=ask_id,
+          slot_id=int(slot_row["fact_id"]), delivered=delivered)
+    _egress("peer", peer_rec.get("name") or peer_id, privacy,
+            approving_action="user_tap", ok=delivered,
+            meta={"slot_id": int(slot_row["fact_id"]),
+                  "event_id": event_row.get("id")})
+    if not delivered:
+        return {"ok": False, "error": f"{peer_rec.get('name', 'peer')} unreachable",
+                "status": "undelivered"}
+    return {"ok": True, "status": "delivered", "delivered": True,
+            "redacted": kinds}
+
+
+def _deliver_update(peer_rec: dict, payload: dict) -> bool:
+    try:
+        res = _post_peer(peer_rec, "/peer/update", payload)
+        return bool(res.get("ok"))
+    except Exception as exc:
+        print(f"[peer] update delivery failed ({exc}).")
+        return False
+
+
+def _egress(kind: str, destination: str, privacy: str, *,
+            approving_action: str, ok: bool, meta: dict | None = None) -> None:
+    try:
+        from app.services.model_log import model_log
+        model_log.log_egress(kind=kind, destination=destination,
+                             privacy_class=privacy,
+                             approving_action=approving_action, ok=ok,
+                             meta=meta)
+    except Exception:
+        pass
+
+
+def handle_update(peer: dict, payload: dict) -> dict:
+    """Authenticated inbound peer.update: a fill for a slot a peer held on
+    OUR behalf (or a typed null when their policy withheld it). Refused
+    unless ask_id / origin_id matches an ask WE sent to THAT peer."""
+    if not isinstance(payload, dict):
+        return {"ok": False, "error": "body must be a JSON object"}
+    ask_id = str(payload.get("ask_id") or "").strip()[:64]
+    origin_id = str(payload.get("origin_id") or "").strip()[:64] or None
+    peer_id = peer.get("peer_id", "")
+    with _lock:
+        sent = _load(_sent_path(), [])
+        matches = [s for s in sent if s.get("peer_id") == peer_id and (
+            (ask_id and s.get("ask_id") == ask_id)
+            or (origin_id and s.get("origin_id") == origin_id))]
+    if not matches:
+        return {"ok": False, "error": "no matching ask"}
+    # A team fill answers the QUESTION the user asked; the slot_request row
+    # the member held for it settles alongside.
+    item = next((m for m in matches if m.get("kind") == "question"), matches[0])
+    matched_ids = {m.get("ask_id") for m in matches}
+    name = peer.get("name") or "A teammate"
+    _touch(peer_id, "answers")
+    if payload.get("response_kind") == "null_result":
+        nr = _sanitize_null(payload.get("null_result"))
+        for aid in matched_ids:
+            _update_sent(aid, "declined" if nr["reason"] == "policy_denied"
+                         else "null", None, null_result=nr)
+        _emit_peer_result(_format_null_chat(name, nr))
+        _settle_waiting_row(item["ask_id"], status="declined"
+                            if nr["reason"] == "policy_denied" else "null",
+                            reason=nr["reason"])
+        audit("update_received", peer_ids=[peer_id], ask_id=item["ask_id"],
+              kind="null_result", reason=nr["reason"])
+        return {"ok": True, "status": "recorded", "response_kind": "null_result"}
+    answer_text = str(payload.get("answer") or "").strip()
+    if not answer_text:
+        return {"ok": False, "error": "empty update"}
+    answer_text = answer_text[: settings.peer.max_text_chars]
+    origin = item.get("origin_id") or origin_id or item["ask_id"]
+    # Two fills within a minute: only the first delivers; the second is logged.
+    if item.get("status") == "answered" and item.get("fill_event_id"):
+        audit("update_duplicate", peer_ids=[peer_id], ask_id=item["ask_id"])
+        print(f"[peer] duplicate fill for {item['ask_id']} from {name} logged.")
+        return {"ok": True, "status": "already_resolved"}
+    asked_at = float(item.get("created_at") or time.time())
+    elapsed = max(0.0, time.time() - asked_at)
+    need = str(payload.get("need") or "")[:200]
+    ev_meta = {"peer_id": peer_id, "peer": name, "ask_id": item["ask_id"],
+               "origin_id": origin, "kind": "fill", "need": need,
+               "as_of": _coerce_as_of(payload.get("as_of")),
+               "elapsed_s": round(elapsed, 1), "never_authorizes": True}
+    eid = _land_update_event(name, answer_text, ev_meta)
+    with _lock:
+        sent = _load(_sent_path(), [])
+        for s_ in sent:
+            if s_.get("ask_id") not in matched_ids:
+                continue
+            s_["status"] = "answered"
+            s_["answered_at"] = time.time()
+            s_["fill_event_id"] = eid
+            s_["fill_at"] = time.time()
+            s_["as_of"] = ev_meta["as_of"]
+            if s_.get("ask_id") == item.get("ask_id"):
+                s_["response_kind"] = "fill"      # ONE fill row per delivery
+                s_["answer"] = answer_text
+            else:
+                s_["response_kind"] = "slot_filled"  # the member's slot settled
+        _save(_sent_path(), _trim_sent(sent))
+    _settle_waiting_row(item["ask_id"], status="answered", answer=answer_text,
+                        evidence_event_id=eid, origin_id=origin)
+    _emit_peer_result(
+        f"{name}'s Sparrow found the {need or 'thing'} you asked about "
+        f"({_fmt_elapsed(elapsed)} after the ask):\n\n{answer_text[:1200]}")
+    audit("update_received", peer_ids=[peer_id], ask_id=item["ask_id"],
+          kind="fill", event_id=eid, elapsed_s=round(elapsed, 1))
+    # Sibling slots elsewhere on the team close as cancelled (spec F4.5).
+    others = _sibling_holders(origin, except_peer_id=peer_id)
+    for pid in others:
+        try:
+            send_slot_resolved(pid, origin_id=origin, slot_id=None,
+                               reason=f"filled by {name}")
+        except Exception as exc:
+            print(f"[peer] slot_resolved to {pid} skipped ({exc}).")
+    try:
+        from app.services import team_layer
+        rollup = team_layer.maybe_rollup(item.get("team_ask_id"))
+        if rollup:
+            _notify_chat(rollup)
+    except Exception:
+        pass
+    return {"ok": True, "status": "recorded", "response_kind": "fill",
+            "event_id": eid, "siblings_notified": others}
+
+
+def _fmt_elapsed(seconds: float) -> str:
+    s = int(seconds)
+    h, rem = divmod(s, 3600)
+    m = rem // 60
+    if h:
+        return f"{h} h {m:02d} m"
+    if m:
+        return f"{m} m"
+    return f"{s} s"
+
+
+def _land_update_event(name: str, text: str, meta: dict) -> int | None:
+    """A delivered fill lands as observed-tier memory (source=peer.update)
+    with the peer's attribution in the text, like an ingested answer."""
+    try:
+        from app.storage import get_store
+        ev = Event(time=time.time(), modality=Modality.TEXT,
+                   raw=f"[from {name}'s Sparrow] {text}",
+                   summary=f"[peer.update] {text[:120]}", source="peer.update",
+                   meta={"origin": "peer", **meta})
+        _conf.attach(ev, _conf.OBSERVED)
+        store = get_store()
+        eid = store.insert(ev)
+        try:
+            from app.services.slots import index_if_bound
+            index_if_bound(store, eid, ev)
+        except Exception:
+            pass
+        return int(eid)
+    except Exception as exc:
+        print(f"[peer] update landing skipped ({exc}).")
+        return None
+
+
+def _sibling_holders(origin_id: str | None, *,
+                     except_peer_id: str | None = None) -> list[str]:
+    """Peers we asked (same origin) that may still hold a slot for us."""
+    if not origin_id:
+        return []
+    out: list[str] = []
+    for s_ in _load(_sent_path(), []):
+        if s_.get("origin_id") != origin_id:
+            continue
+        pid = s_.get("peer_id")
+        if not pid or pid == except_peer_id or pid in out:
+            continue
+        if s_.get("status") in ("null", "queued", "pending", "sent",
+                                "slot_held", "slot_pending") or \
+                s_.get("kind") == "slot_request":
+            out.append(pid)
+    return out
+
+
+def send_slot_resolved(peer_id: str, *, origin_id: str | None,
+                       slot_id: int | None, reason: str) -> dict:
+    """Tell a peer the slot they hold for us is resolved (filled elsewhere,
+    or erased). Carries the ids and a one-line reason — never the fill."""
+    with _lock:
+        registry = _load(_peers_path(), {})
+        peer_rec = registry.get(peer_id)
+    if peer_rec is None:
+        return {"ok": False, "error": "unknown peer"}
+    payload = {"origin_id": origin_id, "slot_id": slot_id,
+               "reason": (reason or "")[:120]}
+    try:
+        res = _post_peer(peer_rec, "/peer/slot-resolved", payload)
+    except Exception as exc:
+        audit("slot_resolved_sent", peer_ids=[peer_id], origin_id=origin_id,
+              ok=False, error=str(exc)[:80])
+        return {"ok": False, "error": str(exc)}
+    audit("slot_resolved_sent", peer_ids=[peer_id], origin_id=origin_id,
+          reason=reason, ok=bool(res.get("ok")))
+    return res
+
+
+def handle_slot_resolved(peer: dict, payload: dict) -> dict:
+    """Authenticated inbound: close our slots held for THAT peer under the
+    given origin (or slot id) as cancelled with the reason."""
+    if not isinstance(payload, dict):
+        return {"ok": False, "error": "body must be a JSON object"}
+    from app.storage import get_store
+    from app.services import slots as _slots
+    peer_id = peer.get("peer_id", "")
+    origin_id = str(payload.get("origin_id") or "").strip()[:64] or None
+    reason = str(payload.get("reason") or "resolved")[:120]
+    store = get_store()
+    closed: list[int] = []
+    for row in _slots.open_slots(store):
+        slot = row.get("slot") or {}
+        req = slot.get("requester") or {}
+        if req.get("kind") != "peer" or str(req.get("id") or "") != peer_id:
+            continue
+        if origin_id and slot.get("origin_id") != origin_id and \
+                req.get("ask_id") != origin_id:
+            continue
+        if payload.get("slot_id") is not None and not origin_id and \
+                int(payload["slot_id"]) != int(row["fact_id"]):
+            continue
+        try:
+            _slots.cancel(store, int(row["fact_id"]), actor="peer",
+                          reason=f"slot_resolved: {reason}")
+            closed.append(int(row["fact_id"]))
+        except Exception as exc:
+            print(f"[peer] slot close skipped ({exc}).")
+    if closed:
+        _notify_chat(f"{peer.get('name', 'A teammate')}'s question was "
+                     f"resolved ({reason}) — stopped watching.")
+    audit("slot_resolved_received", peer_ids=[peer_id], origin_id=origin_id,
+          reason=reason, closed=closed)
+    return {"ok": True, "closed": closed}
+
+
 # --- disclosure policy (Phase 2) --------------------------------------------
 # What a peer's question can be ABOUT, as the user reasons about sharing:
 #   availability — schedule, whereabouts, free/busy, deadlines, dates
@@ -1067,6 +1737,24 @@ def handle_ask(peer: dict, payload: dict) -> dict:
     # on the sender — surfaces for the human (offer) unless the sim flag.
     if kind not in _PEER_KINDS:
         return {"ok": False, "error": f"unknown kind {kind!r}"}
+    # Loop protection (spec F4.6): an ask carries a hop count and an origin
+    # id; hop is capped at 1 (no transitive asks in v1) and a peer never
+    # re-asks the origin.
+    try:
+        hop = int(payload.get("hop") or 0)
+    except (TypeError, ValueError):
+        hop = 0
+    if hop > MAX_HOP:
+        return {"ok": False, "error": f"hop limit ({MAX_HOP}) exceeded"}
+    origin_id = str(payload.get("origin_id") or "").strip()[:64] or None
+    team_ask_id = str(payload.get("team_ask_id") or "").strip()[:64] or None
+    audit("ask_received", peer_ids=[peer_id], ask_id=ask_id, kind=kind,
+          hop=hop, origin_id=origin_id)
+
+    if kind == "slot_request":
+        return _handle_slot_request(peer, payload, ask_id=ask_id,
+                                    question=question, origin_id=origin_id,
+                                    team_ask_id=team_ask_id, hop=hop)
 
     # A handoff is a request for THIS user to do something — action-adjacent,
     # so it ALWAYS waits for the human. No policy grant and no dev flag can
@@ -1118,6 +1806,23 @@ def handle_ask(peer: dict, payload: dict) -> dict:
                 "redacted": []}
     if action == "auto":
         composed = compose_answer(question, question_class=topic)
+        if not composed.get("claims"):
+            # A miss is not a denial (spec F4.1): typed null_result, and the
+            # receiving human gets the four options — nothing runs on the
+            # asker's behalf automatically.
+            offered = _offer_null_options(
+                peer, ask_id=ask_id, question=question, origin_id=origin_id,
+                hop=hop, team_ask_id=team_ask_id)
+            print(f"[peer] null (no memory) for {peer.get('name', '?')}: "
+                  f"{question[:80]}")
+            audit("null_result", peer_ids=[peer_id], ask_id=ask_id,
+                  reason="no_memory", slot_offered=offered)
+            return {"ok": True, "status": "answered", "ask_id": ask_id,
+                    "topic": topic, "answer": composed["text"],
+                    "claims": [], "as_of": None, "near_miss": False,
+                    "redacted": [], "response_kind": "null_result",
+                    "null_result": null_result("no_memory",
+                                               slot_offered=offered)}
         print(f"[peer] auto-answered {peer.get('name', '?')} "
               f"({topic or 'dev flag'}): {question[:80]}")
         return {"ok": True, "status": "answered", "ask_id": ask_id,
@@ -1125,12 +1830,16 @@ def handle_ask(peer: dict, payload: dict) -> dict:
                 "claims": composed.get("claims") or [],
                 "as_of": composed.get("as_of"),
                 "near_miss": composed.get("near_miss"),
-                "redacted": composed["redacted"]}
+                "redacted": composed["redacted"],
+                "response_kind": "answer"}
     if action == "deny":
         print(f"[peer] auto-declined {peer.get('name', '?')} "
               f"({topic}): {question[:80]}")
+        audit("null_result", peer_ids=[peer_id], ask_id=ask_id,
+              reason="policy_denied")
         return {"ok": True, "status": "declined", "ask_id": ask_id,
-                "topic": topic}
+                "topic": topic, "response_kind": "null_result",
+                "null_result": null_result("policy_denied")}
 
     with _lock:
         asks = _load(_asks_path(), [])
@@ -1142,6 +1851,7 @@ def handle_ask(peer: dict, payload: dict) -> dict:
                 "peer_name": peer.get("name", "?"), "ask_id": ask_id,
                 "question": question, "topic": topic, "kind": kind,
                 "loop_id": str(payload.get("loop_id") or "").strip() or None,
+                "hop": hop, "origin_id": origin_id, "team_ask_id": team_ask_id,
                 "created_at": time.time(),
                 "status": "pending", "answer": None, "decided_at": None}
         asks.append(item)
@@ -1370,7 +2080,12 @@ def decide_ask(local_id: str, approve: bool) -> dict:
         print(f"[peer] telemetry skipped ({exc}).")
 
     if not approve:
+        # The wire shape stays {ask_id, declined}: `declined` already means
+        # policy_denied to the asker (handle_answer types it), and peers on
+        # older builds keep working.
         outbound = {"ask_id": item["ask_id"], "declined": True}
+        audit("null_result", peer_ids=[item.get("peer_id", "")],
+              ask_id=item["ask_id"], reason="policy_denied")
         delivered = _deliver(peer_rec, outbound)
         if delivered:
             _finish_ask(local_id, "denied", None)
@@ -1420,11 +2135,29 @@ def decide_ask(local_id: str, approve: bool) -> dict:
 
     composed = compose_answer(item["question"],
                               question_class=item.get("topic"))
+    if not composed.get("claims"):
+        offered = _offer_null_options(
+            peer_rec | {"peer_id": item.get("peer_id", "")},
+            ask_id=item["ask_id"], question=item["question"],
+            origin_id=item.get("origin_id"), hop=int(item.get("hop") or 0),
+            team_ask_id=item.get("team_ask_id"))
+        outbound = {"ask_id": item["ask_id"], "answer": composed["text"],
+                    "claims": [], "response_kind": "null_result",
+                    "null_result": null_result("no_memory",
+                                               slot_offered=offered)}
+        audit("null_result", peer_ids=[item.get("peer_id", "")],
+              ask_id=item["ask_id"], reason="no_memory", slot_offered=offered)
+        delivered = _deliver(peer_rec, outbound)
+        out = _complete_or_retry_delivery(
+            local_id, delivered, composed["text"], outbound, "null")
+        out["response_kind"] = "null_result"
+        return out
     outbound = {"ask_id": item["ask_id"],
                 "answer": composed["text"],
                 "claims": composed.get("claims") or [],
                 "as_of": composed.get("as_of"),
-                "near_miss": composed.get("near_miss")}
+                "near_miss": composed.get("near_miss"),
+                "response_kind": "answer"}
     # Phase 4.1: THIS is the moment a clip grant may be minted — a human just
     # said yes to this specific answer. The grant covers only the events behind
     # the claims they approved, and only for the peer who asked. The auto-
@@ -1539,7 +2272,8 @@ def retry_delivery_pending(peer_id: str | None = None) -> dict:
 # --- asking side (outbound) --------------------------------------------------
 def ask(peer_id: str, question: str, kind: str = "question",
         *, loop_id: str | None = None, team_slug: str | None = None,
-        team_ask_id: str | None = None) -> dict:
+        team_ask_id: str | None = None, hop: int = 0,
+        origin_id: str | None = None, mint_waiting: bool = True) -> dict:
     """Send one question or task handoff to a paired peer. Synchronous when
     their side auto-answers (questions only — handoffs always wait for their
     human); otherwise pending until they decide, delivered to /peer/answer.
@@ -1577,6 +2311,7 @@ def ask(peer_id: str, question: str, kind: str = "question",
                                    ask_id=ask_id, side="sender")
         except Exception:
             pass
+    origin_id = origin_id or _origin_for(ask_id)
     with _lock:
         sent = _load(_sent_path(), [])
         sent.append({"ask_id": ask_id, "peer_id": peer_id,
@@ -1584,10 +2319,26 @@ def ask(peer_id: str, question: str, kind: str = "question",
                      "question": question, "kind": kind,
                      "loop_id": loop_id, "team_slug": team_slug,
                      "team_ask_id": team_ask_id,
+                     "hop": int(hop or 0), "origin_id": origin_id,
+                     "response_kind": None, "null_reason": None,
                      "created_at": time.time(),
                      "status": "sent", "answer": None, "answered_at": None})
         _save(_sent_path(), sent)
-    return _dispatch_ask(peer_rec, peer_id, ask_id, question, kind, loop_id)
+    audit("ask_sent", peer_ids=[peer_id], ask_id=ask_id, kind=kind,
+          hop=int(hop or 0), origin_id=origin_id, team_ask_id=team_ask_id)
+    res = _dispatch_ask(peer_rec, peer_id, ask_id, question, kind, loop_id,
+                        hop=int(hop or 0), origin_id=origin_id,
+                        team_ask_id=team_ask_id)
+    # The asker's board shows "waiting on <peer>" while the question is
+    # with them (spec scenario 1 step 1 / F3.7) — for questions only.
+    if mint_waiting and kind == "question" and res.get("status") in (
+            "pending", "queued", "null"):
+        try:
+            _mint_waiting_row(peer_rec, peer_id, ask_id, question,
+                              origin_id=origin_id, team_ask_id=team_ask_id)
+        except Exception as exc:
+            print(f"[peer] waiting row skipped ({exc}).")
+    return res
 
 
 def retry_queued(item: dict) -> dict:
@@ -1610,12 +2361,15 @@ def retry_queued(item: dict) -> dict:
 
 def _dispatch_ask(peer_rec: dict, peer_id: str, ask_id: str, question: str,
                   kind: str, loop_id: str | None,
-                  from_mailbox: bool = False) -> dict:
+                  from_mailbox: bool = False, hop: int = 0,
+                  origin_id: str | None = None,
+                  team_ask_id: str | None = None) -> dict:
     """Send one ask and record the attempt. The telemetry wrapper sits here,
     not in ask(), so mailbox retries are counted too."""
     t0 = time.time()
     res = _dispatch_ask_inner(peer_rec, peer_id, ask_id, question, kind,
-                              loop_id, from_mailbox=from_mailbox)
+                              loop_id, from_mailbox=from_mailbox, hop=hop,
+                              origin_id=origin_id, team_ask_id=team_ask_id)
     try:
         from app.services import peer_telemetry
         peer_telemetry.record(
@@ -1646,9 +2400,14 @@ def _is_followup(peer_id: str, ask_id: str) -> bool:
 
 def _dispatch_ask_inner(peer_rec: dict, peer_id: str, ask_id: str,
                         question: str, kind: str, loop_id: str | None,
-                        from_mailbox: bool = False) -> dict:
+                        from_mailbox: bool = False, hop: int = 0,
+                        origin_id: str | None = None,
+                        team_ask_id: str | None = None) -> dict:
     payload = {"ask_id": ask_id, "question": question, "kind": kind,
-               "base_url": my_base_url(), "internal_url": my_internal_url()}
+               "base_url": my_base_url(), "internal_url": my_internal_url(),
+               "hop": int(hop or 0), "origin_id": origin_id or ask_id}
+    if team_ask_id:
+        payload["team_ask_id"] = team_ask_id
     if loop_id:
         payload["loop_id"] = loop_id
     try:
@@ -1669,6 +2428,31 @@ def _dispatch_ask_inner(peer_rec: dict, peer_id: str, ask_id: str,
         return {"ok": False, "ask_id": ask_id,
                 "error": res.get("error", "peer refused"),
                 "peer": peer_rec.get("name", "?")}
+    if kind == "slot_request":
+        # A member holding (or being offered) a slot for us: record it on
+        # the sent row, never as a chat answer.
+        held = res.get("status") == "answered"
+        _update_sent(ask_id, "slot_held" if held else "slot_pending", None)
+        with _lock:
+            sent = _load(_sent_path(), [])
+            for s_ in sent:
+                if s_.get("ask_id") == ask_id:
+                    s_["response_kind"] = res.get("response_kind") or "slot_offered"
+                    s_["slot_id"] = res.get("slot_id")
+            _save(_sent_path(), _trim_sent(sent))
+        return {"ok": True, "status": res.get("status"), "ask_id": ask_id,
+                "response_kind": res.get("response_kind") or "slot_offered",
+                "slot_id": res.get("slot_id"), "peer": peer_rec.get("name", "?")}
+    if res.get("response_kind") == "null_result" or (
+            res.get("status") == "answered" and not res.get("claims")
+            and isinstance(res.get("null_result"), dict)):
+        nr = _sanitize_null(res.get("null_result"))
+        _record_answer(peer_rec, peer_id, ask_id, None,
+                       declined=(nr["reason"] == "policy_denied"),
+                       null_result=nr)
+        return {"ok": True, "status": "null", "ask_id": ask_id,
+                "response_kind": "null_result", "null_result": nr,
+                "peer": peer_rec.get("name", "?")}
     if res.get("status") == "answered":
         answer_text = str(res.get("answer") or "")[: settings.peer.max_text_chars]
         claims = _sanitize_claims(res.get("claims"))
@@ -1684,8 +2468,11 @@ def _dispatch_ask_inner(peer_rec: dict, peer_id: str, ask_id: str,
                 "as_of": _coerce_as_of(res.get("as_of")),
                 "peer": peer_rec.get("name", "?")}
     if res.get("status") == "declined":
-        _record_answer(peer_rec, peer_id, ask_id, None, declined=True)
+        _record_answer(peer_rec, peer_id, ask_id, None, declined=True,
+                       null_result=null_result("policy_denied"))
         return {"ok": True, "status": "declined", "ask_id": ask_id,
+                "response_kind": "null_result",
+                "null_result": null_result("policy_denied"),
                 "peer": peer_rec.get("name", "?")}
     _update_sent(ask_id, "pending", None)
     return {"ok": True, "status": "pending", "ask_id": ask_id,
@@ -1711,7 +2498,8 @@ def _queue_offline(peer_id, ask_id, question, kind, loop_id, exc) -> bool:
         print(f"[peer] mailbox enqueue failed for {ask_id} ({enq_exc}); "
               f"not marking queued after {exc}.")
         return False
-    _update_sent(ask_id, "queued", None)
+    _update_sent(ask_id, "queued", None,
+                 null_result=null_result("offline"))
     print(f"[peer] queued ask {ask_id} for {peer_id} ({exc}).")
     return True
 
@@ -1779,12 +2567,19 @@ def nudge_stale_pending() -> list[dict]:
 def _update_sent(ask_id: str, status: str, answer: str | None,
                  claims: list | None = None, as_of: float | None = None,
                  near_miss: bool = False,
-                 clip_grant: dict | None = None) -> None:
+                 clip_grant: dict | None = None,
+                 null_result: dict | None = None) -> None:
     with _lock:
         sent = _load(_sent_path(), [])
         for s in sent:
             if s.get("ask_id") == ask_id:
                 s["status"] = status
+                if null_result is not None:
+                    s["response_kind"] = "null_result"
+                    s["null_reason"] = null_result.get("reason")
+                    s["slot_offered"] = bool(null_result.get("slot_offered"))
+                elif answer is not None and status == "answered":
+                    s["response_kind"] = s.get("response_kind") or "answer"
                 if answer is not None:
                     s["answer"] = answer
                     s["answered_at"] = time.time()
@@ -1806,15 +2601,40 @@ def _record_answer(peer_rec: dict, peer_id: str, ask_id: str,
                    answer_text: str | None, declined: bool = False,
                    claims: list | None = None, as_of: float | None = None,
                    near_miss: bool = False,
-                   clip_grant: dict | None = None) -> None:
+                   clip_grant: dict | None = None,
+                   null_result: dict | None = None) -> None:
     """Land one inbound answer. Phase 1.4: when the peer sent claims, they are
     persisted with their own provenance and peer attribution, so
     find_peer_answers and synthesize_topic_knowledge inherit dates and sources
-    with no further work."""
+    with no further work. A typed null_result records its reason on the sent
+    row (status "null" for a miss, "declined" for a policy denial) and
+    surfaces the difference in chat."""
+    if null_result is not None:
+        nr = _sanitize_null(null_result)
+        status = "declined" if nr["reason"] == "policy_denied" else "null"
+        _update_sent(ask_id, status, None, null_result=nr)
+        _touch(peer_id, "answers")
+        name = peer_rec.get("name") or "A teammate"
+        _emit_peer_result(_format_null_chat(name, nr, ask_id))
+        _publish_event("peer.answer",
+                       f"[from {name}'s Sparrow — {nr['reason']}]",
+                       {"peer_id": peer_id, "peer": name, "ask_id": ask_id,
+                        "ingested": False, "null_reason": nr["reason"]})
+        _settle_waiting_row(ask_id, status=status, reason=nr["reason"])
+        try:
+            from app.services import peer_telemetry
+            peer_telemetry.record(
+                "answer", ask_id=ask_id, peer_id=peer_id,
+                peer_name=name, status=status, answer_chars=0,
+                null_reason=nr["reason"], usable=False)
+        except Exception as exc:
+            print(f"[peer] telemetry skipped ({exc}).")
+        return
     status = "declined" if declined else "answered"
     _update_sent(ask_id, status, answer_text or "", claims=claims,
                  as_of=as_of, near_miss=near_miss, clip_grant=clip_grant)
     _touch(peer_id, "answers")
+    _settle_waiting_row(ask_id, status=status, answer=answer_text)
     usable = peer_answer_usable(answer_text or "", claims=claims)
     try:
         from app.services import peer_telemetry
@@ -1966,11 +2786,19 @@ def handle_answer(peer: dict, payload: dict) -> dict:
         team_layer.mailbox_remove(ask_id)
     except Exception:
         pass
+    if isinstance(payload.get("null_result"), dict) or \
+            payload.get("response_kind") == "null_result":
+        nr = _sanitize_null(payload.get("null_result"))
+        if payload.get("declined") and nr["reason"] == "no_memory":
+            nr = null_result("policy_denied", slot_offered=False)
+        _record_answer(peer, peer["peer_id"], ask_id, None,
+                       declined=(nr["reason"] == "policy_denied"),
+                       null_result=nr)
+        _after_answer(item, declined=(nr["reason"] == "policy_denied"))
+        return {"ok": True, "status": "recorded", "response_kind": "null_result"}
     if payload.get("declined"):
-        _record_answer(peer, peer["peer_id"], ask_id, None, declined=True)
-        _emit_peer_result(
-            f"{peer.get('name', 'A teammate')}'s Sparrow declined to answer:\n\n"
-            f"“{item.get('question', '')[:120]}”")
+        _record_answer(peer, peer["peer_id"], ask_id, None, declined=True,
+                       null_result=null_result("policy_denied"))
         _after_answer(item, declined=True)
         return {"ok": True, "status": "declined"}
     answer_text = str(payload.get("answer") or "").strip()
@@ -1982,6 +2810,7 @@ def handle_answer(peer: dict, payload: dict) -> dict:
                    claims=claims, as_of=_coerce_as_of(payload.get("as_of")),
                    near_miss=bool(payload.get("near_miss")),
                    clip_grant=_sanitize_grant(payload.get("clip_grant")))
+    audit("answer_received", peer_ids=[peer.get("peer_id", "")], ask_id=ask_id)
     print(f"[peer] answer from {peer.get('name', '?')}: {answer_text[:80]}")
     _emit_peer_result(_format_peer_answer_chat(
         peer.get("name", "A teammate"), answer_text))
@@ -2113,7 +2942,10 @@ _EXPLICIT_CHANNEL_RE = re.compile(
 _EMAIL_ENVELOPE_RE = re.compile(
     r"^\s*(?:to|subject|body|cc|bcc)\s*:\s*", re.I | re.M)
 
-_PEER_KINDS = ("question", "handoff", "notify",
+# slot_request: after an all-null team fan-out, the asker asks each member
+# to hold a slot (spec F4.5). peer_update / slot_resolved ride their own
+# endpoints (/peer/update, /peer/slot-resolved), not /peer/ask.
+_PEER_KINDS = ("question", "handoff", "notify", "slot_request",
                "org_digest", "org_priority", "org_escalate")
 _ORG_KINDS = ("org_digest", "org_priority", "org_escalate")
 
@@ -2611,6 +3443,8 @@ def _chat_ask_run(peer_id: str, question: str, kind: str = "question") -> None:
                 f"Couldn't reach {name}'s Sparrow "
                 f"({res.get('error', 'unknown error')}).")
         return
+    if status == "null":
+        return  # _record_answer already said exactly why
     if status == "answered":
         _emit_peer_result(_format_peer_answer_chat(
             name, str(res.get("answer") or "")[:400]))
@@ -2683,7 +3517,13 @@ def answers(ask_id: str | None = None) -> list[dict]:
         row = {k: r.get(k) for k in ("ask_id", "peer_name", "question",
                                      "status", "answer", "created_at",
                                      "answered_at", "kind", "loop_id",
-                                     "team_slug", "team_ask_id")}
+                                     "team_slug", "team_ask_id",
+                                     "response_kind", "null_reason",
+                                     "slot_offered", "hop", "origin_id",
+                                     "fill_event_id", "fill_at")}
+        row["waiting_on"] = (r.get("peer_name")
+                             if r.get("status") in ("pending", "queued", "null",
+                                                    "sent") else None)
         row["as_of"] = r.get("as_of")
         row["near_miss"] = bool(r.get("near_miss"))
         grant = r.get("clip_grant") or {}

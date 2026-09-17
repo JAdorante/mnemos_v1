@@ -272,9 +272,38 @@ def connectors_custom_delete(connector_id: str) -> dict:
     return r
 
 
+@router.post("/connectors/sync-all")
+def connectors_sync_all() -> dict:
+    """Manual tick of the background scheduler (consented connectors)."""
+    from app.services.connectors import scheduler
+    return scheduler.sync_all(force=True)
+
+
+class ConnectorBackgroundIn(BaseModel):
+    enabled: bool
+
+
+@router.post("/connectors/{connector_id}/background")
+def connector_background(connector_id: str, body: ConnectorBackgroundIn) -> dict:
+    """Enable/disable background sync for one connector. The consent record
+    keeps the plain sentence of what will be polled and how often."""
+    from app.services import capture_consent
+    from app.services.connectors import get as get_connector, scheduler
+    c = get_connector(connector_id)
+    if not c:
+        raise HTTPException(404, f"unknown connector: {connector_id}")
+    sentence = scheduler.consent_sentence(c)
+    rec = capture_consent.record_connector(
+        c.id, enabled=bool(body.enabled), sentence=sentence,
+        interval_s=scheduler.interval_for(c))
+    return {"ok": True, "connector_id": c.id, "consent": rec,
+            **scheduler.status(c.id)}
+
+
 @router.get("/connectors/{connector_id}")
 def connector_one(connector_id: str, request: Request) -> dict:
     from app.services.connectors import get as get_connector, request_public_base
+    from app.services.connectors import scheduler
     c = get_connector(connector_id)
     if not c:
         raise HTTPException(404, f"unknown connector: {connector_id}")
@@ -282,6 +311,10 @@ def connector_one(connector_id: str, request: Request) -> dict:
     live = request_public_base(request)
     if live and connector_id == "google":
         st = {**st, "oauth_mode": "redirect", "public_base": live}
+    try:
+        st = {**st, **scheduler.status(c.id)}
+    except Exception as exc:
+        st = {**st, "sync_error": str(exc)}
     return st
 
 
@@ -303,8 +336,25 @@ def connector_connect(connector_id: str, request: Request) -> dict:
     hint = _normalize_https_origin(request.headers.get("x-public-base"))
     # The Connections sheet sends the page the user pressed Connect on, so the
     # browser comes back there instead of landing in the onboarding wizard.
-    return c.begin_connect(public_base=hint or request_public_base(request),
-                           return_path=request.headers.get("x-return-path"))
+    res = c.begin_connect(public_base=hint or request_public_base(request),
+                          return_path=request.headers.get("x-return-path"))
+    # Background sync is enabled per connector at connect time with a plain
+    # sentence of what will be polled and how often (spec F1 trust §8);
+    # `x-background-sync: 0` opts out at the same moment.
+    try:
+        from app.services import capture_consent
+        from app.services.connectors import scheduler
+        if callable(getattr(c, "fetch_items", None)) and res.get("ok"):
+            want = (request.headers.get("x-background-sync") or "1") not in (
+                "0", "false", "off")
+            sentence = scheduler.consent_sentence(c)
+            capture_consent.record_connector(
+                c.id, enabled=want, sentence=sentence,
+                interval_s=scheduler.interval_for(c))
+            res = {**res, "background_sync": want, "consent_sentence": sentence}
+    except Exception as exc:
+        print(f"[connectors] consent record skipped ({exc}).")
+    return res
 
 
 @router.post("/connectors/{connector_id}/sync")

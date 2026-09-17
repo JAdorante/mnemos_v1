@@ -24,6 +24,12 @@ from urllib.parse import urlparse
 
 from app.config import settings
 
+
+def _os_env(key: str, default: str) -> str:
+    import os
+    return os.environ.get(key, default)
+
+
 _lock = threading.Lock()
 _stop = threading.Event()
 _thread: threading.Thread | None = None
@@ -92,6 +98,10 @@ _ASK_HASH_TO_RE = re.compile(
 _ASK_TEAM_TO_RE = re.compile(
     r"^\s*ask\s+(?:the\s+)?(?P<who>.{1,40}?)\s+team\s+to\s+(?P<q>.{3,})$",
     re.I)
+# "#Team what is the status of the Boston deal?" — the hashtag alone is the
+# addressee (spec scenario 2 step 5).
+_HASH_BARE_RE = re.compile(
+    r"^\s*#(?P<slug>[A-Za-z][\w-]{0,40})\s*[:,]?\s+(?P<q>.{3,})$")
 
 
 def _peer_cfg():
@@ -197,6 +207,39 @@ def _slugify(name: str) -> str:
     return s[:40]
 
 
+# Per-team policy (spec F4 open questions): whether a member's Sparrow holds
+# a slot for a teammate without asking, and whether a fill is delivered on
+# arrival (still with the undo window). Both default off — ask first.
+DEFAULT_TEAM_POLICY = {"auto_accept_slots": False, "deliver_on_fill": False}
+FANOUT_DEADLINE_S = float(_os_env("QUILL_TEAM_FANOUT_DEADLINE_S", "30"))
+
+
+def fanout_deadline_s() -> float:
+    """Read at call time so operators (and tests) can shorten the window."""
+    try:
+        return max(0.0, float(_os_env("QUILL_TEAM_FANOUT_DEADLINE_S",
+                                      str(FANOUT_DEADLINE_S))))
+    except ValueError:
+        return FANOUT_DEADLINE_S
+
+
+def _fanout_sequential() -> bool:
+    """QUILL_TEAM_FANOUT_SEQUENTIAL=1 asks members one after another (the
+    in-process scenario harness swaps instance context per call and must
+    not do that from concurrent threads)."""
+    return _os_env("QUILL_TEAM_FANOUT_SEQUENTIAL", "0") in ("1", "true", "True")
+
+
+def _policy_of(rec: dict) -> dict:
+    raw = rec.get("policy") if isinstance(rec, dict) else None
+    out = dict(DEFAULT_TEAM_POLICY)
+    if isinstance(raw, dict):
+        for k in DEFAULT_TEAM_POLICY:
+            if k in raw:
+                out[k] = bool(raw[k])
+    return out
+
+
 def list_teams() -> list[dict]:
     with _lock:
         reg = _load(_teams_path(), {})
@@ -207,8 +250,41 @@ def list_teams() -> list[dict]:
             "name": rec.get("name") or slug,
             "peer_ids": list(rec.get("peer_ids") or []),
             "created_at": rec.get("created_at"),
+            "policy": _policy_of(rec),
         })
     return out
+
+
+def set_team_policy(slug: str, policy: dict) -> dict:
+    t = get_team(slug)
+    if t is None:
+        return {"ok": False, "error": "unknown team"}
+    with _lock:
+        reg = _load(_teams_path(), {})
+        rec = reg.get(t["slug"]) or {}
+        cur = _policy_of(rec)
+        for k in DEFAULT_TEAM_POLICY:
+            if k in (policy or {}):
+                cur[k] = bool(policy[k])
+        rec["policy"] = cur
+        reg[t["slug"]] = rec
+        _save(_teams_path(), reg)
+    return {"ok": True, "team": get_team(t["slug"])}
+
+
+def teams_of_peer(peer_id: str) -> list[dict]:
+    return [t for t in list_teams() if peer_id in (t.get("peer_ids") or [])]
+
+
+def auto_accept_slots_from(peer_id: str) -> bool:
+    """True when any team both of you are on auto-accepts teammate slots."""
+    return any(bool(t.get("policy", {}).get("auto_accept_slots"))
+               for t in teams_of_peer(peer_id))
+
+
+def deliver_on_fill_for(peer_id: str) -> bool:
+    return any(bool(t.get("policy", {}).get("deliver_on_fill"))
+               for t in teams_of_peer(peer_id))
 
 
 def get_team(slug: str) -> dict | None:
@@ -229,7 +305,8 @@ def get_team(slug: str) -> dict | None:
             return None
     return {"slug": key, "name": rec.get("name") or key,
             "peer_ids": list(rec.get("peer_ids") or []),
-            "created_at": rec.get("created_at")}
+            "created_at": rec.get("created_at"),
+            "policy": _policy_of(rec)}
 
 
 def upsert_team(name: str, peer_ids: list[str] | None = None,
@@ -248,6 +325,7 @@ def upsert_team(name: str, peer_ids: list[str] | None = None,
             "name": display,
             "peer_ids": ids or list(prev.get("peer_ids") or []),
             "created_at": prev.get("created_at") or time.time(),
+            "policy": _policy_of(prev),
         }
         # If caller passed peer_ids (even empty), take them as the new set.
         if peer_ids is not None:
@@ -289,6 +367,8 @@ def parse_group_ask(text: str) -> dict | None:
     if m is None:
         m = _ASK_HASH_TO_RE.match(text) or _ASK_TEAM_TO_RE.match(text)
         to_form = m is not None
+    if m is None:
+        m = _HASH_BARE_RE.match(text)
     if not m:
         return None
     who = (m.groupdict().get("slug") or m.groupdict().get("who") or "").strip()
@@ -313,32 +393,116 @@ def parse_group_ask(text: str) -> dict | None:
             "question": question, "kind": kind}
 
 
-def fanout_ask(team_slug: str, question: str, kind: str = "question") -> dict:
-    """Ask every paired member. Each ask is independent; rollup is later."""
+def fanout_ask(team_slug: str, question: str, kind: str = "question", *,
+               hop: int = 0, origin_id: str | None = None,
+               exclude_peer_ids: list[str] | None = None,
+               on_behalf_of: dict | None = None) -> dict:
+    """Ask every paired member in parallel. Each ask is independent; the
+    merge happens in `merge_fanout` after the deadline. `hop` / `origin_id`
+    ride on every ask (loop protection); `exclude_peer_ids` keeps the origin
+    out of a forwarded fan-out."""
     team = get_team(team_slug)
     if team is None:
         return {"ok": False, "error": "unknown team"}
     from app.services import peer_channel
+    if hop > peer_channel.MAX_HOP:
+        return {"ok": False, "error": f"hop limit ({peer_channel.MAX_HOP})"}
     paired = {p["peer_id"] for p in peer_channel.peers()}
-    members = [pid for pid in team["peer_ids"] if pid in paired]
+    excl = set(exclude_peer_ids or [])
+    members = [pid for pid in team["peer_ids"] if pid in paired and pid not in excl]
     if not members:
         return {"ok": False, "error": "no paired members on that team",
                 "team_slug": team["slug"], "team_name": team["name"]}
     team_ask_id = uuid.uuid4().hex[:12]
+    origin = origin_id or team_ask_id
     results = []
-    for pid in members:
-        res = peer_channel.ask(pid, question, kind,
-                               team_slug=team["slug"],
-                               team_ask_id=team_ask_id)
-        results.append({"peer_id": pid, **{k: res.get(k) for k in
-                       ("ok", "status", "ask_id", "peer", "error", "answer")}})
+    threads = []
+    lock = threading.Lock()
+
+    def _one(pid: str) -> None:
+        res = peer_channel.ask(pid, question, kind, team_slug=team["slug"],
+                               team_ask_id=team_ask_id, hop=hop,
+                               origin_id=origin, mint_waiting=(hop == 0))
+        with lock:
+            results.append({"peer_id": pid, **{k: res.get(k) for k in
+                           ("ok", "status", "ask_id", "peer", "error",
+                            "answer", "response_kind", "null_result")}})
+
+    if _fanout_sequential():
+        for pid in members:
+            _one(pid)
+    else:
+        for pid in members:
+            t = threading.Thread(target=_one, args=(pid,), daemon=True)
+            t.start()
+            threads.append(t)
+        for t in threads:
+            t.join(timeout=max(5.0, fanout_deadline_s()))
+    try:
+        from app.services import agent_log
+        agent_log.audit("fanout", peer_ids=members, ask_id=team_ask_id,
+                        team=team["slug"], hop=hop, origin_id=origin,
+                        on_behalf_of=(on_behalf_of or {}).get("name"))
+    except Exception:
+        pass
     return {"ok": True, "team_slug": team["slug"], "team_name": team["name"],
-            "team_ask_id": team_ask_id, "asked": len(members),
+            "team_ask_id": team_ask_id, "origin_id": origin,
+            "asked": len(members), "members": members,
+            "hop": hop, "on_behalf_of": on_behalf_of,
             "results": results}
 
 
+def _terminal(status: str | None) -> bool:
+    return (status or "") in ("answered", "declined", "null", "error",
+                              "accepted", "refused")
+
+
+def merge_fanout(team_ask_id: str, *, wait_s: float | None = None,
+                 poll_s: float = 0.5) -> dict:
+    """Wait up to the deadline for every member's answer, then merge into
+    one message with per-peer attribution; nulls are listed by name."""
+    from app.services import peer_channel
+    deadline = time.time() + float(fanout_deadline_s() if wait_s is None else wait_s)
+    while True:
+        rows = [r for r in peer_channel.answers() if r.get("team_ask_id") == team_ask_id]
+        if rows and all(_terminal(r.get("status")) for r in rows):
+            break
+        if time.time() >= deadline:
+            break
+        time.sleep(max(0.05, poll_s))
+    rows = [r for r in peer_channel.answers() if r.get("team_ask_id") == team_ask_id]
+    bits, answered, nulls, pending, denied = [], [], [], [], []
+    for r in rows:
+        who = r.get("peer_name") or "teammate"
+        st = r.get("status") or "?"
+        if st == "answered":
+            ans = (r.get("answer") or "").strip()
+            answered.append(r)
+            bits.append(f"- {who}: {ans[:400]}" if ans else f"- {who}: answered")
+        elif st in ("null",):
+            nulls.append(r)
+            bits.append(f"- {who}: nothing")
+        elif st == "declined":
+            denied.append(r)
+            bits.append(f"- {who}: declined (policy)")
+        elif st == "queued":
+            pending.append(r)
+            bits.append(f"- {who}: offline — queued")
+        else:
+            pending.append(r)
+            bits.append(f"- {who}: no answer yet")
+    text = "\n".join(bits)
+    return {"team_ask_id": team_ask_id, "rows": rows, "text": text,
+            "answered": [r["peer_name"] for r in answered],
+            "nulls": [r["peer_name"] for r in nulls],
+            "denied": [r["peer_name"] for r in denied],
+            "pending": [r["peer_name"] for r in pending],
+            "all_null": bool(rows) and not answered and not pending
+                        and len(nulls) == len(rows)}
+
+
 def _chat_team_run(team_slug: str, question: str, kind: str) -> None:
-    from app.services.peer_channel import _notify_chat
+    from app.services.peer_channel import _notify_chat, _emit_peer_result
     res = fanout_ask(team_slug, question, kind)
     name = res.get("team_name") or team_slug
     if not res.get("ok"):
@@ -348,7 +512,59 @@ def _chat_team_run(team_slug: str, question: str, kind: str) -> None:
     n = int(res.get("asked") or 0)
     verb = "Handing off to" if kind == "handoff" else "Asked"
     _notify_chat(f"{verb} the {name} team ({n} teammate"
-                 f"{'' if n == 1 else 's'}) — I'll roll up answers as they land.")
+                 f"{'' if n == 1 else 's'}) — {int(fanout_deadline_s())} s for "
+                 "answers, then I'll merge what came back.")
+    if kind != "question":
+        return
+    merged = merge_fanout(res["team_ask_id"])
+    _emit_peer_result(f"From the {name} team:\n{merged['text']}")
+    if merged["all_null"]:
+        offer_all_null_slots(res, question)
+
+
+def offer_all_null_slots(fanout: dict, question: str) -> dict:
+    """All-null fan-out (spec F4.5): one slot per member, requester = asker.
+    Each member's Sparrow holds one (auto under team policy, else offered);
+    the first fill anywhere delivers here and closes the siblings."""
+    from app.services import peer_channel, slots as _slots
+    if not _slots.enabled():
+        return {"ok": False, "error": "slots disabled"}
+    origin = fanout.get("origin_id") or fanout.get("team_ask_id")
+    sent = []
+    for pid in fanout.get("members") or []:
+        res = peer_channel.ask(pid, question, "slot_request",
+                               team_slug=fanout.get("team_slug"),
+                               team_ask_id=fanout.get("team_ask_id"),
+                               hop=int(fanout.get("hop") or 0), origin_id=origin,
+                               mint_waiting=False)
+        sent.append({"peer_id": pid, "status": res.get("status"),
+                     "response_kind": res.get("response_kind")})
+    # One waiting row for the whole team, not one per member.
+    try:
+        from app.storage import get_store
+        store = get_store()
+        need = _slots.normalize_need(question)
+        fid = store.add_commitment(
+            f"Waiting on the {fanout.get('team_name') or 'team'}: {need}",
+            extracted_at=time.time(), state="detected", task_kind="peer_ask",
+            counterparty_name=fanout.get("team_name"), requester_kind="user",
+            slot={"need": need, "origin_id": origin,
+                  "team_ask_id": fanout.get("team_ask_id"),
+                  "waiting_on": fanout.get("team_name"),
+                  "member_peer_ids": list(fanout.get("members") or []),
+                  "asked_at": time.time()},
+            allow_declined_thread=True)
+        if fid:
+            store.transition_commitment(fid, "waiting", actor="user",
+                                        reason="team_slots_requested")
+            store.set_counterparty_expects(fid, True)
+    except Exception as exc:
+        print(f"[team] waiting row skipped ({exc}).")
+    from app.services.peer_channel import _notify_chat
+    _notify_chat(f"Nobody on the {fanout.get('team_name') or 'team'} had it — "
+                 f"asked each of them to keep a slot open for you; the first "
+                 "one to see it will send it here.")
+    return {"ok": True, "origin_id": origin, "requests": sent}
 
 
 def chat_team_ask_async(team_slug: str, question: str,
@@ -578,8 +794,15 @@ def _ping_loop() -> None:
             # online, and silence is what teaches a tester it does not work.
             from app.services import peer_channel
             peer_channel.nudge_stale_pending()
+            # Offers and notices held during meeting mode surface once it ends.
+            peer_channel.flush_deferred_null_offers()
         except Exception as exc:
             print(f"[peer] pending nudge skipped ({exc}).")
+        try:
+            from app.services import salience
+            salience.flush_deferred()
+        except Exception:
+            pass
         if _stop.wait(interval):
             return
 

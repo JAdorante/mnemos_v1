@@ -562,6 +562,14 @@ img.thumb.big{max-height:none;max-width:100%}
   #constPane{padding:10px 12px 16px}
   #constPane .const-frame{height:clamp(260px,44vh,360px)}
 }
+.chip{display:inline-block;font-size:.72rem;padding:.1rem .45rem;border-radius:999px;border:1px solid var(--line,#444);color:var(--mut,#9298a3);margin-right:.4rem}
+.chip-awaiting_data{border-color:var(--violet,#8d85f2);color:var(--violet,#8d85f2)}
+.chip-uncertain{border-color:#d7a44a;color:#d7a44a}
+.chip-done{border-color:#4caf7d;color:#4caf7d}
+.chip-declined,.chip-cancelled{opacity:.6}
+.task-missing,.task-q,.task-cand{font-size:.85rem;margin:.25rem 0}
+.task-q{color:#d7a44a}
+.task-board{margin-bottom:.75rem}
 </style></head><body>
 <div class="chrome">
   <div class="top">
@@ -624,6 +632,7 @@ img.thumb.big{max-height:none;max-width:100%}
 <div class="layout">
 <div style="display:flex;flex-direction:column;min-height:0;min-width:0;flex:1">
 <div id="mnemosToastSlot"></div>
+<div id="taskBoard" class="task-board"></div>
 <div id="list"><div class="empty">loading…</div></div>
 <div id="constPane">
   <div class="const-grid">
@@ -1320,6 +1329,75 @@ async function loadTurns(){
     : '<div class="empty">no turns yet — click “Rebuild turns”.</div>';
  }catch(e){ list.innerHTML='<div class="empty">error loading: '+e+'</div>'; }
 }
+/* Tasks that close themselves / wait for data (spec F2.8): a status chip
+   per row; awaiting_data rows say what is missing (+ Deliver / Not it for
+   each candidate fill); uncertain rows show the question inline with
+   Yes / Not yet. */
+function taskChip(f){
+ const st=f.status||'open';
+ const label={open:'open',awaiting_data:'waiting for data',uncertain:'unsure',
+   done:'done',declined:'declined',cancelled:'cancelled'}[st]||st;
+ return '<span class="chip chip-'+MnemosEsc(st)+'">'+MnemosEsc(label)+'</span>';
+}
+function taskExtras(f){
+ let out='';
+ if(f.status==='awaiting_data'){
+  const need=(f.slot&&f.slot.need)||f.missing||'';
+  const who=(f.slot&&f.slot.requester&&f.slot.requester.kind==='peer')
+    ?(f.slot.requester.name||'a teammate'):'you';
+  out+='<div class="task-missing">Missing: <b>'+MnemosEsc(need)+'</b> · for '+MnemosEsc(who)+'</div>';
+  for(const c of (f.candidates||[])){
+   out+='<div class="task-cand">Candidate event #'+c.event_id+' ('+Math.round(c.score*100)+'%) '
+     +'<button class="mini done" onclick="taskFill('+f.task_id+','+c.event_id+',\'deliver\')">Deliver to '+MnemosEsc(who)+'</button>'
+     +'<button class="mini drop" onclick="taskFill('+f.task_id+','+c.event_id+',\'reject\')">Not it</button></div>';
+  }
+ }
+ if(f.status==='uncertain'&&f.question){
+  out+='<div class="task-q">'+MnemosEsc(f.question)
+    +' <button class="mini done" onclick="taskAnswer('+f.task_id+',true)">Yes</button>'
+    +'<button class="mini" onclick="taskAnswer('+f.task_id+',false)">Not yet</button></div>';
+ }
+ return out;
+}
+async function taskFill(id,eid,action){
+ await fetch('/tasks/'+id+'/fill/'+eid,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action})});
+ loadFacts();
+}
+async function taskAnswer(id,done){
+ await fetch('/tasks/'+id+'/answer',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({done})});
+ loadFacts();
+}
+async function taskStatus(id,status){
+ await fetch('/tasks/'+id+'/status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({status})});
+ loadFacts();
+}
+function taskRow(t){
+ const bits=[];
+ if(t.counterparty) bits.push('<span class="spk">'+MnemosEsc(t.counterparty)+'</span>');
+ if(t.kind) bits.push(MnemosEsc(t.kind));
+ if(t.due) bits.push('due '+MnemosEsc(t.due));
+ const acts=(t.actions||[]).map(a=>{
+   if(a.action==='answer') return '';
+   return '<button class="mini'+(a.status==='done'?' done':(a.status==='declined'?' drop':''))+'" onclick="taskStatus('+t.task_id+',\''+a.status+'\')">'+MnemosEsc(a.label)+'</button>';
+ }).join('');
+ return '<div class="row task-row task-'+MnemosEsc(t.status||'')+'">'+taskChip(t)
+  +'<div class="body"><div class="text">'+MnemosEsc(t.text||'')+'</div>'
+  +'<div class="meta">'+bits.join('<span>·</span>')+'</div>'+taskExtras(t)
+  +'<div class="acts">'+acts+'</div></div></div>';
+}
+async function loadTasks(){
+ const el=document.getElementById('taskBoard'); if(!el) return;
+ try{
+  const j=await (await fetch('/tasks?status=open,awaiting_data,uncertain&limit=200')).json();
+  const rows=j.tasks||[];
+  const waiting=rows.filter(t=>t.status==='awaiting_data');
+  const unsure=rows.filter(t=>t.status==='uncertain');
+  const open=rows.filter(t=>t.status==='open');
+  const sec=(title,arr)=> arr.length?'<div class="sechead">'+title+'</div>'+arr.map(taskRow).join(''):'';
+  el.innerHTML=sec('Needs your answer',unsure)+sec('Waiting for data',waiting)+sec('Open tasks',open)
+    ||'<div class="empty">no tasks waiting on anything.</div>';
+ }catch(e){ el.innerHTML='<div class="empty">error loading tasks: '+e+'</div>'; }
+}
 function factRow(f){
  const kind=f.kind;
  const parties = kind==='commitment'
@@ -1327,6 +1405,7 @@ function factRow(f){
    : (f.owner||'');
  const bits=[];
  if(parties) bits.push('<span class="spk">'+MnemosEsc(parties)+'</span>');
+ if(kind==='commitment'&&f.status&&f.status!=='open') bits.push(taskChip(f));
  if(f.due) bits.push('due '+MnemosEsc(f.due));
  if(f.source) bits.push(MnemosEsc(f.source));
  if(f.review) bits.push('<span class="rev">'+MnemosEsc(f.review)+'</span>');
@@ -1365,6 +1444,7 @@ function playFactMoment(aid){
  audio.scrollIntoView({block:'nearest'});
 }
 async function loadFacts(){
+ loadTasks();
  try{
   // The review queue: open facts not yet dismissed. Newest first.
   const j=await (await fetch('/facts?status=open&limit=300')).json();

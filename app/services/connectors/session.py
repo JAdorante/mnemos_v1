@@ -119,17 +119,28 @@ def active_ids(*, connected: set[str] | None = None,
     return (connected - disabled) | (connected & enabled)
 
 
-# Source prefixes each connector contributes to the memory timeline.
-_SOURCE_PREFIXES: dict[str, tuple[str, ...]] = {
-    "google": ("exhaust.gmail", "exhaust.calendar"),
-}
+def source_prefixes() -> dict[str, tuple[str, ...]]:
+    """Source prefixes each connector contributes to the memory timeline,
+    read off the connector classes (`source_prefixes`) so a new connector
+    needs no edit here. A connector without the attribute contributes its
+    own id as a prefix ("<id>.")."""
+    from app.services.connectors.registry import all as all_connectors
+    out: dict[str, tuple[str, ...]] = {}
+    for c in all_connectors():
+        cid = (getattr(c, "id", "") or "").strip().lower()
+        if not cid:
+            continue
+        raw = getattr(c, "source_prefixes", None)
+        prefixes = tuple(str(p) for p in raw) if raw else (f"{cid}.",)
+        out[cid] = prefixes
+    return out
 
 
 def blocked_source_prefixes() -> tuple[str, ...]:
     """Event/fact source prefixes to drop while grounding this chat turn."""
     active = active_ids()
     blocked: list[str] = []
-    for cid, prefixes in _SOURCE_PREFIXES.items():
+    for cid, prefixes in source_prefixes().items():
         if cid not in active:
             blocked.extend(prefixes)
     return tuple(blocked)

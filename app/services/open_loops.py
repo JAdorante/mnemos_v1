@@ -376,6 +376,19 @@ def detect(store, *, worker=None, now: float | None = None,
     loops.extend(detect_waiting_on_me(store, now=now))
     loops.extend(detect_unanswered_questions(store, now=now))
     loops.extend(detect_pending_asks(worker=worker))
+    # Tasks that wait for data / on the user (spec F2.4, F3.6): stale slots
+    # get Keep / Drop; an unanswered `uncertain` question re-surfaces here
+    # after 48 h and never auto-closes.
+    try:
+        from app.services import slots as _slots
+        loops.extend(_slots.horizon_items(store, now=now))
+    except Exception as exc:
+        print(f"[open_loops] slot review skipped ({exc}).")
+    try:
+        from app.services import task_completion as _tc
+        loops.extend(_tc.horizon_items(store, now=now))
+    except Exception as exc:
+        print(f"[open_loops] task questions skipped ({exc}).")
     # Dedup by fact_id (prefer waiting_on_them over me when both — shouldn't)
     seen: set[str] = set()
     out: list[dict] = []
@@ -428,6 +441,7 @@ def horizon_items(
             "event_key": None,
             "event_title": None,
             "fact_id": lp.get("fact_id"),
+            "actions": list(lp.get("actions") or []),
         })
         if len(items) >= limit:
             break

@@ -51,11 +51,24 @@ def summarize(facts: list[dict], now: float | None = None,
         if kind not in ("task", "commitment"):
             continue
         status = (f.get("status") or "open").lower()
+        # 2026-09 task model: a task waiting for data or for the user's
+        # answer is still open work; a declined task was judged not-a-task
+        # (like a dismissed one) and never counts as abandoned.
+        if status in ("awaiting_data", "uncertain"):
+            status = "open"
+        if status == "declined":
+            continue
         if status not in counts:
             continue
         # A fact the human dismissed was judged NOISE, not abandoned work —
         # it must not drag the fulfillment rate down.
         if f.get("review") == "dismissed":
+            continue
+        # `done` counts only when the closing transition carries an
+        # evidence_id or the user's own actor (spec F2.7); a row annotated
+        # done_verified=False is an unevidenced auto-close and stays out of
+        # the numerator AND the denominator, so the baseline stays honest.
+        if status == "done" and f.get("done_verified") is False:
             continue
         counts[status] += 1
         by_kind.setdefault(kind, {"open": 0, "done": 0, "cancelled": 0})
@@ -99,6 +112,23 @@ def summarize(facts: list[dict], now: float | None = None,
         # index 0 = this week, 1 = last week, ... newest first.
         "weekly": {"created": created_by_week, "resolved": resolved_by_week},
     }
+
+
+def annotate_done_verified(store, facts: list[dict]) -> list[dict]:
+    """Stamp each done task/commitment row with done_verified from its last
+    transition (commitment_state.done_is_attributable). Legacy rows without
+    a transition log stay unannotated and count as before."""
+    from app.services.commitment_state import done_is_attributable
+    for f in facts:
+        if f.get("kind") != "commitment" or (f.get("status") or "") != "done":
+            continue
+        try:
+            tx = store.last_transition(int(f["fact_id"]))
+        except Exception:
+            tx = None
+        if tx is not None:
+            f["done_verified"] = done_is_attributable(tx)
+    return facts
 
 
 def _baseline_path():

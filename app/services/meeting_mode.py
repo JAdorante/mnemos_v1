@@ -279,6 +279,14 @@ def exit_mode(*, reason: str = "manual") -> dict[str, Any]:
             "source": None, "snapshot": None,
         })
     _restore_aggressiveness(snap if isinstance(snap, dict) else None)
+    # Notices and peer offers held back during the meeting surface now.
+    for mod, fn in (("salience", "flush_deferred"),
+                    ("peer_channel", "flush_deferred_null_offers")):
+        try:
+            import importlib
+            getattr(importlib.import_module(f"app.services.{mod}"), fn)()
+        except Exception as exc:
+            print(f"[meeting_mode] {mod}.{fn} skipped ({exc}).")
     return {"ok": True, "active": False, "reason": reason, "ended": meta}
 
 

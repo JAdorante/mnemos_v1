@@ -33,6 +33,9 @@ def _blank() -> dict[str, Any]:
         "consented_at": None,
         "updated_at": None,
         "sources": {s: False for s in SOURCES},
+        # Connector background sync (spec F1 trust §8): enabled per connector
+        # at connect time with the plain sentence that was shown.
+        "connectors": {},
     }
 
 
@@ -55,6 +58,11 @@ def load(*, force: bool = False) -> dict[str, Any]:
                     if isinstance(src, dict):
                         for s in SOURCES:
                             out["sources"][s] = bool(src.get(s))
+                    conns = raw.get("connectors") or {}
+                    if isinstance(conns, dict):
+                        out["connectors"] = {
+                            str(k): dict(v) for k, v in conns.items()
+                            if isinstance(v, dict)}
         except Exception as exc:
             print(f"[capture_consent] load skipped ({exc}).")
         _cached = dict(out)
@@ -113,6 +121,43 @@ def save(sources: dict[str, bool] | None = None, *,
         _apply_save_audio(bool(cur["sources"].get("save_audio")))
         _apply_capability_flags(cur["sources"])
         return dict(cur)
+
+
+def allows_connector(connector_id: str) -> bool:
+    """True only when background sync was enabled for this connector."""
+    rec = (load().get("connectors") or {}).get((connector_id or "").lower())
+    return bool(rec and rec.get("enabled"))
+
+
+def record_connector(connector_id: str, *, enabled: bool,
+                     sentence: str = "", interval_s: float | None = None) -> dict:
+    """Persist the per-connector background-sync consent and the sentence
+    that was shown. Never touches the capture sources."""
+    global _cached
+    cid = (connector_id or "").strip().lower()
+    now = time.time()
+    with _lock:
+        cur = load(force=True)
+        conns = dict(cur.get("connectors") or {})
+        prev = dict(conns.get(cid) or {})
+        conns[cid] = {
+            "enabled": bool(enabled),
+            "sentence": sentence or prev.get("sentence") or "",
+            "interval_s": interval_s if interval_s is not None
+            else prev.get("interval_s"),
+            "consented_at": (prev.get("consented_at") or now) if enabled
+            else prev.get("consented_at"),
+            "updated_at": now,
+        }
+        cur["connectors"] = conns
+        cur["updated_at"] = now
+        try:
+            from app.atomic_json import write_json
+            write_json(_path(), cur, sort_keys=True)
+        except Exception as exc:
+            print(f"[capture_consent] connector save failed ({exc}).")
+        _cached = dict(cur)
+        return dict(conns[cid])
 
 
 def _apply_save_audio(on: bool) -> None:

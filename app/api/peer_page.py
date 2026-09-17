@@ -356,11 +356,19 @@ function renderSent(rows){
   $('sentBox').innerHTML='<table><tr><th>To</th><th>Question</th><th>Status</th><th>Answer</th></tr>'+
     rows.slice().reverse().map(r=>`<tr><td>${esc(r.peer_name)}${r.team_slug?` <span class="tag">#${esc(r.team_slug)}</span>`:''}</td>
     <td>${esc(r.question)}${r.loop_id?`<div class="muted" style="font-family:var(--mono);font-size:.75rem">loop ${esc(r.loop_id)}</div>`:''}</td>
-    <td>${esc(r.status)}</td><td>${esc(r.answer||'')}${answerExtras(r)}</td></tr>`).join('')+'</table>';
+    <td>${esc(statusLabel(r))}</td><td>${esc(r.answer||'')}${answerExtras(r)}</td></tr>`).join('')+'</table>';
 }
 // Provenance the asker can act on: when the answer is dated, say so; when the
 // teammate also approved the recordings behind it, let them hear the moment.
 // The grant is theirs and expires, so a stale one simply stops playing.
+// A miss and a denial must not look the same to the asker (spec F4.1).
+function statusLabel(r){
+  if(r.status==='null') return r.null_reason==='offline'?'offline — queued':'nothing in memory'+(r.slot_offered?' · slot offered':'');
+  if(r.status==='declined') return 'declined (policy)';
+  if(r.waiting_on&&(r.status==='pending'||r.status==='queued'||r.status==='sent')) return 'waiting on '+r.waiting_on;
+  if(r.response_kind==='fill') return 'answered · fill';
+  return r.status||'';
+}
 function answerExtras(r){
   let out='';
   if(r.as_of) out+=`<div class="muted" style="font-size:.75rem">as of ${esc(fmtDay(r.as_of))}</div>`;

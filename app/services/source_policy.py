@@ -161,6 +161,19 @@ def classify_source(
 
     if src.startswith("exhaust"):
         return "exhaust"
+    # Connector background capture (spec F1.4): source="<connector>.<kind>"
+    # — mail / calendar / other. Read-only observed capture that may mint
+    # people and commitments; it never authorizes an agent step
+    # (meta.never_authorizes, enforced in trust.py).
+    if src.startswith("agent.fetch"):
+        return "agent_fetch"
+    if "." in src and src.split(".", 1)[0] in _connector_ids():
+        kind = src.split(".", 1)[1]
+        if kind in ("mail", "gmail", "email", "dm", "message", "chat"):
+            return "connector_mail"
+        if "calendar" in kind or kind in ("event", "meeting"):
+            return "connector_calendar"
+        return "connector_item"
     if src.startswith("audio"):
         return "meeting_transcript" if "system" in src else "private_conversation"
     if "calendar" in src:
@@ -216,6 +229,20 @@ def classify_source(
     if src.startswith("document") or src.startswith("docs"):
         return "user_authored_document"
     return "unknown"
+
+
+@lru_cache(maxsize=1)
+def _connector_ids() -> frozenset[str]:
+    """Registered connector ids (cached; the registry is static per process
+    apart from custom MCP rows, which carry an `mcp-` prefix)."""
+    ids = {"google", "slack", "outlook", "hubspot", "salesforce", "notion",
+           "github", "jira", "linear"}
+    try:
+        from app.services.connectors import registry
+        ids |= {c.id for c in registry.all()}
+    except Exception:
+        pass
+    return frozenset(ids)
 
 
 def policy_for(source_class: str) -> SourcePolicy:

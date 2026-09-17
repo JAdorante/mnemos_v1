@@ -32,7 +32,14 @@ from tests.test_peer_channel import PeerChannelBase  # noqa: E402
 
 # The complete set of peer-token-authenticated routes. Adding one is a
 # deliberate act: it must be a gated verb, never a read of stored memory.
-PEER_AUTHED_ROUTES = {"/peer/ask", "/peer/ping", "/peer/answer", "/peer/clip"}
+#
+# 2026-09 (connector capture & task fulfillment): `/peer/update` lands a
+# slot fill for an ask WE sent that peer (refused otherwise — the same
+# match rule as /peer/answer), and `/peer/slot-resolved` closes a slot WE
+# hold for that peer. Both are inbound notices bound to our own prior act;
+# neither returns a file or reads stored memory.
+PEER_AUTHED_ROUTES = {"/peer/ask", "/peer/ping", "/peer/answer", "/peer/clip",
+                      "/peer/update", "/peer/slot-resolved"}
 
 # `/peer/clip` (Phase 4) is the one route that hands another tenant a file.
 # It was added by deliberately updating this list — which is what this guard

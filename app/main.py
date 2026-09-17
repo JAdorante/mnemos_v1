@@ -562,6 +562,23 @@ async def _startup() -> None:
                   f"(every {int(settings.icloud.sync_interval_s)}s when connected).")
     except Exception as exc:
         print(f"[icloud_calendar] startup hook skipped ({exc}).")
+    # Connector capture & task fulfillment (2026-09): the completion detector
+    # + slot watcher hook every persisted event; connectors sync in the
+    # background on their own cadence (QUILL_CONNECTOR_SYNC=0 to disable).
+    try:
+        from app.services import task_completion
+        task_completion.attach()
+        print("[task_completion] watching persisted events for task evidence "
+              "and slot fills.")
+    except Exception as exc:
+        print(f"[task_completion] startup hook skipped ({exc}).")
+    try:
+        from app.services.connectors import scheduler as connector_scheduler
+        if connector_scheduler.start_background():
+            print("[connectors] background sync running (per-connector "
+                  "cadence, consented connectors only).")
+    except Exception as exc:
+        print(f"[connectors] scheduler startup skipped ({exc}).")
     # Proactively offer to act on detected to-do lists (via chat).
     if os.environ.get("QUILL_AGENT") not in ("0", "false", "False"):
         from app.services import todo_watcher

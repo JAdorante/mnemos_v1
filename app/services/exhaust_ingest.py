@@ -540,12 +540,20 @@ def _google_get(url: str) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
-def fetch_gmail_headers(*, days: int | None = None,
-                        now: float | None = None) -> list[dict]:
-    """Last N days of Gmail metadata (From/To/Cc/Date/Message-ID only)."""
-    days = int(days if days is not None else settings.exhaust.days)
+def fetch_gmail_headers(*, days: float | None = None,
+                        now: float | None = None,
+                        include_subject: bool = False) -> list[dict]:
+    """Last N days of Gmail metadata (From/To/Cc/Date/Message-ID only).
+
+    `include_subject=True` (connector background capture, spec F1) also
+    requests the Subject header — still the gmail.metadata scope, still no
+    body. The cold-start contact ingest keeps the narrower default."""
+    days = float(days if days is not None else settings.exhaust.days)
     ts = time.time() if now is None else float(now)
     after = int(ts - days * 86400)
+    extra = "&metadataHeaders=Subject" if include_subject else ""
+    wanted = ("from", "to", "cc", "date", "message-id") + (
+        ("subject",) if include_subject else ())
     q = quote(f"after:{after}")
     out: list[dict] = []
     page = None
@@ -566,14 +574,13 @@ def fetch_gmail_headers(*, days: int | None = None,
                 f"{quote(mid)}?format=metadata"
                 "&metadataHeaders=From&metadataHeaders=To"
                 "&metadataHeaders=Cc&metadataHeaders=Date"
-                "&metadataHeaders=Message-ID"
+                "&metadataHeaders=Message-ID" + extra
             )
             payload = got.get("payload") or {}
             headers = {
                 (h.get("name") or "").lower(): (h.get("value") or "")
                 for h in (payload.get("headers") or [])
-                if (h.get("name") or "").lower() in (
-                    "from", "to", "cc", "date", "message-id")
+                if (h.get("name") or "").lower() in wanted
             }
             # Guard: Gmail metadata format must never include a body.
             if payload.get("body", {}).get("data") or payload.get("parts"):

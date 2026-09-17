@@ -1839,8 +1839,9 @@ def console_attention(days: float = 7.0) -> dict:
     out["self_report_due"] = bool(last is None
                                   or _time.time() - last > 7 * 86400.0)
     out["self_report_last_ts"] = last
-    facts = (store.list_facts(kind="task", limit=5000)
-             + store.list_facts(kind="commitment", limit=5000))
+    facts = fulfillment.annotate_done_verified(
+        store, store.list_facts(kind="task", limit=5000)
+        + store.list_facts(kind="commitment", limit=5000))
     out["fulfillment"] = fulfillment.summarize(facts)
     try:
         out["fulfillment"] = fulfillment.with_baseline(out["fulfillment"])
@@ -2113,8 +2114,9 @@ def console_fulfillment() -> dict:
     from app.services import fulfillment
 
     store = memory._ensure_store()
-    facts = (store.list_facts(kind="task", limit=5000)
-             + store.list_facts(kind="commitment", limit=5000))
+    facts = fulfillment.annotate_done_verified(
+        store, store.list_facts(kind="task", limit=5000)
+        + store.list_facts(kind="commitment", limit=5000))
     return fulfillment.with_baseline(fulfillment.summarize(facts))
 
 
@@ -2124,8 +2126,9 @@ def console_fulfillment_baseline() -> dict:
     from app.services import fulfillment
 
     store = memory._ensure_store()
-    facts = (store.list_facts(kind="task", limit=5000)
-             + store.list_facts(kind="commitment", limit=5000))
+    facts = fulfillment.annotate_done_verified(
+        store, store.list_facts(kind="task", limit=5000)
+        + store.list_facts(kind="commitment", limit=5000))
     summary = fulfillment.summarize(facts)
     stamped = fulfillment.stamp_baseline(summary, note="console")
     return {"ok": True, "baseline": stamped, "current": summary}
@@ -3215,6 +3218,17 @@ def facts_open_tasks(limit: int = 100) -> dict:
 
 class FactEdit(BaseModel):
     text: str
+
+
+def peer_channel_addressed(text: str) -> bool:
+    """True when a message addresses a peer or team ("ask X", "#team …",
+    "tell X"), so the peer router — not the task router — owns it."""
+    try:
+        from app.services import peer_channel
+        return bool(peer_channel.parse_team_ask(text)
+                    or peer_channel.parse_team_tell(text))
+    except Exception:
+        return False
 
 
 def _get_or_404(fact_id: int) -> dict:
@@ -4726,6 +4740,51 @@ def chat(body: ChatIn) -> dict:
                 return {"ok": True, "routed": "calendar_offer", "since": since}
     except Exception as exc:
         print(f"[calendar_intent] skipped ({exc}).")
+    # Typed tasks that close themselves / wait for data (spec F2.5, F3.1c):
+    # "Have a call with Marc" mints a task with counterparty=Marc, kind=call;
+    # "get me the Boston quote" / "keep an eye out for …" offers a slot.
+    try:
+        from app.services import task_completion as _tc
+        intent = _tc.parse_task_intent(display)
+        if intent and not peer_channel_addressed(display):
+            store = memory._ensure_store()
+            agent.worker._emit("user", display)
+            if intent["kind"] == "slot":
+                from app.services import slots as _slots
+                if _slots.enabled():
+                    need = _slots.normalize_need(intent["need"])
+                    hits = _slots.search_assist(store, need, allow_connectors=False,
+                                                timeout_s=3)
+                    if hits and hits[0].get("event_id") is not None:
+                        h = hits[0]
+                        agent.worker._emit(
+                            "result",
+                            f"I already have something on the {need}:\n\n"
+                            f"“{(h.get('text') or '')[:400]}”\n\n"
+                            f"Source: /memory?event={h['event_id']}. Want me "
+                            "to keep watching for a newer one? Reply 'yes'.")
+                    agent.worker.propose_slot_create({
+                        "need": need, "requester": {"kind": "user", "id": None},
+                        "requester_name": "you"})
+                    return {"ok": True, "routed": "slot_offer", "since": since}
+            else:
+                fid = _tc.create_user_task(
+                    store, intent.get("text") or display,
+                    counterparty=intent.get("counterparty"), kind=intent.get("kind"))
+                if fid:
+                    agent.worker._emit(
+                        "result",
+                        f"Added to your tasks: {intent.get('text') or display} "
+                        f"(with {intent.get('counterparty')}). I'll mark it done "
+                        "when I see evidence, and ask if I'm unsure.",
+                        stream={"type": "task.created", "task_id": fid})
+                else:
+                    agent.worker._emit(
+                        "result", "You declined that one earlier — not re-adding it.")
+                return {"ok": True, "routed": "task_created", "since": since,
+                        "task_id": fid}
+    except Exception as exc:
+        print(f"[task_intent] skipped ({exc}).")
     # Team ask ("ask sarah: are the slides done?") -> the peer channel, not
     # the browser agent. Deterministic: only fires when the addressee resolves
     # to a PAIRED peer. The ask runs on a background thread (the teammate's
@@ -5894,6 +5953,31 @@ def peer_clip_inbound(body: dict, authorization: str | None = Header(None)):
     return Response(content=data, media_type=media)
 
 
+@router.post("/peer/update")
+def peer_update_inbound(body: dict, authorization: str | None = Header(None)) -> dict:
+    """Authenticated inbound peer.update: a slot fill (or typed null) for an
+    ask WE sent that peer. Refused unless it matches an ask of ours."""
+    from app.services import peer_channel
+
+    peer = peer_channel.authenticate(authorization)
+    if peer is None:
+        raise HTTPException(status_code=401, detail="invalid or missing peer token")
+    return peer_channel.handle_update(peer, body)
+
+
+@router.post("/peer/slot-resolved")
+def peer_slot_resolved_inbound(body: dict,
+                               authorization: str | None = Header(None)) -> dict:
+    """Authenticated inbound notice: the slot we hold for that peer is
+    resolved (filled elsewhere / erased) — close it as cancelled."""
+    from app.services import peer_channel
+
+    peer = peer_channel.authenticate(authorization)
+    if peer is None:
+        raise HTTPException(status_code=401, detail="invalid or missing peer token")
+    return peer_channel.handle_slot_resolved(peer, body)
+
+
 @router.post("/peer/answer")
 def peer_answer_inbound(body: dict, authorization: str | None = Header(None)) -> dict:
     """Authenticated delivery of an answer to an ask WE sent. Refused unless it
@@ -6026,6 +6110,303 @@ def peer_team_delete(body: PeerTeamDeleteIn) -> dict:
     if not res.get("ok"):
         raise HTTPException(status_code=404, detail=res.get("error") or "unknown team")
     return res
+
+
+# --- Teams (spec F4.4): CRUD over the team_layer registry ------------------
+class TeamIn(BaseModel):
+    name: str
+    peer_ids: list[str] | None = None
+    slug: str | None = None
+    policy: dict | None = None
+
+
+class TeamPolicyIn(BaseModel):
+    policy: dict
+
+
+@router.get("/teams")
+def teams_list() -> dict:
+    from app.services import team_layer
+    return {"teams": team_layer.list_teams()}
+
+
+@router.post("/teams")
+def teams_create(body: TeamIn) -> dict:
+    from app.services import team_layer
+    res = team_layer.upsert_team(body.name, body.peer_ids, slug=body.slug)
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error") or "team failed")
+    if body.policy:
+        res = team_layer.set_team_policy(res["team"]["slug"], body.policy)
+    return res
+
+
+@router.get("/teams/{slug}")
+def teams_get(slug: str) -> dict:
+    from app.services import team_layer
+    t = team_layer.get_team(slug)
+    if t is None:
+        raise HTTPException(status_code=404, detail="unknown team")
+    return {"team": t}
+
+
+@router.post("/teams/{slug}")
+def teams_update(slug: str, body: TeamIn) -> dict:
+    from app.services import team_layer
+    t = team_layer.get_team(slug)
+    if t is None:
+        raise HTTPException(status_code=404, detail="unknown team")
+    res = team_layer.upsert_team(body.name or t["name"], body.peer_ids,
+                                 slug=t["slug"])
+    if body.policy:
+        res = team_layer.set_team_policy(t["slug"], body.policy)
+    return res
+
+
+@router.post("/teams/{slug}/policy")
+def teams_policy(slug: str, body: TeamPolicyIn) -> dict:
+    from app.services import team_layer
+    res = team_layer.set_team_policy(slug, body.policy)
+    if not res.get("ok"):
+        raise HTTPException(status_code=404, detail=res.get("error") or "unknown team")
+    return res
+
+
+@router.delete("/teams/{slug}")
+def teams_delete(slug: str) -> dict:
+    from app.services import team_layer
+    res = team_layer.delete_team(slug)
+    if not res.get("ok"):
+        raise HTTPException(status_code=404, detail=res.get("error") or "unknown team")
+    return res
+
+
+# --- Tasks board (spec: data model & API) --------------------------------------
+class TaskStatusIn(BaseModel):
+    status: str
+    reason: str | None = None
+
+
+class TaskAnswerIn(BaseModel):
+    done: bool
+
+
+class TaskSlotIn(BaseModel):
+    need: str | None = None
+    entities: list[str] | None = None
+    counterparty: str | None = None
+    deliver_on_fill: bool | None = None
+    match_threshold: float | None = None
+
+
+class TaskFillIn(BaseModel):
+    action: str  # deliver | reject
+
+
+class TaskCreateIn(BaseModel):
+    text: str
+    counterparty: str | None = None
+    kind: str | None = None
+    need: str | None = None  # kind=slot
+
+
+def _task_view(row: dict) -> dict:
+    slot = row.get("slot") or None
+    view = {
+        "task_id": row.get("fact_id"), "text": row.get("text"),
+        "status": row.get("status"), "state": row.get("commitment_state"),
+        "kind": row.get("task_kind"),
+        "counterparty": row.get("counterparty_name") or row.get("to_person"),
+        "from_person": row.get("from_person"), "to_person": row.get("to_person"),
+        "due": row.get("due"), "created_at": row.get("extracted_at"),
+        "updated_at": row.get("updated_at"), "question": row.get("question"),
+        "review_after": row.get("review_after"),
+        "requester": (slot or {}).get("requester") if slot else (
+            {"kind": row.get("requester_kind"), "id": row.get("requester_id")}
+            if row.get("requester_kind") else None),
+        "slot": slot, "missing": (slot or {}).get("need") if slot else None,
+        "linked_declined_id": row.get("linked_declined_id"),
+        "source_event_id": row.get("source_event_id"),
+        "evidence": row.get("completion_evidence_json"),
+        "actions": [],
+    }
+    st = row.get("status")
+    if st == "uncertain":
+        view["actions"] = [{"label": "Yes", "action": "answer", "done": True},
+                           {"label": "Not yet", "action": "answer", "done": False}]
+    elif st == "awaiting_data":
+        view["actions"] = [{"label": "Keep", "action": "status", "status": "awaiting_data"},
+                           {"label": "Drop", "action": "status", "status": "declined"}]
+    elif st == "open":
+        view["actions"] = [{"label": "Done", "action": "status", "status": "done"},
+                           {"label": "Decline", "action": "status", "status": "declined"}]
+    return view
+
+
+@router.get("/tasks")
+def tasks_list(status: str | None = None, limit: int = 300) -> dict:
+    """Board rows incl. slot and question fields. `status` filters on one
+    compat status (open|awaiting_data|uncertain|done|declined|cancelled) or a
+    comma list; default = open work."""
+    from app.services import commitment_state as cs
+    store = memory._ensure_store()
+    statuses = None
+    if status:
+        statuses = tuple(s.strip() for s in status.split(",") if s.strip())
+        bad = [s for s in statuses if s not in cs.STATUSES]
+        if bad:
+            raise HTTPException(status_code=400, detail=f"unknown status {bad}")
+    rows = store.list_tasks(statuses, limit=limit)
+    views = [_task_view(r) for r in rows]
+    for v in views:
+        if v["status"] == "awaiting_data":
+            cands = store.list_slot_candidates(int(v["task_id"]), verdict="offered")
+            v["candidates"] = [{"event_id": c["event_id"], "score": c["score"],
+                                "created_at": c["created_at"]} for c in cands[:5]]
+    return {"count": len(views), "tasks": views}
+
+
+@router.post("/tasks")
+def tasks_create(body: TaskCreateIn) -> dict:
+    """User-created task ("have a call with Marc") or slot ("get me the
+    Boston quote")."""
+    from app.services import slots as _slots, task_completion as _tc
+    store = memory._ensure_store()
+    kind = (body.kind or "").strip().lower() or None
+    if kind == "slot" or body.need:
+        if not _slots.enabled():
+            raise HTTPException(status_code=400, detail="slots disabled (QUILL_SLOTS=0)")
+        fid = _slots.create(store, body.need or body.text,
+                            requester={"kind": "user", "id": None})
+    else:
+        parsed = _tc.parse_task_intent(body.text) or {}
+        fid = _tc.create_user_task(
+            store, body.text, counterparty=body.counterparty or parsed.get("counterparty"),
+            kind=kind or parsed.get("kind"))
+    if not fid:
+        raise HTTPException(status_code=409, detail="declined earlier from this thread")
+    return {"ok": True, "task": _task_view(store.get_task(fid))}
+
+
+@router.get("/tasks/{task_id}")
+def tasks_get(task_id: int) -> dict:
+    store = memory._ensure_store()
+    row = store.get_task(task_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"no task {task_id}")
+    v = _task_view(row)
+    v["transitions"] = store.list_commitment_transitions(task_id, limit=20)
+    v["candidates"] = store.list_slot_candidates(task_id)
+    return {"task": v}
+
+
+@router.post("/tasks/{task_id}/status")
+def tasks_status(task_id: int, body: TaskStatusIn) -> dict:
+    """User-driven transition; body {status, reason}. `done` carries the
+    user's own cite; `declined` is terminal for capture."""
+    from app.services import commitment_state as cs
+    from app.services import slots as _slots
+    store = memory._ensure_store()
+    row = store.get_task(task_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"no task {task_id}")
+    st = (body.status or "").strip().lower()
+    if st not in cs.STATUSES:
+        raise HTTPException(status_code=400, detail=f"unknown status {st!r}")
+    to_state = cs.state_for_status(st)
+    evidence = None
+    if to_state == "completed":
+        evidence = {"source": "user_mark_done", "note": body.reason or ""}
+    try:
+        if to_state == "declined" and row.get("slot"):
+            out = _slots.drop(store, task_id, reason=body.reason or "dropped")
+        elif to_state == "awaiting_data" and row.get("slot") and \
+                row.get("status") == "awaiting_data":
+            _slots.keep(store, task_id)
+            out = {"ok": True, "fact_id": task_id, "status": "awaiting_data",
+                   "kept": True}
+        else:
+            out = store.transition_commitment(
+                task_id, to_state, reason=body.reason or f"user:{st}",
+                evidence=evidence, actor="user")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {**out, "task": _task_view(store.get_task(task_id))}
+
+
+@router.post("/tasks/{task_id}/answer")
+def tasks_answer(task_id: int, body: TaskAnswerIn) -> dict:
+    """Resolve an uncertain question {done: bool}."""
+    from app.services import task_completion as _tc
+    store = memory._ensure_store()
+    row = store.get_task(task_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"no task {task_id}")
+    if row.get("status") != "uncertain":
+        raise HTTPException(status_code=409, detail="task is not awaiting an answer")
+    try:
+        out = _tc.answer(store, task_id, bool(body.done))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {**out, "task": _task_view(store.get_task(task_id))}
+
+
+@router.post("/tasks/{task_id}/slot")
+def tasks_slot(task_id: int, body: TaskSlotIn) -> dict:
+    """Create or edit the slot on a task (moves an open task to awaiting_data)."""
+    from app.services import slots as _slots
+    store = memory._ensure_store()
+    row = store.get_task(task_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"no task {task_id}")
+    if not _slots.enabled():
+        raise HTTPException(status_code=400, detail="slots disabled (QUILL_SLOTS=0)")
+    changes = {k: v for k, v in body.model_dump().items() if v is not None}
+    if row.get("slot"):
+        _slots.update(store, task_id, **changes)
+    else:
+        need = changes.pop("need", None) or row.get("text") or ""
+        import time as _time
+        slot = {"need": _slots.normalize_need(need), "need_raw": need,
+                "entities": changes.get("entities") or _slots.resolve_entities(
+                    _slots.normalize_need(need), store=store),
+                "counterparty": changes.get("counterparty") or row.get("counterparty_name"),
+                "requester": {"kind": "user", "id": None},
+                "created_from": row.get("source_event_id"),
+                "deliver_on_fill": bool(changes.get("deliver_on_fill")),
+                "match_threshold": float(changes.get("match_threshold")
+                                         or _slots.DEFAULT_THRESHOLD),
+                "origin_id": None, "team_slug": None, "created_at": _time.time()}
+        store.set_slot(task_id, slot, review_after=_time.time() + _slots.REVIEW_AFTER_S,
+                       requester_kind="user")
+        if row.get("status") != "awaiting_data":
+            try:
+                store.transition_commitment(task_id, "awaiting_data", actor="user",
+                                            reason="slot_added")
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "task": _task_view(store.get_task(task_id))}
+
+
+@router.post("/tasks/{task_id}/fill/{event_id}")
+def tasks_fill(task_id: int, event_id: int, body: TaskFillIn) -> dict:
+    """{action: deliver | reject} on a candidate fill."""
+    from app.services import slots as _slots
+    store = memory._ensure_store()
+    if store.get_task(task_id) is None:
+        raise HTTPException(status_code=404, detail=f"no task {task_id}")
+    action = (body.action or "").strip().lower()
+    if action in ("deliver", "send", "yes"):
+        out = _slots.deliver(store, task_id, event_id)
+    elif action in ("reject", "not_it", "not it", "no"):
+        out = _slots.reject_fill(store, task_id, event_id)
+    elif action == "undo":
+        out = {"ok": True, "undone": _slots.undo(task_id)}
+    else:
+        raise HTTPException(status_code=400, detail=f"unknown action {action!r}")
+    if not out.get("ok") and out.get("error") and not out.get("superseded"):
+        raise HTTPException(status_code=409, detail=out["error"])
+    return {**out, "task": _task_view(store.get_task(task_id))}
 
 
 # --- Org AI Network (hybrid coordinator + local digests/priorities) ----------

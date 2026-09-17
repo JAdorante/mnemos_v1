@@ -1263,7 +1263,7 @@ function syncThinking(busy){
     wasBusy=false;
   }
 }
-function add(kind,text,distillId,sources,packet,compiled){
+function add(kind,text,distillId,sources,packet,compiled,stream){
   // Progress feeds the thinking block (frontier-style), not the transcript.
   if(kind==='progress'){
     if(liveMode) appendThinkLine(text);
@@ -1327,6 +1327,20 @@ function add(kind,text,distillId,sources,packet,compiled){
     det.appendChild(bodyWrap);
     host.appendChild(det);
   }
+  // Typed chat-stream messages (task.completed, task.question,
+  // slot.fill_offer, peer.null_options, connector.salient_item) carry their
+  // action set: one button per action, each a plain reply.
+  if(stream && Array.isArray(stream.actions) && stream.actions.length){
+    const acts=document.createElement('div');acts.className='verdict stream-actions';
+    acts.dataset.streamType=stream.type||'';
+    for(const a of stream.actions){
+      const b=document.createElement('button');b.type='button';
+      b.textContent=a.label||a.reply||'';
+      b.onclick=()=>{ if(a.reply) reply(a.reply); };
+      acts.appendChild(b);
+    }
+    host.appendChild(acts);
+  }
   if(kind==='result' && distillId){
     const acts=document.createElement('div');acts.className='verdict';
     const mk=(labelTxt,outcome,cls)=>{
@@ -1374,7 +1388,7 @@ async function poll(){
   for(const e of (j.events||[])){
     since=e.id+1;
     if(e.kind==='error') lastErrShown=e.text;
-    if(liveMode) add(e.kind, e.text, e.distill_id, e.sources, e.packet, e.compiled);
+    if(liveMode) add(e.kind, e.text, e.distill_id, e.sources, e.packet, e.compiled, e.stream);
     if(e.kind==='result'||e.kind==='ask'||e.kind==='error') gotTerminal=true;
   }
   const s=j.state||{};

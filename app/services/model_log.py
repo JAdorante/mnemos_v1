@@ -25,6 +25,9 @@ from app.config import settings
 # Providers whose calls leave the machine (egress inventory).
 _CLOUD_PROVIDERS = frozenset({
     "claude", "anthropic", "gemini", "openai", "google", "azure",
+    # Non-model egress that still leaves the machine: a peer delivery and a
+    # browser fetch of a source app (Option B). Zero cost, same inventory.
+    "peer", "agent_fetch",
 })
 
 # USD per 1M tokens, (input, output). Source: Claude pricing, 2026-07.
@@ -219,6 +222,22 @@ class ModelLog:
                 print(f"[model_log] write skipped ({exc}).")
         return row
 
+    def log_egress(self, *, kind: str, destination: str,
+                   privacy_class: str | None, approving_action: str,
+                   ok: bool = True, meta: dict | None = None) -> dict:
+        """One row for something that left the machine WITHOUT a model call:
+        a peer delivery (`kind="peer"`) or an Option B fetch (`agent_fetch`).
+        Appears in egress_inventory next to cloud model calls with the
+        destination, privacy_class, and the approving action."""
+        m = {"destination": destination, "approving_action": approving_action,
+             "privacy_action": "allow" if ok else "refuse"}
+        if meta:
+            m.update(meta)
+        return self.log_call(
+            task=f"egress.{kind}", provider=kind, model=destination[:80],
+            latency_s=0.0, ok=ok, input_tokens=0, output_tokens=0,
+            cost_usd=0.0, privacy_max=privacy_class, meta=m)
+
     def stats(self) -> dict[str, Any]:
         """Aggregated view for the console: per (task, provider, model) rollups
         plus privacy egress summary (plan 6.2)."""
@@ -293,6 +312,9 @@ class ModelLog:
                         "privacy_action": action,
                         "cost_usd": d.get("cost_usd"),
                         "input_tokens": d.get("input_tokens"),
+                        "destination": (d.get("meta") or {}).get("destination"),
+                        "approving_action": (d.get("meta") or {}).get(
+                            "approving_action"),
                     })
         except Exception as exc:
             return {"ok": False, "error": str(exc), "recent": [],

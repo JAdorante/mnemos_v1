@@ -78,6 +78,50 @@ def _blob_to_emb(b):
     return np.frombuffer(b, dtype=np.float32) if b else None
 
 
+_TOKEN_STOP = frozenset({
+    "the", "a", "an", "and", "or", "to", "of", "for", "in", "on", "my", "me",
+    "i", "you", "we", "is", "are", "be", "with", "at", "this", "that", "it",
+    "as", "from", "about", "have", "get", "send", "call", "will", "would",
+})
+
+
+def _content_tokens(text: str) -> set[str]:
+    import re as _re
+    return {w for w in _re.findall(r"[a-z0-9]{3,}", (text or "").lower())
+            if w not in _TOKEN_STOP}
+
+
+# --- post-insert hooks -------------------------------------------------------
+# Every persisted event passes through Store.insert, whichever producer made
+# it (bus subscribers, chat_ingest, documents, peer answers, connector sync).
+# The task-completion detector and the slot watcher register here rather than
+# on the bus, because several producers insert directly and never publish,
+# and because only this seam knows the row id. Hooks are best-effort: an
+# exception in one never breaks the capture path. Called OUTSIDE the lock.
+_insert_hooks: list = []
+
+
+def add_insert_hook(fn) -> None:
+    if fn not in _insert_hooks:
+        _insert_hooks.append(fn)
+
+
+def remove_insert_hook(fn) -> None:
+    try:
+        _insert_hooks.remove(fn)
+    except ValueError:
+        pass
+
+
+def _run_insert_hooks(store, event_id: int, event: Event) -> None:
+    for fn in list(_insert_hooks):
+        try:
+            fn(store, event_id, event)
+        except Exception as exc:  # never break capture
+            print(f"[storage] insert hook {getattr(fn, '__name__', fn)!r} "
+                  f"skipped ({exc}).")
+
+
 class Store:
     def __init__(self, db_path: Path | None = None, audio_dir: Path | None = None,
                  *, readonly: bool = False) -> None:
@@ -1922,6 +1966,10 @@ class Store:
 
             # Plan 4.1 — commitment state machine (additive).
             self._migrate_commitment_state()
+            # Connector capture & task fulfillment (2026-09): slots, task
+            # questions, evidence ids on transitions, slot candidates,
+            # connector sync cursors (additive).
+            self._migrate_task_slots()
 
             # Meeting Layer P1 — calendar ↔ session join columns (guarded ALTER,
             # entities.hidden precedent). New CREATE TABLE already includes them.
@@ -2246,6 +2294,78 @@ class Store:
             "ON commitment_transitions(fact_id, created_at)")
         self._conn.commit()
 
+    def _migrate_task_slots(self) -> None:
+        """Additive columns + tables for tasks that wait for data.
+
+        commitments: slot_json / review_after / requester_kind / requester_id
+        (the open slot), task_kind + counterparty_name (user-created tasks
+        such as "have a call with Marc" whose counterparty may not be a
+        person row yet), question (the pending yes/no for `uncertain`),
+        thread_key + linked_declined_id (decline is terminal for capture).
+        commitment_transitions: evidence_id — the event that closed it.
+        slot_candidates: the Not-it memory. connector_sync: per-connector
+        cursor + counters.
+        """
+        try:
+            cols = {r["name"] for r in
+                    self._conn.execute("PRAGMA table_info(commitments)").fetchall()}
+        except Exception:
+            return
+        if not cols:
+            return
+        for col, decl in (
+            ("slot_json", "TEXT"),
+            ("review_after", "REAL"),
+            ("requester_kind", "TEXT"),
+            ("requester_id", "TEXT"),
+            ("task_kind", "TEXT"),
+            ("counterparty_name", "TEXT"),
+            ("question", "TEXT"),
+            ("thread_key", "TEXT"),
+            ("linked_declined_id", "INTEGER"),
+        ):
+            if col not in cols:
+                self._conn.execute(
+                    f"ALTER TABLE commitments ADD COLUMN {col} {decl}")
+        tcols = {r["name"] for r in self._conn.execute(
+            "PRAGMA table_info(commitment_transitions)").fetchall()}
+        if tcols and "evidence_id" not in tcols:
+            self._conn.execute(
+                "ALTER TABLE commitment_transitions ADD COLUMN evidence_id INTEGER")
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS slot_candidates (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                commitment_id INTEGER NOT NULL,
+                event_id      INTEGER NOT NULL,
+                score         REAL    NOT NULL,
+                verdict       TEXT    NOT NULL,   -- offered|delivered|rejected|superseded
+                created_at    REAL    NOT NULL,
+                decided_at    REAL,
+                UNIQUE (commitment_id, event_id)
+            )
+            """
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_slot_cand_commit "
+            "ON slot_candidates(commitment_id, verdict)")
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS connector_sync (
+                connector_id TEXT PRIMARY KEY,
+                cursor_json  TEXT,
+                last_sync    REAL,
+                next_sync    REAL,
+                items_landed INTEGER NOT NULL DEFAULT 0,
+                last_error   TEXT
+            )
+            """
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_commitments_status "
+            "ON commitments(status)")
+        self._conn.commit()
+
     # --------------------------- learning pairs ---------------------------
     def add_learning_pair(self, row: dict) -> str | None:
         """Insert one canonical LearningPair (learning_store.record builds and
@@ -2426,7 +2546,10 @@ class Store:
                 row,
             )
             self._conn.commit()
-            return int(cur.lastrowid)
+            eid = int(cur.lastrowid)
+        if _insert_hooks:
+            _run_insert_hooks(self, eid, event)
+        return eid
 
     def _row_to_event(self, r: sqlite3.Row) -> Event:
         return Event(
@@ -4868,6 +4991,61 @@ class Store:
                                   ts=extracted_at)
         return fid
 
+    def thread_key_for_event(self, event_id: int | None) -> str | None:
+        """The conversation identity an event carries, when it has one: a
+        connector thread id, else its external id. Used so a declined task is
+        never re-proposed from the same source thread."""
+        if not event_id:
+            return None
+        try:
+            row = self.get_event(int(event_id))
+        except Exception:
+            return None
+        if not row:
+            return None
+        try:
+            meta = json.loads(row.get("meta") or "{}")
+        except Exception:
+            meta = {}
+        for key in ("thread_key", "thread_id", "external_id"):
+            val = meta.get(key)
+            if val not in (None, ""):
+                prefix = (row.get("source") or "").split(".")[0] or "event"
+                return f"{prefix}:{key}:{val}"
+        return None
+
+    def declined_commitment_for_thread(self, thread_key: str | None) -> int | None:
+        """A declined task minted from this thread, if any."""
+        if not thread_key:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT fact_id FROM commitments WHERE thread_key = ? "
+                "AND state = 'declined' ORDER BY fact_id DESC LIMIT 1",
+                (thread_key,)).fetchone()
+        return int(row["fact_id"]) if row else None
+
+    def similar_declined_commitment(self, text: str, *, min_overlap: float = 0.6,
+                                    limit: int = 200) -> int | None:
+        """A declined task whose text substantially matches `text` — a new
+        mention creates a NEW task linked to it (never silently reuses it)."""
+        toks = _content_tokens(text)
+        if not toks:
+            return None
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT fact_id, text FROM commitments WHERE state = 'declined' "
+                "ORDER BY fact_id DESC LIMIT ?", (int(limit),)).fetchall()
+        best: tuple[float, int] | None = None
+        for r in rows:
+            other = _content_tokens(r["text"] or "")
+            if not other:
+                continue
+            ov = len(toks & other) / max(1, len(toks | other))
+            if ov >= min_overlap and (best is None or ov > best[0]):
+                best = (ov, int(r["fact_id"]))
+        return best[1] if best else None
+
     def add_commitment(self, text: str, *, source_event_id: int | None = None,
                        source_span: str = "", confidence: float | None = None,
                        from_person_id: int | None = None,
@@ -4876,7 +5054,34 @@ class Store:
                        from_resolution_confidence: float | None = None,
                        to_mention_id: int | None = None,
                        to_resolution_confidence: float | None = None,
-                       extracted_at: float) -> int:
+                       extracted_at: float,
+                       state: str = "detected",
+                       task_kind: str | None = None,
+                       counterparty_name: str | None = None,
+                       requester_kind: str | None = None,
+                       requester_id: str | None = None,
+                       slot: dict | None = None,
+                       review_after: float | None = None,
+                       thread_key: str | None = None,
+                       allow_declined_thread: bool = False) -> int:
+        """Insert a commitment (the task model). Returns the fact id, or 0
+        when the source thread already produced a task the user DECLINED —
+        decline is terminal for capture, so the same thread never re-proposes.
+        A matching declined task from a DIFFERENT thread does not block: the
+        new row is linked to it via linked_declined_id.
+        """
+        from app.services import commitment_state as cs
+        state = (state or "detected").strip().lower()
+        if state not in cs.STATES:
+            raise cs.TransitionError(f"unknown commitment state: {state!r}")
+        status = cs.status_for(state)
+        if thread_key is None:
+            thread_key = self.thread_key_for_event(source_event_id)
+        if thread_key and not allow_declined_thread and \
+                self.declined_commitment_for_thread(thread_key) is not None:
+            return 0
+        linked = self.similar_declined_commitment(text)
+        slot_json = json.dumps(slot) if slot else None
         with self._lock:
             cur = self._conn.execute(
                 "INSERT INTO facts (kind, source_event_id, source_span, confidence, "
@@ -4888,11 +5093,15 @@ class Store:
                 "INSERT INTO commitments (fact_id, text, from_person_id, to_person_id, "
                 "due, status, state, counterparty_expects, "
                 "from_mention_id, from_resolution_confidence, "
-                "to_mention_id, to_resolution_confidence) "
-                "VALUES (?, ?, ?, ?, ?, 'open', 'detected', 0, ?, ?, ?, ?)",
-                (fid, text, from_person_id, to_person_id, due,
+                "to_mention_id, to_resolution_confidence, "
+                "task_kind, counterparty_name, requester_kind, requester_id, "
+                "slot_json, review_after, thread_key, linked_declined_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (fid, text, from_person_id, to_person_id, due, status, state,
                  from_mention_id, from_resolution_confidence,
-                 to_mention_id, to_resolution_confidence),
+                 to_mention_id, to_resolution_confidence,
+                 task_kind, counterparty_name, requester_kind, requester_id,
+                 slot_json, review_after, thread_key, linked),
             )
             self._conn.commit()
         self.record_node_access("fact", fid, extracted_at)
@@ -7193,6 +7402,15 @@ class Store:
                c.completion_evidence_json AS completion_evidence_json,
                c.last_surfaced AS last_surfaced,
                c.counterparty_expects AS counterparty_expects,
+               c.slot_json AS slot_json,
+               c.review_after AS review_after,
+               c.requester_kind AS requester_kind,
+               c.requester_id AS requester_id,
+               c.task_kind AS task_kind,
+               c.counterparty_name AS counterparty_name,
+               c.question AS question,
+               c.thread_key AS thread_key,
+               c.linked_declined_id AS linked_declined_id,
                pt.canonical_name AS owner,
                pf.canonical_name AS from_person,
                pto.canonical_name AS to_person,
@@ -7680,18 +7898,24 @@ class Store:
         evidence: dict | str | None = None,
         actor: str = "user",
         ts: float | None = None,
+        evidence_id: int | None = None,
+        question: str | None = None,
     ) -> dict:
         """Apply a legal commitment state transition (plan 4.1).
 
-        Completing requires cited evidence. Returns
-        `{ok, fact_id, from_state, to_state, status}`.
+        Completing requires cited evidence or the user as actor. `evidence_id`
+        is the event that closed (or questioned) the task; when omitted it is
+        read from evidence["evidence_event_id"]. `question` is stored on the
+        row for an `uncertain` transition so the board can show it inline.
+        Returns `{ok, fact_id, from_state, to_state, status}`.
         """
         import time as _time
         ts = float(ts if ts is not None else _time.time())
         with self._lock:
             out = self._transition_commitment_unlocked(
                 fact_id, to_state, reason=reason, evidence=evidence,
-                actor=actor, ts=ts)
+                actor=actor, ts=ts, evidence_id=evidence_id,
+                question=question)
             self._conn.commit()
             return out
 
@@ -7701,6 +7925,8 @@ class Store:
         evidence: dict | str | None = None,
         actor: str = "user",
         ts: float,
+        evidence_id: int | None = None,
+        question: str | None = None,
     ) -> dict:
         """Caller must hold `self._lock`. Does not commit."""
         import json
@@ -7714,13 +7940,22 @@ class Store:
             raise TransitionError(f"no commitment for fact_id={fact_id}")
         from_state = (row["state"] or "detected").strip().lower()
         to_state = (to_state or "").strip().lower()
+        actor = (actor or "user").strip().lower() or "user"
         cs.require_legal(from_state, to_state)
         ev = cs.normalize_evidence(evidence)
         if to_state == "completed" and not cs.evidence_ok_for_completed(ev):
+            # Plan 4.1 invariant, kept: even the user's own close carries a
+            # cite (set_fact_status stamps user_mark_done; the /tasks answer
+            # route stamps user_confirm). An unevidenced close from ANY actor
+            # is illegal — the fulfillment metric depends on it.
             raise TransitionError(
                 "completed requires completion evidence "
                 "(evidence_event_id/source/note)"
             )
+        if evidence_id is None:
+            evidence_id = cs.evidence_id_of(ev)
+        elif "evidence_event_id" not in ev:
+            ev["evidence_event_id"] = int(evidence_id)
         if from_state == to_state:
             return {
                 "ok": True, "fact_id": int(fact_id),
@@ -7732,18 +7967,24 @@ class Store:
         if to_state == "completed":
             self._conn.execute(
                 "UPDATE commitments SET state = ?, status = ?, "
-                "completion_evidence_json = ? WHERE fact_id = ?",
+                "completion_evidence_json = ?, question = NULL WHERE fact_id = ?",
                 (to_state, compat, evidence_json, fact_id))
+        elif to_state == "uncertain":
+            self._conn.execute(
+                "UPDATE commitments SET state = ?, status = ?, "
+                "completion_evidence_json = ?, question = ? WHERE fact_id = ?",
+                (to_state, compat, evidence_json, question, fact_id))
         else:
             self._conn.execute(
-                "UPDATE commitments SET state = ?, status = ? WHERE fact_id = ?",
+                "UPDATE commitments SET state = ?, status = ?, question = NULL "
+                "WHERE fact_id = ?",
                 (to_state, compat, fact_id))
         self._conn.execute(
             "INSERT INTO commitment_transitions "
             "(fact_id, from_state, to_state, reason, evidence_json, actor, "
-            "created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "created_at, evidence_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (fact_id, from_state, to_state, reason, evidence_json,
-             actor, float(ts)))
+             actor, float(ts), evidence_id))
         self._conn.execute(
             "UPDATE facts SET updated_at = ? WHERE id = ?",
             (float(ts), fact_id))
@@ -7751,7 +7992,12 @@ class Store:
             "ok": True, "fact_id": int(fact_id),
             "from_state": from_state, "to_state": to_state,
             "status": compat, "noop": False,
+            "evidence_id": evidence_id,
         }
+
+    def last_transition(self, fact_id: int) -> dict | None:
+        rows = self.list_commitment_transitions(int(fact_id), limit=1)
+        return rows[0] if rows else None
 
     def list_commitment_transitions(
         self, fact_id: int, *, limit: int = 50,
@@ -7759,7 +8005,7 @@ class Store:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT id, fact_id, from_state, to_state, reason, "
-                "evidence_json, actor, created_at "
+                "evidence_json, actor, created_at, evidence_id "
                 "FROM commitment_transitions WHERE fact_id = ? "
                 "ORDER BY created_at DESC, id DESC LIMIT ?",
                 (fact_id, limit)).fetchall()
@@ -7790,6 +8036,210 @@ class Store:
                 (ts, fact_id))
             self._conn.commit()
             return cur.rowcount > 0
+
+    # ------------------------- tasks / slots (2026-09) -------------------
+    def list_tasks(self, statuses: tuple[str, ...] | list[str] | None = None,
+                   *, limit: int = 300) -> list[dict]:
+        """Joined commitment rows for the Tasks board, newest first. `statuses`
+        filters on the compat status (open | awaiting_data | uncertain | done
+        | declined | cancelled); None = the open work
+        (commitment_state.OPEN_STATUSES)."""
+        from app.services import commitment_state as cs
+        want = set(statuses) if statuses else set(cs.OPEN_STATUSES)
+        with self._lock:
+            rows = self._conn.execute(
+                self._FACT_SELECT + " WHERE f.kind = 'commitment' "
+                "ORDER BY f.extracted_at DESC").fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            if (d.get("state") or "") == "escrowed":
+                continue
+            if (d.get("status") or "") not in want:
+                continue
+            out.append(self._hydrate_task_row(d))
+            if len(out) >= limit:
+                break
+        return out
+
+    def get_task(self, fact_id: int) -> dict | None:
+        d = self.get_fact(int(fact_id))
+        if not d or d.get("kind") != "commitment":
+            return None
+        return self._hydrate_task_row(d)
+
+    @staticmethod
+    def _hydrate_task_row(d: dict) -> dict:
+        raw = d.get("slot_json")
+        slot = None
+        if isinstance(raw, str) and raw.strip():
+            try:
+                slot = json.loads(raw)
+            except Exception:
+                slot = None
+        d["slot"] = slot if isinstance(slot, dict) else None
+        return d
+
+    def set_slot(self, fact_id: int, slot: dict | None, *,
+                 review_after: float | None = None,
+                 requester_kind: str | None = None,
+                 requester_id: str | None = None) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE commitments SET slot_json = ?, review_after = ?, "
+                "requester_kind = COALESCE(?, requester_kind), "
+                "requester_id = COALESCE(?, requester_id) WHERE fact_id = ?",
+                (json.dumps(slot) if slot else None, review_after,
+                 requester_kind, requester_id, int(fact_id)))
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def set_task_question(self, fact_id: int, question: str | None) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE commitments SET question = ? WHERE fact_id = ?",
+                (question, int(fact_id)))
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def list_open_slots(self, *, limit: int = 200) -> list[dict]:
+        """Tasks whose completion is defined by data not in memory yet."""
+        out = []
+        for row in self.list_tasks(("awaiting_data",), limit=limit):
+            if row.get("slot"):
+                out.append(row)
+        return out
+
+    def add_slot_candidate(self, commitment_id: int, event_id: int,
+                           score: float, verdict: str = "offered",
+                           *, ts: float | None = None) -> int | None:
+        """Remember that an event was scored against a slot. Returns the row
+        id, or None when the pair was already recorded (the Not-it memory —
+        an event is never offered twice for the same slot)."""
+        import time as _time
+        ts = float(ts if ts is not None else _time.time())
+        with self._lock:
+            try:
+                cur = self._conn.execute(
+                    "INSERT INTO slot_candidates (commitment_id, event_id, "
+                    "score, verdict, created_at) VALUES (?, ?, ?, ?, ?)",
+                    (int(commitment_id), int(event_id), float(score),
+                     verdict, ts))
+            except sqlite3.IntegrityError:
+                return None
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def slot_candidate(self, commitment_id: int, event_id: int) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM slot_candidates WHERE commitment_id = ? "
+                "AND event_id = ?", (int(commitment_id), int(event_id))
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_slot_candidates(self, commitment_id: int, *,
+                             verdict: str | None = None) -> list[dict]:
+        with self._lock:
+            if verdict:
+                rows = self._conn.execute(
+                    "SELECT * FROM slot_candidates WHERE commitment_id = ? "
+                    "AND verdict = ? ORDER BY created_at DESC",
+                    (int(commitment_id), verdict)).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT * FROM slot_candidates WHERE commitment_id = ? "
+                    "ORDER BY created_at DESC", (int(commitment_id),)).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_slot_candidate_verdict(self, commitment_id: int, event_id: int,
+                                   verdict: str, *, score: float | None = None,
+                                   ts: float | None = None) -> bool:
+        import time as _time
+        ts = float(ts if ts is not None else _time.time())
+        with self._lock:
+            if score is None:
+                cur = self._conn.execute(
+                    "UPDATE slot_candidates SET verdict = ?, decided_at = ? "
+                    "WHERE commitment_id = ? AND event_id = ?",
+                    (verdict, ts, int(commitment_id), int(event_id)))
+            else:
+                cur = self._conn.execute(
+                    "UPDATE slot_candidates SET verdict = ?, decided_at = ?, "
+                    "score = ? WHERE commitment_id = ? AND event_id = ?",
+                    (verdict, ts, float(score), int(commitment_id),
+                     int(event_id)))
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def delete_slot_candidates(self, commitment_id: int) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM slot_candidates WHERE commitment_id = ?",
+                (int(commitment_id),))
+            self._conn.commit()
+            return cur.rowcount
+
+    # ----------------------------- connector sync --------------------------
+    def connector_sync_get(self, connector_id: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM connector_sync WHERE connector_id = ?",
+                ((connector_id or "").strip().lower(),)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        try:
+            d["cursor"] = json.loads(d.get("cursor_json") or "{}") or {}
+        except Exception:
+            d["cursor"] = {}
+        return d
+
+    def connector_sync_set(self, connector_id: str, *,
+                           cursor: dict | None = None,
+                           last_sync: float | None = None,
+                           next_sync: float | None = None,
+                           items_landed_add: int = 0,
+                           last_error: str | None = None,
+                           clear_error: bool = False) -> dict:
+        cid = (connector_id or "").strip().lower()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM connector_sync WHERE connector_id = ?",
+                (cid,)).fetchone()
+            if row is None:
+                self._conn.execute(
+                    "INSERT INTO connector_sync (connector_id, cursor_json, "
+                    "last_sync, next_sync, items_landed, last_error) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (cid, json.dumps(cursor or {}), last_sync, next_sync,
+                     int(items_landed_add), last_error))
+            else:
+                sets, args = [], []
+                if cursor is not None:
+                    sets.append("cursor_json = ?"); args.append(json.dumps(cursor))
+                if last_sync is not None:
+                    sets.append("last_sync = ?"); args.append(float(last_sync))
+                if next_sync is not None:
+                    sets.append("next_sync = ?"); args.append(float(next_sync))
+                if items_landed_add:
+                    sets.append("items_landed = items_landed + ?")
+                    args.append(int(items_landed_add))
+                if last_error is not None or clear_error:
+                    sets.append("last_error = ?"); args.append(last_error)
+                if sets:
+                    args.append(cid)
+                    self._conn.execute(
+                        "UPDATE connector_sync SET " + ", ".join(sets)
+                        + " WHERE connector_id = ?", args)
+            self._conn.commit()
+        return self.connector_sync_get(cid) or {}
+
+    def connector_sync_clear(self) -> int:
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM connector_sync")
+            self._conn.commit()
+            return cur.rowcount
 
     def set_counterparty_expects(
         self, fact_id: int, expects: bool,

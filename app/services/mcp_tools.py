@@ -19,6 +19,7 @@ READ_TOOLS = (
     "memory_search",
     "person_context",
     "open_loops",
+    "open_slots",
     "org_brief",
     "provenance",
 )
@@ -156,6 +157,12 @@ def tool_schemas() -> list[dict[str, Any]]:
          "inputSchema": {"type": "object", "properties": {
              "person": {"type": "string"},
          }}},
+        {"name": "open_slots",
+         "description": ("Tasks waiting for data that is not in memory yet "
+                         "(what is needed, who asked, since when). " + refusal),
+         "inputSchema": {"type": "object", "properties": {
+             "requester": {"type": "string"},
+         }}},
         {"name": "org_brief",
          "description": "People, facts, and open work for an organization. " + refusal,
          "inputSchema": {"type": "object", "properties": {
@@ -237,6 +244,27 @@ def call_tool(name: str, arguments: dict | None = None) -> dict[str, Any]:
                     },
                 })
             return {"ok": True, "results": redact_result(open_[:40])}
+        if name == "open_slots":
+            from app.services import slots as _slots
+            from app.services.memory import memory
+            store = memory._ensure_store()
+            want = (args.get("requester") or "").strip().lower()
+            rows = []
+            for r in _slots.open_slots(store):
+                slot = r.get("slot") or {}
+                who = _slots.requester_label(slot)
+                if want and want not in who.lower():
+                    continue
+                rows.append({
+                    "task_id": r.get("fact_id"),
+                    "need": slot.get("need"),
+                    "requester": who,
+                    "since": slot.get("created_at"),
+                    "review_after": r.get("review_after"),
+                    "status": r.get("status"),
+                    "provenance": {"event_id": slot.get("created_from")},
+                })
+            return {"ok": True, "results": redact_result(rows[:40])}
         if name == "org_brief":
             from app.services.memory import memory
             store = memory._ensure_store()

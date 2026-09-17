@@ -350,6 +350,14 @@ def wipe(confirm: str, *, full: bool = False, credentials: bool = False,
     except Exception:
         pass
 
+    # Peers holding slots for this user learn they are resolved (reason
+    # erased) BEFORE the store goes away; the receipt lists them.
+    slots_notified: list[dict] = []
+    try:
+        from app.services import slots as _slots
+        slots_notified = _slots.notify_erasure()
+    except Exception as exc:
+        slots_notified = [{"ok": False, "error": str(exc)}]
     stopped = stop_capture()
     closed = _close_stores()
 
@@ -390,6 +398,9 @@ def wipe(confirm: str, *, full: bool = False, credentials: bool = False,
         "handles_closed": closed,
         "kept": [] if full else list(KEEP_NAMES),
         "credentials_removed": creds_removed,
+        "slots_notified": slots_notified,
+        "removed_also": ["open slots", "slot candidates",
+                         "connector sync cursors", "team membership"],
         "failures": failures,
         "complete": not failures,
         "statement": (
