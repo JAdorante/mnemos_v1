@@ -74,6 +74,16 @@ services:
 
   sparrow-user1:
     <<: *sparrow
+    # The gateway (sparrow.ravenry.us) reaches this seat ONLY by this alias on
+    # sparrow-net. Declared here so `compose up` keeps the attachment: an
+    # undeclared, hand-made attachment is dropped on every recreate, which
+    # silently broke the front door for adopted users on 2026-09-17.
+    # `default` must stay listed — the tunnels and peer URLs dial
+    # sparrow-user1:8000 there.
+    networks:
+      default:
+      sparrow-net:
+        aliases: [sparrow-seat-user1]
     ports:
       - "127.0.0.1:8001:8000"
     # LoRA pilot (user1 only): the idle trainer needs the GPU visible to the
@@ -138,6 +148,16 @@ services:
 
   sparrow-user3:
     <<: *sparrow
+    # The gateway (sparrow.ravenry.us) reaches this seat ONLY by this alias on
+    # sparrow-net. Declared here so `compose up` keeps the attachment: an
+    # undeclared, hand-made attachment is dropped on every recreate, which
+    # silently broke the front door for adopted users on 2026-09-17.
+    # `default` must stay listed — the tunnels and peer URLs dial
+    # sparrow-user3:8000 there.
+    networks:
+      default:
+      sparrow-net:
+        aliases: [sparrow-seat-user3]
     ports:
       - "127.0.0.1:8003:8000"
     volumes:
@@ -196,3 +216,10 @@ volumes:
   sparrow-user4-data:
   sparrow-user5-data:
   sparrow-user6-data:
+
+networks:
+  default: {}
+  # The gateway's network, created by deploy/gateway/docker-compose.yml.
+  # External: this stack joins it and never creates or removes it.
+  sparrow-net:
+    external: true
