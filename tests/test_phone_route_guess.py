@@ -14,6 +14,11 @@ force-routed to Phone Link. The heuristic ran over the whole agent goal, which
 Add context had merged the document into — a bare "text"/"call"/"phone"
 anywhere in an attached file hijacked the surface. The fix is the seam, not the
 wordlist: send() reads the TYPED message (`display`), never the merged goal.
+
+Live failure (Sept 22 2026): "What meeting/call do I have tomorrow?" matched
+the noun "call" and force-routed a calendar question to Phone Link, which
+replied "Phone Link is disabled". A message that opens as a question is never
+a phone action; only verb-first / polite-request phrasings take the fast lane.
 """
 from __future__ import annotations
 
@@ -43,6 +48,31 @@ class GuessSurfaceTests(unittest.TestCase):
             "phone Mom",
             "reply to Marc that the deck is done",
             "send a text to Patrick",
+        ):
+            self.assertEqual(_guess_surface(q), "phone_link", msg=q)
+
+    def test_questions_are_never_phone_tasks(self):
+        # Live failure (Sept 22 2026): "What meeting/call do I have tomorrow?"
+        # matched the noun "call" and answered "Phone Link is disabled".
+        for q in (
+            "What meeting/call do I have tomorrow?",
+            "what call do I have tomorrow",
+            "When is my call with Dave?",
+            "Did Abby text me back?",
+            "who should I call about the Ravenry update?",
+            "is there a text from Marc?",
+            "How do I phone someone from here?",
+        ):
+            self.assertIsNone(_guess_surface(q), msg=q)
+
+    def test_polite_requests_and_verb_first_questions_still_fast_lane(self):
+        # A request phrased as a question is still an action; a trailing "?"
+        # inside the SMS body must not demote the verb-first instruction.
+        for q in (
+            "can you text Abby I'm running late?",
+            "could you call Conor Kane",
+            "please phone Mom",
+            "text Abby: what time is the meeting?",
         ):
             self.assertEqual(_guess_surface(q), "phone_link", msg=q)
 

@@ -5308,11 +5308,23 @@ def onboarding_template() -> dict:
     return onboarding.write_template()
 
 
+# Hosted (QUILL_HEADLESS=1) seats have no access to the user's machine — the
+# container only mounts /srv/sparrow/data. Advertising "scan my system" /
+# "read my documents" there is a dead button that looks like a product bug.
+_HEADLESS_LOCAL_FS = (
+    "Not available on hosted Sparrow — this instance cannot see files or "
+    "apps on your computer. Connect a calendar or fill in the form instead."
+)
+
+
 @router.get("/onboarding/scan-available")
 def onboarding_scan_available() -> dict:
     """Cheap probe so the wizard shows the auto-fill button only when scanning
     is enabled — no scan work is done here. `optional` lists sources the user
     can explicitly opt into (e.g. bookmarks)."""
+    if _headless():
+        return {"available": False, "sources": [], "optional": [],
+                "reason": _HEADLESS_LOCAL_FS}
     return {"available": settings.onboarding.scan_enabled,
             "sources": sorted(settings.onboarding.scan_sources),
             "optional": sorted(settings.onboarding.scan_optional)}
@@ -5340,6 +5352,8 @@ def onboarding_enrich(body: OnboardingScanIn | None = None) -> dict:
     onboarding complete, and lands as observed/unreviewed (traceable via
     source 'onboarding.scan', reversible in the console) — distinct from the
     user-stated, human-accepted answers. `include` opts into bookmarks."""
+    if _headless():
+        return {"ok": False, "error": _HEADLESS_LOCAL_FS}
     from app.services import onboarding_scan
 
     return onboarding_scan.enrich(sources=_scan_sources(body))
@@ -5349,6 +5363,9 @@ def onboarding_enrich(body: OnboardingScanIn | None = None) -> dict:
 def onboarding_scan(body: OnboardingScanIn | None = None) -> dict:
     """Read-only draft of the local signals (no ingest, no form changes) — kept
     for inspection/tests. The wizard uses /onboarding/enrich instead."""
+    if _headless():
+        return {"ok": False, "error": _HEADLESS_LOCAL_FS,
+                "profile": {}, "found": {}}
     from app.services import onboarding_scan
 
     return onboarding_scan.scan(sources=_scan_sources(body))
@@ -5357,16 +5374,29 @@ def onboarding_scan(body: OnboardingScanIn | None = None) -> dict:
 # --- read-my-documents (opt-in content ingestion) ---------------------------
 @router.get("/onboarding/documents-available")
 def onboarding_documents_available() -> dict:
-    """Cheap probe: is document ingestion enabled, and which folders are in
-    scope? No files are read here — just the configured roots — so the wizard can
-    show the consent checkbox with an honest 'we'll read these folders' line."""
-    from app.services import documents
+    """Cheap probe for the Setup documents affordance.
 
-    if not settings.documents.enabled:
-        return {"available": False, "roots": [], "exts": []}
-    return {"available": True,
+    Upload (`upload`) is the shared path on hosted seats and local `run_all`
+    so Setup matches 1:1. Local folder walks stay on the preview/ingest APIs
+    but the wizard no longer advertises them (`available` is always false).
+    """
+    from app.services import attachments, documents
+
+    exts = sorted(settings.documents.exts)
+    docs_on = bool(settings.documents.enabled)
+    upload = docs_on
+    accept = attachments.allowed_doc_accept() if upload else ""
+
+    if _headless():
+        return {"available": False, "upload": upload, "roots": [], "exts": exts,
+                "accept": accept,
+                "reason": ("" if upload else _HEADLESS_LOCAL_FS)}
+    if not docs_on:
+        return {"available": False, "upload": False, "roots": [], "exts": [],
+                "accept": ""}
+    return {"available": False, "upload": True,
             "roots": [str(p) for p in documents.roots()],
-            "exts": sorted(settings.documents.exts)}
+            "exts": exts, "accept": accept}
 
 
 @router.get("/onboarding/documents-preview")
@@ -5376,7 +5406,7 @@ def onboarding_documents_preview(limit: int = 50) -> dict:
     to report char counts but writes nothing to memory."""
     from app.services import documents
 
-    if not settings.documents.enabled:
+    if _headless() or not settings.documents.enabled:
         return {"available": False, "files": []}
     files = documents.preview(limit=max(1, min(limit, 200)))
     return {"available": True, "count": len(files), "files": files}
@@ -5390,9 +5420,45 @@ def onboarding_documents() -> dict:
     in the Console), and all events carry source='documents.scan' (reversible).
     Idempotent — re-running skips unchanged files. Roots are server-side only (no
     client-supplied paths), so this can't be pointed at arbitrary directories."""
+    if _headless():
+        return {"ok": False, "error": _HEADLESS_LOCAL_FS}
     from app.services import documents
 
     return documents.ingest()
+
+
+@router.post("/onboarding/documents-upload")
+async def onboarding_documents_upload(file: UploadFile = File(...)) -> dict:
+    """Upload documents into memory from Setup (local and hosted).
+
+    Same extract/mine path as Chat → Attach. Documents only (no photos).
+    Provenance is source='onboarding.upload' so Memory can review/reverse
+    them separately from chat attachments. Fact mining runs in the
+    background so a multi-chunk PDF cannot freeze Setup.
+    """
+    import asyncio
+    from functools import partial
+
+    from app.services import attachments
+
+    if not settings.documents.enabled:
+        raise HTTPException(status_code=400,
+                            detail="document ingestion disabled (QUILL_DOCUMENTS=0)")
+    name = file.filename or "file"
+    try:
+        data = await file.read()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"read failed: {exc}") from exc
+    result = await asyncio.to_thread(partial(
+        attachments.ingest_bytes, name, data,
+        source="onboarding.upload", section="onboarding.upload",
+        allow_images=False))
+    if not result.get("ok"):
+        raise HTTPException(status_code=400,
+                            detail=result.get("error") or "ingest failed")
+    # Drop chat-turn `context` — setup has no sticky composer to merge into.
+    result.pop("context", None)
+    return result
 
 
 @router.post("/onboarding/ingest")

@@ -63,8 +63,6 @@ class PlannedConnector:
 
 PLANNED: tuple[PlannedConnector, ...] = (
     PlannedConnector("slack", "Slack", ("Slack",)),
-    PlannedConnector("outlook", "Outlook",
-                     ("Outlook", "Microsoft Calendar", "Microsoft Teams")),
     PlannedConnector("hubspot", "HubSpot", ("HubSpot",)),
     PlannedConnector("linear", "Linear", ("Linear",)),
     PlannedConnector("notion", "Notion", ("Notion",)),

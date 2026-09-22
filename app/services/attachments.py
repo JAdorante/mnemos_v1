@@ -91,7 +91,8 @@ def _schedule_fact_mine(fn, *args, label: str = "attach") -> None:
     t.start()
 
 
-def _ingest_document(path: Path, original_name: str, data: bytes) -> dict:
+def _ingest_document(path: Path, original_name: str, data: bytes, *,
+                     source: str = SOURCE, section: str = "chat.attach") -> dict:
     from app.events import Event, Modality
     from app.services import confidence as _conf
     from app.services.documents import extract_text
@@ -110,11 +111,12 @@ def _ingest_document(path: Path, original_name: str, data: bytes) -> dict:
 
     store = get_store()
     now = time.time()
+    label = "upload" if source != SOURCE else "attach"
     ev = Event(
         time=now, modality=Modality.DOCUMENT, raw=text,
-        summary=f"[attach] {original_name} ({len(text)} chars)",
-        source=SOURCE,
-        meta={"section": "chat.attach", "path": str(path), "title": original_name,
+        summary=f"[{label}] {original_name} ({len(text)} chars)",
+        source=source,
+        meta={"section": section, "path": str(path), "title": original_name,
               "ext": path.suffix.lower(), "bytes": len(data),
               "content_sha1": _content_key(data)},
     )
@@ -156,7 +158,8 @@ def _ingest_document(path: Path, original_name: str, data: bytes) -> dict:
     }
 
 
-def _ingest_image(path: Path, original_name: str, data: bytes) -> dict:
+def _ingest_image(path: Path, original_name: str, data: bytes, *,
+                  source: str = SOURCE, section: str = "chat.attach") -> dict:
     from app.events import Event, Modality
     from app.services import confidence as _conf
     from app.storage import get_store
@@ -184,7 +187,7 @@ def _ingest_image(path: Path, original_name: str, data: bytes) -> dict:
         from app.services.vlm import vlm
         res = vlm.describe(
             jpeg,
-            context={"frame_path": str(path), "source": SOURCE, "modality": "vision"},
+            context={"frame_path": str(path), "source": source, "modality": "vision"},
         ) or {}
         description = (res.get("description") or "").strip()
         ocr = (res.get("ocr_text") or "").strip()
@@ -204,9 +207,9 @@ def _ingest_image(path: Path, original_name: str, data: bytes) -> dict:
     now = time.time()
     ev = Event(
         time=now, modality=Modality.VISION, raw=raw, summary=summary,
-        source=SOURCE,
+        source=source,
         entities=list(vision_meta.get("objects") or []),
-        meta={"section": "chat.attach", "frame_path": str(path),
+        meta={"section": section, "frame_path": str(path),
               "title": original_name, "ext": path.suffix.lower(),
               "bytes": len(data), "content_sha1": _content_key(data),
               "vision": vision_meta,
@@ -242,11 +245,18 @@ def _ingest_image(path: Path, original_name: str, data: bytes) -> dict:
     }
 
 
-def ingest_bytes(filename: str, data: bytes) -> dict:
+def ingest_bytes(filename: str, data: bytes, *,
+                 source: str = SOURCE,
+                 section: str | None = None,
+                 allow_images: bool = True) -> dict:
     """Save one uploaded file and ingest it into memory for learning.
 
     Returns a result dict with ok/kind/name/context (for the chat turn) and
     event_id/facts when successful.
+
+    `source` / `section` default to chat.attach; onboarding upload passes
+    onboarding.upload so Memory can review/reverse those separately.
+    `allow_images=False` keeps hosted setup on documents only (no VLM photos).
     """
     if not data:
         return {"ok": False, "error": "empty file", "name": filename}
@@ -256,10 +266,12 @@ def ingest_bytes(filename: str, data: bytes) -> dict:
 
     original = _safe_name(filename)
     ext = Path(original).suffix.lower()
-    if ext not in _DOC_EXTS and ext not in _IMAGE_EXTS:
-        allowed = ", ".join(sorted(_DOC_EXTS | _IMAGE_EXTS))
+    allowed = set(_DOC_EXTS)
+    if allow_images:
+        allowed |= _IMAGE_EXTS
+    if ext not in allowed:
         return {"ok": False, "error": f"unsupported type {ext or '(none)'}; "
-                f"allowed: {allowed}", "name": original}
+                f"allowed: {', '.join(sorted(allowed))}", "name": original}
 
     # Content-addressed filename keeps duplicates from stacking; still unique
     # enough via short uuid prefix if the same bytes arrive under a new name.
@@ -271,10 +283,11 @@ def ingest_bytes(filename: str, data: bytes) -> dict:
     except Exception as exc:
         return {"ok": False, "error": f"save failed: {exc}", "name": original}
 
+    sec = section or source
     try:
         if ext in _IMAGE_EXTS:
-            return _ingest_image(path, original, data)
-        return _ingest_document(path, original, data)
+            return _ingest_image(path, original, data, source=source, section=sec)
+        return _ingest_document(path, original, data, source=source, section=sec)
     except Exception as exc:
         print(f"[attachments] ingest failed for {original}: {exc}")
         return {"ok": False, "error": str(exc), "name": original, "path": str(path)}
@@ -283,3 +296,8 @@ def ingest_bytes(filename: str, data: bytes) -> dict:
 def allowed_accept() -> str:
     """HTML <input accept=...> value for the chat file picker."""
     return ",".join(sorted(_DOC_EXTS | _IMAGE_EXTS))
+
+
+def allowed_doc_accept() -> str:
+    """HTML accept= for document-only pickers (hosted onboarding upload)."""
+    return ",".join(sorted(_DOC_EXTS))

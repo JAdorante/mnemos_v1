@@ -1,4 +1,4 @@
-"""Reusable app connectors (Google first; others planned; custom MCP)."""
+"""Reusable app connectors (Google, Outlook; others planned; custom MCP)."""
 from app.services.connectors.base import (
     Connector,
     oauth_redirect_base,

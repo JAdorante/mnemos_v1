@@ -31,6 +31,11 @@ x-env: &sparrow-env
   # Google connector (Gmail + Calendar metadata).
   GOOGLE_OAUTH_CLIENT_ID: "${GOOGLE_OAUTH_CLIENT_ID:-}"
   GOOGLE_OAUTH_CLIENT_SECRET: "${GOOGLE_OAUTH_CLIENT_SECRET:-}"
+  # Outlook connector (Microsoft Graph mail headers + calendar). Shares the
+  # relay below: register .../oauth/outlook/callback alongside Google's.
+  MS_OAUTH_CLIENT_ID: "${MS_OAUTH_CLIENT_ID:-}"
+  MS_OAUTH_CLIENT_SECRET: "${MS_OAUTH_CLIENT_SECRET:-}"
+  MS_OAUTH_TENANT: "${MS_OAUTH_TENANT:-common}"
   # The ONE redirect URI registered with Google — a stable Tailscale Funnel
   # hostname, not a quick tunnel. Whichever container the funnel points at
   # relays the code back to the seat that started the flow (the live origin
@@ -171,6 +176,12 @@ services:
 
   sparrow-user4:
     <<: *sparrow
+    # Adopted into the gateway 2026-09-22 (hughsalva@college.harvard.edu);
+    # same alias rule as user3 above.
+    networks:
+      default:
+      sparrow-net:
+        aliases: [sparrow-seat-user4]
     ports:
       - "127.0.0.1:8004:8000"
     volumes:

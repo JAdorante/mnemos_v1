@@ -171,7 +171,7 @@ def connectors_list(request: Request) -> dict:
     connectors = list_status()
     if live:
         for row in connectors:
-            if row.get("id") == "google":
+            if row.get("oauth_mode"):  # any web-OAuth connector
                 row["oauth_mode"] = "redirect"
                 row["public_base"] = live
     return {
@@ -192,7 +192,7 @@ def connectors_directory(request: Request) -> dict:
     live = request_public_base(request)
     if live:
         for row in payload.get("connectors") or []:
-            if row.get("id") == "google":
+            if row.get("oauth_mode"):  # any web-OAuth connector
                 row["oauth_mode"] = "redirect"
                 row["public_base"] = live
     payload["public_base"] = live
@@ -309,7 +309,7 @@ def connector_one(connector_id: str, request: Request) -> dict:
         raise HTTPException(404, f"unknown connector: {connector_id}")
     st = c.status()
     live = request_public_base(request)
-    if live and connector_id == "google":
+    if live and st.get("oauth_mode"):
         st = {**st, "oauth_mode": "redirect", "public_base": live}
     try:
         st = {**st, **scheduler.status(c.id)}
@@ -375,14 +375,15 @@ def connector_disconnect(connector_id: str) -> dict:
     return c.disconnect()
 
 
-@router.get("/oauth/google/callback")
-def google_oauth_callback(request: Request,
-                          code: str | None = None,
-                          state: str | None = None,
-                          error: str | None = None):
-    """Google web-redirect landing — also the relay for the other seats.
+@router.get("/oauth/{provider}/callback")
+def oauth_callback(provider: str, request: Request,
+                   code: str | None = None,
+                   state: str | None = None,
+                   error: str | None = None):
+    """Web-redirect landing for an OAuth connector (google, outlook) — also
+    the relay for the other seats.
 
-    One redirect URI is registered with Google (``QUILL_OAUTH_REDIRECT_BASE``,
+    One redirect URI per provider is registered (``QUILL_OAUTH_REDIRECT_BASE``,
     a stable hostname). Whichever instance it routes to lands here. If this
     instance did not mint ``state``, the flow started on some other rotating
     hostname: bounce code and state there untouched and let it finish. Token
@@ -391,37 +392,42 @@ def google_oauth_callback(request: Request,
     """
     from urllib.parse import quote, urlencode
     from fastapi.responses import RedirectResponse
-    from app.services import exhaust_ingest as ex
     from app.services.connectors import get as get_connector, request_public_base
     from app.services.connectors.base import DEFAULT_RETURN_PATH
+
+    provider = (provider or "").strip().lower()
+    c = get_connector(provider)
+    # The state helpers live on the connector (outlook) or, for google, on
+    # the older exhaust_ingest module the connector fronts.
+    if provider == "google":
+        from app.services import exhaust_ingest as hooks
+    else:
+        hooks = c
+    if c is None or not callable(getattr(hooks, "peek_oauth_state", None)):
+        raise HTTPException(404, f"no OAuth connector: {provider}")
 
     def _dest(path: str, key: str, value: str) -> str:
         sep = "&" if "?" in path else "?"
         return f"{path}{sep}{key}={quote(value)}"
 
     # Where the user pressed Connect (Connections sheet, onboarding, …).
-    back = ex.peek_oauth_state(state or "").get("return_path") or DEFAULT_RETURN_PATH
+    back = hooks.peek_oauth_state(state or "").get("return_path") or DEFAULT_RETURN_PATH
 
-    if state and not ex.has_oauth_state(state):
-        origin = ex.state_return_origin(state)
+    if state and not hooks.has_oauth_state(state):
+        origin = hooks.state_return_origin(state)
         # origin == ours means the state simply expired here — fall through to
         # the normal mismatch error rather than redirecting to ourselves.
         if origin and origin != request_public_base(request):
             qs = urlencode({k: v for k, v in
                             (("code", code), ("state", state), ("error", error))
                             if v})
-            return RedirectResponse(f"{origin}/oauth/google/callback?{qs}",
+            return RedirectResponse(f"{origin}/oauth/{provider}/callback?{qs}",
                                     status_code=302)
 
     if error:
         return RedirectResponse(_dest(back, "oauth_error", error),
                                 status_code=302)
-    c = get_connector("google")
-    if not c:
-        return RedirectResponse(
-            _dest(back, "oauth_error", "google connector missing"),
-            status_code=302)
-    # Empty redirect_uri → exhaust uses the URI saved with oauth state
+    # Empty redirect_uri → the connector uses the URI saved with oauth state
     # (minted from the live Origin/Host at connect time).
     result = c.complete_connect(code or "", state or "", redirect_uri="")
     # complete_connect consumed the state; prefer the path it carried.
@@ -430,7 +436,13 @@ def google_oauth_callback(request: Request,
         return RedirectResponse(
             _dest(back, "oauth_error", str(result.get("error") or "oauth failed")),
             status_code=302)
-    return RedirectResponse(_dest(back, "connected", "google"), status_code=302)
+    return RedirectResponse(_dest(back, "connected", provider), status_code=302)
+
+
+def google_oauth_callback(request: Request, code: str | None = None,
+                          state: str | None = None, error: str | None = None):
+    """Back-compat name for the Google flow (same handler as the route)."""
+    return oauth_callback("google", request, code=code, state=state, error=error)
 
 
 @router.get("/mcp/tools")

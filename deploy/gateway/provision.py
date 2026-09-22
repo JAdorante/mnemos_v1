@@ -68,7 +68,9 @@ def _seat_env(seat: str, token: str) -> dict[str, str]:
         # Pilot posture: prepare freely, stop before anything irreversible.
         "AGENT_DRY_RUN": os.environ.get("SEAT_AGENT_DRY_RUN", "draft"),
     }
-    for optional in ("GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_SECRET"):
+    for optional in ("GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_SECRET",
+                     "MS_OAUTH_CLIENT_ID", "MS_OAUTH_CLIENT_SECRET",
+                     "MS_OAUTH_TENANT"):
         if os.environ.get(optional):
             env[optional] = os.environ[optional]
     if os.environ.get("SEAT_OAUTH_REDIRECT_BASE"):

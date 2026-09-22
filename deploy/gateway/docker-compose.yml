@@ -36,6 +36,9 @@ services:
       SEAT_ANTHROPIC_KEY: "${SPARROW_ANTHROPIC_KEY:-}"
       GOOGLE_OAUTH_CLIENT_ID: "${GOOGLE_OAUTH_CLIENT_ID:-}"
       GOOGLE_OAUTH_CLIENT_SECRET: "${GOOGLE_OAUTH_CLIENT_SECRET:-}"
+      MS_OAUTH_CLIENT_ID: "${MS_OAUTH_CLIENT_ID:-}"
+      MS_OAUTH_CLIENT_SECRET: "${MS_OAUTH_CLIENT_SECRET:-}"
+      MS_OAUTH_TENANT: "${MS_OAUTH_TENANT:-common}"
       SEAT_OAUTH_REDIRECT_BASE: "https://sparrow.ravenry.us"
 
   # NOTE: the socat that republishes host Ollama on 11435 is NOT declared here,

@@ -1406,7 +1406,9 @@ doesn't raise, it quietly changes what becomes a memory.
   Peer↔Person links are user-asserted only (`POST /peer/link`).
 - **M6 connectors** — Claude-style connector layer on Sparrow:
   directory browse (`GET /connectors/directory`), Connect/OAuth (Google
-  ready; Outlook/HubSpot/Slack still planned), **per-conversation enable**
+  and Outlook ready — Outlook is Microsoft Graph `Mail.ReadBasic` +
+  `Calendars.Read` via `MS_OAUTH_CLIENT_ID`, callback
+  `/oauth/outlook/callback`; HubSpot/Slack still planned), **per-conversation enable**
   (Chat → Connectors; `POST /connectors/session`), custom MCP connectors
   (`POST /connectors/custom` — reached from *this* machine, so localhost
   is fine), team allowlist (`POST /connectors/team`), and Tool access

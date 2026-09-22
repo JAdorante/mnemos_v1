@@ -269,12 +269,25 @@ textarea{min-height:96px;resize:vertical}
            metadata scan above, this reads file text and sends it to the model). -->
       <div id="docsBox" hidden style="border:1px dashed var(--acc-28);border-radius:12px;padding:12px 14px;margin-bottom:16px;background:var(--acc-05)">
         <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-          <button type="button" class="btn btn-ghost" id="docsBtn" disabled>📄 Read my documents</button>
-          <span class="muted" id="docsStatus" style="flex:1;min-width:160px">Optional: let @@BRAND@@ read the text of your recent documents (PDF, Word, notes) so it can answer questions about them. Unlike the scan above, this sends document text to the model to pull out tasks and facts — everything it learns is <b>reviewable in Memory</b> and can be removed. <span id="docsRoots"></span></span>
+          <button type="button" class="btn btn-ghost" id="docsBtn">📄 Read my documents</button>
+          <span class="muted" id="docsStatus" style="flex:1;min-width:160px">Optional: let @@BRAND@@ read the text of your recent documents (PDF, Word, notes) so it can answer questions about them. Unlike the scan above, this sends document text to the model to pull out tasks and facts — everything it learns is <b>reviewable in Memory</b> and can be removed. Check the box below, then click. <span id="docsRoots"></span></span>
         </div>
         <label id="docsConsent" style="display:flex;gap:8px;align-items:flex-start;margin:12px 0 0;text-transform:none;letter-spacing:0;font-weight:400;font-size:.9rem;color:var(--text);cursor:pointer">
           <input type="checkbox" id="docsCheck" style="width:auto;margin-top:3px">
           <span>I understand @@BRAND@@ will read the text of my recent documents and extract facts from them.</span>
+        </label>
+      </div>
+      <!-- Hosted seats: no local filesystem — upload replaces the scan/docs boxes. -->
+      <div id="uploadBox" hidden style="border:1px dashed var(--acc-28);border-radius:12px;padding:12px 14px;margin-bottom:16px;background:var(--acc-05)">
+        <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+          <button type="button" class="btn btn-ghost" id="uploadBtn">📄 Upload documents</button>
+          <input type="file" id="uploadInput" multiple hidden>
+          <span class="muted" id="uploadStatus" style="flex:1;min-width:160px">Optional: upload PDFs, Word docs, or notes so @@BRAND@@ can learn from them. Text is sent to the model to extract facts — everything is <b>reviewable in Memory</b> and can be removed. Check the box below, then choose files.</span>
+        </div>
+        <div id="uploadList" class="muted" style="margin-top:8px;font-size:.88rem"></div>
+        <label id="uploadConsent" style="display:flex;gap:8px;align-items:flex-start;margin:12px 0 0;text-transform:none;letter-spacing:0;font-weight:400;font-size:.9rem;color:var(--text);cursor:pointer">
+          <input type="checkbox" id="uploadCheck" style="width:auto;margin-top:3px">
+          <span>I understand @@BRAND@@ will read the text of the files I upload and extract facts from them.</span>
         </label>
       </div>
       <label for="name">Your name</label>
@@ -841,6 +854,11 @@ document.getElementById("scanBtn").onclick=runEnrich;
 // --- documents: content-level ingestion, gated behind an explicit checkbox.
 async function runDocs(){
   const s=document.getElementById("docsStatus"), b=document.getElementById("docsBtn");
+  const consented=!!(document.getElementById("docsCheck")||{}).checked;
+  if(!consented){
+    s.textContent="Check the box below first — @@BRAND@@ only reads documents after you consent.";
+    return;
+  }
   s.textContent="Reading your documents… this can take a minute."; b.disabled=true;
   try{
     const j=await (await fetch("/onboarding/documents",{method:"POST"})).json();
@@ -855,11 +873,69 @@ async function runDocs(){
       else { s.textContent="Didn't find readable documents to add."; }
     } else { s.textContent=j.error||"Document reading is unavailable."; }
   }catch(e){ s.textContent="Couldn't reach @@BRAND@@ to read documents."; }
+  finally{ b.disabled=false; }
 }
 document.getElementById("docsBtn").onclick=runDocs;
-document.getElementById("docsCheck").onchange=function(){
-  document.getElementById("docsBtn").disabled=!this.checked;
-};
+
+// --- hosted upload: same extract/mine path as Chat attach, user-picked files.
+async function runUpload(){
+  const s=document.getElementById("uploadStatus"),
+        b=document.getElementById("uploadBtn"),
+        inp=document.getElementById("uploadInput"),
+        list=document.getElementById("uploadList");
+  if(!document.getElementById("uploadCheck").checked){
+    s.textContent="Check the box below first — @@BRAND@@ only reads files after you consent.";
+    return;
+  }
+  inp.click();
+}
+document.getElementById("uploadBtn").onclick=runUpload;
+document.getElementById("uploadInput").addEventListener("change", async function(){
+  const s=document.getElementById("uploadStatus"),
+        b=document.getElementById("uploadBtn"),
+        list=document.getElementById("uploadList");
+  const files=[...this.files||[]];
+  this.value="";
+  if(!files.length) return;
+  if(!document.getElementById("uploadCheck").checked){
+    s.textContent="Check the box below first — @@BRAND@@ only reads files after you consent.";
+    return;
+  }
+  b.disabled=true;
+  let ok=0, fail=0, pending=0;
+  const lines=[];
+  for(const f of files){
+    s.textContent="Uploading "+f.name+"…";
+    try{
+      const fd=new FormData(); fd.append("file", f, f.name);
+      const r=await fetch("/onboarding/documents-upload",{method:"POST",body:fd});
+      const j=await r.json().catch(()=>({}));
+      if(!r.ok || j.ok===false){
+        fail++;
+        lines.push("✗ "+f.name+" — "+(j.detail||j.error||("failed ("+r.status+")")));
+      }else{
+        ok++;
+        if(j.facts_pending) pending++;
+        lines.push("✓ "+(j.name||f.name)+(j.chars?(" ("+j.chars+" chars)"):"")
+                   +(j.facts_pending?" — mining facts…":""));
+      }
+    }catch(e){
+      fail++;
+      lines.push("✗ "+f.name+" — network error");
+    }
+    list.innerHTML=lines.map(t=>"<div>"+t+"</div>").join("");
+  }
+  if(ok && !fail){
+    s.textContent="✓ Uploaded "+ok+" file"+(ok>1?"s":"")
+      +(pending?" — facts are still being extracted; review them in Memory.":".");
+  }else if(ok){
+    s.textContent="Uploaded "+ok+", "+fail+" failed. Review anything learned in Memory.";
+  }else{
+    s.textContent=fail?"Couldn't upload those files — try PDF, Word, or plain text."
+                      :"No files selected.";
+  }
+  b.disabled=false;
+});
 
 async function boot(){
   try{
@@ -874,10 +950,17 @@ async function boot(){
           document.getElementById("bmConsent").hidden=false;
       }
     }catch(e){}
-    // Documents box: only when the server allows content ingestion.
+    // Documents: same Upload control on local and hosted (1:1).
     try{
       const dc=await (await fetch("/onboarding/documents-available")).json();
-      if(dc && dc.available){
+      if(dc && dc.upload){
+        document.getElementById("uploadBox").hidden=false;
+        const inp=document.getElementById("uploadInput");
+        if(dc.accept) inp.setAttribute("accept", dc.accept);
+        else if((dc.exts||[]).length)
+          inp.setAttribute("accept", dc.exts.join(",")+",text/plain,application/pdf");
+      } else if(dc && dc.available){
+        // Legacy FS walk — kept if an older server still advertises it.
         document.getElementById("docsBox").hidden=false;
         const roots=(dc.roots||[]).map(p=>p.split(/[\\/]/).pop()).filter(Boolean);
         if(roots.length) document.getElementById("docsRoots").textContent=

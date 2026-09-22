@@ -118,6 +118,16 @@ _PHONE_TASK_RE = re.compile(
     r"\b(text|sms|imessage|reply to|call|phone(?!\s*(?:number|#)))\b|"
     r"\bsend (?:a |an )?(?:text|sms|imessage)\b",
     re.I)
+# A QUESTION is never a phone action. "What meeting/call do I have tomorrow?"
+# matched bare "call" (the noun) and force-routed a calendar question to Phone
+# Link, which answered "Phone Link is disabled" (live failure, Sept 22 2026).
+# Interrogative openers only — "can you text Abby …" / "please call Mom" are
+# requests, and "text Abby: what time?" starts with the verb, so neither the
+# polite-request form nor a trailing "?" is treated as a question here.
+_QUESTION_OPENER_RE = re.compile(
+    r"^\s*(?:what|which|when|who|whom|whose|where|why|how|"
+    r"do|does|did|is|are|was|were|have|has|had|am|any|anything)\b",
+    re.I)
 # "send a message to X" is ambiguous (SMS vs web chat vs email) — it no longer
 # force-routes anywhere. The fast path is reserved for UNAMBIGUOUS SMS verbs;
 # everything ambiguous goes to the LLM router, whose call is cheap relative to
@@ -149,7 +159,8 @@ def _guess_surface(text: str) -> str | None:
     """
     t = text or ""
     web_chat = bool(_WEB_CHAT_CUE_RE.search(t))
-    if not web_chat and _PHONE_TASK_RE.search(t):
+    question = bool(_QUESTION_OPENER_RE.search(t))
+    if not web_chat and not question and _PHONE_TASK_RE.search(t):
         return "phone_link"
     tl = t.strip().lower()
     # Anticipation / shorthand OS launches — avoid fighting the agent Chrome

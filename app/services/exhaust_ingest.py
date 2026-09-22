@@ -41,6 +41,16 @@ SCOPES = (
 SOURCE_GMAIL = "exhaust.gmail"
 SOURCE_CAL = "exhaust.calendar"
 
+# Provider → (mail source, calendar source, mail label, calendar label). The
+# People-seeding ingest below is provider-agnostic once the fetchers hand it
+# the shared header/event shape; Outlook (connectors/outlook.py) reuses it.
+PROVIDERS: dict[str, dict[str, str]] = {
+    "google": {"mail": SOURCE_GMAIL, "cal": SOURCE_CAL,
+               "mail_label": "Gmail", "cal_label": "Google Calendar"},
+    "outlook": {"mail": "exhaust.outlook", "cal": "exhaust.mscalendar",
+                "mail_label": "Outlook", "cal_label": "Microsoft Calendar"},
+}
+
 _lock = threading.Lock()
 _progress: dict[str, Any] = {
     "running": False, "contacts": 0, "events": 0, "messages": 0, "error": None,
@@ -698,10 +708,13 @@ def apply_stats(
     messages: list[dict] | None = None,
     events: list[dict] | None = None,
     now: float | None = None,
+    provider: str = "google",
 ) -> dict[str, Any]:
     """Mint people/orgs/edges. Returns ledger + counts."""
     from app.services import people_pipeline as pp
 
+    prov = PROVIDERS.get(provider) or PROVIDERS["google"]
+    src_mail, src_cal = prov["mail"], prov["cal"]
     ts = time.time() if now is None else float(now)
     ledger = _load_json(_ledger_path(), {"people": [], "events": [],
                                          "relations": [], "calendar_ids": []})
@@ -712,16 +725,16 @@ def apply_stats(
     # One provenance event per source class (not per message — keep the
     # timeline readable). Individual message/event ids ride in meta + ledger.
     gmail_eid = _provenance_event(
-        store, source=SOURCE_GMAIL,
-        raw="Gmail metadata ingest (From/To/Cc/Date/Message-ID).",
+        store, source=src_mail,
+        raw=f"{prov['mail_label']} metadata ingest (From/To/Cc/Date/Message-ID).",
         summary="Seeded people from email headers (no bodies).",
         ts=ts, meta={"n_messages": len(messages or []),
                      "n_threads": len({m.get("thread_id") for m in (messages or [])
                                        if m.get("thread_id")})},
     )
     cal_eid = _provenance_event(
-        store, source=SOURCE_CAL,
-        raw="Google Calendar metadata ingest (attendees/title/times).",
+        store, source=src_cal,
+        raw=f"{prov['cal_label']} metadata ingest (attendees/title/times).",
         summary="Seeded people from calendar attendees (no event bodies).",
         ts=ts, meta={"n_events": len(events or [])},
     )
@@ -733,7 +746,7 @@ def apply_stats(
         blob = "\n\n".join(header_blob(m.get("headers") or {}) for m in messages)
         ingest_email_network(
             blob, store=store, event_id=gmail_eid,
-            event_source=SOURCE_GMAIL, window="exhaust.gmail", now=ts)
+            event_source=src_mail, window=src_mail, now=ts)
 
     for email, st in stats.items():
         name = (st.get("name") or email.split("@")[0]).strip()
@@ -746,7 +759,7 @@ def apply_stats(
             res = pp.resolve_person_mention(
                 name, store=store, event_id=cal_eid if st.get("from_calendar")
                 else gmail_eid,
-                event_source=SOURCE_CAL if st.get("from_calendar") else SOURCE_GMAIL,
+                event_source=src_cal if st.get("from_calendar") else src_mail,
                 window="exhaust", text=f"From: {name} <{email}>",
                 grammatical_role="exhaust_contact", now=ts,
                 relationship_boost=0.8)
@@ -881,10 +894,16 @@ def run_ingest(
     events: list[dict] | None = None,
     fetch: bool = True,
     now: float | None = None,
+    provider: str = "google",
 ) -> dict[str, Any]:
-    """One-shot ingest. ``fetch=False`` uses the provided fixtures (tests)."""
+    """One-shot ingest. ``fetch=False`` uses the provided fixtures (tests,
+    and other providers that fetch on their own — ``provider`` stamps the
+    sources they land under)."""
     if not enabled() and fetch:
         return {"ok": False, "error": "QUILL_EXHAUST_INGEST=0"}
+    if fetch and provider != "google":
+        return {"ok": False, "error": f"{provider} fetches its own headers; "
+                                      "pass messages/events with fetch=False"}
     from app.storage import get_store
     store = store or get_store()
     _set_progress(running=True, contacts=0, events=0, messages=0, error=None)
@@ -904,7 +923,7 @@ def run_ingest(
         _set_progress(contacts=len(stats), events=len(events),
                       messages=len(messages))
         out = apply_stats(store, stats, pairs, messages=messages,
-                          events=events, now=now)
+                          events=events, now=now, provider=provider)
         _set_progress(running=False)
         return {**out, "contacts": len(stats),
                 "messages": len(messages), "calendar_events": len(events)}
@@ -928,7 +947,7 @@ def purge(store=None) -> dict[str, Any]:
                 n_rel += 1
         except Exception:
             pass
-    for src in (SOURCE_GMAIL, SOURCE_CAL):
+    for src in {v for p in PROVIDERS.values() for v in (p["mail"], p["cal"])}:
         try:
             dropped = store.purge_source(src)
             n_events += len(dropped.get("events") or [])

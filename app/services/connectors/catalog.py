@@ -41,9 +41,18 @@ DIRECTORY: dict[str, dict[str, Any]] = {
     },
     "outlook": {
         "category": "calendar",
-        "description": "Outlook mail and Microsoft Calendar (planned).",
-        "capabilities": ("Mail headers", "Calendar events", "Teams presence"),
+        "description": (
+            "Read-only Outlook mail headers and Microsoft Calendar events. "
+            "Sparrow never sees message bodies or your password — "
+            "you sign in on Microsoft's own screen."
+        ),
+        "capabilities": (
+            "Import contacts from recent mail headers",
+            "Import upcoming and recent calendar events",
+            "Seed People and your next-meeting view",
+        ),
         "auth": "oauth",
+        "scopes_blurb": "Mail.ReadBasic + Calendars.Read",
     },
     "hubspot": {
         "category": "crm",

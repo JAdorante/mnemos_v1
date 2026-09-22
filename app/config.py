@@ -936,6 +936,30 @@ class ExhaustConfig:
             f"{_get('QUILL_DATA_DIR', 'data')}/exhaust_ledger.json")
 
 @dataclass(frozen=True)
+class OutlookConfig:
+    """Outlook mail/calendar metadata (see services/connectors/outlook.py).
+
+    Entra app registration: a client id is enough for a *public* (desktop
+    loopback) client; add the secret for hosted web redirects. ``tenant`` is
+    ``common`` (any Microsoft account), ``organizations``, ``consumers`` or
+    a tenant id.
+    """
+    client_id: str = _get("MS_OAUTH_CLIENT_ID", "")
+    client_secret: str = _get("MS_OAUTH_CLIENT_SECRET", "")
+    tenant: str = _get("MS_OAUTH_TENANT", "common")
+
+    @property
+    def token_path(self) -> str:
+        return _get(
+            "QUILL_OUTLOOK_TOKEN",
+            f"{_get('QUILL_DATA_DIR', 'data')}/connectors/outlook/token.json")
+
+    @property
+    def oauth_state_path(self) -> str:
+        return f"{_get('QUILL_DATA_DIR', 'data')}/connectors/outlook/oauth_state.json"
+
+
+@dataclass(frozen=True)
 class McpConfig:
     """Read-only MCP memory server (mcp_server/). Off until QUILL_MCP=1."""
     enabled: bool = _get("QUILL_MCP", "0") not in ("0", "false", "False")
@@ -1708,6 +1732,7 @@ class Settings:
     memory: MemoryConfig = MemoryConfig()
     first_run: FirstRunConfig = FirstRunConfig()
     exhaust: ExhaustConfig = ExhaustConfig()
+    outlook: OutlookConfig = OutlookConfig()
     mcp: McpConfig = McpConfig()
     external_capture: ExternalCaptureConfig = ExternalCaptureConfig()
     onboarding: OnboardingConfig = OnboardingConfig()
