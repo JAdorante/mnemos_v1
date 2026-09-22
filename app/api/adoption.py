@@ -406,12 +406,18 @@ def oauth_callback(provider: str, request: Request,
     if c is None or not callable(getattr(hooks, "peek_oauth_state", None)):
         raise HTTPException(404, f"no OAuth connector: {provider}")
 
+    # Where the user pressed Connect (Connections sheet, onboarding, …), and
+    # on which origin. The browser sits on the *registered* callback host
+    # when it gets here — the relay anchor when one is set — which only
+    # serves the callback paths. A relative Location would resolve there and
+    # 404, so the final hop is absolute on the origin the flow started on.
+    entry = hooks.peek_oauth_state(state or "")
+    back = entry.get("return_path") or DEFAULT_RETURN_PATH
+    home = (entry.get("return_origin") or "").rstrip("/")
+
     def _dest(path: str, key: str, value: str) -> str:
         sep = "&" if "?" in path else "?"
-        return f"{path}{sep}{key}={quote(value)}"
-
-    # Where the user pressed Connect (Connections sheet, onboarding, …).
-    back = hooks.peek_oauth_state(state or "").get("return_path") or DEFAULT_RETURN_PATH
+        return f"{home}{path}{sep}{key}={quote(value)}"
 
     if state and not hooks.has_oauth_state(state):
         origin = hooks.state_return_origin(state)

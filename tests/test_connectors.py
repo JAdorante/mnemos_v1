@@ -450,7 +450,8 @@ class ReturnPathTests(unittest.TestCase):
             resp = google_oauth_callback(self._req(origin), code="authcode",
                                          state=r["state"])
         self.assertEqual(resp.status_code, 302)
-        self.assertEqual(resp.headers["location"], "/console?connected=google")
+        self.assertEqual(resp.headers["location"],
+                         f"{origin}/console?connected=google")
 
     def test_callback_error_returns_to_the_same_page(self) -> None:
         from app.api.adoption import google_oauth_callback
@@ -460,7 +461,7 @@ class ReturnPathTests(unittest.TestCase):
                                      error="access_denied")
         self.assertEqual(resp.status_code, 302)
         self.assertEqual(resp.headers["location"],
-                         "/console?tab=conn&oauth_error=access_denied")
+                         f"{origin}/console?tab=conn&oauth_error=access_denied")
 
     def test_onboarding_default_is_unchanged(self) -> None:
         from app.api.adoption import google_oauth_callback
@@ -475,7 +476,7 @@ class ReturnPathTests(unittest.TestCase):
             resp = google_oauth_callback(self._req(origin), code="c",
                                          state=r["state"])
         self.assertEqual(resp.headers["location"],
-                         "/onboarding?step=2&connected=google")
+                         f"{origin}/onboarding?step=2&connected=google")
 
 
 if __name__ == "__main__":

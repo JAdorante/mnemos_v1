@@ -66,6 +66,17 @@ on every ping, so a changed hostname heals itself.
 
 ## Google connector (Gmail + Calendar metadata)
 
+> **Since 2026-09-22 the anchor is the gateway, not Tailscale.** The gateway
+> at `https://sparrow.ravenry.us` passes anonymous `GET /oauth/<provider>/callback`
+> through to a relay seat (`deploy/gateway/gateway.py`, `store.relay_user`),
+> so `SPARROW_OAUTH_REDIRECT_BASE=https://sparrow.ravenry.us` and the redirect
+> URIs registered with Google/Microsoft are
+> `https://sparrow.ravenry.us/oauth/google/callback` and
+> `https://sparrow.ravenry.us/oauth/outlook/callback`. Everything below about
+> a Tailscale Funnel still works and is kept as the fallback for a box with no
+> gateway; the funnel on this box can be turned off with
+> `sudo tailscale funnel --https=443 off`.
+
 **Register one redirect URI, once.** Google's Web OAuth client only accepts
 redirect URIs registered ahead of time, and quick-tunnel hostnames rotate on
 every restart — six seats would mean six new URIs to paste in each time. So
@@ -120,6 +131,43 @@ Leave `SPARROW_OAUTH_REDIRECT_BASE` unset and the old behaviour returns: the
 redirect is minted from the live origin (`window.location.origin` / `Origin`
 / `X-Forwarded-Host`), which means registering every hostname by hand.
 Desktop installs without a public HTTPS base keep the loopback OAuth flow.
+
+### Outlook (Microsoft Graph mail headers + calendar)
+
+Same relay, second path. The Outlook connector (`app/services/connectors/
+outlook.py`) uses `Mail.ReadBasic` + `Calendars.Read` — Graph never returns a
+body under those — and lands on `/oauth/outlook/callback`.
+
+```bash
+# 1. Expose the second callback path on the SAME funnel hostname.
+sudo tailscale funnel --bg --set-path=/oauth/outlook/callback \
+     http://127.0.0.1:8001/oauth/outlook/callback
+tailscale funnel status   # both /oauth/google/callback and /oauth/outlook/callback listed
+```
+
+```bash
+# 2. .env on the GB10 (next to the Google keys)
+MS_OAUTH_CLIENT_ID=...
+MS_OAUTH_CLIENT_SECRET=...
+MS_OAUTH_TENANT=common        # or organizations | consumers | <tenant id>
+```
+
+3. Microsoft Entra admin center → App registrations → New registration.
+   Supported account types: pick what the pilot users have (personal +
+   work = "common"). Redirect URI, platform **Web**, exactly one:
+   `https://gb10.<tailnet>.ts.net/oauth/outlook/callback`. Then
+   Certificates & secrets → new client secret (that is `MS_OAUTH_CLIENT_SECRET`),
+   and API permissions → Microsoft Graph → *Delegated* → `Mail.ReadBasic`,
+   `Calendars.Read`, `offline_access`, `User.Read`. No admin consent is
+   needed for those; each user consents on Microsoft's screen.
+4. `docker compose -f docker-compose.yml -f docker-compose.tunnel.yml up -d --build`,
+   then Privacy → Connections → **Connect** on Outlook.
+
+Users who come in through the gateway (`sparrow.ravenry.us`) arrive with
+`X-Forwarded-Host` set, so their seat mints the redirect from *that* origin
+unless `SPARROW_OAUTH_REDIRECT_BASE` is set. With the funnel anchor set, every
+gb10 seat uses the funnel URI whichever door the user came in — so one
+registered URI per provider covers both.
 
 If `tailscale funnel` on this version has no `--set-path`, funnel the whole
 root instead (`sudo tailscale funnel --bg http://127.0.0.1:8001`) — user1's

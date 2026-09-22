@@ -347,6 +347,18 @@ class ProviderIngestTests(_Sandbox):
         self.assertEqual(ex.PROVIDERS["google"]["mail"], ex.SOURCE_GMAIL)
 
 
+class AuthWallTests(unittest.TestCase):
+    """The browser arrives at the callback with no LAN token (live 401 on
+    2026-09-22 before this exemption); the OAuth state is the auth."""
+
+    def test_outlook_callback_is_token_exempt_like_google(self) -> None:
+        from app.services import api_auth
+        self.assertTrue(api_auth.path_is_exempt("/oauth/google/callback", "GET"))
+        self.assertTrue(api_auth.path_is_exempt("/oauth/outlook/callback", "GET"))
+        self.assertFalse(api_auth.path_is_exempt("/oauth/slack/callback", "GET"))
+        self.assertFalse(api_auth.path_is_exempt("/connectors/outlook/connect", "POST"))
+
+
 class CallbackRouteTests(_Sandbox):
     """The generic /oauth/{provider}/callback serves outlook like google."""
 
@@ -375,7 +387,8 @@ class CallbackRouteTests(_Sandbox):
                 headers={"origin": "https://seat.example.com"},
                 follow_redirects=False)
         self.assertEqual(resp.status_code, 302)
-        self.assertEqual(resp.headers["location"], "/console?connected=outlook")
+        self.assertEqual(resp.headers["location"],
+                         "https://seat.example.com/console?connected=outlook")
         self.assertTrue(ol.connected())
 
     def test_outlook_callback_relays_to_minting_origin(self) -> None:
@@ -392,6 +405,29 @@ class CallbackRouteTests(_Sandbox):
                                   follow_redirects=False)
         self.assertEqual(resp.status_code, 302)
         self.assertIn("oauth_error=access_denied", resp.headers["location"])
+
+    def test_success_redirect_is_absolute_on_the_starting_origin(self) -> None:
+        """Funnel host serves only the callback path — a relative Location
+        would 404 there once the exchange succeeded (found 2026-09-22)."""
+        start = ol.start_oauth_redirect("https://sparrow.example.com",
+                                        redirect_base="https://anchor.ts.net",
+                                        return_path="/privacy")
+        with patch.object(ol, "_exchange_code", lambda c, r: {
+                "access_token": "a", "scope": "Mail.ReadBasic Calendars.Read"}):
+            resp = self._client().get(
+                f"/oauth/outlook/callback?code=abc&state={start['state']}",
+                headers={"host": "anchor.ts.net", "x-forwarded-proto": "https"},
+                follow_redirects=False)
+        self.assertEqual(resp.headers["location"],
+                         "https://sparrow.example.com/privacy?connected=outlook")
+        # Provider-side error, same anchor: also absolute.
+        start2 = ol.start_oauth_redirect("https://sparrow.example.com",
+                                         redirect_base="https://anchor.ts.net")
+        resp = self._client().get(
+            f"/oauth/outlook/callback?error=access_denied&state={start2['state']}",
+            headers={"host": "anchor.ts.net", "x-forwarded-proto": "https"},
+            follow_redirects=False)
+        self.assertTrue(resp.headers["location"].startswith("https://sparrow.example.com/"))
         self.assertEqual(self._client().get("/oauth/slack/callback?code=x",
                                             follow_redirects=False).status_code, 404)
 

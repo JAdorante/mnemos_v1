@@ -96,6 +96,25 @@ def user_count() -> int:
     return len(_read(users_path()))
 
 
+def relay_user() -> dict[str, Any] | None:
+    """The seat that receives OAuth callbacks nobody is signed in for.
+
+    ``OAUTH_RELAY_EMAIL`` picks it; otherwise the oldest account. Any seat
+    will do: a callback whose state it did not mint is bounced to the origin
+    encoded in that state (app/api/adoption.py oauth_callback), so the relay
+    seat never sees a token that is not its own.
+    """
+    import os
+    rows = _read(users_path())
+    if not rows:
+        return None
+    want = normalize_email(os.environ.get("OAUTH_RELAY_EMAIL", "") or "")
+    if want and want in rows:
+        return rows[want]
+    oldest = min(rows.values(), key=lambda r: float(r.get("created") or 0))
+    return oldest
+
+
 def create_user(email: str, password: str, seat: str, token: str) -> dict[str, Any]:
     """Record a new human and the seat minted for them. Caller has already
     validated the password and provisioned the container."""

@@ -53,7 +53,8 @@ _EXACT_EXEMPT = frozenset({
     "/onboarding/status",
     "/phone/pair/claim",
     "/peer/pair/claim",   # peer pairing: the single-use code IS the auth
-    "/oauth/google/callback",  # Google OAuth redirect; state is the auth
+    "/oauth/google/callback",   # OAuth redirects: the state is the auth
+    "/oauth/outlook/callback",  # (browser arrives with no LAN token)
     "/docs",
     "/openapi.json",
     "/redoc",

@@ -52,6 +52,13 @@ def _echoquery(request: Request):
     return {"q": request.url.query}
 
 
+@seat_app.get("/oauth/{provider}/callback")
+def _oauth_cb(provider: str, request: Request):
+    return {"provider": provider, "q": request.url.query,
+            "auth": request.headers.get("authorization", ""),
+            "fwd_host": request.headers.get("x-forwarded-host", "")}
+
+
 class _Server(uvicorn.Server):
     def install_signal_handlers(self) -> None:
         pass
@@ -172,6 +179,35 @@ class GatewayTest(unittest.TestCase):
     def test_anonymous_post_is_401_not_a_redirect(self):
         r = self.c.post("/some/api", json={})
         self.assertEqual(r.status_code, 401)
+
+    # -- OAuth callback relay ----------------------------------------------
+    def test_anonymous_oauth_callback_is_relayed_to_a_seat(self):
+        """Google/Microsoft redirect the browser here with no gateway cookie
+        (the user may have started on a quick-tunnel URL). The hop goes to
+        the relay seat with its token, not to /signin."""
+        self._signup("first@b.com")
+        self.c.cookies.clear()
+        r = self.c.get("/oauth/google/callback?code=abc&state=xyz",
+                       follow_redirects=False)
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertEqual(body["provider"], "google")
+        self.assertEqual(body["q"], "code=abc&state=xyz")
+        self.assertEqual(body["auth"], "Bearer upstream-token-abc")
+        self.assertEqual(body["fwd_host"], "testserver")
+
+    def test_oauth_relay_is_get_only_and_exact(self):
+        self._signup("first@b.com")
+        self.c.cookies.clear()
+        self.assertEqual(self.c.post("/oauth/google/callback").status_code, 401)
+        r = self.c.get("/oauth/google/callback/extra", follow_redirects=False)
+        self.assertEqual(r.status_code, 303)
+        r = self.c.get("/oauth/google/other", follow_redirects=False)
+        self.assertEqual(r.status_code, 303)
+
+    def test_oauth_relay_with_no_accounts_is_503(self):
+        r = self.c.get("/oauth/outlook/callback?code=1", follow_redirects=False)
+        self.assertEqual(r.status_code, 503)
 
     def test_proxy_injects_the_seat_token(self):
         self._signup()

@@ -68,6 +68,28 @@ require a shared code — the field appears on the form automatically. Cap
 capacity with `MAX_SEATS`, and size `SEAT_MEM_LIMIT` / `SEAT_CPUS` to the box:
 every seat runs its own CPU ASR.
 
+## Connectors (Google, Outlook)
+
+Seats provisioned here mint OAuth redirects on `https://sparrow.ravenry.us`
+(`SEAT_OAUTH_REDIRECT_BASE` in the compose file), and the browser carries the
+gateway session cookie back on the provider's redirect, so `/oauth/<provider>/
+callback` proxies to the user's own seat. Uncomment `GOOGLE_OAUTH_*` and
+`MS_OAUTH_*` in `.env`, register these two redirect URIs with Google (Web
+client) and Entra (Web platform), then `docker compose up -d --build` so the
+gateway's `provision.py` passes the keys to new seats:
+
+    https://sparrow.ravenry.us/oauth/google/callback
+    https://sparrow.ravenry.us/oauth/outlook/callback
+
+Seats that already exist keep their old environment until recreated; adopted
+gb10 seats take theirs from `deploy/hosted/gb10/.env` instead.
+
+The gateway is also the OAuth **relay** for users who are not signed in to it
+(they started Connect on a quick-tunnel URL): an anonymous `GET
+/oauth/<provider>/callback` is proxied to the relay seat — `OAUTH_RELAY_EMAIL`
+in `.env`, else the oldest account — whose app bounces the code to the origin
+carried in the OAuth `state`. No other anonymous path is proxied.
+
 ## Security posture
 
 | Concern | Handling |

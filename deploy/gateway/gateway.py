@@ -311,11 +311,25 @@ async def ws_ingest(ws: WebSocket) -> None:
 # ---------------------------------------------------------------------------
 # Everything else — HTTP reverse proxy into the signed-in user's seat
 # ---------------------------------------------------------------------------
+# The one path a browser reaches with no gateway session: Google/Microsoft
+# send the user back here after sign-in, and a user who started Connect on a
+# quick-tunnel URL was never signed in to the gateway at all. The seat's own
+# callback relays a code it did not mint to the origin carried in ``state``,
+# so any seat can take the hop — see store.relay_user.
+_OAUTH_CALLBACK_RE = re.compile(r"^oauth/[a-z0-9_-]+/callback$")
+
+
 @app.api_route("/{path:path}",
                methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD",
                         "OPTIONS"])
 async def proxy(path: str, request: Request) -> Response:
     user = _current_user(request)
+    if not user and request.method.upper() == "GET" \
+            and _OAUTH_CALLBACK_RE.match(path):
+        user = store.relay_user()
+        if not user:
+            return JSONResponse({"detail": "no seat can relay this callback"},
+                                status_code=503)
     if not user:
         if request.method.upper() in {"GET", "HEAD"}:
             nxt = request.url.path
