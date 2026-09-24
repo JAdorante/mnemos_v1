@@ -526,11 +526,15 @@ def decide(
     row = _patch_row(store, int(sid), consent=choice, status=STATUS_ACTIVE,
                      entered_at=now)
     try:
+        # Keyed by THIS session's id. Keyed by calendar id alone, a manual
+        # meeting (no calendar row) recorded nothing and the settle pass fell
+        # back to the default.
         mm.set_session_retention(
-            choice, calendar_event_id=row.get("calendar_event_id"),
+            choice, meeting_session_id=int(sid),
+            calendar_event_id=row.get("calendar_event_id"),
             store=store, apply=False)
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[meeting_session] retention record skipped ({exc}).")
     try:
         from app.services import meeting_capture as _mc
         _mc.sync()
@@ -601,14 +605,13 @@ def end(*, reason: str = "manual", store: Store | None = None) -> dict[str, Any]
         usage.bump("meeting_minutes", int(max(0.0, now - float(entered)) // 60))
     try:
         from app.services import meeting_mode as mm
-        if st.get("consent") == CONSENT_TRANSCRIPT:
+        if st.get("consent") == CONSENT_TRANSCRIPT and sid is not None:
+            # Exactly the events this session stamped — not a wall-clock
+            # window, which also caught whatever else happened meanwhile.
             try:
-                mm.strip_session_audio(
-                    store, calendar_event_id=st.get("calendar_event_id"),
-                    t0=st.get("entered_at") or st.get("t_start"),
-                    t1=now)
-            except Exception:
-                pass
+                mm.strip_session_audio(store, meeting_session_id=int(sid))
+            except Exception as exc:
+                print(f"[meeting_session] strip skipped ({exc}).")
         mm.exit_mode(reason=reason)
     except Exception:
         pass
@@ -617,7 +620,56 @@ def end(*, reason: str = "manual", store: Store | None = None) -> dict[str, Any]
         _mc.sync()
     except Exception:
         pass
+    if sid is not None and st.get("consent") in RECORD_CONSENT:
+        kick_note_pipeline(int(sid))
     return {"ok": True, "active": False, "reason": reason, "ended": st}
+
+
+def _note_delay_s() -> float:
+    """How long after the last word the note can be built: the turn-settle
+    gap the consolidator uses, plus a beat for the extractor to land facts."""
+    try:
+        from app.config import settings
+        return float(settings.consolidation.session_gap_s) + 5.0
+    except Exception:
+        return 305.0
+
+
+def kick_note_pipeline(meeting_session_id: int) -> dict[str, Any]:
+    """Ending a meeting starts the note; it does not wait for the next sound.
+
+    Before this, `end()` enqueued nothing: the consolidate → extract →
+    session_enhance chain only ran when a LATER audio event arrived, so a
+    meeting followed by silence had no note until something else was said or
+    the app restarted. Two nudges: one now (fold the meeting's turns), one
+    after the settle gap (the last turn is extractable, the note is
+    eligible). Only when the worker is running — in tests it is not, and an
+    enqueue against a stopped worker is a row in the real jobs table.
+    """
+    try:
+        from app.services.worker import worker
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    thread = getattr(worker, "_thread", None)
+    if thread is None or not thread.is_alive():
+        return {"ok": False, "skipped": "worker not running"}
+    try:
+        worker.enqueue("consolidate", unique=True)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    delay = _note_delay_s()
+
+    def _fire() -> None:
+        try:
+            worker.enqueue("consolidate", unique=True)
+        except Exception as exc:
+            print(f"[meeting_session] note nudge skipped ({exc}).")
+
+    t = threading.Timer(delay, _fire)
+    t.daemon = True
+    t.name = f"meeting-note-{meeting_session_id}"
+    t.start()
+    return {"ok": True, "delay_s": delay}
 
 
 # ---------------------------------------------------------------------------

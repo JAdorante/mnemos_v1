@@ -347,5 +347,56 @@ class GoogleItemShapeTests(_OverlapEnv):
         self.assertLess(fg.call_args.kwargs["days"], 0.2)   # one hour + overlap
 
 
+class GmailMetadataScopeTests(unittest.TestCase):
+    """gmail.metadata refuses ``q`` (HTTP 403 "Metadata scope does not
+    support 'q' parameter", live 2026-09-23): the window is a newest-first
+    walk that stops at the cutoff, never a search."""
+
+    def test_list_has_no_q_and_stops_at_cutoff(self):
+        from app.services import exhaust_ingest as ex
+        urls = []
+        now = NOW
+        msgs = {"m1": now - 3600, "m2": now - 2 * 86400, "m3": now - 40 * 86400}
+
+        def fake_get(url):
+            urls.append(url)
+            if "/messages?" in url and "/messages/" not in url:
+                if "pageToken" in url:
+                    return {"messages": [{"id": "m3"}]}
+                return {"messages": [{"id": "m1"}, {"id": "m2"}],
+                        "nextPageToken": "p2"}
+            mid = url.split("/messages/")[1].split("?")[0]
+            return {"id": mid, "threadId": "t-" + mid,
+                    "internalDate": str(int(msgs[mid] * 1000)),
+                    "payload": {"headers": [{"name": "From", "value": "a@x"},
+                                            {"name": "Message-ID", "value": f"<{mid}>"}]}}
+
+        with mock.patch.object(ex, "_google_get", fake_get):
+            rows = ex.fetch_gmail_headers(days=7, now=now)
+        self.assertEqual([r["id"] for r in rows], ["<m1>", "<m2>"])
+        for u in urls:
+            self.assertNotIn("q=", u)
+        # m3 is older than the window: the walk fetched it, then stopped.
+        self.assertFalse(any("pageToken=p3" in u for u in urls))
+
+    def test_capture_consent_withdrawal_keeps_connector_consent(self):
+        import tempfile
+        from pathlib import Path
+        from app.services import capture_consent as cc
+        with tempfile.TemporaryDirectory() as td:
+            with mock.patch.object(cc, "_path", lambda: Path(td) / "c.json"), \
+                 mock.patch.object(cc, "_apply_save_audio", lambda *_: None), \
+                 mock.patch.object(cc, "_apply_capability_flags", lambda *_: None):
+                cc._cached = None
+                cc.record_connector("google", enabled=True, sentence="s", interval_s=300)
+                self.assertTrue(cc.allows_connector("google"))
+                cc.save({"mic": True})
+                self.assertTrue(cc.allows_connector("google"))
+                cc.save(consented=False)
+                self.assertTrue(cc.allows_connector("google"))
+                self.assertFalse(cc.allows("mic"))
+            cc._cached = None
+
+
 if __name__ == "__main__":
     unittest.main()

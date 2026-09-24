@@ -68,6 +68,24 @@ body{
   text-decoration:none;display:inline-flex;align-items:center;
 }
 .receipt button.play{background:var(--acc);color:var(--acc-fg);border:none}
+.receipt.playing{
+  border-left:3px solid var(--acc);padding-left:10px;
+  background:var(--acc-06);border-radius:0 8px 8px 0;
+}
+.receipt .pill.removed{color:var(--mut);border-style:dashed}
+.playerbar{
+  position:sticky;bottom:0;z-index:var(--z-raised);margin-top:18px;padding:10px 14px;
+  display:flex;gap:12px;align-items:center;flex-wrap:wrap;
+  background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);
+  box-shadow:var(--shadow-surface);
+}
+.playerbar .now{flex:1;min-width:200px;font-size:13px;color:var(--text);line-height:1.4}
+.playerbar .now .lbl{font:11px var(--sans);color:var(--acc);display:block}
+.playerbar audio{width:min(360px,100%);height:36px}
+.playerbar button.close{
+  border-radius:8px;padding:6px 10px;font:500 12px var(--font);cursor:pointer;
+  border:1px solid var(--line);background:var(--panel);color:var(--navy);
+}
 .item .row-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
 .item.dismissed{opacity:.55}
 .item .pill{
@@ -102,7 +120,6 @@ body{
 .ask-out .err{color:#8B3A2A}
 .foot{margin-top:28px;display:flex;gap:14px;flex-wrap:wrap;font-size:13px}
 .foot a{color:var(--navy)}
-#player{display:none}
 @media(max-width:640px){
   .wrap{padding:8px 14px 48px}
   .mast h1{font-size:clamp(1.35rem,5vw,1.85rem)}
@@ -138,6 +155,11 @@ body{
   </header>
   <div class="stack" id="items"></div>
   <div class="empty" id="empty" hidden>No enhanced note yet for this meeting.</div>
+  <div class="playerbar" id="playerBar" hidden>
+    <div class="now"><span class="lbl">Playing the moment</span><span id="nowPlaying"></span></div>
+    <audio id="player" controls preload="none"></audio>
+    <button type="button" class="close" id="playerClose">Close</button>
+  </div>
   <section class="panel" id="askPanel" hidden>
     <h2>Ask this meeting</h2>
     <p class="hint">Answers stay scoped to this note’s transcript, facts, and attendees.</p>
@@ -160,7 +182,6 @@ body{
     <a href="/chat">Chat</a>
   </footer>
 </div>
-<audio id="player"></audio>
 @@UI_JS@@
 <script>
 const noteId = @@NOTE_ID@@;
@@ -170,11 +191,59 @@ function art(p) {
   return '/artifact?path=' + encodeURIComponent(p);
 }
 
-function playPath(path) {
+// One visible player for the page. A clip is one utterance; the quoted words
+// sit somewhere inside it, so playback starts at their offset when the
+// server could locate them and from the top when it could not. The receipt
+// being played is marked, and the bar stays until closed so the listener can
+// scrub back for context.
+function clearPlaying() {
+  document.querySelectorAll('.receipt.playing').forEach(el => el.classList.remove('playing'));
+}
+function playMoment(btn) {
+  const path = btn.getAttribute('data-path');
   if (!path) return;
+  const start = parseFloat(btn.getAttribute('data-start') || '0') || 0;
+  const label = btn.getAttribute('data-label') || '';
   const a = document.getElementById('player');
-  a.src = art(path);
-  a.play().catch(() => {});
+  const bar = document.getElementById('playerBar');
+  const src = art(path);
+  clearPlaying();
+  const receipt = btn.closest('.receipt');
+  if (receipt) receipt.classList.add('playing');
+  document.getElementById('nowPlaying').textContent = label;
+  bar.hidden = false;
+  const seekAndPlay = () => {
+    try { if (start > 0) a.currentTime = start; } catch (e) {}
+    a.play().catch(() => {});
+  };
+  if (a.getAttribute('data-src') !== src) {
+    a.setAttribute('data-src', src);
+    a.src = src;
+    a.addEventListener('loadedmetadata', seekAndPlay, {once: true});
+    a.load();
+  } else {
+    seekAndPlay();
+  }
+}
+function playPath(path) {
+  // Kept for callers that only have a path.
+  const fake = document.createElement('button');
+  fake.setAttribute('data-path', path);
+  playMoment(fake);
+}
+document.getElementById('playerClose').onclick = () => {
+  const a = document.getElementById('player');
+  try { a.pause(); } catch (e) {}
+  clearPlaying();
+  document.getElementById('playerBar').hidden = true;
+};
+document.getElementById('player').addEventListener('ended', clearPlaying);
+
+function audioPill(ev) {
+  if (ev.audio_state === 'removed') {
+    return '<span class="pill removed" title="The audio was deleted when this meeting was kept transcript-only. The words stay.">audio removed · transcript-only</span>';
+  }
+  return '<span class="pill">no audio captured</span>';
 }
 
 function spanHtml(hl, fallback) {
@@ -226,7 +295,10 @@ async function load() {
   document.getElementById('askPanel').hidden = !rid;
   document.getElementById('draftPanel').hidden = !rid;
   window.__meetingNoteId = rid || null;
-  window.__meetingSessionId = note.subject_id || null;
+  // The meeting's own id when the note has one (stable); a derived session
+  // id only for legacy notes.
+  window.__meetingSessionId = note.meeting_session_id || null;
+  window.__legacySessionId = (note.subject_type === 'session') ? (note.subject_id || null) : null;
   renderPrivacy(note.privacy || {});
 
   stack.innerHTML = (note.items || []).map(it => {
@@ -235,10 +307,14 @@ async function load() {
       ? ('<span class="pill">' + MnemosEsc(it.review) + '</span>') : '';
     const receipts = (it.evidence || []).map(ev => {
       const quote = spanHtml(ev.span_highlight, ev.source_span || ev.text || '');
+      const start = (ev.clip_start_s != null) ? ev.clip_start_s : 0;
+      const label = (ev.source_span || ev.text || '').slice(0, 140);
       const play = ev.playable && ev.play_path
         ? ('<button type="button" class="play" data-path="'
-           + MnemosEsc(ev.play_path) + '">Play the moment</button>')
-        : '<span class="pill">no audio</span>';
+           + MnemosEsc(ev.play_path) + '" data-start="' + MnemosEsc(String(start))
+           + '" data-label="' + MnemosEsc(label) + '">Play the moment'
+           + (ev.clip_start_s != null ? '' : ' (from start)') + '</button>')
+        : audioPill(ev);
       return '<div class="receipt"><div class="quote">' + quote + '</div>'
         + '<div class="actions">' + play
         + '<span class="pill">fact ' + MnemosEsc(String(ev.fact_id || '')) + '</span>'
@@ -257,7 +333,7 @@ async function load() {
   }).join('');
 
   stack.querySelectorAll('button.play').forEach(btn => {
-    btn.onclick = () => playPath(btn.getAttribute('data-path'));
+    btn.onclick = () => playMoment(btn);
   });
   stack.querySelectorAll('.row-actions button').forEach(btn => {
     btn.onclick = () => {
@@ -275,9 +351,10 @@ function renderPrivacy(priv) {
   const cons = priv.consent || {};
   const ret = priv.retention || {};
   const lead = document.getElementById('privacyLead');
-  const retLabel = ret.retention === 'keep_receipts'
+  const retLabel = (ret.retention === 'keep_receipts'
     ? 'Keep receipts (audio retained for playback)'
-    : 'Transcript-only (WAVs deleted; note stays)';
+    : 'Transcript-only (WAVs deleted; note stays)')
+    + (ret.source === 'meeting_session' ? ', as chosen when the meeting started' : '');
   lead.textContent = (cons.consented
     ? 'Capture was consented for this workspace. '
     : 'Capture consent was off or unknown for this note. ')
@@ -295,14 +372,16 @@ function renderPrivacy(priv) {
 }
 
 async function setRetention(choice) {
-  const sid = window.__meetingSessionId;
+  const msid = window.__meetingSessionId;
+  const sid = window.__legacySessionId;
   try {
     await fetch('/meeting/retention', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
         retention: choice,
-        session_id: sid || null,
+        meeting_session_id: msid || null,
+        session_id: msid ? null : (sid || null),
         default: false,
       }),
     });

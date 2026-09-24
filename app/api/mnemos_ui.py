@@ -1192,6 +1192,8 @@ window.MnemosConstellation = {
                 + 'data-act="play-moment" data-audio-id="' + aid + '">Play the moment</button>';
               html += '<audio id="' + aid + '" class="const-ev-audio" controls preload="none" src="/artifact?path='
                 + encodeURIComponent(play) + '"></audio>';
+            } else if (s.audio_state === 'removed') {
+              html += '<div class="const-edit-hint">audio removed · transcript-only</div>';
             }
             html += '</div></div>';
           });

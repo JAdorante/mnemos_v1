@@ -105,7 +105,13 @@ def set_default_retention(choice: str) -> dict[str, Any]:
 
 
 def session_key(session_id: int | None = None,
-                calendar_event_id: str | None = None) -> str | None:
+                calendar_event_id: str | None = None,
+                meeting_session_id: int | None = None) -> str | None:
+    """Three id spaces, one prefs map. A MeetingSession (the consent owner)
+    keys as `meeting:<id>`; a derived speech session — rebuilt wholesale, so
+    its ids churn — as `session:<id>`; a calendar row as `cal:<id>`."""
+    if meeting_session_id is not None:
+        return f"meeting:{int(meeting_session_id)}"
     if session_id is not None:
         return f"session:{int(session_id)}"
     if calendar_event_id:
@@ -113,13 +119,42 @@ def session_key(session_id: int | None = None,
     return None
 
 
+def _consent_of(store: Store | None, meeting_session_id: int | None) -> str | None:
+    """The retention a MeetingSession row states, or None."""
+    if meeting_session_id is None:
+        return None
+    try:
+        row = (store or get_store()).get_meeting_session(int(meeting_session_id))
+    except Exception:
+        return None
+    c = (row or {}).get("consent")
+    return c if c in VALID_RETENTION else None
+
+
 def retention_for(
     session_id: int | None = None,
     calendar_event_id: str | None = None,
+    meeting_session_id: int | None = None,
+    store: Store | None = None,
 ) -> dict[str, Any]:
-    """Resolved retention record for a session / calendar event."""
+    """Resolved retention record for a session / calendar event.
+
+    A MeetingSession's own consent is the source of truth when one is named;
+    the prefs file is where derived-session and calendar choices live.
+    """
     prefs = load_prefs()
-    key = session_key(session_id, calendar_event_id)
+    stated = _consent_of(store, meeting_session_id)
+    key = session_key(session_id, calendar_event_id, meeting_session_id)
+    if stated:
+        row = (prefs.get("sessions") or {}).get(key or "") or {}
+        return {
+            "retention": stated,
+            "applied_at": row.get("applied_at"),
+            "stripped": bool(row.get("stripped")),
+            "source": "meeting_session",
+            "key": key,
+            "is_default": False,
+        }
     row = (prefs.get("sessions") or {}).get(key or "") if key else None
     if isinstance(row, dict) and row.get("retention") in VALID_RETENTION:
         return {
@@ -330,15 +365,28 @@ def set_session_retention(
     choice: str, *,
     session_id: int | None = None,
     calendar_event_id: str | None = None,
+    meeting_session_id: int | None = None,
     store: Store | None = None,
     apply: bool = True,
 ) -> dict[str, Any]:
-    """Record + optionally apply retention for one session."""
+    """Record + optionally apply retention for one session.
+
+    Named a MeetingSession, the choice is also written to its row, so a later
+    settle pass reads the same answer the user gave — the prefs file alone
+    was where a keep-receipts choice went missing.
+    """
     if choice not in VALID_RETENTION:
         return {"ok": False, "error": f"invalid retention: {choice}"}
-    key = session_key(session_id, calendar_event_id)
+    key = session_key(session_id, calendar_event_id, meeting_session_id)
     if not key:
-        return {"ok": False, "error": "session_id or calendar_event_id required"}
+        return {"ok": False,
+                "error": "meeting_session_id, session_id or calendar_event_id required"}
+    if meeting_session_id is not None:
+        try:
+            (store or get_store()).update_meeting_session(
+                int(meeting_session_id), consent=choice)
+        except Exception as exc:
+            print(f"[meeting_mode] consent write skipped ({exc}).")
     prefs = load_prefs()
     sessions = dict(prefs.get("sessions") or {})
     row = {
@@ -348,12 +396,14 @@ def set_session_retention(
         "source": "user",
         "session_id": session_id,
         "calendar_event_id": calendar_event_id,
+        "meeting_session_id": meeting_session_id,
     }
     strip_result = None
     if apply and choice == RETENTION_TRANSCRIPT:
         store = store or get_store()
         strip_result = strip_session_audio(
-            store, session_id=session_id, calendar_event_id=calendar_event_id)
+            store, session_id=session_id, calendar_event_id=calendar_event_id,
+            meeting_session_id=meeting_session_id)
         row["stripped"] = bool(strip_result.get("ok"))
         row["strip"] = {
             "n_files": strip_result.get("n_files"),
@@ -378,37 +428,130 @@ def set_session_retention(
 def apply_default_for_session(
     store: Store, sess: dict, *, force: bool = False,
 ) -> dict[str, Any] | None:
-    """On settle/enhance: apply default retention once if unset."""
+    """On settle/enhance: apply retention to a session's events, once.
+
+    Per EVENT, from the stamp. An event a recording MeetingSession stamped
+    follows that session's stated consent; only unstamped events follow the
+    user's default. A speech session is a wall-clock rollup that can span
+    several meetings and the silence between them, so a session-wide default
+    was deleting receipts the user had asked to keep — measured on the first
+    pilot night: a keep-receipts meeting lost all nine of its clips to the
+    transcript-only default six minutes after it ended.
+    """
+    msid = sess.get("meeting_session_id")
     sid = sess.get("id")
     cal = sess.get("calendar_event_id")
-    key = session_key(sid, cal)
+    key = session_key(sid, cal, msid)
     if not key:
         return None
     prefs = load_prefs()
     existing = (prefs.get("sessions") or {}).get(key)
     if existing and not force:
         return None
-    choice = prefs.get("default_retention") or RETENTION_TRANSCRIPT
-    return set_session_retention(
-        choice, session_id=sid, calendar_event_id=cal,
-        store=store, apply=True,
-    )
+    default = prefs.get("default_retention") or RETENTION_TRANSCRIPT
+    event_ids = [int(x) for x in (sess.get("event_ids") or []) if x is not None]
+    if msid is not None and not event_ids:
+        try:
+            event_ids = store.events_for_meeting_session(int(msid))
+        except Exception:
+            event_ids = []
+    stamps = {}
+    try:
+        stamps = store.event_meeting_sessions(event_ids)
+    except Exception:
+        stamps = {}
+    groups: dict[int | None, list[int]] = {}
+    for eid in event_ids:
+        groups.setdefault(stamps.get(eid), []).append(eid)
+    by_meeting: dict[str, str] = {}
+    to_strip: list[int] = []
+    kept = 0
+    for gid, ids in groups.items():
+        if gid is None:
+            choice = default
+            src = "default"
+        else:
+            choice = _consent_of(store, gid) or default
+            src = "meeting_session" if _consent_of(store, gid) else "default"
+            by_meeting[str(gid)] = choice
+        if choice == RETENTION_TRANSCRIPT:
+            to_strip.extend(ids)
+        else:
+            kept += len(ids)
+    strip_result = None
+    if to_strip:
+        strip_result = store.strip_event_audio(to_strip)
+    sessions = dict(prefs.get("sessions") or {})
+    sessions[key] = {
+        "retention": (_consent_of(store, msid) if msid is not None else None) or default,
+        "applied_at": time.time(),
+        "stripped": bool(to_strip),
+        "source": "settle",
+        "session_id": sid,
+        "calendar_event_id": cal,
+        "meeting_session_id": msid,
+        "by_meeting_session": by_meeting,
+        "strip": ({"n_files": strip_result.get("n_files"),
+                   "n_events": strip_result.get("n_events"),
+                   "n_facts": strip_result.get("n_facts")}
+                  if strip_result else None),
+        "kept_events": kept,
+    }
+    save_prefs({
+        "sessions": sessions,
+        "offered": prefs.get("offered") or {},
+        "declined": prefs.get("declined") or {},
+        "default_retention": prefs.get("default_retention"),
+    })
+    return {"ok": True, "key": key, "retention": sessions[key]["retention"],
+            "by_meeting_session": by_meeting, "stripped_events": len(to_strip),
+            "kept_events": kept, "strip": strip_result}
+
+
+def _honor_stamps(store: Store, event_ids: list[int]) -> list[int]:
+    """Drop events a keep-receipts MeetingSession stamped. A window or a
+    derived-session strip must never take a stated consent down with it."""
+    if not event_ids:
+        return []
+    try:
+        stamps = store.event_meeting_sessions(event_ids)
+    except Exception:
+        return list(event_ids)
+    keep_ids = {gid for gid in set(stamps.values()) if gid is not None
+                and _consent_of(store, gid) == RETENTION_RECEIPTS}
+    if not keep_ids:
+        return list(event_ids)
+    return [e for e in event_ids if stamps.get(e) not in keep_ids]
 
 
 def strip_session_audio(
     store: Store, *,
     session_id: int | None = None,
     calendar_event_id: str | None = None,
+    meeting_session_id: int | None = None,
     t0: float | None = None,
     t1: float | None = None,
 ) -> dict[str, Any]:
-    """Delete WAVs for a session window; keep transcript + open ledger.
+    """Delete WAVs for a session; keep transcript + open ledger.
+
+    Named a MeetingSession, strips exactly the events it stamped. Otherwise
+    the derived session's events, else a wall-clock window — and in every
+    branch an event a keep-receipts meeting stamped is left alone.
 
     Clears ``audio_path`` / enhanced paths on events. Marks citing facts
     ``state='evidence_removed'`` so vector_gc can drop embeddings — does **not**
     cancel open commitments/tasks (note + ledger stay functional; playback gone).
     """
     event_ids: list[int] = []
+    if meeting_session_id is not None:
+        try:
+            event_ids = store.events_for_meeting_session(int(meeting_session_id))
+        except Exception:
+            event_ids = []
+        if not event_ids:
+            return {"ok": True, "n_files": 0, "n_events": 0, "n_facts": 0,
+                    "skipped": "no_events"}
+        return store.strip_event_audio(event_ids)
     if session_id is not None:
         try:
             for s in store.recent_sessions(limit=80):
@@ -433,6 +576,7 @@ def strip_session_audio(
                     break
         except Exception:
             pass
+    event_ids = _honor_stamps(store, event_ids)
     if not event_ids:
         return {"ok": True, "n_files": 0, "n_events": 0, "n_facts": 0,
                 "skipped": "no_events"}
@@ -460,9 +604,12 @@ def note_privacy_block(
     *,
     session_id: int | None = None,
     calendar_event_id: str | None = None,
+    meeting_session_id: int | None = None,
+    store: Store | None = None,
 ) -> dict[str, Any]:
     """Fields stamped onto hydrated meeting notes (P5 accept criteria)."""
-    ret = retention_for(session_id, calendar_event_id)
+    ret = retention_for(session_id, calendar_event_id,
+                        meeting_session_id=meeting_session_id, store=store)
     mode = status()
     return {
         "consent": consent_summary(),

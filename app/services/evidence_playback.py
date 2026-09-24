@@ -29,10 +29,20 @@ def clip_from_meta(meta: dict | None) -> dict[str, Any]:
         or meta.get("transcript")
         or ""
     )
+    # Three honest states, not two. "No audio" used to cover both a clip
+    # that was never written and one the user's transcript-only choice
+    # deleted; a note reader deserves to know which.
+    if play:
+        state = "playable"
+    elif meta.get("audio_stripped"):
+        state = "removed"
+    else:
+        state = "none"
     return {
         "audio_path": raw or None,
         "enhanced_audio": enhanced or None,
         "play_path": play or None,
+        "audio_state": state,
         "transcript": (transcript or "").strip(),
     }
 
@@ -44,6 +54,7 @@ def clip_from_event(ev) -> dict[str, Any]:
             "audio_path": None,
             "enhanced_audio": None,
             "play_path": None,
+            "audio_state": "none",
             "transcript": "",
             "modality": None,
             "time": None,
@@ -122,6 +133,7 @@ def hydrate_source(
                 "match": hit["match"],
                 "after": hit["after"],
             }
+    source["audio_state"] = clip.get("audio_state") or "none"
     if clip.get("modality") and not source.get("modality"):
         source["modality"] = clip["modality"]
     if clip.get("time") is not None:

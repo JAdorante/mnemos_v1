@@ -23,6 +23,12 @@ class EvidencePlaybackUnitTests(unittest.TestCase):
         self.assertEqual(c["audio_path"], "/data/audio/a.wav")
         self.assertEqual(c["transcript"], "hello world")
 
+    def test_three_audio_states(self):
+        from app.services.evidence_playback import clip_from_meta
+        self.assertEqual(clip_from_meta({"audio_path": "/x.wav"})["audio_state"], "playable")
+        self.assertEqual(clip_from_meta({"audio_stripped": True})["audio_state"], "removed")
+        self.assertEqual(clip_from_meta({})["audio_state"], "none")
+
     def test_find_span_highlight(self):
         from app.services.evidence_playback import find_span
 

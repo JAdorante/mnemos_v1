@@ -5,8 +5,13 @@ When a calendar-linked or ≥5-min session settles, compose a note from:
   * co-timed notepad jots (P2)
   * facts already extracted from those turns (cite, don't re-extract)
 
-Persists as `reflections`/`reflection_items` with scope='meeting',
-subject_type='session'. Each item carries source_fact_ids for playback.
+Persists as `reflections`/`reflection_items` with scope='meeting'. A meeting
+the user started or accepted (a `meeting_sessions` row with a recording
+consent) gets ONE note of its own, subject_type='meeting_session', titled and
+bounded by that row — its id is stable, where a derived speech session's id
+is rebuilt on every consolidation. Speech sessions that overlap such a meeting
+are skipped; the rest (calendar-linked or long ad-hoc) keep the legacy
+subject_type='session' note. Each item carries source_fact_ids for playback.
 """
 from __future__ import annotations
 
@@ -19,6 +24,10 @@ from app.storage import Store, get_store
 
 ENHANCE_MODEL = os.environ.get("QUILL_ENHANCE_MODEL", "claude-sonnet-4-6")
 MIN_DURATION_S = float(os.environ.get("QUILL_MEETING_ENHANCE_MIN_S", "300"))
+# A meeting the user explicitly recorded is eligible whatever its length —
+# except one that caught almost nothing (a 16-second false start on the first
+# pilot night), which is not worth a model call.
+MIN_MEETING_UTTERANCES = int(os.environ.get("QUILL_MEETING_ENHANCE_MIN_UTTERANCES", "3"))
 MAX_TURN_CHARS = 12_000
 MAX_FACTS = 80
 
@@ -107,9 +116,12 @@ def is_settled(session: dict, now: float | None = None) -> bool:
 
 
 def is_eligible(session: dict, now: float | None = None) -> bool:
-    """Calendar-linked or ≥5-min session that has settled."""
+    """Calendar-linked or ≥5-min session that has settled; a recorded
+    MeetingSession that has settled and said enough."""
     if not is_settled(session, now):
         return False
+    if session.get("meeting_session_id") is not None:
+        return int(session.get("n_utterances") or 0) >= MIN_MEETING_UTTERANCES
     if session.get("calendar_event_id"):
         return True
     dur = float(session.get("duration_s")
@@ -160,20 +172,71 @@ def template_focus(store: Store, name: str) -> str:
     return _DEFAULT_TEMPLATES.get(name, _DEFAULT_TEMPLATES["external_call"])["focus"]
 
 
+def session_for_meeting(store: Store, ms: dict) -> dict | None:
+    """A MeetingSession row as the session dict the enhancer consumes.
+
+    Bounded by when the user entered and ended it; its events are the ones it
+    stamped, so the packet holds the meeting and not the silence around it.
+    """
+    msid = ms.get("id")
+    if msid is None:
+        return None
+    start = ms.get("entered_at") or ms.get("t_start")
+    end = ms.get("ended_at") or ms.get("t_end")
+    if not start or not end:
+        return None
+    try:
+        event_ids = store.events_for_meeting_session(int(msid))
+    except Exception:
+        event_ids = []
+    return {
+        "id": None,
+        "meeting_session_id": int(msid),
+        "start": float(start), "end": float(end),
+        "duration_s": round(float(end) - float(start), 2),
+        "calendar_event_id": ms.get("calendar_event_id"),
+        "meeting_meta": {
+            "title": ms.get("title") or "",
+            "attendees": list(ms.get("attendees") or []),
+            "provider": ms.get("provider"),
+            "meeting_session_id": int(msid),
+        },
+        "event_ids": event_ids,
+        "n_utterances": len(event_ids),
+        "speakers": [],
+        "text": "",
+    }
+
+
 def already_enhanced(store: Store, session: dict) -> bool:
-    """Idempotent across session-id rebuilds — match on period window."""
+    """Idempotent across session-id rebuilds — match on period window.
+
+    A MeetingSession matches by its own stable id, or by a legacy
+    session-scoped note whose window already contains it (so deploying this
+    does not re-note every meeting a speech-session note has covered).
+    """
     start = float(session.get("start") or 0)
     end = float(session.get("end") or 0)
     cal = session.get("calendar_event_id") or ""
+    msid = session.get("meeting_session_id")
     try:
         rows = store.list_reflections(scope="meeting", limit=80)
     except Exception:
         return False
     for r in rows:
+        if msid is not None and r.get("subject_type") == "meeting_session":
+            try:
+                if int(r.get("subject_id") or 0) == int(msid):
+                    return True
+            except (TypeError, ValueError):
+                pass
         ps, pe = r.get("period_start"), r.get("period_end")
         if ps is None or pe is None:
             continue
         if abs(float(ps) - start) < 2.0 and abs(float(pe) - end) < 2.0:
+            return True
+        if (msid is not None and r.get("subject_type") == "session"
+                and float(ps) <= start + 2.0 and float(pe) >= end - 2.0):
             return True
         # Calendar-linked: also match via summary tag
         if cal and cal in (r.get("summary") or ""):
@@ -183,14 +246,20 @@ def already_enhanced(store: Store, session: dict) -> bool:
 
 
 def note_href_for_session(store: Store, session_id: int | None) -> str:
-    """HTML path for a session's enhanced note. Never 404s — falls back to list."""
+    """HTML path for a session's enhanced note. Never 404s — falls back to list.
+
+    The id is a MeetingSession id first (stable, what the toast links) and a
+    derived session id second (legacy notes).
+    """
     sid = int(session_id or 0)
     if sid:
         try:
-            for r in store.list_reflections(scope="meeting", limit=80):
-                if (r.get("subject_type") == "session"
-                        and int(r.get("subject_id") or 0) == sid):
-                    return f"/meeting/note/{int(r['id'])}"
+            rows = store.list_reflections(scope="meeting", limit=80)
+            for want in ("meeting_session", "session"):
+                for r in rows:
+                    if (r.get("subject_type") == want
+                            and int(r.get("subject_id") or 0) == sid):
+                        return f"/meeting/note/{int(r['id'])}"
         except Exception:
             pass
     try:
@@ -383,10 +452,11 @@ def enhance_session(
         header = f"{title} · {cal}"
     full_summary = (f"{header}\n\n{summary}" if summary else header)
 
+    msid = session.get("meeting_session_id")
     rid = store.add_reflection(
         scope="meeting",
-        subject_type="session",
-        subject_id=session.get("id"),
+        subject_type="meeting_session" if msid is not None else "session",
+        subject_id=int(msid) if msid is not None else session.get("id"),
         period_start=float(session.get("start") or now),
         period_end=float(session.get("end") or now),
         summary=full_summary,
@@ -466,7 +536,7 @@ def enhance_session(
                 n_facts = len(_facts_for_events(store, ids))
         except Exception:
             n_facts = int(n_items or 0)
-        sid = session.get("id")
+        sid = msid if msid is not None else session.get("id")
         # Deep-link via /meetings/{session_id} (303 → live note). Never bake a
         # raw reflection id into first_run.json — test DBs and restarts leave
         # stale /meeting/note/N links that 404 in the real store.
@@ -504,8 +574,54 @@ def run_once(store: Store | None = None, *, verbose: bool = False,
     except Exception as exc:
         return {"ok": False, "error": str(exc), "enhanced": 0}
 
+    # Recorded meetings first: one note each, keyed by the meeting's own id.
+    recorded: list[tuple[float, float]] = []
+    meeting_sessions: list[dict] = []
+    try:
+        from app.services import meeting_session as _ms
+        for ms in store.list_meeting_sessions(limit=50):
+            if ms.get("consent") not in _ms.RECORD_CONSENT:
+                continue
+            a = ms.get("entered_at") or ms.get("t_start")
+            b = ms.get("ended_at") or (now if ms.get("status") == _ms.STATUS_ACTIVE
+                                       else ms.get("t_end"))
+            if a and b:
+                recorded.append((float(a), float(b)))
+            if ms.get("status") == _ms.STATUS_ENDED:
+                sess = session_for_meeting(store, ms)
+                if sess:
+                    meeting_sessions.append(sess)
+    except Exception as exc:
+        print(f"[meeting_enhance] meeting sessions skipped ({exc}).")
+
+    def _overlaps_recorded(sess: dict) -> bool:
+        a = float(sess.get("start") or 0)
+        b = float(sess.get("end") or 0)
+        return any(a < hi and b > lo for lo, hi in recorded)
+
     results = []
+    for sess in meeting_sessions:
+        if not is_eligible(sess, now) and not force:
+            continue
+        if already_enhanced(store, sess) and not force:
+            continue
+        try:
+            res = enhance_session(sess, store=store, verbose=verbose, force=force)
+            results.append(res)
+            if res.get("reflection_id") and verbose:
+                print(f"[meeting_enhance] meeting {sess.get('meeting_session_id')} → "
+                      f"reflection {res['reflection_id']} "
+                      f"({res.get('items')} items, tmpl={res.get('template')})")
+        except Exception as exc:
+            print(f"[meeting_enhance] meeting {sess.get('meeting_session_id')} "
+                  f"failed ({exc}).")
+            results.append({"error": str(exc),
+                            "meeting_session_id": sess.get("meeting_session_id")})
+
     for sess in sessions:
+        if _overlaps_recorded(sess):
+            # Its content belongs to a meeting's own note.
+            continue
         if not is_eligible(sess, now) and not force:
             continue
         if already_enhanced(store, sess) and not force:
@@ -523,6 +639,22 @@ def run_once(store: Store | None = None, *, verbose: bool = False,
 
     n_ok = sum(1 for r in results if r.get("reflection_id"))
     return {"ok": True, "enhanced": n_ok, "results": results}
+
+
+def _span_offsets(store: Store, event_id, span: str) -> tuple[float | None, float | None]:
+    """Where the quoted words sit inside the clip, in seconds — exact from
+    word timestamps when the capture kept them, else estimated from position.
+    The peer-clip path already knew how; local playback never asked."""
+    if not event_id or not (span or "").strip():
+        return None, None
+    try:
+        from app.services import peer_clip
+        win = peer_clip.span_window(int(event_id), span, store)
+    except Exception:
+        win = None
+    if not win:
+        return None, None
+    return float(win[0]), float(win[1])
 
 
 def hydrate_meeting_note(store: Store, reflection: dict) -> dict:
@@ -545,6 +677,7 @@ def hydrate_meeting_note(store: Store, reflection: dict) -> dict:
                 continue
             clip: dict[str, Any] = {}
             span_hl = None
+            clip_start = clip_end = None
             ev = emap.get(fr.get("source_event_id"))
             if ev is not None:
                 clip = clip_from_event(ev)
@@ -556,6 +689,9 @@ def hydrate_meeting_note(store: Store, reflection: dict) -> dict:
                         "match": hit["match"],
                         "after": hit["after"],
                     }
+                if clip.get("play_path"):
+                    clip_start, clip_end = _span_offsets(
+                        store, fr.get("source_event_id"), span)
             evidence.append({
                 "fact_id": fid,
                 "kind": fr.get("kind"),
@@ -564,6 +700,9 @@ def hydrate_meeting_note(store: Store, reflection: dict) -> dict:
                 "source_event_id": fr.get("source_event_id"),
                 "play_path": clip.get("play_path"),
                 "playable": bool(clip.get("play_path")),
+                "audio_state": clip.get("audio_state") or "none",
+                "clip_start_s": clip_start,
+                "clip_end_s": clip_end,
                 "span_highlight": span_hl,
                 "transcript": clip.get("transcript") or "",
             })
@@ -583,27 +722,39 @@ def hydrate_meeting_note(store: Store, reflection: dict) -> dict:
     if " · " in title:
         title = title.split(" · ", 1)[0].strip()
 
+    subject_type = reflection.get("subject_type")
+    msid = (int(reflection.get("subject_id") or 0) or None
+            if subject_type == "meeting_session" else None)
+    meeting_title = ""
+    if msid is not None:
+        try:
+            ms = store.get_meeting_session(msid) or {}
+            meeting_title = (ms.get("title") or "").strip()
+        except Exception:
+            meeting_title = ""
+
     privacy = {}
     try:
         from app.services import meeting_mode as _mm
-        sid = reflection.get("subject_id") if reflection.get(
-            "subject_type") == "session" else None
-        privacy = _mm.note_privacy_block(session_id=sid)
+        sid = reflection.get("subject_id") if subject_type == "session" else None
+        privacy = _mm.note_privacy_block(
+            session_id=sid, meeting_session_id=msid, store=store)
     except Exception:
         privacy = {}
 
     return {
         "id": reflection["id"],
         "scope": reflection["scope"],
-        "title": title or "Meeting note",
+        "title": meeting_title or title or "Meeting note",
         "summary": body or summary,
         "model": reflection.get("model"),
         "confidence": reflection.get("confidence"),
         "period_start": reflection.get("period_start"),
         "period_end": reflection.get("period_end"),
         "created_at": reflection.get("created_at"),
-        "subject_type": reflection.get("subject_type"),
+        "subject_type": subject_type,
         "subject_id": reflection.get("subject_id"),
+        "meeting_session_id": msid,
         "items": views,
         "privacy": privacy,
     }

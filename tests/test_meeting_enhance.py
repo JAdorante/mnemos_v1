@@ -247,5 +247,189 @@ class ModelRouterEnhanceTests(unittest.TestCase):
         self.assertEqual(r.model_for("enhance"), MODELS["enhance"])
 
 
+class MeetingSessionNoteTests(unittest.TestCase):
+    """One note per recorded MeetingSession, keyed by its own id."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="quill_msn_")
+        self.store = _store(self.tmp)
+        self.env = patch.dict(os.environ, {
+            "QUILL_MEETING_ENHANCE": "1",
+            "QUILL_DATA_DIR": self.tmp,
+        })
+        self.env.start()
+        from app.services import first_run, meeting_mode as mm, meeting_session as ms
+        ms.reset()
+        first_run._cached = None
+        self._prefs = patch.object(
+            mm, "_prefs_path", lambda: Path(self.tmp) / "meeting_prefs.json")
+        self._prefs.start()
+        self.calls = 0
+
+    def tearDown(self):
+        self._prefs.stop()
+        self.env.stop()
+        from app.services import first_run, meeting_session as ms
+        ms.reset()
+        first_run._cached = None
+        self.store.close()
+
+    def _router(self, fid):
+        outer = self
+
+        class FakeRouter:
+            def complete_json(self_, *a, **k):
+                outer.calls += 1
+                return {"summary": "What happened.", "confidence": 0.8,
+                        "items": [{"kind": "next_step", "text": "Send it",
+                                   "detail": "", "subject": "", "confidence": 0.9,
+                                   "source_fact_ids": [fid] if fid else []}]}
+        return FakeRouter()
+
+    def _meeting(self, *, consent="transcript_only", n=4, title="All In Meeting Test 3",
+                 start=NOW - 900, dur=120):
+        from app.events import Event, Modality
+        from app.services.consolidation import Turn
+        row = self.store.insert_meeting_session(
+            title=title, source="manual", consent=consent, status="ended",
+            t_start=start, t_end=start + 3600, entered_at=start,
+            ended_at=start + dur, created_at=start)
+        msid = int(row["id"])
+        eids = []
+        for i in range(n):
+            eids.append(self.store.insert(Event(
+                time=start + 10 + i * 20, modality=Modality.AUDIO,
+                raw=f"we agreed to send the deck {i}", summary="turn",
+                source="audio.web_mic",
+                meta={"meeting_session_id": msid})))
+        self.store.replace_turns([Turn(
+            start=start + 10, end=start + 10 + n * 20, speaker="user",
+            text="we agreed to send the deck", event_ids=list(eids),
+            audio_paths=[], n_utterances=n)])
+        fid = self.store.add_commitment(
+            "send the deck", source_event_id=eids[0],
+            source_span="send the deck", confidence=0.9, extracted_at=start + 30)
+        return msid, fid, eids
+
+    def test_run_once_notes_each_recorded_meeting_by_its_own_id(self):
+        from app.services import meeting_enhance as me
+        from app.services.sessions import Session
+        msid, fid, eids = self._meeting()
+        # The speech session that contains it would have been a legacy note.
+        self.store.replace_sessions([Session(
+            start=NOW - 920, end=NOW - 700, speakers=["user"], text="t",
+            turn_ids=[], event_ids=list(eids), n_turns=1, n_utterances=4,
+            calendar_event_id="Work|x")])
+        with patch("app.services.model_router.router", self._router(fid)):
+            res = me.run_once(self.store)
+        self.assertEqual(res["enhanced"], 1, res)
+        self.assertEqual(self.calls, 1, "one note, not one per id space")
+        rid = res["results"][0]["reflection_id"]
+        r = self.store.get_reflection(rid)
+        self.assertEqual(r["subject_type"], "meeting_session")
+        self.assertEqual(int(r["subject_id"]), msid)
+        self.assertTrue((r["summary"] or "").startswith("All In Meeting Test 3"))
+        note = me.hydrate_meeting_note(self.store, r)
+        self.assertEqual(note["title"], "All In Meeting Test 3")
+        self.assertEqual(note["meeting_session_id"], msid)
+        self.assertEqual(note["privacy"]["retention"]["source"], "meeting_session")
+        self.assertEqual(me.note_href_for_session(self.store, msid),
+                         f"/meeting/note/{rid}")
+        with patch("app.services.model_router.router", self._router(fid)):
+            again = me.run_once(self.store)
+        self.assertEqual(again["enhanced"], 0, "idempotent by meeting id")
+
+    def test_meeting_already_covered_by_a_legacy_note_is_not_renoted(self):
+        from app.services import meeting_enhance as me
+        msid, fid, _ = self._meeting()
+        self.store.add_reflection(
+            scope="meeting", subject_type="session", subject_id=69,
+            period_start=NOW - 1000, period_end=NOW - 600,
+            summary="Meeting\n\nold note", model="x", confidence=0.5,
+            created_at=NOW - 500)
+        with patch("app.services.model_router.router", self._router(fid)):
+            res = me.run_once(self.store)
+        self.assertEqual(res["enhanced"], 0)
+        self.assertEqual(self.calls, 0)
+
+    def test_a_false_start_is_not_worth_a_model_call(self):
+        from app.services import meeting_enhance as me
+        msid, fid, _ = self._meeting(n=2, dur=16)
+        with patch("app.services.model_router.router", self._router(fid)):
+            res = me.run_once(self.store)
+        self.assertEqual(res["enhanced"], 0)
+        self.assertEqual(self.calls, 0)
+
+    def test_hydrate_tells_removed_audio_from_none(self):
+        from app.events import Event, Modality
+        from app.services import meeting_enhance as me
+        stripped = self.store.insert(Event(
+            time=NOW - 100, modality=Modality.AUDIO, raw="send the deck",
+            summary="t", source="audio.web_mic",
+            meta={"audio_stripped": True, "audio_stripped_at": NOW - 50}))
+        silent = self.store.insert(Event(
+            time=NOW - 90, modality=Modality.AUDIO, raw="and the invoice",
+            summary="t", source="audio.web_mic", meta={}))
+        f1 = self.store.add_commitment("send the deck", source_event_id=stripped,
+                                       source_span="send the deck",
+                                       confidence=0.9, extracted_at=NOW - 80)
+        f2 = self.store.add_commitment("send the invoice", source_event_id=silent,
+                                       source_span="the invoice",
+                                       confidence=0.9, extracted_at=NOW - 80)
+        rid = self.store.add_reflection(
+            scope="meeting", subject_type="session", subject_id=1,
+            period_start=NOW - 120, period_end=NOW - 60, summary="M\n\ns",
+            model="x", confidence=0.5, created_at=NOW)
+        self.store.add_reflection_item(
+            rid, kind="commitment", text="Send both", detail="", subject="",
+            confidence=0.9, source_fact_ids=[f1, f2], created_at=NOW)
+        note = me.hydrate_meeting_note(self.store, self.store.get_reflection(rid))
+        ev = {e["fact_id"]: e for e in note["items"][0]["evidence"]}
+        self.assertEqual(ev[f1]["audio_state"], "removed")
+        self.assertEqual(ev[f2]["audio_state"], "none")
+        self.assertFalse(ev[f1]["playable"])
+
+    def test_hydrate_offsets_land_inside_a_real_clip(self):
+        import wave
+        from app.events import Event, Modality
+        from app.services import meeting_enhance as me
+        path = Path(self.tmp) / "audio" / "clip.wav"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with wave.open(str(path), "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000)
+            w.writeframes(b"\x00\x00" * 16000 * 4)          # 4 s of silence
+        eid = self.store.insert(Event(
+            time=NOW - 100, modality=Modality.AUDIO,
+            raw="alpha beta gamma delta epsilon zeta", summary="t",
+            source="audio.web_mic", meta={"audio_path": str(path)}))
+        fid = self.store.add_commitment("gamma", source_event_id=eid,
+                                        source_span="gamma delta",
+                                        confidence=0.9, extracted_at=NOW - 80)
+        rid = self.store.add_reflection(
+            scope="meeting", subject_type="session", subject_id=1,
+            period_start=NOW - 120, period_end=NOW - 60, summary="M\n\ns",
+            model="x", confidence=0.5, created_at=NOW)
+        self.store.add_reflection_item(
+            rid, kind="decision", text="Gamma", detail="", subject="",
+            confidence=0.9, source_fact_ids=[fid], created_at=NOW)
+        note = me.hydrate_meeting_note(self.store, self.store.get_reflection(rid))
+        ev = note["items"][0]["evidence"][0]
+        self.assertEqual(ev["audio_state"], "playable")
+        self.assertIsNotNone(ev["clip_start_s"])
+        self.assertGreater(ev["clip_start_s"], 0.0, "the words are mid-clip")
+        self.assertLess(ev["clip_start_s"], ev["clip_end_s"])
+        self.assertLessEqual(ev["clip_end_s"], 4.0)
+
+    def test_page_has_a_visible_player_and_honest_labels(self):
+        from app.api.meeting_page import MEETING_PAGE
+        self.assertIn('id="playerBar"', MEETING_PAGE)
+        self.assertIn("<audio id=\"player\" controls", MEETING_PAGE)
+        self.assertNotIn("#player{display:none}", MEETING_PAGE)
+        self.assertIn("audio removed · transcript-only", MEETING_PAGE)
+        self.assertIn("no audio captured", MEETING_PAGE)
+        self.assertIn("data-start=", MEETING_PAGE)
+        self.assertIn("meeting_session_id: msid || null", MEETING_PAGE)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -8762,6 +8762,62 @@ class Store:
             rows = self._conn.execute(sql, args).fetchall()
         return [self._meeting_session_from_row(r) for r in rows]
 
+    def events_for_meeting_session(self, meeting_session_id: int) -> list[int]:
+        """Ids of the events a recording meeting session stamped as its own.
+
+        The stamp (`meta.meeting_session_id`, set at ingest while the session
+        is active with a recording consent) is the only durable link between
+        a meeting and its audio; retention is decided on it, not on wall-clock
+        windows that also catch bystander events.
+        """
+        sid = int(meeting_session_id)
+        with self._lock:
+            try:
+                rows = self._conn.execute(
+                    "SELECT id FROM events WHERE "
+                    "json_extract(meta, '$.meeting_session_id') = ? "
+                    "ORDER BY time ASC", (sid,)).fetchall()
+                return [int(r["id"]) for r in rows]
+            except sqlite3.OperationalError:
+                rows = self._conn.execute(
+                    "SELECT id, meta FROM events WHERE meta LIKE ? "
+                    "ORDER BY time ASC", ('%"meeting_session_id"%',)).fetchall()
+        out = []
+        for r in rows:
+            try:
+                meta = json.loads(r["meta"] or "{}")
+            except Exception:
+                continue
+            if isinstance(meta, dict) and meta.get("meeting_session_id") == sid:
+                out.append(int(r["id"]))
+        return out
+
+    def event_meeting_sessions(self, event_ids) -> dict[int, int | None]:
+        """event id -> the meeting session that stamped it (None if none)."""
+        ids = sorted({int(x) for x in (event_ids or []) if x is not None})
+        if not ids:
+            return {}
+        out: dict[int, int | None] = {i: None for i in ids}
+        with self._lock:
+            for i in range(0, len(ids), 500):
+                chunk = ids[i:i + 500]
+                marks = ",".join("?" for _ in chunk)
+                rows = self._conn.execute(
+                    f"SELECT id, meta FROM events WHERE id IN ({marks})",
+                    chunk).fetchall()
+                for r in rows:
+                    try:
+                        meta = json.loads(r["meta"] or "{}")
+                    except Exception:
+                        continue
+                    sid = meta.get("meeting_session_id") if isinstance(meta, dict) else None
+                    if sid is not None:
+                        try:
+                            out[int(r["id"])] = int(sid)
+                        except (TypeError, ValueError):
+                            pass
+        return out
+
     def find_person_by_contact(
         self, type_: str, value_normalized: str,
     ) -> int | None:

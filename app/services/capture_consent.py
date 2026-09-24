@@ -94,7 +94,14 @@ def save(sources: dict[str, bool] | None = None, *,
     with _lock:
         cur = load(force=True)
         if consented is False:
+            # Withdrawing capture consent clears the capture allow-list only.
+            # Connector background-sync consent is its own record, given per
+            # connector at connect time with its own sentence; the Privacy
+            # sheet saving the capture toggles must not erase it (it did —
+            # live 2026-09-23, a save one minute after Connect emptied it).
+            keep = dict(cur.get("connectors") or {})
             cur = _blank()
+            cur["connectors"] = keep
             cur["updated_at"] = now
         else:
             if sources:

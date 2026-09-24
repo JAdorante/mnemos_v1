@@ -564,14 +564,16 @@ def fetch_gmail_headers(*, days: float | None = None,
     extra = "&metadataHeaders=Subject" if include_subject else ""
     wanted = ("from", "to", "cc", "date", "message-id") + (
         ("subject",) if include_subject else ())
-    q = quote(f"after:{after}")
     out: list[dict] = []
     page = None
+    # The gmail.metadata scope refuses the ``q`` parameter outright ("Metadata
+    # scope does not support 'q' parameter", HTTP 403 — seen live 2026-09-23),
+    # so the window cannot be a search. The list endpoint returns newest first;
+    # walk it and stop at the first message older than the cutoff.
+    reached_cutoff = False
     while True:
-        url = (
-            "https://gmail.googleapis.com/gmail/v1/users/me/messages"
-            f"?q={q}&maxResults=100"
-        )
+        url = ("https://gmail.googleapis.com/gmail/v1/users/me/messages"
+               "?maxResults=100")
         if page:
             url += f"&pageToken={quote(page)}"
         data = _google_get(url)
@@ -601,6 +603,9 @@ def fetch_gmail_headers(*, days: float | None = None,
                     msg_ts = parsedate_to_datetime(headers["date"]).timestamp()
                 except Exception:
                     msg_ts = ts
+            if msg_ts and msg_ts < after:
+                reached_cutoff = True
+                break
             # Gmail's own threadId comes back on the message resource we
             # already fetched — same metadata format, no body, no extra scope.
             # It is the authoritative conversation identity, stabler than
@@ -612,7 +617,7 @@ def fetch_gmail_headers(*, days: float | None = None,
                         "thread_id": str(got.get("threadId") or "") or None,
                         "headers": headers, "ts": msg_ts})
         page = data.get("nextPageToken")
-        if not page:
+        if reached_cutoff or not page:
             break
         if len(out) >= 5000:
             break
