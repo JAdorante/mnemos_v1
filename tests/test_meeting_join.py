@@ -205,5 +205,64 @@ class ParseAttendeeTests(unittest.TestCase):
         self.assertIn("zoom.us", ev["join_url"])
 
 
+class MeetingSessionJoinTests(unittest.TestCase):
+    """A manual meeting reaches the speech session through its stamps."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="quill_msj_"))
+        from app.storage import Store
+        self.store = Store(db_path=self.tmp / "t.db", audio_dir=self.tmp / "audio")
+
+    def tearDown(self):
+        self.store.close()
+
+    def test_sessions_rebuild_takes_the_meetings_identity(self):
+        from app.events import Event, Modality
+        from app.services import sessions as sess_mod
+        from app.services.consolidation import Turn
+        row = self.store.insert_meeting_session(
+            title="All In Meeting Test 3", source="manual",
+            attendees=[{"name": "Dave Randel", "source": "manual"}],
+            consent="keep_receipts", status="ended",
+            t_start=NOW, t_end=NOW + 3600, entered_at=NOW, ended_at=NOW + 600,
+            created_at=NOW)
+        msid = int(row["id"])
+        eids = [self.store.insert(Event(
+            time=NOW + 10 + i * 30, modality=Modality.AUDIO, raw=f"said {i}",
+            summary="t", source="audio.web_mic",
+            meta={"meeting_session_id": msid} if i < 5 else {}))
+            for i in range(6)]
+        self.store.replace_turns([Turn(
+            start=NOW + 10, end=NOW + 200, speaker="user", text="said",
+            event_ids=eids, audio_paths=[], n_utterances=6)])
+        sess_mod.rebuild(self.store)
+        got = self.store.recent_sessions(limit=1)[0]
+        meta = got["meeting_meta"] or {}
+        self.assertEqual(meta.get("title"), "All In Meeting Test 3")
+        self.assertEqual(meta.get("meeting_session_id"), msid)
+        self.assertEqual([a["name"] for a in meta.get("attendees") or []], ["Dave Randel"])
+        self.assertEqual(meta.get("consent"), "keep_receipts")
+        self.assertIsNone(got.get("calendar_event_id"), "no calendar row was invented")
+
+    def test_a_stray_stamp_does_not_rename_an_ambient_stretch(self):
+        from app.events import Event, Modality
+        from app.services import sessions as sess_mod
+        from app.services.consolidation import Turn
+        row = self.store.insert_meeting_session(
+            title="Quick", source="manual", consent="transcript_only",
+            status="ended", t_start=NOW, t_end=NOW + 60, entered_at=NOW,
+            ended_at=NOW + 30, created_at=NOW)
+        eids = [self.store.insert(Event(
+            time=NOW + 10 + i * 30, modality=Modality.AUDIO, raw="x",
+            summary="t", source="audio.whisper",
+            meta={"meeting_session_id": int(row["id"])} if i == 0 else {}))
+            for i in range(8)]
+        self.store.replace_turns([Turn(
+            start=NOW + 10, end=NOW + 300, speaker="user", text="x",
+            event_ids=eids, audio_paths=[], n_utterances=8)])
+        sess_mod.rebuild(self.store)
+        self.assertIsNone(self.store.recent_sessions(limit=1)[0]["meeting_meta"])
+
+
 if __name__ == "__main__":
     unittest.main()

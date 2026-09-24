@@ -102,5 +102,12 @@ def rebuild(store: Store | None = None) -> int:
         meeting_join.link_sessions(store, sessions)
     except Exception as exc:
         print(f"[sessions] calendar join skipped ({exc}).")
+    # A meeting the user started by hand has no calendar row; its stamp on
+    # each utterance is how the session learns whose meeting it was.
+    try:
+        from app.services import meeting_join
+        meeting_join.attach_meeting_sessions(store, sessions)
+    except Exception as exc:
+        print(f"[sessions] meeting-session join skipped ({exc}).")
     store.replace_sessions(sessions)
     return len(sessions)

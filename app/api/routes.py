@@ -460,6 +460,7 @@ class MeetingSessionStartBody(BaseModel):
     title: str = ""
     consent: str = "transcript_only"  # transcript_only | keep_receipts
     duration_min: float = 120.0
+    attendees: list[str] | str | None = None  # "Dave, Hugh" or ["Dave", "Hugh"]
 
 
 @router.get("/meeting/session/status")
@@ -473,7 +474,8 @@ def meeting_session_start(body: MeetingSessionStartBody) -> dict:
     """Explicit "Start meeting" (web capture page) — manual session + consent."""
     from app.services import meeting_session as _ms
     out = _ms.start_manual(title=body.title, consent=body.consent,
-                           duration_min=body.duration_min)
+                           duration_min=body.duration_min,
+                           attendees=body.attendees)
     if not out.get("ok") and "already live" not in (out.get("error") or ""):
         raise HTTPException(status_code=400, detail=out.get("error"))
     return out

@@ -274,6 +274,76 @@ def link_sessions(store: "Store | None" = None, sessions: list | None = None) ->
     return attach_calendar(sessions, events)
 
 
+# A speech session takes a meeting's identity when that meeting stamped most
+# of what was said in it, or enough of it to be the point of the stretch.
+MEETING_STAMP_FRAC = 0.5
+MEETING_STAMP_MIN = 5
+
+
+def attach_meeting_sessions(store, sessions: list) -> int:
+    """Mutate Session objects with the MeetingSession that stamped them.
+
+    Calendar join gives a session its title and attendees only when a
+    calendar row exists; a meeting the user started by hand had neither, so
+    everything that reads `meeting_meta` — context anchors, the team layer,
+    the shell's "in a meeting" line, meeting chat's attendee list — saw an
+    untitled stretch. The stamp on each utterance is the durable link, so a
+    session whose events one meeting stamped inherits that meeting's row.
+    A calendar link already present is kept; the meeting id rides alongside.
+    """
+    if not sessions:
+        return 0
+    store = _store(store)
+    all_ids = [int(e) for sess in sessions for e in (getattr(sess, "event_ids", None) or [])]
+    if not all_ids:
+        return 0
+    try:
+        stamps = store.event_meeting_sessions(all_ids)
+    except Exception:
+        return 0
+    if not any(v is not None for v in stamps.values()):
+        return 0
+    rows: dict[int, dict | None] = {}
+    linked = 0
+    for sess in sessions:
+        ids = [int(e) for e in (getattr(sess, "event_ids", None) or [])]
+        if not ids:
+            continue
+        counts: dict[int, int] = {}
+        for e in ids:
+            m = stamps.get(e)
+            if m is not None:
+                counts[m] = counts.get(m, 0) + 1
+        if not counts:
+            continue
+        msid, n = max(counts.items(), key=lambda kv: kv[1])
+        if n < MEETING_STAMP_MIN and n / len(ids) < MEETING_STAMP_FRAC:
+            continue
+        if msid not in rows:
+            try:
+                rows[msid] = store.get_meeting_session(int(msid))
+            except Exception:
+                rows[msid] = None
+        row = rows[msid]
+        if not row:
+            continue
+        meta = dict(sess.meeting_meta or {})
+        if not meta.get("title"):
+            meta["title"] = (row.get("title") or "")[:200]
+        if not meta.get("attendees"):
+            meta["attendees"] = list(row.get("attendees") or [])
+        meta.setdefault("organizer", row.get("organizer"))
+        meta["meeting_session_id"] = int(msid)
+        meta["provider"] = row.get("provider") or meta.get("provider") or ""
+        meta["consent"] = row.get("consent")
+        meta.setdefault("source", row.get("source") or "meeting_session")
+        sess.meeting_meta = meta
+        if not sess.calendar_event_id and row.get("calendar_event_id"):
+            sess.calendar_event_id = row.get("calendar_event_id")
+        linked += 1
+    return linked
+
+
 def attendees_for_time(
     store: "Store | None", start: float, end: float | None = None,
 ) -> list[dict]:

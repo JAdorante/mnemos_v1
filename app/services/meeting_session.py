@@ -385,7 +385,74 @@ def stamp_event(event) -> Any:
     ch = _channel_of(src)
     if ch in ("mic", "remote"):
         meta["audio_channel"] = ch
+    if ch == "remote":
+        _name_remote_voice(event, st)
     return event
+
+
+def _self_names() -> set[str]:
+    out: set[str] = set()
+    try:
+        from app.services.identity import user_identity
+        u = user_identity() or {}
+        for k in ("name", "primary_email", "secondary_email"):
+            v = (u.get(k) or "").strip().lower()
+            if v:
+                out.add(v)
+    except Exception:
+        pass
+    return out
+
+
+def remote_roster(st: dict[str, Any] | None) -> list[str]:
+    """Roster names that are not the user — the people a remote voice can be."""
+    if not st:
+        return []
+    me = _self_names()
+    names: list[str] = []
+    for a in st.get("attendees") or []:
+        if not isinstance(a, dict):
+            continue
+        name = (a.get("name") or "").strip()
+        email = (a.get("email") or "").strip().lower()
+        if not name or name.lower() in me or (email and email in me):
+            continue
+        if name not in names:
+            names.append(name)
+    return names
+
+
+def _name_remote_voice(event, st: dict[str, Any]) -> None:
+    """Give the other side's voice a name when the roster leaves no doubt.
+
+    Diarization clusters a remote voice as "Remote 1" — never a person, so a
+    commitment it makes has no owner. When the meeting's roster holds exactly
+    one person who is not the user, that voice is that person: the label is
+    rewritten as a known speaker with `decision="roster"`, and the cluster
+    label is kept beside it. With several remote names the voice stays a
+    cluster and the candidates ride along for the packet; a voice the
+    recogniser already knows is never overridden.
+    """
+    meta = event.meta
+    spk = meta.get("speaker")
+    if not isinstance(spk, dict) or spk.get("is_known") or spk.get("decision") == "roster":
+        return
+    names = remote_roster(st)
+    if not names:
+        return
+    if len(names) > 1:
+        spk["roster_candidates"] = names
+        return
+    name = names[0]
+    spk["cluster_label"] = spk.get("label")
+    spk.update({"label": name, "name": name, "is_known": True,
+                "decision": "roster"})
+    try:
+        people = list(getattr(event, "people", None) or [])
+        if name not in people:
+            event.people = [name, *people]
+    except Exception:
+        pass
 
 
 def speaker_space(source: str) -> str:
@@ -543,18 +610,50 @@ def decide(
     return {"ok": True, "consent": choice, "status": STATUS_ACTIVE, "session": row}
 
 
+def roster_names(attendees) -> list[dict[str, Any]]:
+    """Free-text roster ("Dave, Hugh Salva") or a list of names → attendee
+    dicts, deduplicated, blanks dropped. What a manual meeting has instead of
+    a calendar invite."""
+    if attendees is None:
+        return []
+    if isinstance(attendees, str):
+        parts = [x for x in re.split(r"[,;\n]+", attendees)]
+    else:
+        parts = list(attendees)
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for a in parts:
+        if isinstance(a, dict):
+            name = (a.get("name") or "").strip()
+            email = (a.get("email") or "").strip()
+        else:
+            name, email = str(a or "").strip(), ""
+        key = (name or email).lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        row = {"name": name[:120], "source": "manual"}
+        if email:
+            row["email"] = email
+        out.append(row)
+    return out[:40]
+
+
 def start_manual(
     *,
     title: str = "",
     consent: str = CONSENT_TRANSCRIPT,
     duration_min: float = 120.0,
+    attendees=None,
     store: Store | None = None,
 ) -> dict[str, Any]:
     """Explicit user-initiated meeting (web "Start meeting" button).
 
     Spawns a SOURCE_MANUAL session and applies the retention choice in one
     step — no calendar anchor, no offer queue. Refuses while another session
-    is live so a button mash cannot orphan an active recording.
+    is live so a button mash cannot orphan an active recording. `attendees`
+    is the roster the user typed: the only way a manual meeting's remote
+    voice can get a name.
     """
     if consent not in RECORD_CONSENT:
         return {"ok": False, "error": f"invalid consent: {consent}"}
@@ -568,6 +667,7 @@ def start_manual(
     spawn(
         store,
         title=(title or "").strip()[:200] or "Meeting",
+        attendees=roster_names(attendees),
         source=SOURCE_MANUAL,
         provider="unknown",
         t_start=now,

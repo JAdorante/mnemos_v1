@@ -1,3 +1,17 @@
+# Meetings — a roster names the other voice, and the meeting reaches the session, September 24 2026
+
+Tracing a meeting through to memory in a scratch store showed the chain holding — utterances, turns, facts from the local extractor, a note keyed by the meeting, every receipt playable — and two places it thinned. Facts had no person: a manual meeting has no invite, so the other side's voice stayed a diarization cluster ("Remote 1"), which the extractor rightly refuses to mint as a person, so every commitment it made had no owner. And the meeting's title and attendees never reached the derived speech session, which only calendar rows filled; context anchors, the team layer, meeting chat's attendee list and the shell's "in a meeting" line all read that field and saw an untitled stretch.
+
+**A roster at start.** The capture page's Start meeting takes "who's on the call". Names go onto the `meeting_sessions` row as attendees, the same place a calendar invite puts them, so attendee priors, ASR vocabulary and the note packet already see them.
+
+**The lone remote name claims the unknown voice.** When the roster holds exactly one person who is not the user, `stamp_event` rewrites an unrecognised remote-channel speaker as that person — a known speaker with `decision="roster"`, the cluster label kept beside it. A voice the recogniser already knows is never overridden, the mic side is never renamed, and with several remote names the voice stays a cluster and the candidates ride along. From there the existing machinery does the rest: turns take the name, and the extractor's "me is the speaker" rule gives the commitment an owner. In the trace, `from=Dave Randel` on the call he asked for, `owner=Justin Adorante` on the deck he promised.
+
+**The session learns whose meeting it was.** `sessions.rebuild` now joins each speech session to the MeetingSession that stamped most of its utterances (or at least five), inheriting title, attendees, consent and the meeting's id; a calendar link already present is kept. A stray stamp on an ambient stretch does not rename it.
+
+Tests: roster storage and self-exclusion, the lone-name claim and its three refusals, stamp-based session join and its floor; the trace itself is reproducible from the scratchpad script. The extractor minted "Manufacturing Team" as a person in the trace — pre-existing behaviour, noted, not changed.
+
+---
+
 # Sign-in walls on the hosted browser: honest asks, a connector lane, and take-over, September 23 2026
 
 Live on a hosted seat the night before: "check my gmail" went to the browser agent, which opened mail.google.com, hit Google's sign-in wall, and asked three times for a sign-in the user had no way to perform — the seat's browser is headless, so the pane's "reveal" answered "runs fully headless here" ten times in a row. The Google connector on that same seat already held the inbox headers through the Gmail API.

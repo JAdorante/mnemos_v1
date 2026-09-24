@@ -168,6 +168,8 @@ button:disabled{opacity:.45;cursor:default}
       <option value="transcript_only">Transcript only</option>
       <option value="keep_receipts">Keep audio receipts</option>
     </select>
+    <input id="meet-who" placeholder="Who's on the call (names, comma-separated)" maxlength="600"
+      style="font:inherit;padding:8px 10px;border:1px solid var(--line);border-radius:8px;flex:1 1 240px">
   </div>
   <div class="row">
     <button id="meeting" class="primary">Start meeting</button>
@@ -750,7 +752,8 @@ $('meeting').onclick = async () => {
   try {
     const d = await post('/meeting/session/start', {
       title: $('meet-title').value.trim(),
-      consent: $('meet-ret').value});
+      consent: $('meet-ret').value,
+      attendees: $('meet-who').value.trim()});
     if (!d.ok) { alert('Meeting: ' + (d.error || 'could not start')); return; }
     MEET = {active: true, title: (d.session && d.session.title) || ''};
     paintMeeting();

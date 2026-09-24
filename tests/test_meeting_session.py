@@ -291,5 +291,98 @@ class ParseChoiceTests(unittest.TestCase):
         self.assertIsNone(parse_choice("what is the weather"))
 
 
+class RosterTests(unittest.TestCase):
+    """A manual meeting's typed roster names the other side's voice."""
+
+    def setUp(self):
+        from app.services import meeting_session as ms
+        ms.reset()
+        self.td = tempfile.TemporaryDirectory()
+        self.store = _store(self.td.name)
+        self._ident = patch("app.services.identity.user_identity",
+                            return_value={"name": "Justin Adorante",
+                                          "primary_email": "j@x.com"})
+        self._ident.start()
+
+    def tearDown(self):
+        from app.services import meeting_session as ms
+        self._ident.stop()
+        ms.reset()
+        try:
+            self.store.close()
+        except Exception:
+            pass
+        try:
+            self.td.cleanup()
+        except (OSError, PermissionError):
+            pass
+
+    def _start(self, attendees):
+        from app.services import meeting_session as ms
+        with patch("app.services.meeting_session.get_store", return_value=self.store), \
+             patch("app.services.meeting_mode.enter", return_value={"ok": True}), \
+             patch("app.services.meeting_capture.sync", lambda *a, **k: None):
+            out = ms.start_manual(title="Class", consent="transcript_only",
+                                  attendees=attendees, store=self.store)
+        self.assertTrue(out["ok"], out)
+        return out
+
+    def _remote(self, speaker):
+        from app.events import Event, Modality
+        return Event(time=1.0, modality=Modality.AUDIO, raw="I will send it",
+                     summary="t", source="audio.web_tab",
+                     meta={"speaker": dict(speaker)})
+
+    def test_roster_is_stored_without_the_user(self):
+        from app.services import meeting_session as ms
+        out = self._start("Justin Adorante, Dave Randel, , dave randel")
+        names = [a["name"] for a in out["session"]["attendees"]]
+        self.assertEqual(names, ["Justin Adorante", "Dave Randel"])
+        self.assertEqual(ms.remote_roster(ms.current()), ["Dave Randel"])
+        self.assertEqual(ms.roster_names(["a@b.com"])[0]["name"], "a@b.com")
+        self.assertEqual(ms.roster_names(None), [])
+
+    def test_lone_remote_name_claims_the_unknown_voice(self):
+        from app.services import meeting_session as ms
+        self._start(["Dave Randel"])
+        cluster = {"label": "Remote 1", "name": None, "is_known": False,
+                   "decision": "new", "confidence": 0.7}
+        ev = ms.stamp_event(self._remote(cluster))
+        spk = ev.meta["speaker"]
+        self.assertEqual(ev.meta["audio_channel"], "remote")
+        self.assertEqual((spk["name"], spk["label"], spk["is_known"], spk["decision"]),
+                         ("Dave Randel", "Dave Randel", True, "roster"))
+        self.assertEqual(spk["cluster_label"], "Remote 1", "the cluster is kept beside it")
+        self.assertEqual(ev.people, ["Dave Randel"])
+        # A second stamp (memory._on_event re-stamps defensively) changes nothing.
+        ms.stamp_event(ev)
+        self.assertEqual(ev.meta["speaker"]["decision"], "roster")
+        self.assertEqual(ev.people, ["Dave Randel"])
+        from app.services.consolidation import enrolled_name
+        self.assertEqual(enrolled_name(ev), "Dave Randel", "turns take the name")
+
+    def test_known_voice_mic_and_ambiguous_rosters_are_left_alone(self):
+        from app.events import Event, Modality
+        from app.services import meeting_session as ms
+        self._start(["Dave Randel"])
+        known = {"label": "Hugh Salva", "name": "Hugh Salva", "is_known": True,
+                 "decision": "accepted"}
+        ev = ms.stamp_event(self._remote(known))
+        self.assertEqual(ev.meta["speaker"]["name"], "Hugh Salva",
+                         "the recogniser's answer beats the roster")
+        mic = ms.stamp_event(Event(
+            time=1.0, modality=Modality.AUDIO, raw="x", summary="t",
+            source="audio.web_mic",
+            meta={"speaker": {"label": "Speaker 3", "name": None, "is_known": False}}))
+        self.assertIsNone(mic.meta["speaker"]["name"], "the mic side is never renamed")
+        ms.end(store=self.store); ms.reset()
+        self._start(["Dave Randel", "Hugh Salva"])
+        two = ms.stamp_event(self._remote(
+            {"label": "Remote 1", "name": None, "is_known": False}))
+        self.assertFalse(two.meta["speaker"]["is_known"])
+        self.assertEqual(two.meta["speaker"]["roster_candidates"],
+                         ["Dave Randel", "Hugh Salva"])
+
+
 if __name__ == "__main__":
     unittest.main()
