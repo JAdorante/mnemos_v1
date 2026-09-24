@@ -1,13 +1,13 @@
 a{color:inherit;text-decoration:none}
 .top,.chrome{
-  background:var(--chrome-bg, rgba(16,18,22,.88));
+  background:var(--chrome-bg);
   border-bottom:1px solid var(--line);
 }
 .top{position:sticky;top:0;z-index:var(--z-raised)}
 .chrome .top{position:static}
 @supports (backdrop-filter: blur(10px)) {
   .top,.chrome{
-    background:rgba(16,18,22,.88);
+    background:var(--chrome-bg);
     backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
   }
 }
@@ -366,7 +366,7 @@ body:not(:has(> .dock)){padding-bottom:var(--dock-clear,72px)}
 .mnemos-hold-tip{
   position:fixed;z-index:var(--z-modal);max-width:240px;padding:8px 10px;
   font:11px/1.35 var(--mono);color:var(--navy);
-  background:rgba(22,22,27,.97);border:1px solid var(--acc-35);
+  background:var(--folio);border:1px solid var(--acc-35);
   border-radius:var(--radius-xs);box-shadow:var(--shadow-float);pointer-events:none;
 }
 #mnemosPrivacy h2,#mnemosConnManage h2{
@@ -427,6 +427,19 @@ body:not(:has(> .dock)){padding-bottom:var(--dock-clear,72px)}
 }
 /* Global Ask trigger + worker status dot — live in the shell, every route. */
 .nav-right{margin-left:auto;display:flex;align-items:center;gap:12px}
+.theme-toggle{
+  width:32px;height:32px;padding:0;margin:0;flex:0 0 auto;
+  display:inline-flex;align-items:center;justify-content:center;
+  border:1px solid var(--line);border-radius:var(--radius-full);
+  background:var(--panel);color:var(--mut);cursor:pointer;
+  transition:border-color var(--dur-fast) var(--ease-io),
+    background var(--dur-fast) var(--ease-io),color var(--dur-fast) var(--ease-io);
+}
+.theme-toggle:hover{border-color:var(--line-strong);background:var(--bg-elev);color:var(--text)}
+.theme-toggle svg{width:15px;height:15px;display:block}
+html[data-theme="light"] .theme-toggle .icon-sun{display:none}
+html[data-theme="dark"] .theme-toggle .icon-moon,
+:root:not([data-theme]) .theme-toggle .icon-moon{display:none}
 .ask-trigger{
   display:inline-flex;align-items:center;gap:8px;
   background:var(--raised);border:1px solid var(--line);border-radius:var(--r-sm);

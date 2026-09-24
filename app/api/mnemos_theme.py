@@ -2,16 +2,19 @@
 
 Design system (UI refactor spec, sparrow-today-redesign.html):
   - Surfaces: soft-ink page (--ink), cards (--surface), nested/hover (--raised),
-    one opaque hairline (--line). No shadows anywhere — elevation on a dark
-    theme is border + fill delta.
-  - Text: warm off-white (--text), --muted for secondary, --faint for meta
-    only (never load-bearing).
+    one opaque hairline (--line). Elevation is border + fill delta by default.
+  - Themes: dark is the default palette; light is a cool off-white ground
+    (marketing-page feel) toggled via html[data-theme]. Persist in
+    localStorage (mnemos.ui.theme); boot script sets data-theme before paint.
+  - Text: --text primary, --muted secondary, --faint for meta only
+    (never load-bearing).
   - Semantic: violet = primary action + person entities; amber = topics +
     attention; green = healthy/idle.
   - Type: two voices. Fraunces (serif, display-only: page h1, card h2,
     margin-note prose) and Instrument Sans (everything functional). Mono is
     not a UI face — it survives only inside <pre> raw-payload disclosures.
-    No ALL-CAPS eyebrows, no letterspaced labels.
+    No ALL-CAPS eyebrows, no letterspaced labels (welcome brand stack is the
+    one intentional exception).
   - Radii: three tiers mapped to hierarchy — 14 section cards, 10 nested
     panels/inputs, 7 buttons/small controls.
   - Material: flat by default. A surface may opt into light instead (--card-hi
@@ -98,6 +101,17 @@ THEME_SCRIPT_LINKS = theme_script_links("dev")
 BRAND_MARK = """\
 <svg class="mark" width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 13c5-1 9-5 11-10 1 4 0 8-2 11l9-3c-4 5-10 8-16 8l-2-6z" fill="var(--violet)"/></svg>"""
 
+# Blocking boot — runs before first paint so data-theme is set before CSS.
+# Reads the same key MnemosMemory uses (JSON string "light"|"dark").
+THEME_BOOT = """\
+<script>(function(){try{var k='mnemos.ui.theme',r=localStorage.getItem(k),t=null;
+if(r!=null){try{t=JSON.parse(r)}catch(e){t=r}}
+if(t!=='light'&&t!=='dark'){
+t=(window.matchMedia&&matchMedia('(prefers-color-scheme:light)').matches)?'light':'dark'}
+document.documentElement.setAttribute('data-theme',t);
+document.documentElement.style.colorScheme=t}catch(e){
+document.documentElement.setAttribute('data-theme','dark')}})();</script>"""
+
 ROOT_TOKENS = """\
 :root{
   color-scheme:dark;
@@ -134,8 +148,7 @@ ROOT_TOKENS = """\
   --acc-45:color-mix(in srgb,var(--acc) 45%,transparent);
   --acc-55:color-mix(in srgb,var(--acc) 55%,transparent);
   --acc-dim:var(--acc-12);--acc-ink:var(--acc-22);--acc-warm:#14131D;
-  /* Ink tints — light-ink washes for hovers, hairlines, quiet fills.
-     Use these instead of raw rgba(...) so the ground can re-theme. */
+  /* Ink tints — washes from strongest text so the ground can re-theme. */
   --ink-03:color-mix(in srgb,var(--navy) 3%,transparent);
   --ink-04:color-mix(in srgb,var(--navy) 4%,transparent);
   --ink-06:color-mix(in srgb,var(--navy) 6%,transparent);
@@ -161,61 +174,82 @@ ROOT_TOKENS = """\
   --fs-body:15px;--fs-title3:17px;--fs-title2:21px;--fs-title1:26px;--fs-large:32px;
   --lh-tight:1.2;--lh-snug:1.35;--lh-body:1.55;--lh-loose:1.65;
   --track-tight:-.022em;--track-snug:-.012em;--track-caps:.06em;
-  /* No shadows anywhere — elevation is border + fill delta on a dark theme.
-     Tokens stay defined so page CSS keeps parsing; they all resolve to none. */
+  /* Elevation is border + fill delta; shadow tokens stay defined as none. */
   --shadow:none;
   --shadow-workspace:none;
   --shadow-surface:none;
   --shadow-folio:none;
   --shadow-float:none;
   --shadow-press:none;
-  /* Material — for surfaces that opt into light (today: the constellation).
-     The flat --shadow-* tokens above stay the page default; a lit surface adds
-     a one-pixel bright edge at its top plus a two-layer shadow — a tight
-     contact shadow and a wide, faint ambient one — so the card reads as an
-     object under a light from above. A surface takes one or the other. */
+  /* Material — surfaces that opt into lift (today: the constellation). */
   --card-hi:color-mix(in srgb,var(--navy) 8%,transparent);
   --device-hi:color-mix(in srgb,var(--navy) 13%,transparent);
   --lift-1:0 1px 2px rgb(0 0 0 / .34);
   --lift-2:0 1px 2px rgb(0 0 0 / .36),0 14px 34px -16px rgb(0 0 0 / .6);
   --lift-3:0 2px 5px rgb(0 0 0 / .42),0 24px 56px -20px rgb(0 0 0 / .7);
-  /* The accent gets dimension, not more presence: gloss on top, its own hue
-     in the ambient shadow. One primary control per surface. */
   --lift-acc:0 1px 2px rgb(0 0 0 / .4),0 10px 22px -12px var(--acc-45);
   /* Motion — fast to start, long to settle; springs only for the mark. */
   --ease:cubic-bezier(.22,1,.36,1);
   --ease-io:cubic-bezier(.4,0,.2,1);
   --ease-spring:cubic-bezier(.34,1.45,.5,1);
   --dur-fast:.15s;--dur:.26s;--dur-slow:.45s;
-  /* Materials — chrome and floats share one glass recipe. */
   --glass:saturate(1.8) blur(20px);
-  /* Two voices: serif is display-only (page h1, card h2, margin-note prose);
-     everything functional is sans. Mono is not a UI face — <pre> payloads only. */
   --sans:"Instrument Sans","Instrument Sans Fallback",system-ui,sans-serif;
   --serif:"Fraunces","Fraunces Fallback",Georgia,serif;
   --font:var(--sans);
   --display:var(--serif);
   --mono:"IBM Plex Mono",ui-monospace,Consolas,monospace;
   --grain:none;
-  /* Stacking bands — never invent raw z-index integers outside this file. */
-  --z-base: 1;    /* in-flow decorations: ::before spines, grain overlays */
-  --z-raised: 5;  /* sticky page chrome: .top bars, .work-bar, table heads */
-  --z-rail: 15;   /* ambient side rails (legacy float; prefer layout) */
-  --z-banner: 25; /* approval / status banners */
-  --z-float: 40;  /* toasts, ghost panels, nudges — dock owns these */
-  --z-popover: 50;/* dropdowns, past-chats panel */
-  --z-system: 70; /* recording chips — must beat conversational float */
-  --z-modal: 80;  /* modal sheets, privacy dialog, hold tips */
-  --chrome-h: 56px; /* measured by MnemosChrome; fallback for first paint */
-  --composer-h: 0px; /* in-flow chat composer; lifts the corner dock */
-  --dock-clear: 72px; /* measured rec/toast dock height + gap */
+  --z-base: 1;
+  --z-raised: 5;
+  --z-rail: 15;
+  --z-banner: 25;
+  --z-float: 40;
+  --z-popover: 50;
+  --z-system: 70;
+  --z-modal: 80;
+  --chrome-h: 56px;
+  --composer-h: 0px;
+  --dock-clear: 72px;
   --chrome-bg: rgba(16,18,22,.88);
+  --chrome-bg-solid: #101216;
+}
+/* Light — cool off-white ground, near-black type, soft violet accent.
+   Matches the Ravenry/Sparrow marketing landing feel. */
+html[data-theme="light"]{
+  color-scheme:light;
+  --ink:#f7f8fa;--surface-2:#ffffff;--raised:#eef0f4;
+  --paper:var(--ink);--bg:var(--ink);--bg-elev:var(--raised);
+  --workspace:var(--ink);--surface:var(--surface-2);--panel:var(--surface-2);--panel-2:var(--raised);
+  --folio:var(--surface-2);--overlay:rgba(15,17,21,.42);--float:var(--surface-2);
+  --text:#111318;--mut:#5c6370;--muted:var(--mut);--faint:#8b919c;
+  --line:#e4e7ec;--hairline:#eceef2;--line-strong:#d0d5dd;
+  --navy:#111318;--charcoal:#5c6370;
+  --violet:#6e66e8;--amber:#c9922e;--green:#2f9a60;
+  --violet-dim:rgba(110,102,232,.12);
+  --acc:var(--violet);--acc-fg:#ffffff;
+  --acc-warm:#f3f2ff;
+  --danger:#c44b44;
+  --desktop:#c45f78;
+  --card-hi:color-mix(in srgb,#fff 70%,transparent);
+  --device-hi:color-mix(in srgb,#fff 85%,transparent);
+  --lift-1:0 1px 2px rgb(15 17 21 / .05);
+  --lift-2:0 1px 2px rgb(15 17 21 / .05),0 14px 34px -16px rgb(15 17 21 / .12);
+  --lift-3:0 2px 5px rgb(15 17 21 / .06),0 24px 56px -20px rgb(15 17 21 / .14);
+  --lift-acc:0 1px 2px rgb(15 17 21 / .06),0 10px 22px -12px var(--acc-45);
+  --chrome-bg: rgba(247,248,250,.88);
+  --chrome-bg-solid: #f7f8fa;
+}
+html[data-theme="light"] body{
+  background:
+    radial-gradient(ellipse 80% 55% at 50% -10%,#ffffff 0%,transparent 70%),
+    var(--ink);
 }
 /* `hidden` must beat any class that sets display (.fetch-err{display:flex}),
    or the element stays painted forever. Author rules outrank the UA sheet. */
 [hidden]{display:none!important}
 @supports not (backdrop-filter: blur(1px)) {
-  :root{ --chrome-bg: #101216; }
+  :root{ --chrome-bg: var(--chrome-bg-solid); }
 }
 @font-face{
   font-family:"Instrument Sans Fallback";src:local("Arial");
@@ -469,14 +503,14 @@ INK_CSS = """\
 CHROME_CSS = """\
 a{color:inherit;text-decoration:none}
 .top,.chrome{
-  background:var(--chrome-bg, rgba(16,18,22,.88));
+  background:var(--chrome-bg);
   border-bottom:1px solid var(--line);
 }
 .top{position:sticky;top:0;z-index:var(--z-raised)}
 .chrome .top{position:static}
 @supports (backdrop-filter: blur(10px)) {
   .top,.chrome{
-    background:rgba(16,18,22,.88);
+    background:var(--chrome-bg);
     backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
   }
 }
@@ -835,7 +869,7 @@ body:not(:has(> .dock)){padding-bottom:var(--dock-clear,72px)}
 .mnemos-hold-tip{
   position:fixed;z-index:var(--z-modal);max-width:240px;padding:8px 10px;
   font:11px/1.35 var(--mono);color:var(--navy);
-  background:rgba(22,22,27,.97);border:1px solid var(--acc-35);
+  background:var(--folio);border:1px solid var(--acc-35);
   border-radius:var(--radius-xs);box-shadow:var(--shadow-float);pointer-events:none;
 }
 #mnemosPrivacy h2,#mnemosConnManage h2{
@@ -896,6 +930,19 @@ body:not(:has(> .dock)){padding-bottom:var(--dock-clear,72px)}
 }
 /* Global Ask trigger + worker status dot — live in the shell, every route. */
 .nav-right{margin-left:auto;display:flex;align-items:center;gap:12px}
+.theme-toggle{
+  width:32px;height:32px;padding:0;margin:0;flex:0 0 auto;
+  display:inline-flex;align-items:center;justify-content:center;
+  border:1px solid var(--line);border-radius:var(--radius-full);
+  background:var(--panel);color:var(--mut);cursor:pointer;
+  transition:border-color var(--dur-fast) var(--ease-io),
+    background var(--dur-fast) var(--ease-io),color var(--dur-fast) var(--ease-io);
+}
+.theme-toggle:hover{border-color:var(--line-strong);background:var(--bg-elev);color:var(--text)}
+.theme-toggle svg{width:15px;height:15px;display:block}
+html[data-theme="light"] .theme-toggle .icon-sun{display:none}
+html[data-theme="dark"] .theme-toggle .icon-moon,
+:root:not([data-theme]) .theme-toggle .icon-moon{display:none}
 .ask-trigger{
   display:inline-flex;align-items:center;gap:8px;
   background:var(--raised);border:1px solid var(--line);border-radius:var(--r-sm);
@@ -978,6 +1025,17 @@ def nav_markup() -> str:
         '<div class="nav-right">'
         f'<button type="button" class="ask-trigger" id="mnemosAskOpen">'
         f'Ask {BRAND} anything… <kbd>⌘K</kbd></button>'
+        '<button type="button" class="theme-toggle" id="mnemosThemeToggle"'
+        ' title="Toggle light / dark" aria-label="Toggle light and dark mode">'
+        '<svg class="icon-sun" viewBox="0 0 24 24" fill="none" aria-hidden="true">'
+        '<circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="1.75"/>'
+        '<path d="M12 2v2.5M12 19.5V22M4.93 4.93l1.77 1.77M17.3 17.3l1.77 1.77'
+        'M2 12h2.5M19.5 12H22M4.93 19.07l1.77-1.77M17.3 6.7l1.77-1.77"'
+        ' stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/></svg>'
+        '<svg class="icon-moon" viewBox="0 0 24 24" fill="none" aria-hidden="true">'
+        '<path d="M20 14.5A8.5 8.5 0 0 1 9.5 4 7 7 0 1 0 20 14.5z"'
+        ' stroke="currentColor" stroke-width="1.75" stroke-linejoin="round"/></svg>'
+        '</button>'
         '<button type="button" class="status-dot" id="mnemosStatusDot"'
         ' title="worker" aria-label="worker status"></button>'
         '<a class="nav-profile" href="/profile" title="You" aria-label="Profile">'
@@ -1028,10 +1086,26 @@ def nav_markup() -> str:
     )
 
 
+def _inject_theme_boot(page: str) -> str:
+    """Put THEME_BOOT immediately after <head> so data-theme wins before paint."""
+    lower = page.lower()
+    idx = lower.find("<head>")
+    if idx < 0:
+        idx = lower.find("<head ")
+        if idx < 0:
+            return page
+        end = page.find(">", idx)
+        if end < 0:
+            return page
+        return page[: end + 1] + "\n" + THEME_BOOT + page[end + 1 :]
+    end = idx + len("<head>")
+    return page[:end] + "\n" + THEME_BOOT + page[end:]
+
+
 def apply_plain(page: str) -> str:
     """Utility pages: fonts + tokens only (no nav, chrome, or UI bundle)."""
     v = asset_version()
-    return (
+    return _inject_theme_boot(
         page.replace("@@FONTS@@", font_links(v))
         .replace("@@ROOT@@", ROOT_TOKENS)
         .replace("@@BRAND@@", BRAND)
@@ -1047,7 +1121,7 @@ def apply(page: str) -> str:
     Pages that render math include @@KATEX@@ after @@FONTS@@ (Chat, Console).
     """
     v = asset_version()
-    return (
+    return _inject_theme_boot(
         page.replace("@@FONTS@@", font_links(v) + "\n" + theme_style_links(v))
         .replace("@@KATEX@@", KATEX_LINKS)
         .replace("@@ROOT@@", ROOT_TOKENS)

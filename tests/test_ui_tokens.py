@@ -350,6 +350,21 @@ class UiTokenEnforcementTests(unittest.TestCase):
         ):
             self.assertIn(name, ROOT_TOKENS)
 
+    def test_light_theme_tokens_and_boot(self) -> None:
+        from app.api.mnemos_theme import ROOT_TOKENS, THEME_BOOT, apply, nav_markup
+        from app.api.mnemos_ui import UI_JS
+
+        self.assertIn('html[data-theme="light"]', ROOT_TOKENS)
+        self.assertIn("--ink:#f7f8fa", ROOT_TOKENS)
+        self.assertIn("mnemos.ui.theme", THEME_BOOT)
+        self.assertIn("data-theme", THEME_BOOT)
+        self.assertIn("window.MnemosTheme", UI_JS)
+        self.assertIn("theme-toggle", nav_markup())
+        page = apply("<!doctype html><head></head><body>@@UI_JS@@</body></html>")
+        self.assertIn("mnemos.ui.theme", page)
+        # Boot must precede body paint — injected before </head> content ends.
+        self.assertLess(page.lower().find("mnemos.ui.theme"), page.lower().find("</head>"))
+
     def test_no_raw_z_index_outside_theme(self) -> None:
         """Raw z-index integers outside mnemos_theme.py are a lint failure."""
         raw_z = re.compile(r"z-index\s*:\s*\d+")

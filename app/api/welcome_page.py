@@ -28,36 +28,47 @@ body{
 a{color:var(--navy);text-decoration:none}
 a:hover{opacity:.8}
 
+.welcome-bar{
+  display:flex;justify-content:flex-end;align-items:center;
+  padding:16px 20px 0;max-width:720px;width:100%;margin:0 auto;
+}
 .stage{
-  flex:1;display:flex;flex-direction:column;justify-content:center;
-  max-width:640px;width:100%;margin:0 auto;padding:48px 24px 64px;
+  flex:1;display:flex;flex-direction:column;justify-content:center;align-items:center;
+  text-align:center;
+  max-width:720px;width:100%;margin:0 auto;padding:32px 24px 64px;
   animation:morningPaper .45s var(--ease) both;
 }
-.company{
-  display:inline-flex;align-items:center;gap:0;margin:0 0 28px;
-  text-decoration:none;color:inherit;
+.brand-stack{
+  display:flex;flex-direction:column;align-items:center;gap:6px;
+  margin:0 0 48px;
 }
-.company-logo{
-  height:28px;width:auto;display:block;
-  /* Lockup is near-black on transparent — invert for the dark ink ground. */
-  filter:brightness(0) invert(1);
-  opacity:.9;
+.company-name{
+  font:600 11px/1.2 var(--sans);letter-spacing:.22em;
+  text-transform:uppercase;color:var(--mut);margin:0;
 }
-.product{
-  font-family:var(--serif);font-weight:500;
-  font-size:clamp(2.6rem,7vw,3.8rem);letter-spacing:var(--track-tight);
-  margin:0 0 18px;color:var(--text);line-height:1.05;
+.builds{
+  font:500 9px/1.2 var(--sans);letter-spacing:.28em;
+  text-transform:uppercase;color:var(--faint);margin:0;
+}
+.product-row{
+  display:inline-flex;align-items:center;gap:10px;margin-top:10px;
+  font:600 12px/1 var(--sans);letter-spacing:.2em;
+  text-transform:uppercase;color:var(--text);
+}
+.product-dot{
+  width:8px;height:8px;border-radius:50%;background:var(--violet);flex:0 0 auto;
+  box-shadow:0 0 0 4px var(--violet-dim),0 0 18px var(--acc-35);
 }
 h1{
-  font-family:var(--sans);font-weight:500;
-  font-size:clamp(1.15rem,2.8vw,1.35rem);letter-spacing:var(--track-snug);
-  margin:0 0 12px;max-width:36ch;color:var(--text);line-height:1.35;
+  font-family:var(--sans);font-weight:650;
+  font-size:clamp(1.85rem,5.2vw,2.75rem);letter-spacing:var(--track-tight);
+  margin:0 0 14px;max-width:18ch;color:var(--text);line-height:1.15;
 }
 .lead{
   color:var(--muted);
-  font-size:1.08rem;line-height:1.55;max-width:40ch;margin:0 0 30px;
+  font-size:1.05rem;line-height:1.55;max-width:38ch;margin:0 0 32px;
 }
-.cta{display:flex;flex-wrap:wrap;gap:12px;align-items:center}
+.cta{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:center}
 .btn{
   appearance:none;border:1px solid transparent;cursor:pointer;font:inherit;font-weight:600;
   font-size:14px;border-radius:var(--r-sm);padding:11px 18px;
@@ -74,8 +85,8 @@ h1{
 .skip:hover{color:var(--navy);transform:translateY(-1px)}
 
 .unlock{
-  margin-top:36px;padding-top:28px;border-top:1px solid var(--ink-08);
-  max-width:28rem;animation:fadeUp .35s var(--ease) both;
+  margin-top:40px;padding-top:28px;border-top:1px solid var(--ink-08);
+  max-width:28rem;width:100%;text-align:left;animation:fadeUp .35s var(--ease) both;
 }
 .unlock h2{
   font-family:var(--display);font-weight:400;font-size:1.35rem;
@@ -108,7 +119,8 @@ h1{
 .foot a:hover{color:var(--navy)}
 
 @media(max-width:520px){
-  .stage{padding:36px 20px 48px}
+  .stage{padding:24px 20px 48px}
+  .brand-stack{margin-bottom:36px}
   .cta .btn{width:100%;text-align:center}
   .unlock .row{flex-direction:column}
 }
@@ -118,13 +130,30 @@ h1{
 </style>
 </head>
 <body>
+  <div class="welcome-bar">
+    <button type="button" class="theme-toggle" id="mnemosThemeToggle"
+      title="Toggle light / dark" aria-label="Toggle light and dark mode">
+      <svg class="icon-sun" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="1.75"/>
+        <path d="M12 2v2.5M12 19.5V22M4.93 4.93l1.77 1.77M17.3 17.3l1.77 1.77M2 12h2.5M19.5 12H22M4.93 19.07l1.77-1.77M17.3 6.7l1.77-1.77"
+          stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/>
+      </svg>
+      <svg class="icon-moon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M20 14.5A8.5 8.5 0 0 1 9.5 4 7 7 0 1 0 20 14.5z"
+          stroke="currentColor" stroke-width="1.75" stroke-linejoin="round"/>
+      </svg>
+    </button>
+  </div>
   <main class="stage" id="stage">
-    <a class="company" href="/" aria-label="@@COMPANY@@">
-      <img class="company-logo" src="/static/ravenry-logo.png" width="759" height="222"
-           alt="@@COMPANY@@" decoding="async">
-    </a>
-    <p class="product">@@BRAND@@</p>
-    <h1 id="headline">Your memory starts here</h1>
+    <div class="brand-stack">
+      <p class="company-name">@@COMPANY@@</p>
+      <p class="builds">Builds</p>
+      <div class="product-row">
+        <span class="product-dot" aria-hidden="true"></span>
+        <span>@@BRAND@@</span>
+      </div>
+    </div>
+    <h1 id="headline">A nervous system for your company.</h1>
     <p class="lead" id="lead">A personal memory that hears, remembers, and — with your approval — acts. This install lives on your machine.</p>
     <div class="cta" id="cta">
       <button type="button" class="btn btn-primary" id="primaryBtn">Get started</button>
@@ -188,7 +217,7 @@ h1{
       secondaryLink.href=state.onboarding_url||'/onboarding';
       secondaryLink.onclick=null;
     }else{
-      headline.textContent='Your memory starts here';
+      headline.textContent='A nervous system for your company.';
       lead.textContent='A short setup so @@BRAND@@ knows your name, people, and work — then it can remember and help act.';
       primaryBtn.textContent='Get started';
       primaryBtn.onclick=goOnboarding;

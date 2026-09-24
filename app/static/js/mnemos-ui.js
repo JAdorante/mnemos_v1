@@ -19,6 +19,57 @@ window.MnemosMemory = {
   }
 };
 
+/* Light / dark — persists via MnemosMemory; boot script in <head> applies
+   data-theme before paint so the first frame matches. */
+window.MnemosTheme = (function () {
+  const KEY = 'theme';
+  function systemTheme() {
+    try {
+      return window.matchMedia('(prefers-color-scheme: light)').matches
+        ? 'light' : 'dark';
+    } catch (e) { return 'dark'; }
+  }
+  function current() {
+    const t = document.documentElement.getAttribute('data-theme');
+    return (t === 'light' || t === 'dark') ? t : systemTheme();
+  }
+  function apply(theme) {
+    const t = theme === 'light' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', t);
+    try { document.documentElement.style.colorScheme = t; } catch (e) {}
+    window.MnemosMemory.set(KEY, t);
+    document.querySelectorAll('.theme-toggle').forEach((btn) => {
+      const next = t === 'light' ? 'dark' : 'light';
+      btn.setAttribute('aria-label', 'Switch to ' + next + ' mode');
+      btn.title = 'Switch to ' + next + ' mode';
+    });
+    try {
+      document.dispatchEvent(new CustomEvent('mnemos:theme', { detail: { theme: t } }));
+    } catch (e) {}
+    return t;
+  }
+  function toggle() {
+    return apply(current() === 'light' ? 'dark' : 'light');
+  }
+  function bind() {
+    document.querySelectorAll('.theme-toggle').forEach((btn) => {
+      if (btn.dataset.themeBound) return;
+      btn.dataset.themeBound = '1';
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        toggle();
+      });
+    });
+    apply(current());
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', bind);
+  } else {
+    bind();
+  }
+  return { current, apply, toggle, bind };
+})();
+
 /* Plan 6.4 — attach double-submit CSRF header on state-changing fetches. */
 (function () {
   function csrfFromCookie() {
