@@ -2608,12 +2608,23 @@ def meetings_list(limit: int = 40) -> dict:
         if r.get("period_start"):
             import time as _t
             when = _t.strftime("%a %b %d %H:%M", _t.localtime(r["period_start"]))
+        title = _meeting_title(r.get("summary") or "")
+        msid = None
+        if r.get("subject_type") == "meeting_session":
+            try:
+                msid = int(r.get("subject_id") or 0) or None
+                ms = store.get_meeting_session(msid) if msid else None
+                title = ((ms or {}).get("title") or "").strip() or title
+            except Exception:
+                msid = None
         out.append({
             "id": r["id"],
-            "title": _meeting_title(r.get("summary") or ""),
+            "title": title,
             "when": when,
             "n_items": len(items),
             "created_at": r.get("created_at"),
+            "subject_type": r.get("subject_type"),
+            "meeting_session_id": msid,
         })
     return {"meetings": out}
 
@@ -2727,6 +2738,7 @@ class MeetingRetentionIn(BaseModel):
     retention: str  # transcript_only | keep_receipts
     session_id: int | None = None
     calendar_event_id: str | None = None
+    meeting_session_id: int | None = None
     default: bool = False  # when True, set the user default preference
 
 
@@ -2768,6 +2780,7 @@ def meeting_retention_set(body: MeetingRetentionIn) -> dict:
         body.retention,
         session_id=body.session_id,
         calendar_event_id=body.calendar_event_id,
+        meeting_session_id=body.meeting_session_id,
         store=memory._ensure_store(),
         apply=True,
     )
@@ -3146,6 +3159,7 @@ def _fact_view(d: dict) -> dict:
         "source_audio": None,  # filled in by the route from the source event
         "enhanced_audio": None,
         "play_path": None,
+        "audio_state": "none",  # playable | removed (transcript-only) | none
         "source_transcript": "",
         "span_highlight": None,
         "playable": False,
@@ -3183,6 +3197,7 @@ def facts_list(kind: str | None = None, status: str | None = None,
             v["source_audio"] = clip.get("audio_path")
             v["enhanced_audio"] = clip.get("enhanced_audio")
             v["play_path"] = clip.get("play_path")
+            v["audio_state"] = clip.get("audio_state") or "none"
             v["source_transcript"] = clip.get("transcript") or ""
             v["playable"] = bool(clip.get("play_path"))
             span = v.get("source_span") or ""
@@ -5110,7 +5125,42 @@ def chat_ui_redirect() -> RedirectResponse:
 def ghost_status() -> dict:
     """Freshness probe the chat pane polls to decide whether to show itself."""
     from browser_agent import config as bcfg, ghost
-    return {"mode": bcfg.GHOST_MODE, **ghost.meta()}
+    handoff = ghost.signin_handoff().get("kind")
+    with agent.worker.lock:
+        awaiting = bool(agent.worker.awaiting)
+    return {"mode": bcfg.GHOST_MODE, "handoff": handoff,
+            "browser_open": agent.worker.browser_open(),
+            "awaiting": awaiting, **ghost.meta()}
+
+
+class GhostInputIn(BaseModel):
+    type: str
+    x: float | None = None
+    y: float | None = None
+    text: str | None = None
+    key: str | None = None
+    dy: float | None = None
+    button: str | None = None
+    clicks: int | None = None
+
+
+@router.post("/agent/ghost/input")
+def ghost_input(body: GhostInputIn) -> dict:
+    """Sign-in handoff for a headless install: relay one human input event
+    (click / type / key / scroll, in frame pixels) into the agent's page.
+    Executed on the Playwright thread while the agent is idle or waiting on
+    an ask; refused mid-task. The text is typed into the page and never
+    logged or stored (the access log carries the path only)."""
+    from browser_agent.browser import HUMAN_INPUT_KINDS, HUMAN_TEXT_MAX
+    kind = (body.type or "").lower()
+    if kind not in HUMAN_INPUT_KINDS:
+        return {"ok": False, "reason": f"unknown input: {kind or '(none)'}"}
+    if kind == "click" and (body.x is None or body.y is None):
+        return {"ok": False, "reason": "click needs x and y"}
+    if body.text is not None and len(body.text) > HUMAN_TEXT_MAX:
+        return {"ok": False, "reason": f"text over {HUMAN_TEXT_MAX} characters"}
+    ev = {k: v for k, v in body.model_dump().items() if v is not None}
+    return agent.worker.submit_ghost_input(ev)
 
 
 @router.get("/agent/ghost/frame")

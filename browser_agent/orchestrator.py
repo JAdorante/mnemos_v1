@@ -68,6 +68,28 @@ def _route_text(r):
             f"       {r.get('rationale', '')}")
 
 
+def _connector_lane(route: dict) -> tuple[str, dict] | None:
+    """(context block, meta) when a connected connector can serve this
+    route's mail/calendar read; None to take the browser path. Standalone
+    agent (no app package) or any lane failure → None, never an exception."""
+    try:
+        from app.services.connectors import lane
+        return lane.context_block(route)
+    except Exception:
+        return None
+
+
+def _connector_for_host(host: str) -> dict | None:
+    """{"id", "label", "connected"} for the app-layer connector that covers a
+    web host (mail.google.com → Google, outlook.live.com → Outlook), or None.
+    Standalone agent (no app package) → None."""
+    try:
+        from app.services.connectors import lane
+        return lane.connector_for_host(host)
+    except Exception:
+        return None
+
+
 # --- the learning layer (procedural memory) --------------------------------
 # After a goal finishes we distill its trajectory into a page-independent
 # "recipe" (the winning path) plus the distinct verify-failure lessons, key it
@@ -575,31 +597,75 @@ class Agent:
             return True
         return False
 
-    def _maybe_signin_handoff_hint(self, scan: dict) -> None:
-        """One deterministic hint per host when a real sign-in wall appears:
-        tell the user the reveal handoff exists. The model-generated ask path
-        stays — this fires even when the model soldiers on without asking.
-        Only when there's actually a hidden window to reveal (never headless),
-        and never for a host whose stored creds just auto-filled."""
+    def _maybe_signin_handoff_hint(self, scan: dict) -> str | None:
+        """A real sign-in wall with no stored credentials is a human step.
+        What the human CAN do depends on the install (browser_agent.ghost
+        decides, once, for every caller):
+
+          reveal   — a parked headed window exists: log one hint per host
+                     that the pane's reveal/park buttons bring it up, and let
+                     the model keep going (it will ask_human as usual);
+          takeover — headless with the pane's input relay: same, with the
+                     take-over wording;
+          none     — nothing for the human to act on at all: return
+                     a plain stop message. The caller ends the run with it
+                     instead of letting the model ask three times for a
+                     sign-in nobody can perform (observed live 2026-09-22:
+                     three asks, then "blocked without more input").
+
+        Returns the stop message, or None to continue."""
         try:
             wall = looks_like_login_wall(scan)
             if not wall:
-                return
+                return None
             host = host_from_url((scan or {}).get("url") or "")
-            if not host or host in self._signin_hint_hosts:
-                return
-            self._signin_hint_hosts.add(host)
-            if get_creds(host):
-                return
+            if not host or get_creds(host):
+                return None
             from . import ghost
-            if not ghost.can_reveal():
-                return
-            self._log(
-                f"   sign-in wall at {host} ({wall}) — press “reveal” on the "
-                "Agent browser pane to sign in yourself, then “park” to hide "
-                "it again.")
+            handoff = ghost.signin_handoff()
+            if handoff.get("kind") == "none":
+                return self._signin_blocked_message(host, wall)
+            if host in self._signin_hint_hosts:
+                return None
+            self._signin_hint_hosts.add(host)
+            if handoff.get("kind") == "takeover":
+                self._log(
+                    f"   sign-in wall at {host} ({wall}) — press “take over” "
+                    "on the Agent browser pane to sign in through my browser "
+                    "yourself, then “hand back”.")
+            else:
+                self._log(
+                    f"   sign-in wall at {host} ({wall}) — press “reveal” on "
+                    "the Agent browser pane to sign in yourself, then “park” "
+                    "to hide it again.")
         except Exception:
             pass
+        return None
+
+    @staticmethod
+    def _signin_blocked_message(host: str, wall: str) -> str:
+        """The honest stop for a sign-in wall nobody can act on. Names the
+        connector that covers this host when one exists so the user's next
+        move is concrete (Setup → Connectors), never "sign in in the browser
+        window" on an install that has no window."""
+        what = {"qr": "a link-a-device sign-in",
+                "password": "a password sign-in"}.get(wall, "a sign-in")
+        msg = (f"{host} is asking for {what}, and on this install there is no "
+               "browser window I can hand to you — and I never enter "
+               "credentials myself.")
+        cover = _connector_for_host(host)
+        if cover and cover.get("connected"):
+            msg += (f" Your {cover['label']} connector is already connected, "
+                    "so ask me again and I'll read this through the connector "
+                    "instead of the browser.")
+        elif cover:
+            msg += (f" Connect {cover['label']} under Setup → Connectors and "
+                    "ask again — I'll use the connector instead of the browser.")
+        else:
+            msg += (" If Setup → Connectors lists this service, connect it "
+                    "there and ask again; otherwise this task needs a desktop "
+                    "install where the browser window can be handed to you.")
+        return msg
 
     # Session conversation window — follow-ups ("text that", "what you just said")
     # need more than a couple of clipped turns.
@@ -1818,6 +1884,26 @@ class Agent:
             self.last_steps, self.last_replans = 0, 0
             return ans, "answered_no_browser"
 
+        # Connector lane: a mail/calendar READ for a provider the user has
+        # connected is answered from the connector's own data (headers and
+        # titles, same scopes as background capture) — not by driving the
+        # provider's web UI into a sign-in wall. Writes (send/draft/schedule)
+        # never take this lane; the browser path keeps its approval gate.
+        lane = _connector_lane(route)
+        if lane is not None:
+            block, meta = lane
+            self._log(f"→ connector lane: {', '.join(meta['labels'])} — "
+                      f"{meta['mail']} messages, {meta['calendar']} events "
+                      f"(last {meta['days']:g} days); no browser needed")
+            self.last_route = {**route, "tool": "connector", "surface": "none",
+                               "requires_browser": False,
+                               "connector": meta["ids"]}
+            ans = self.llm.direct_answer(goal, ctx + block, mode_guidance=study_guidance)
+            self.last_distill_id = getattr(self.llm, "last_distill_id", None)
+            self.transcript.append({"goal": goal, "result": ans})
+            self.last_steps, self.last_replans = 0, 0
+            return ans, "answered_no_browser"
+
         # Web path only from here — start Playwright now.
         self._ensure_browser()
 
@@ -1909,7 +1995,7 @@ class Agent:
             scan = self.driver.scan()
             if self._maybe_stored_login(scan):
                 scan = self.driver.scan()
-            self._maybe_signin_handoff_hint(scan)
+            signin_block = self._maybe_signin_handoff_hint(scan)
             ax_path = self.sdir / "ax" / f"step_{self.step}.json"
             ax_path.write_text(json.dumps(scan)[:200000], encoding="utf-8")
             shot_path = self.sdir / "shots" / f"step_{self.step}.png"
@@ -1921,6 +2007,12 @@ class Agent:
                     pass
             else:
                 self.driver.screenshot(str(shot_path))
+            if signin_block:
+                # The wall is on record (ax + shot above); stop here rather
+                # than spend model steps asking for a sign-in nobody can do.
+                self._log(f"   sign-in wall — stopping: {signin_block}")
+                result, status = signin_block, "needs_input"
+                break
 
             before = signature(scan)
 

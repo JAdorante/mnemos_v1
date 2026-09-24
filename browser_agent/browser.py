@@ -25,6 +25,30 @@ from .surfaces import inside_surface, pixel_surface
 _STEALTH_JS = "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
 
 
+# Playwright wants "Control+z" / "ArrowLeft"; models and humans write
+# "ctrl+z" / "left". Shared by the model's press_key and the human relay.
+_KEY_ALIAS = {"ctrl": "Control", "control": "Control", "cmd": "Meta",
+              "command": "Meta", "meta": "Meta", "alt": "Alt",
+              "option": "Alt", "shift": "Shift", "esc": "Escape",
+              "return": "Enter", "del": "Delete",
+              "left": "ArrowLeft", "right": "ArrowRight",
+              "up": "ArrowUp", "down": "ArrowDown",
+              "arrowleft": "ArrowLeft", "arrowright": "ArrowRight",
+              "arrowup": "ArrowUp", "arrowdown": "ArrowDown",
+              "pageup": "PageUp", "pagedown": "PageDown"}
+
+
+def normalize_key(key: str) -> str:
+    parts = [k for k in str(key or "").replace(" ", "+").split("+") if k]
+    return "+".join(_KEY_ALIAS.get(k.lower(), k if len(k) == 1 else k.capitalize())
+                    for k in parts)
+
+
+# The ghost pane's human relay: what one input event may do, and its bounds.
+HUMAN_INPUT_KINDS = ("click", "type", "key", "scroll", "frame")
+HUMAN_TEXT_MAX = 2000
+
+
 class BrowserDriver:
     def __init__(self, headless: bool = True, user_data_dir=None, channel=None,
                  cdp_url=None):
@@ -499,20 +523,7 @@ class BrowserDriver:
             key = str(args.get("key") or "").strip()
             if not key:
                 return {"ok": False, "detail": "press_key needs a key"}
-            # Playwright wants "Control+z"; models write "ctrl+z".
-            parts = [k for k in key.replace(" ", "+").split("+") if k]
-            alias = {"ctrl": "Control", "control": "Control", "cmd": "Meta",
-                     "command": "Meta", "meta": "Meta", "alt": "Alt",
-                     "option": "Alt", "shift": "Shift", "esc": "Escape",
-                     "return": "Enter", "del": "Delete",
-                     # Playwright spells these camel-case; models don't.
-                     "left": "ArrowLeft", "right": "ArrowRight",
-                     "up": "ArrowUp", "down": "ArrowDown",
-                     "arrowleft": "ArrowLeft", "arrowright": "ArrowRight",
-                     "arrowup": "ArrowUp", "arrowdown": "ArrowDown",
-                     "pageup": "PageUp", "pagedown": "PageDown"}
-            norm = "+".join(alias.get(k.lower(), k if len(k) == 1 else k.capitalize())
-                            for k in parts)
+            norm = normalize_key(key)
             p.keyboard.press(norm)
             p.wait_for_timeout(200)
             self._publish_frame()
@@ -567,6 +578,63 @@ class BrowserDriver:
         p.wait_for_timeout(300)
         self._publish_frame()
         return {"ok": True, "detail": detail}
+
+    # --- human relay (sign-in handoff on a headless install) ---------------
+    def human_input(self, ev: dict) -> dict:
+        """Relay ONE input event from the ghost pane into the live page: the
+        human signs in through the agent's own browser when there is no
+        window to reveal. Runs on the Playwright thread (the bridge drains
+        its relay queue there); never raises.
+
+        Coordinates arrive in pixels of the last published frame, which is a
+        viewport-sized screenshot — `_to_css` applies the same scale the
+        model's click_at uses, so the two paths agree. Unlike click_at this
+        is NOT confined to a graphics surface: the human is the authority
+        here, and the page is whatever the agent left on screen. The text
+        is typed, never logged, and never stored."""
+        try:
+            kind = str(ev.get("type") or "").lower()
+            p = self.page
+            if p is None:
+                return {"ok": False, "reason": "the agent browser is not open"}
+            if kind == "click":
+                cx, cy = self._to_css(ev.get("x"), ev.get("y"))
+                btn = str(ev.get("button") or "left").lower()
+                if btn not in ("left", "right", "middle"):
+                    btn = "left"
+                try:
+                    clicks = max(1, min(2, int(ev.get("clicks") or 1)))
+                except (TypeError, ValueError):
+                    clicks = 1
+                p.mouse.click(cx, cy, button=btn, click_count=clicks)
+            elif kind == "type":
+                text = str(ev.get("text") or "")[:HUMAN_TEXT_MAX]
+                if text:
+                    p.keyboard.type(text, delay=15)
+            elif kind == "key":
+                norm = normalize_key(str(ev.get("key") or ""))
+                if not norm:
+                    return {"ok": False, "reason": "no key"}
+                p.keyboard.press(norm)
+            elif kind == "scroll":
+                try:
+                    dy = float(ev.get("dy") or 0)
+                except (TypeError, ValueError):
+                    dy = 0.0
+                p.mouse.wheel(0, max(-4000.0, min(4000.0, dy)))
+            elif kind == "frame":
+                # No input — just a fresh screenshot, so the pane can follow
+                # a page that moves on its own (the redirect after sign-in).
+                pass
+            else:
+                return {"ok": False, "reason": f"unknown input: {kind or '(none)'}"}
+            p.wait_for_timeout(250)
+            self._sync_active_page()
+            self._publish_frame()
+            return {"ok": True}
+        except Exception as e:
+            self._publish_frame()
+            return {"ok": False, "reason": f"{type(e).__name__}: {str(e)[:160]}"}
 
     def close(self):
         if self.attached:

@@ -524,18 +524,35 @@ _SIGNIN_ASK_RE = re.compile(
 
 
 def _signin_handoff_hint(q: str) -> str:
-    """Append the reveal instruction to a sign-in-shaped agent ask — but only
-    when a parked window actually exists (a headless install must not point
-    the user at a button that answers 'no window to reveal')."""
+    """Tell a sign-in-shaped agent ask the truth about what the user can do
+    on this install. browser_agent.ghost decides:
+
+      reveal — a parked window exists: point at the pane's reveal/park buttons;
+      none   — headless (hosted): the model's "sign in in the browser window"
+               is impossible here, so say so and point at Setup → Connectors.
+               Without this the user read the model's ask, pressed reveal ten
+               times, answered "yes", and was asked again (live, 2026-09-22)."""
     try:
         if not q or not _SIGNIN_ASK_RE.search(q):
             return q
         from browser_agent import ghost
-        if not ghost.can_reveal():
-            return q
-        return (q + "\n\n(The agent's browser is hidden — press “reveal” on "
-                    "the Agent browser pane to bring it up, sign in there, "
-                    "then press “park” to hide it again.)")
+        handoff = ghost.signin_handoff()
+        kind = handoff.get("kind")
+        if kind == "reveal":
+            return (q + "\n\n(The agent's browser is hidden — press “reveal” on "
+                        "the Agent browser pane to bring it up, sign in there, "
+                        "then press “park” to hide it again.)")
+        if kind == "takeover":
+            return (q + "\n\n(My browser has no window here, but you can drive "
+                        "it: press “take over” on the Agent browser pane, click "
+                        "and type into the page to sign in, press “hand back”, "
+                        "then reply “done”. If Setup → Connectors covers this "
+                        "service, connecting it there is the sturdier route.)")
+        return (q + "\n\n(Note: this seat's browser runs headless — there is no "
+                    "window for you to sign in to, and I never take passwords "
+                    "in chat. Connect the account under Setup → Connectors and "
+                    "ask again, and I'll use the connector instead of the "
+                    "browser.)")
     except Exception:
         return q
 
@@ -570,6 +587,9 @@ class AgentWorker:
         self.error: str | None = None  # fatal startup error (e.g. no API key)
         self._answer = ""
         self._answer_ev = threading.Event()
+        # Ghost pane input relay: (event, done, result-slot) tuples, drained
+        # on the browser lane's thread while it is idle or waiting on an ask.
+        self._ghost_in_q: queue.Queue = queue.Queue()
         self._answer_fast = ""
         self._answer_ev_fast = threading.Event()
         self.agent = None
@@ -682,10 +702,62 @@ class AgentWorker:
             self.awaiting, self.question = True, q
         self._emit("ask", q)
         self._answer_ev.clear()
-        self._answer_ev.wait()
+        # The wait is where a sign-in handoff happens on a headless install:
+        # this thread owns Playwright, so the pane's relayed clicks/typing
+        # can only reach the page from here. Service them while blocked.
+        while not self._answer_ev.wait(0.2):
+            self._drain_ghost_input()
         with self.lock:
             self.awaiting, self.question = False, None
             return self._answer
+
+    # --- ghost pane input relay (sign-in handoff without a window) ---------
+    def browser_open(self) -> bool:
+        """True when the browser lane's Playwright page exists."""
+        a = self.agent
+        return bool(a is not None and getattr(a, "_browser_started", False)
+                    and getattr(getattr(a, "driver", None), "page", None) is not None)
+
+    def submit_ghost_input(self, ev: dict, timeout_s: float = 8.0) -> dict:
+        """Hand one input event to the Playwright thread and wait for its
+        result. Called from request threads; never touches the page itself.
+        Only serviced while the lane is idle or waiting on an ask — while a
+        goal is executing the agent owns the page, and a human click would
+        land under its next action."""
+        if not self.browser_open():
+            return {"ok": False, "reason": "the agent browser is not open — "
+                                           "give it a web task first"}
+        with self.lock:
+            busy_running = self.busy and not self.awaiting
+        if busy_running:
+            return {"ok": False, "reason": "the agent is mid-task — wait for it "
+                                           "to ask or finish"}
+        done = threading.Event()
+        slot: dict = {}
+        self._ghost_in_q.put((dict(ev or {}), done, slot))
+        if not done.wait(timeout_s):
+            return {"ok": False, "reason": "input timed out"}
+        return slot.get("result") or {"ok": False, "reason": "no result"}
+
+    def _drain_ghost_input(self) -> None:
+        """Playwright-thread side of the relay: run every queued event."""
+        while True:
+            try:
+                ev, done, slot = self._ghost_in_q.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                drv = getattr(self.agent, "driver", None)
+                if drv is None or getattr(drv, "page", None) is None:
+                    slot["result"] = {"ok": False,
+                                      "reason": "the agent browser is not open"}
+                else:
+                    slot["result"] = drv.human_input(ev)
+            except Exception as exc:
+                slot["result"] = {"ok": False,
+                                  "reason": f"{type(exc).__name__}: {exc}"}
+            finally:
+                done.set()
 
     def _on_ask_fast(self, q: str) -> str:
         with self.lock:
@@ -2674,7 +2746,13 @@ class AgentWorker:
                        "off. Add a key to .env for full agent capability.")
 
         while True:
-            cmd = self.cmd_q.get()
+            try:
+                cmd = self.cmd_q.get(timeout=0.25)
+            except queue.Empty:
+                # Idle: the human may be driving the page through the ghost
+                # pane (signing in ahead of the next ask).
+                self._drain_ghost_input()
+                continue
             typ = cmd.get("type")
             try:
                 if typ == "goal":

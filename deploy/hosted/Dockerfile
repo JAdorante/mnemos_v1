@@ -74,12 +74,16 @@ ENV QUILL_HEADLESS=1 \
     QUILL_AGENT_HEADLESS=1 \
     QUILL_GHOST_BROWSER=headless \
     QUILL_BROWSER_NO_SANDBOX=1 \
+    QUILL_AGENT_PROFILE=hosted \
     AGENT_DATA_DIR=/srv/sparrow/data/agent_sessions \
     PYTHONUNBUFFERED=1
 # Web-goal posture: no display in the container, so the agent browser runs
 # headless with its view streamed to the chat ghost pane; --no-sandbox because
 # the container runs as root (isolation comes from the container boundary);
-# agent sessions + login profiles persist in the per-user volume. Web goals
+# agent sessions + login profiles persist in the per-user volume — the
+# QUILL_AGENT_PROFILE=hosted persistent context lives under
+# AGENT_DATA_DIR/profiles/hosted, so a sign-in the user hands over through
+# the ghost pane's "take over" survives a container restart. Web goals
 # additionally need cloud credentials (ANTHROPIC_API_KEY, or a key pasted in
 # onboarding) — without one the router keeps every request in local-only chat.
 # QUILL_CREDENTIALS_FILE must live in the volume: the guided iCloud connect and

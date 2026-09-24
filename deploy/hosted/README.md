@@ -125,3 +125,23 @@ onboarding flow must put the between-meetings unlock card front and center.
   exchange. Quick-tunnel restarts then cost nothing. Unset, the redirect is
   derived from the live site (Origin / Forwarded-Host) and every hostname
   must be registered by hand. See `gb10/README.md`.
+
+## Sign-in walls in the hosted browser
+
+The agent browser in the image is headless (`QUILL_GHOST_BROWSER=headless`),
+so the desktop "reveal / park" handoff has no window to move. Two things
+cover a site that asks for a sign-in:
+
+- **Connector lane.** A mail/calendar *read* ("check my gmail", "what's on
+  my calendar") for a provider the user connected under Setup → Connectors
+  is answered from the connector's own data (headers and titles, same scopes
+  as background capture) and never opens the provider's web UI. Writes still
+  take the browser path and its approval gate. `app/services/connectors/lane.py`.
+- **Take over.** On any other wall the Agent browser pane shows "take over":
+  clicks on the frame and text typed below it are relayed into the agent's
+  page (`POST /agent/ghost/input`, serviced on the Playwright thread while
+  the agent is idle or waiting on an ask). The image sets
+  `QUILL_AGENT_PROFILE=hosted`, a persistent Chromium profile in the user's
+  volume, so a handed-over sign-in survives restarts. Some providers (Google
+  in particular) may refuse a sign-in inside an automated headless browser;
+  the connector is the sturdier route where one exists.

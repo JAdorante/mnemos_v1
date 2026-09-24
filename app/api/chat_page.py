@@ -577,6 +577,20 @@ body{
 }
 #ghost img{display:block;width:100%;background:var(--panel)}
 #ghost.min img{display:none}
+#ghost .keys{display:none;align-items:center;gap:4px;padding:6px 8px;border-top:1px solid var(--hairline)}
+#ghost.take .keys{display:flex}
+#ghost.take{width:min(720px,calc(100vw - 48px))}
+#ghost.take img{cursor:crosshair}
+#ghost.take.min .keys{display:none}
+#ghost .keys input{
+  flex:1;min-width:0;padding:4px 6px;font:var(--fs-caption)/1.2 var(--font);
+  border:1px solid var(--line);border-radius:var(--radius-xs);background:var(--panel);color:var(--text);
+}
+#ghost .keys button{
+  background:transparent;border:1px solid var(--line);border-radius:var(--radius-xs);
+  padding:2px 7px;font-size:var(--fs-caption2);cursor:pointer;color:var(--mut);font-family:var(--font);
+}
+#ghost .keys button:hover{color:var(--text);border-color:var(--line-strong);background:var(--bg-elev)}
 @media(max-width:900px){#ghost{width:min(280px,calc(100vw - 48px))}}
 @media(max-width:640px){
   .top{padding:var(--sp-2) var(--sp-4);gap:var(--sp-2)}
@@ -641,9 +655,18 @@ body{
   <div class="head">
     <span class="ttl" id="ghostttl">Agent browser</span>
     <button id="ghostreveal" title="Bring the agent's browser window on-screen (e.g. to sign in), or park it again">reveal</button>
+    <button id="ghosttake" title="Drive the agent's browser yourself (e.g. to sign in) — your clicks and typing go into its page" style="display:none">take over</button>
     <button id="ghostmin" title="Collapse">–</button>
   </div>
   <img id="ghostimg" alt="agent browser view">
+  <form id="ghostkeys" class="keys" autocomplete="off">
+    <input id="ghosttext" type="text" placeholder="Type into the page — Enter sends it with ⏎" autocomplete="off" spellcheck="false">
+    <button type="button" id="ghosteye" title="Hide what you type (passwords)">hide</button>
+    <button type="submit" title="Type this text into the page (no Enter)">type</button>
+    <button type="button" data-key="Enter" title="Press Enter">⏎</button>
+    <button type="button" data-key="Tab" title="Press Tab">Tab</button>
+    <button type="button" data-key="Backspace" title="Press Backspace">⌫</button>
+  </form>
 </div>
 <div class="dock">
   <div id="bar">
@@ -1497,17 +1520,74 @@ document.getElementById('ghostreveal').onclick=async()=>{
     else if(j.reason) ghostTtl.textContent=j.reason;
   }catch(e){}
 };
+// Take-over: on a headless install (hosted) there is no window to reveal, so
+// the pane itself becomes the handoff — clicks on the frame and text typed
+// below are relayed into the agent's page (POST /agent/ghost/input). The
+// server only services it while the agent is idle or waiting on an ask.
+let ghostTake=false;
+const ghostTakeBtn=document.getElementById('ghosttake'), ghostKeys=document.getElementById('ghostkeys'),
+      ghostText=document.getElementById('ghosttext');
+function ghostFrame(){ if(!ghostEl.classList.contains('min')) ghostImg.src='/agent/ghost/frame?t='+Date.now(); }
+async function ghostSend(ev){
+  try{
+    const j=await (await fetch('/agent/ghost/input',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify(ev)})).json();
+    if(!j.ok&&j.reason) ghostTtl.textContent=j.reason;
+    ghostFrame();
+    return j;
+  }catch(e){ return {ok:false}; }
+}
+ghostTakeBtn.onclick=()=>{
+  ghostTake=!ghostTake;
+  ghostEl.classList.toggle('take',ghostTake);
+  ghostTakeBtn.textContent=ghostTake?'hand back':'take over';
+  if(ghostTake){
+    ghostEl.classList.remove('min'); document.getElementById('ghostmin').textContent='–';
+    ghostEl.style.display='block'; ghostFrame(); ghostText.focus();
+  }
+};
+ghostImg.onclick=(e)=>{
+  if(!ghostTake||!ghostImg.naturalWidth) return;
+  const r=ghostImg.getBoundingClientRect();
+  ghostSend({type:'click',x:(e.clientX-r.left)*ghostImg.naturalWidth/r.width,
+                          y:(e.clientY-r.top)*ghostImg.naturalHeight/r.height});
+};
+ghostImg.addEventListener('wheel',(e)=>{
+  if(!ghostTake) return; e.preventDefault(); ghostSend({type:'scroll',dy:e.deltaY});
+},{passive:false});
+async function ghostType(withEnter){
+  const t=ghostText.value;
+  if(t){ await ghostSend({type:'type',text:t}); ghostText.value=''; }
+  if(withEnter) await ghostSend({type:'key',key:'Enter'});
+}
+ghostKeys.onsubmit=(e)=>{e.preventDefault(); ghostType(false);};
+ghostText.onkeydown=(e)=>{ if(e.key==='Enter'){e.preventDefault(); ghostType(true);} };
+ghostKeys.querySelectorAll('[data-key]').forEach(b=>{ b.onclick=()=>ghostSend({type:'key',key:b.dataset.key}); });
+document.getElementById('ghosteye').onclick=(e)=>{
+  const hid=ghostText.type==='password'; ghostText.type=hid?'text':'password';
+  e.target.textContent=hid?'hide':'show'; ghostText.focus();
+};
+// While driving, ask for a fresh screenshot so a page that moves on its own
+// (the redirect after a sign-in) shows up without another click.
+setInterval(()=>{ if(ghostTake&&!document.hidden) ghostSend({type:'frame'}); }, 1500);
 async function ghostPoll(){
  if(document.hidden) return;
   try{
     const s=await (await fetch('/agent/ghost/status')).json();
-    if(s.fresh){
-      ghostHideAt=Date.now()+30000;
+    // reveal/park move a real OS window; a headless install has none to move —
+    // there the pane offers take-over instead.
+    document.getElementById('ghostreveal').style.display=(s.mode==='headless')?'none':'';
+    ghostTakeBtn.style.display=(s.mode==='headless')?'':'none';
+    // Keep the pane up while the agent is waiting on the user (the frame goes
+    // stale during an ask, but that is exactly when it must stay in reach).
+    const keep=ghostTake||(s.awaiting&&s.has_frame);
+    if(s.fresh||keep){
+      if(s.fresh) ghostHideAt=Date.now()+30000;
       ghostEl.style.display='block';
       ghostEl.classList.add('ink-border');
       ghostTtl.textContent=s.title||s.url||'Agent browser';
       ghostTtl.title=s.url||'';
-      if(!ghostEl.classList.contains('min'))
+      if(s.fresh&&!ghostEl.classList.contains('min')&&!ghostTake)
         ghostImg.src='/agent/ghost/frame?t='+Date.now();
     }else if(Date.now()>ghostHideAt){
       ghostEl.style.display='none';

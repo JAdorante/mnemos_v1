@@ -297,6 +297,32 @@ def _parked_x11_xids(x) -> list[int]:
     return found
 
 
+def signin_handoff() -> dict:
+    """How a sign-in wall can be handed to the human on THIS install:
+
+      {"kind": "reveal"}   a parked headed window exists — the pane's
+                           reveal/park buttons bring it on-screen;
+      {"kind": "takeover"} headless (hosted): no window, but the pane's
+                           "take over" relays the human's clicks and typing
+                           into the agent's page (BrowserDriver.human_input);
+      {"kind": "none", "reason": ...}
+                           nothing for the human to act on (ghost relay
+                           off, Wayland, no display) — callers must say so
+                           plainly instead of pointing at a button.
+
+    One decision, shared by the chat ask path and the orchestrator's wall
+    check, so the two can never disagree about what the user can do."""
+    if can_reveal():
+        return {"kind": "reveal"}
+    try:
+        from . import config as cfg
+        if cfg.GHOST_MODE == "headless":
+            return {"kind": "takeover"}
+    except Exception:
+        pass
+    return {"kind": "none", "reason": _no_window_reason()}
+
+
 def is_parked() -> bool:
     """True while an agent window WE hid is meant to STAY hidden (parked and
     not currently revealed). The driver checks this before bring_to_front —

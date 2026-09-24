@@ -295,8 +295,16 @@ class ParkRevealDispatchTests(unittest.TestCase):
             # Non-sign-in asks stay untouched.
             self.assertEqual(_signin_handoff_hint("Which option should I pick?"),
                              "Which option should I pick?")
-        with mock.patch.object(ghost, "can_reveal", return_value=False):
-            self.assertEqual(_signin_handoff_hint(ask), ask)
+        # No window at all: the ask still gets the truth appended (it must
+        # never point at reveal), never the bare model text — that bare text
+        # is what sent a hosted user hunting for a button ten times.
+        with mock.patch.object(ghost, "can_reveal", return_value=False), \
+             mock.patch.object(ghost, "signin_handoff",
+                               return_value={"kind": "none", "reason": "r"}):
+            out = _signin_handoff_hint(ask)
+            self.assertTrue(out.startswith(ask))
+            self.assertNotIn("reveal", out)
+            self.assertIn("Setup → Connectors", out)
 
 
 class LoginWallDetectionTests(unittest.TestCase):
