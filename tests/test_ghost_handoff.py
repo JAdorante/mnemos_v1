@@ -319,6 +319,102 @@ class OrchestratorLaneWiringTests(unittest.TestCase):
                 a._run_goal_inner("find Acme's careers page")
 
 
+class _RouteHarness:
+    """A bare Agent whose router answers `route`; reaching the browser
+    returns "browser" instead of starting Playwright."""
+
+    def _agent(self, route, desktop):
+        from browser_agent.orchestrator import Agent
+        a = Agent.__new__(Agent)
+        a.dry_run = "draft"
+        a.logs = []
+        a._log = a.logs.append
+        a.session_id = "s"
+        a.transcript = []
+        a.last_route = None
+        a._recorder = types.SimpleNamespace(annotate_run=lambda **kw: None)
+        a.mem = types.SimpleNamespace(log_event=lambda *args: None)
+        a.llm = types.SimpleNamespace(route=lambda g, c: dict(route))
+        a._desktop = lambda: desktop
+        a._run_desktop_goal = lambda goal, ctx, level=None: ("desktop ran", "desktop")
+        return a
+
+    def _run(self, a, goal):
+        from browser_agent import orchestrator as orch
+        from browser_agent.orchestrator import Agent
+
+        class _Started(Exception):
+            pass
+
+        def _start():
+            raise _Started()
+        a._ensure_browser = _start
+        with mock.patch.object(Agent, "_study_block", return_value=""), \
+             mock.patch.object(Agent, "_build_ctx", return_value=""), \
+             mock.patch.object(orch, "_connector_lane", return_value=None):
+            try:
+                return a._run_goal_inner(goal)
+            except _Started:
+                return "browser"
+
+
+class DesktopToBrowserFallbackTests(_RouteHarness, unittest.TestCase):
+    """Live failure (2026-09-25, seat user1): "Can you open a browser for me?"
+    routed open_app → desktop_agent and answered "Desktop control is disabled
+    or unavailable on this machine" — the hosted seat's ghost browser was never
+    tried."""
+
+    _OPEN_APP = {"intent": "open_app", "site": "", "surface": "desktop",
+                 "requires_browser": False, "tool": "desktop_agent", "rationale": ""}
+
+    def test_open_a_browser_without_desktop_uses_ghost_browser(self) -> None:
+        a = self._agent(self._OPEN_APP, desktop=None)
+        self.assertEqual(self._run(a, "Can you open a browser for me?"), "browser")
+        self.assertEqual(a.last_route["surface"], "browser")
+        self.assertEqual(a.last_route["tool"], "browser_agent")
+
+    def test_open_chrome_with_desktop_still_launches_the_app(self) -> None:
+        a = self._agent(self._OPEN_APP, desktop=object())
+        self.assertEqual(self._run(a, "open Chrome"), ("desktop ran", "desktop"))
+
+    def test_os_task_without_desktop_keeps_desktop_answer(self) -> None:
+        a = self._agent(self._OPEN_APP, desktop=None)
+        self.assertEqual(self._run(a, "open Cursor and start a new project"),
+                         ("desktop ran", "desktop"))
+
+
+class LiveFeedRouteTests(_RouteHarness, unittest.TestCase):
+    """Live failure (2026-09-25, seat user1): "what's on my X feed" routed to
+    direct_answer because X has no connector; the reply said it can't browse."""
+
+    _NONE = {"intent": "research_social_feed", "site": "", "surface": "none",
+             "requires_browser": False, "tool": "direct_answer", "rationale": ""}
+
+    def _answering_agent(self):
+        a = self._agent(self._NONE, desktop=None)
+        a.llm.direct_answer = lambda g, c, mode_guidance="": "from memory"
+        a.llm.last_distill_id = None
+        return a
+
+    def test_x_feed_goes_to_browser(self) -> None:
+        for goal in ("What's going on with my X feed?",
+                     "check my twitter notifications",
+                     "anything new in my feed on LinkedIn"):
+            a = self._answering_agent()
+            self.assertEqual(self._run(a, goal), "browser", goal)
+            self.assertEqual(a.last_route["tool"], "browser_agent")
+
+    def test_memory_question_about_a_site_stays_an_answer(self) -> None:
+        a = self._answering_agent()
+        self.assertEqual(self._run(a, "what did Hugh say about LinkedIn ads?"),
+                         ("from memory", "answered_no_browser"))
+
+    def test_router_prompt_names_the_rule(self) -> None:
+        from browser_agent.prompts import ROUTER_SYSTEM
+        self.assertIn("my X feed' -> browser", ROUTER_SYSTEM)
+        self.assertIn("no connector", ROUTER_SYSTEM)
+
+
 class _FakePage:
     def __init__(self):
         self.log = []

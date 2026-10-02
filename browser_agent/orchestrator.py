@@ -68,6 +68,30 @@ def _route_text(r):
             f"       {r.get('rationale', '')}")
 
 
+_BROWSER_ASK = re.compile(
+    r"\b(browser|chrome|chromium|firefox|safari|edge|web ?site|web ?page|"
+    r"google|url|link)\b|https?://|\b[\w-]+\.(com|org|net|io|ai|us|edu)\b", re.I)
+
+
+def _wants_a_browser(goal: str, route: dict) -> bool:
+    """A desktop-routed goal that a web browser can serve (open a browser,
+    open Chrome, go to a URL) — as opposed to a real OS task (a terminal,
+    an IDE, a project folder)."""
+    return bool(_BROWSER_ASK.search(f"{goal} {route.get('site') or ''}"))
+
+
+_SOCIAL = r"(x|twitter|linkedin|reddit|instagram|facebook|threads|bluesky)"
+_FEED = r"(feed|timeline|notifications|dms?|messages|inbox|mentions)"
+_LIVE_FEED_ASK = re.compile(
+    rf"\b{_SOCIAL}(\.com)?\s+{_FEED}\b|\b{_FEED}\s+on\s+{_SOCIAL}(\.com)?\b", re.I)
+
+
+def _wants_a_live_feed(goal: str) -> bool:
+    """The user's own feed/timeline/DMs on a social site — live web content
+    that memory cannot answer, whatever the router thought of connectors."""
+    return bool(_LIVE_FEED_ASK.search(goal or ""))
+
+
 def _connector_lane(route: dict) -> tuple[str, dict] | None:
     """(context block, meta) when a connected connector can serve this
     route's mail/calendar read; None to take the browser path. Standalone
@@ -1870,10 +1894,27 @@ class Agent:
         # hand off to the guarded desktop loop. Checked before the no-browser
         # branch because desktop tasks also have requires_browser=False.
         if route.get("surface") == "desktop":
-            return self._run_desktop_goal(goal, ctx, level=level)
+            # The router reads "open Chrome / a browser" as a desktop app launch.
+            # Where there is no desktop agent (every hosted seat), that answer
+            # was a dead end — the ghost browser IS this install's browser.
+            if _wants_a_browser(goal, route) and self._desktop() is None:
+                self._log("→ no desktop control here; using the agent browser")
+                route = {**route, "surface": "browser", "requires_browser": True,
+                         "tool": "browser_agent"}
+                self.last_route = route
+            else:
+                return self._run_desktop_goal(goal, ctx, level=level)
 
         if route.get("surface") == "phone_link":
             return self._run_phone_link_goal(goal, ctx)
+
+        # Live failure (2026-09-25): "what's on my X feed" routed to 'none'
+        # because X has no connector, and the answer said it couldn't browse.
+        if route.get("surface") == "none" and _wants_a_live_feed(goal):
+            self._log("→ a live feed is web content; using the agent browser")
+            route = {**route, "surface": "browser", "requires_browser": True,
+                     "tool": "browser_agent"}
+            self.last_route = route
 
         # No web action needed (a memory/conversational question): answer directly.
         if not route.get("requires_browser", True):
