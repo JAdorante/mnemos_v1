@@ -1,0 +1,8 @@
+# Org Record Service (org_coordinator/) only. Sparrow nodes never install
+# these: the node stays on SQLite + LanceDB.
+fastapi>=0.111
+uvicorn[standard]>=0.30
+pydantic>=2.7
+sqlalchemy>=2.0,<3
+alembic>=1.13
+psycopg[binary]>=3.1

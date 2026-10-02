@@ -70,6 +70,9 @@ datas = [
     # missing entry here fails at first browser URL parse on the tester's
     # machine, not at build time.
     (str(ROOT / "app" / "perception" / "data"), "app/perception/data"),
+    # Records layer: claim kind JSON Schemas. claim_schemas reads them off
+    # disk; missing, every claim build fails validation at first use.
+    (str(ROOT / "app" / "schemas"), "app/schemas"),
 ]
 for pkg in ("silero_vad", "sentence_transformers", "lancedb", "faster_whisper",
             # pywebview ships JS bridge files it reads off disk at runtime.

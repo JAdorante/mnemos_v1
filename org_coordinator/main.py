@@ -31,6 +31,13 @@ app.include_router(relay_routes.router)
 def _relay_startup() -> None:
     relay_mod.ensure_retry_loop()
 
+# Records layer (Org Record Service): Postgres-backed, mounted only when a
+# database is configured so the JSON coordinator runs without one.
+if os.environ.get("QUILL_ORG_DATABASE_URL"):
+    from org_coordinator.records import api as _records_api
+    app.include_router(_records_api.router)
+    _records_api.install_error_handler(app)
+
 
 class RegisterIn(BaseModel):
     node_id: str = Field(..., min_length=2, max_length=64)

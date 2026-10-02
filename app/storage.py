@@ -1357,6 +1357,7 @@ class Store:
             self._conn.commit()
         self._migrate()
         self._migrate_audio_tele()
+        self._migrate_records()
 
     # Stage timers added after the table shipped. Additive only, and the type is
     # part of the tuple so a new column never needs a second lookup elsewhere.
@@ -1387,6 +1388,165 @@ class Store:
                     added = True
             if added:
                 self._conn.commit()
+
+    # Records layer, Tier 1 policy columns on events. NULL expires_at never
+    # expires: rows captured before this migration are not backfilled, so
+    # turning expiry on cannot sweep a seat's existing history in one night.
+    _EVENTS_RECORDS_ADDED = (
+        ("privacy_class", "TEXT"),
+        ("expires_at", "REAL"),
+        ("hold_ids", "TEXT"),        # JSON list; non-empty suspends expiry
+        ("consent_mode", "TEXT"),
+    )
+
+    def _migrate_records(self) -> None:
+        """Records layer (Tier 1 policy columns, Tier 2 claims, promotion packets,
+        tombstones, the node audit log). Additive and idempotent."""
+        with self._lock:
+            cols = {r["name"] for r in self._conn.execute(
+                "PRAGMA table_info(events)").fetchall()}
+            for name, typ in self._EVENTS_RECORDS_ADDED:
+                if name not in cols:
+                    self._conn.execute(
+                        f"ALTER TABLE events ADD COLUMN {name} {typ}")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_events_expires "
+                "ON events(expires_at) WHERE expires_at IS NOT NULL")
+            # Bi-temporal parity with the org tier: valid time is
+            # valid_from/valid_to; record time is when this node believed it.
+            kcols = {r["name"] for r in self._conn.execute(
+                "PRAGMA table_info(kg_predicates)").fetchall()}
+            for name in ("recorded_at", "superseded_at"):
+                if kcols and name not in kcols:
+                    self._conn.execute(
+                        f"ALTER TABLE kg_predicates ADD COLUMN {name} REAL")
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS claims (
+                    id              TEXT PRIMARY KEY,      -- ulid
+                    candidate_id    INTEGER,               -- fact_candidates.id
+                    kind            TEXT NOT NULL,         -- decision|commitment|status|field_update|fact
+                    subject_ref     TEXT NOT NULL,         -- org-portable: entity:<norm>|person:<norm>|self
+                    subject_label   TEXT,                  -- display name on this node
+                    predicate       TEXT NOT NULL,
+                    value_json      TEXT NOT NULL,
+                    schema_version  TEXT NOT NULL,
+                    canonical_hash  TEXT NOT NULL,
+                    confidence      REAL NOT NULL,
+                    evidence_json   TEXT NOT NULL,         -- [{event_id, span, quote_hash, speaker, t, source}]
+                    privacy_class   TEXT NOT NULL,
+                    capture_source  TEXT NOT NULL,         -- meeting|ambient|screen|web|external|document
+                    consent_mode    TEXT,
+                    personal_only   INTEGER NOT NULL DEFAULT 0,
+                    proposed_scope  TEXT,                  -- null = personal
+                    target_hint     TEXT,
+                    status          TEXT NOT NULL,
+                    status_reason   TEXT,
+                    conflict_with   TEXT,                  -- claim id surfaced alongside
+                    record_ref      TEXT,                  -- org record version id once recorded
+                    created_at      REAL NOT NULL,
+                    updated_at      REAL NOT NULL,
+                    decided_at      REAL,
+                    expires_at      REAL
+                )
+                """
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_claims_status ON claims(status)")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_claims_subject "
+                "ON claims(subject_ref, predicate)")
+            self._conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_claims_candidate "
+                "ON claims(candidate_id) WHERE candidate_id IS NOT NULL")
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS promotion_packets (
+                    id              TEXT PRIMARY KEY,      -- ulid
+                    claim_id        TEXT NOT NULL,
+                    payload_json    TEXT NOT NULL,         -- exact record body
+                    payload_hash    TEXT NOT NULL,
+                    scope_id        TEXT NOT NULL,
+                    target_ref      TEXT,
+                    include_quote   INTEGER NOT NULL DEFAULT 0,
+                    state           TEXT NOT NULL,         -- open|edited|approved|rejected|expired|submitted|recorded|failed
+                    decision        TEXT,                  -- approve|edit|reject
+                    approved_via    TEXT,                  -- button|typed
+                    approved_by     TEXT,                  -- org member id
+                    approved_at     REAL,
+                    expires_at      REAL NOT NULL,
+                    submitted_hash  TEXT,
+                    submitted_at    REAL,
+                    submit_attempts INTEGER NOT NULL DEFAULT 0,
+                    last_error      TEXT,
+                    record_ref      TEXT,
+                    created_at      REAL NOT NULL,
+                    FOREIGN KEY (claim_id) REFERENCES claims(id)
+                )
+                """
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ppackets_claim "
+                "ON promotion_packets(claim_id)")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ppackets_state "
+                "ON promotion_packets(state)")
+            # What survives an expired event: enough for a provenance chain to
+            # say "expired" instead of breaking. Never content.
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS event_tombstones (
+                    id             INTEGER PRIMARY KEY,    -- the expired events.id
+                    time           REAL NOT NULL,
+                    modality       TEXT NOT NULL,
+                    source         TEXT,
+                    privacy_class  TEXT,
+                    content_hash   TEXT NOT NULL,
+                    expired_at     REAL NOT NULL,
+                    policy_version TEXT
+                )
+                """
+            )
+            # Node-only audit trail (expiry receipts, consent events, wipe
+            # receipts, promotion decisions). Same shape as the org log;
+            # metadata only.
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS node_audit_log (
+                    seq          INTEGER PRIMARY KEY,
+                    actor        TEXT NOT NULL,
+                    action       TEXT NOT NULL,
+                    object_ref   TEXT NOT NULL,
+                    payload_hash TEXT NOT NULL,
+                    payload_json TEXT,
+                    prev_hash    TEXT NOT NULL,
+                    entry_hash   TEXT NOT NULL,
+                    at           REAL NOT NULL
+                )
+                """
+            )
+            # Deliveries to the Org Record Service that must survive it being
+            # down: approved packets (TTL still applies) and expired-evidence
+            # notices. Drained by records.org_client.drain_outbox.
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS records_outbox (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kind        TEXT NOT NULL,      -- packet_submit | evidence_expired
+                    ref         TEXT NOT NULL,      -- packet id | receipt seq
+                    body_json   TEXT NOT NULL,
+                    attempts    INTEGER NOT NULL DEFAULT 0,
+                    last_error  TEXT,
+                    next_at     REAL NOT NULL,
+                    created_at  REAL NOT NULL,
+                    done_at     REAL
+                )
+                """
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_records_outbox_due "
+                "ON records_outbox(done_at, next_at)")
+            self._conn.commit()
 
     def _migrate(self) -> None:
         """Additive, idempotent migrations for DBs created before a column existed.
@@ -2533,15 +2693,27 @@ class Store:
             "people", "tasks", "entities", "meta",
         )}
         row["audio_path"] = d.get("meta", {}).get("audio_path")
+        # Records layer Tier 1: the policy columns are stamped once, here, so
+        # the expiry job never has to re-derive a row's class or deadline.
+        row["privacy_class"] = event.meta.get("privacy_class")
+        row["consent_mode"] = event.meta.get("consent_mode")
+        try:
+            from app.services.records import retention as _retention
+            row["expires_at"] = _retention.capture_expires_at(event)
+        except Exception as exc:
+            print(f"[storage] expires_at stamp skipped ({exc}).")
+            row["expires_at"] = None
         with self._lock:
             cur = self._conn.execute(
                 """
                 INSERT INTO events
                     (time, modality, raw, summary, source, confidence,
-                     people, tasks, entities, meta, audio_path)
+                     people, tasks, entities, meta, audio_path,
+                     privacy_class, consent_mode, expires_at)
                 VALUES
                     (:time, :modality, :raw, :summary, :source, :confidence,
-                     :people, :tasks, :entities, :meta, :audio_path)
+                     :people, :tasks, :entities, :meta, :audio_path,
+                     :privacy_class, :consent_mode, :expires_at)
                 """,
                 row,
             )

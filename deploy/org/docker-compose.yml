@@ -1,0 +1,44 @@
+# Org Record Service + Postgres 16 (records layer, Phase 1).
+#
+#   cp deploy/org/.env.example deploy/org/.env   # then fill it in
+#   docker compose -f deploy/org/docker-compose.yml --env-file deploy/org/.env up -d
+#   docker compose -f deploy/org/docker-compose.yml exec org \
+#       python -m org_coordinator.records bootstrap --name "Acme" --admin-email lead@acme.co
+#
+# Nodes join with the printed invite code at /records on their Sparrow seat.
+# Bind stays on loopback: put TLS in front (the service carries credentials).
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: sparrow_org
+      POSTGRES_USER: sparrow_org
+      POSTGRES_PASSWORD: "${ORG_DB_PASSWORD:?set ORG_DB_PASSWORD}"
+    volumes:
+      - org-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sparrow_org -d sparrow_org"]
+      interval: 5s
+      retries: 20
+  org:
+    build:
+      context: ../..
+      dockerfile: deploy/org/Dockerfile
+    image: sparrow-org
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8100:8100"
+    environment:
+      QUILL_ORG_DATABASE_URL: "postgresql+psycopg://sparrow_org:${ORG_DB_PASSWORD}@db:5432/sparrow_org"
+      QUILL_ORG_JWT_SECRET: "${ORG_JWT_SECRET:?set ORG_JWT_SECRET (>= 32 chars)}"
+      QUILL_ORG_AUDIT_ANCHOR_DIR: /srv/org/anchors
+      QUILL_ORG_COORD_DATA: /srv/org/coordinator
+    volumes:
+      - org-anchors:/srv/org/anchors
+volumes:
+  org-db:
+  org-anchors:

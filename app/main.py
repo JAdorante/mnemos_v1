@@ -14,6 +14,7 @@ from app.api.routes import router, start_all, stop_all
 from app.api.adoption import router as adoption_router
 from app.api.web_ingest import router as web_ingest_router
 from app.api.fleet_routes import router as fleet_router
+from app.api.records_routes import router as records_router
 from app.config import settings
 from app.events import bus
 from app.services.api_auth import (
@@ -31,6 +32,7 @@ app.include_router(router)
 app.include_router(adoption_router)
 app.include_router(web_ingest_router)
 app.include_router(fleet_router)
+app.include_router(records_router)
 
 
 # --- active-minute marker (WS-A) --------------------------------------------
@@ -248,6 +250,14 @@ async def _startup() -> None:
             memory_economy.attach()
         except Exception as exc:
             print(f"[memory_economy] attach skipped ({exc}).")
+
+        # Records layer: claims -> promotion -> org records, and Tier 1 expiry
+        # (dry-run unless QUILL_CAPTURE_EXPIRY=enforce).
+        try:
+            from app.services.records import scheduler as _records_sched
+            _records_sched.attach(worker)
+        except Exception as exc:
+            print(f"[records] attach skipped ({exc}).")
 
         # Track F: predictor bench (walk-forward replay) + weekly restore drill.
         from app.services import hardening, predictor_bench

@@ -1,0 +1,12 @@
+{
+  "$id": "sparrow/claims/status",
+  "version": "status-v1",
+  "description": "The state of a thing (a deal, a project) at a time. predicate names the dimension, e.g. deal.stage.",
+  "type": "object",
+  "properties": {
+    "state": {"type": "string", "minLength": 1, "maxLength": 200},
+    "text": {"type": "string", "maxLength": 500}
+  },
+  "required": ["state"],
+  "additionalProperties": false
+}
