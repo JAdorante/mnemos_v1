@@ -180,6 +180,12 @@ def classify_source(
         return "calendar"
     if "notif" in src:
         return "notification"
+    # Fleet signals (services/fleet/): an agent's or a peer fleet's view on
+    # an instrument. Claims only — never commitments, never people.
+    if src.startswith("fleet"):
+        return "fleet_agent"
+    if src == "peer.signal":
+        return "peer_signal"
     if src.startswith("peer"):
         return "peer_answer"   # a teammate's Sparrow answered over the peer channel
     if src.startswith("org"):

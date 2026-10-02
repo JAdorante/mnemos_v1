@@ -10,17 +10,26 @@ import os
 import time
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from org_coordinator import cascade as cascade_mod
 from org_coordinator import escalate as escalate_mod
+from org_coordinator import relay as relay_mod
+from org_coordinator import relay_routes
 from org_coordinator import rollup as rollup_mod
 from org_coordinator import store
 from org_coordinator.auth import hash_token, require_node
 
 app = FastAPI(title="Sparrow Org Coordinator", version="0.1.0")
+# Fleet federation relay: topics, barriers, chained log, forwarding.
+app.include_router(relay_routes.router)
+
+
+@app.on_event("startup")
+def _relay_startup() -> None:
+    relay_mod.ensure_retry_loop()
 
 
 class RegisterIn(BaseModel):
@@ -94,10 +103,23 @@ def health() -> dict:
 
 
 @app.post("/register")
-def register(body: RegisterIn) -> dict:
+def register(body: RegisterIn,
+             authorization: str | None = Header(None)) -> dict:
     role = (body.role or "ic").strip().lower()
     if role not in store.ROLES:
         raise HTTPException(400, f"role must be one of {sorted(store.ROLES)}")
+    # Re-registering an existing node rotates its token, so it must present
+    # the current one. Without this, anyone who can reach /register could
+    # take over a node — and with it the node's relay topics and barrier
+    # group.
+    prev = store.get_node(body.node_id.strip())
+    if prev and prev.get("token_sha256"):
+        presented = ""
+        if authorization and authorization.lower().startswith("bearer "):
+            presented = authorization.split(" ", 1)[1].strip()
+        if hash_token(presented) != prev["token_sha256"]:
+            raise HTTPException(409, "node_id already registered; present "
+                                     "its current token to re-register")
     token = store.mint_token()
     node = store.upsert_node({
         "node_id": body.node_id.strip(),

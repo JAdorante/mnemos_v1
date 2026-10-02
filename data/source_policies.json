@@ -1,5 +1,5 @@
 {
-  "version": "1.7",
+  "version": "1.8",
   "classes": {
     "private_conversation": {
       "extract_mentions": true,
@@ -288,6 +288,28 @@
       "knowledge_entities": true
     },
     "agent_fetch": {
+      "extract_mentions": true,
+      "create_person_candidates": false,
+      "relationship_evidence": false,
+      "extract_contacts": false,
+      "create_commitments": false,
+      "create_claims": true,
+      "update_people": false,
+      "identity_evidence": false,
+      "knowledge_entities": true
+    },
+    "fleet_agent": {
+      "extract_mentions": true,
+      "create_person_candidates": false,
+      "relationship_evidence": false,
+      "extract_contacts": false,
+      "create_commitments": false,
+      "create_claims": true,
+      "update_people": false,
+      "identity_evidence": false,
+      "knowledge_entities": true
+    },
+    "peer_signal": {
       "extract_mentions": true,
       "create_person_candidates": false,
       "relationship_evidence": false,

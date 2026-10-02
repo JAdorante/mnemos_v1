@@ -38,7 +38,11 @@ AUDIO_MIN_CONF = float(os.environ.get("QUILL_SLOT_AUDIO_MIN_CONF", "0.6"))
 SEARCH_ASSIST_S = float(os.environ.get("QUILL_SLOT_SEARCH_S", "10"))
 # Sources that can never fill a slot: the ask itself, our own notices, and
 # the slot's own creation statement.
-_NEVER_FILL_PREFIXES = ("peer.ask", "peer.notify", "slot.", "peer.slot")
+# fleet./peer.signal: an agent's or a peer fleet's view must never fill a
+# slot — a pre-approved deliver_on_fill would otherwise forward it to a
+# teammate over the peer channel, bypassing the relay (fleet invariant 2).
+_NEVER_FILL_PREFIXES = ("peer.ask", "peer.notify", "slot.", "peer.slot",
+                        "fleet.", "peer.signal")
 
 _lock = threading.RLock()
 _pending_auto: dict[int, threading.Timer] = {}

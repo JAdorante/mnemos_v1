@@ -150,6 +150,14 @@ details.fallback summary{cursor:pointer;color:var(--mut);font-size:.9rem}
     <div id="asksBox" class="muted">Nothing waiting.</div>
   </div>
 
+  <div class="panel" id="fleetPanel" hidden>
+    <h2>Fleet signals waiting to share</h2>
+    <p class="muted">Your agents' views on topics you set to <b>offer</b>. Sharing sends
+    exactly what is shown, byte for byte, to the firm relay — no rewriting. If the signal
+    changes, it needs a fresh approval.</p>
+    <div id="fleetBox" class="muted">Nothing waiting.</div>
+  </div>
+
   <div class="panel" id="offersPanel" hidden>
     <h2>People from recent meetings</h2>
     <p class="muted">Attendees who aren't paired yet. Pairing still needs a code — this
@@ -162,7 +170,8 @@ details.fallback summary{cursor:pointer;color:var(--mut);font-size:.9rem}
     <p class="muted">What each teammate's assistant may ask without interrupting you.
     Apply a <b>pack</b> (teammate / manager / company / vendor), then tweak one topic if needed.
     <b>Ask me</b> = you approve each one (the default). <b>Answer</b> = share automatically.
-    <b>Decline</b> = refuse automatically. Personal topics can never be shared automatically.
+    <b>Decline</b> = refuse automatically. Personal topics and positions &amp; orders can
+    never be shared automatically.
     Chat: <code>ask Name: …</code> or <code>ask #team: …</code>.</p>
     <div id="peersBox" class="muted">No teammates paired yet.</div>
   </div>
@@ -194,12 +203,13 @@ const $=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const post=(u,b)=>fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})}).then(r=>r.json());
 const LABEL={auto:'Answer',offer:'Ask me',deny:'Decline'};
-const TOPIC={availability:'Schedule & availability',work:'Work & projects',contact:'Contact details',personal:'Personal',other:'Everything else'};
+const TOPIC={availability:'Schedule & availability',work:'Work & projects',contact:'Contact details',personal:'Personal',trading:'Positions & orders',other:'Everything else'};
 let CLASSES=[],ACTIONS=[];
 let _peerSig=null;
 
 async function refresh(){
   if(document.hidden) return;
+  refreshFleet();
   const errEl=$('peerErr');
   try{
   if(!PEOPLE.length)await loadPeople();
@@ -220,6 +230,37 @@ async function refresh(){
   renderTeams(s.teams||[],s.peers||[]);
   renderLoops(s.loops||[]);renderOffers(s.pairing_offers||[]);
   }catch(e){ if(errEl) errEl.hidden=false; }
+}
+let _fleetSig=null;
+async function refreshFleet(){
+  try{
+    const st=await fetch('/fleet/status');
+    if(!st.ok){$('fleetPanel').hidden=true;return}
+    const s=await st.json();
+    if(!s.enabled){$('fleetPanel').hidden=true;return}
+    const r=await fetch('/fleet/offers?status=pending').then(x=>x.json());
+    const offers=r.offers||[];
+    $('fleetPanel').hidden=false;
+    const sig=JSON.stringify(offers.map(o=>[o.offer_id,o.sha256]));
+    if(sig===_fleetSig)return;
+    _fleetSig=sig;
+    if(!offers.length){$('fleetBox').textContent='Nothing waiting.';return}
+    $('fleetBox').innerHTML=offers.map(o=>{const g=o.signal||{};
+      return `<div class="ask">
+      <div class="q"><b>${esc(g.producer)}</b> on <b>${esc(g.instrument)}</b>:
+        ${esc(g.direction)} · ${esc(g.horizon)} · confidence ${Number(g.confidence||0).toFixed(2)}
+        <span class="tag">${esc(g.topic)}</span><br>“${esc(g.thesis)}”
+        <span class="muted">#${esc(String(o.sha256||'').slice(0,12))}</span></div>
+      <button class="btn btn-sm" onclick="fleetDecide('${esc(o.offer_id)}',true,'${esc(o.sha256)}')">Share</button>
+      <button class="btn btn-ghost btn-sm" onclick="fleetDecide('${esc(o.offer_id)}',false,'')">Keep local</button>
+    </div>`}).join('');
+  }catch(e){$('fleetPanel').hidden=true}
+}
+async function fleetDecide(id,yes,sha){
+  const r=await fetch('/fleet/offers/'+encodeURIComponent(id)+'/decide',{method:'POST',
+    headers:{'Content-Type':'application/json'},body:JSON.stringify({approve:yes,sha256:sha})});
+  if(!r.ok){const e=await r.json().catch(()=>({}));alert(e.detail||'Could not decide');}
+  _fleetSig=null;refreshFleet();
 }
 $('peerRetry')?.addEventListener('click',()=>refresh());
 let PACKS=[],TEAMS=[],PEERS=[],DEFAULT_PACK='teammate';

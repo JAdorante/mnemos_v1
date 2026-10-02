@@ -1237,6 +1237,83 @@ class PeerChannelConfig:
 
 
 @dataclass(frozen=True)
+class FleetConfig:
+    """Fleet federation (see services/fleet/ and docs/fleet-federation.md).
+
+    The owner's agent fleet publishes structured signals into this Sparrow,
+    and Sparrows exchange them only through the firm relay
+    (org_coordinator/). OFF unless QUILL_FLEET=1. Every value is read at call
+    time so a flag flip or a test's env swap takes effect without a reload."""
+
+    @property
+    def enabled(self) -> bool:
+        return _get("QUILL_FLEET", "0") in ("1", "true", "True")
+
+    # A signal leaving this Sparrow gains one hop. Two lets a re-share that
+    # cites its parent (derived_from) travel once more, and no further.
+    @property
+    def max_hops(self) -> int:
+        return int(_get("QUILL_FLEET_MAX_HOPS", "2"))
+
+    @property
+    def max_signals_per_min(self) -> int:
+        return int(_get("QUILL_FLEET_RATE", "30"))
+
+    @property
+    def default_ttl_s(self) -> float:
+        return float(_get("QUILL_FLEET_TTL_S", "3600"))
+
+    # Signals kept in memory for catch-up; older ones come from the store.
+    @property
+    def ring_size(self) -> int:
+        return int(_get("QUILL_FLEET_RING", "1000"))
+
+    @property
+    def relay_url(self) -> str:
+        return _get("QUILL_FLEET_RELAY_URL", "").rstrip("/")
+
+    @property
+    def http_timeout_s(self) -> float:
+        return float(_get("QUILL_FLEET_TIMEOUT_S", "10"))
+
+    @property
+    def agents_path(self) -> str:
+        return _get("QUILL_FLEET_AGENTS",
+                    f"{_get('QUILL_DATA_DIR', 'data')}/fleet_agents.json")
+
+    @property
+    def routes_path(self) -> str:
+        return _get("QUILL_FLEET_ROUTES",
+                    f"{_get('QUILL_DATA_DIR', 'data')}/fleet_routes.json")
+
+    # Compliance owns this file. Missing or malformed means nothing is shared.
+    @property
+    def restricted_list_path(self) -> str:
+        return _get("QUILL_FLEET_RESTRICTED",
+                    f"{_get('QUILL_DATA_DIR', 'data')}/restricted_list.json")
+
+    @property
+    def state_path(self) -> str:
+        return _get("QUILL_FLEET_STATE",
+                    f"{_get('QUILL_DATA_DIR', 'data')}/fleet_state.json")
+
+    @property
+    def offers_path(self) -> str:
+        return _get("QUILL_FLEET_OFFERS",
+                    f"{_get('QUILL_DATA_DIR', 'data')}/fleet_offers.json")
+
+    @property
+    def outbox_path(self) -> str:
+        return _get("QUILL_FLEET_OUTBOX",
+                    f"{_get('QUILL_DATA_DIR', 'data')}/fleet_outbox.json")
+
+    @property
+    def origins_path(self) -> str:
+        return _get("QUILL_FLEET_ORIGINS",
+                    f"{_get('QUILL_DATA_DIR', 'data')}/fleet_origins.json")
+
+
+@dataclass(frozen=True)
 class OrgNodeConfig:
     """Hybrid Org AI Network node (see org_coordinator/ + services/org_*.py).
 
@@ -1739,6 +1816,7 @@ class Settings:
     documents: DocumentsConfig = DocumentsConfig()
     phone: PhoneChannelConfig = PhoneChannelConfig()
     peer: PeerChannelConfig = PeerChannelConfig()
+    fleet: FleetConfig = FleetConfig()
     org: OrgNodeConfig = OrgNodeConfig()
     icloud: IcloudConfig = IcloudConfig()
     voice: VoiceConfig = VoiceConfig()

@@ -1406,8 +1406,26 @@ def handle_slot_resolved(peer: dict, payload: dict) -> dict:
 #   work         — projects, tasks, documents, status, tools
 #   contact      — phone numbers, emails, addresses of people
 #   personal     — health, family, money, feelings, anything private
+#   trading      — positions, orders, fills, P&L, holdings (fleet federation)
 #   other        — everything else / unclear
-CLASSES = ("availability", "work", "contact", "personal", "other")
+CLASSES = ("availability", "work", "contact", "personal", "trading", "other")
+# Classes that can never be auto-answered, whatever a pack or a hand-edited
+# registry says. Checked at write (_sanitize_policy) AND at enforcement
+# (_decide_action).
+NEVER_AUTO = ("personal", "trading")
+# Holdings and execution are never a judgment call for the classifier: a
+# question that names them is `trading`, deterministically.
+# Phrased narrowly on purpose: "open positions in engineering" is hiring and
+# "the order of the agenda" is not execution.
+_TRADING_RE = re.compile(
+    r"(?:p&l|\bpnl\b|\bp and l\b|profit and loss|\bblotter\b|"
+    r"\bnet (?:long|short)\b|"
+    r"\b(?:trading|stock|equity|options?|futures?|fx|bond|crypto|portfolio) "
+    r"(?:positions?|orders?|book|exposure|holdings?)\b|"
+    r"\b(?:buy|sell|limit|stop|market) orders?\b|"
+    r"\bposition (?:in|on|size)\b|\bholdings? (?:in|of)\b|"
+    r"\bhow (?:much|many) .{0,30}(?:shares|contracts|lots)\b|"
+    r"\bare (?:you|they|we) (?:long|short)\b)", re.I)
 ACTIONS = ("auto", "offer", "deny")
 
 _CLASSIFY_SCHEMA = {
@@ -1416,7 +1434,9 @@ _CLASSIFY_SCHEMA = {
         "topic": {"type": "string", "enum": list(CLASSES),
                   "description": "What the question is about. Use `personal` "
                                  "for anything private (health, family, money, "
-                                 "salary, feelings); `other` when unclear."},
+                                 "salary, feelings); `trading` for positions, "
+                                 "orders, fills, P&L or holdings; `other` when "
+                                 "unclear."},
     },
     "required": ["topic"],
 }
@@ -1439,8 +1459,9 @@ def _sanitize_policy(policy: dict) -> dict:
         if action not in ACTIONS:
             raise ValueError(f"unknown action {action!r} (one of {', '.join(ACTIONS)})")
         out[cls] = action
-    if out["personal"] == "auto":
-        raise ValueError("the `personal` class can never be auto-answered")
+    for cls in NEVER_AUTO:
+        if out[cls] == "auto":
+            raise ValueError(f"the `{cls}` class can never be auto-answered")
     return out
 
 
@@ -1475,6 +1496,8 @@ def set_policy(peer_id: str, policy: dict, pack: str | None = None) -> dict:
 def classify_question(question: str) -> str | None:
     """The LOCAL model buckets the question (schema-enforced). None on any
     failure or hesitation — the caller treats None as 'ask the human'."""
+    if _TRADING_RE.search(question or ""):
+        return "trading"
     try:
         from app.services.model_router import router
         res = router.complete_json(
@@ -1484,7 +1507,9 @@ def classify_question(question: str) -> str | None:
                     "whereabouts, free/busy, deadlines, dates), work (projects, "
                     "tasks, documents, status, tools), contact (phone numbers, "
                     "emails, addresses), personal (health, family, money, "
-                    "salary, feelings — anything private), other (unclear). "
+                    "salary, feelings — anything private), trading "
+                    "(positions, orders, fills, P&L, holdings), other "
+                    "(unclear). "
                     "When in doubt between personal and anything else, answer "
                     "personal."),
             messages=[{"role": "user", "content": question}],
@@ -1507,7 +1532,7 @@ def _decide_action(peer: dict, question: str) -> tuple[str, str | None]:
     if topic is None:
         return "offer", None
     action = policy.get(topic, "offer")
-    if action == "auto" and topic == "personal":
+    if action == "auto" and topic in NEVER_AUTO:
         action = "offer"
     return action, topic
 
@@ -1737,6 +1762,11 @@ def handle_ask(peer: dict, payload: dict) -> dict:
     # on the sender — surfaces for the human (offer) unless the sim flag.
     if kind not in _PEER_KINDS:
         return {"ok": False, "error": f"unknown kind {kind!r}"}
+    if kind in _RELAY_ONLY_KINDS:
+        # Sparrows exchange signals only through the relay, which is where
+        # barriers, the restricted list, and the compliance log live.
+        return {"ok": False, "error": "signals arrive only through the firm "
+                                      "relay, not a peer pairing"}
     # Loop protection (spec F4.6): an ask carries a hop count and an origin
     # id; hop is capped at 1 (no transitive asks in v1) and a peer never
     # re-asks the origin.
@@ -2284,6 +2314,9 @@ def ask(peer_id: str, question: str, kind: str = "question",
         return {"ok": False, "error": "peer channel disabled"}
     if kind not in _PEER_KINDS:
         return {"ok": False, "error": f"unknown kind {kind!r}"}
+    if kind in _RELAY_ONLY_KINDS:
+        return {"ok": False, "error": "signals leave only through the fleet "
+                                      "router and the firm relay"}
     question = (question or "").strip()[: settings.peer.max_text_chars]
     if not question:
         return {"ok": False, "error": "empty question"}
@@ -2945,8 +2978,12 @@ _EMAIL_ENVELOPE_RE = re.compile(
 # slot_request: after an all-null team fan-out, the asker asks each member
 # to hold a slot (spec F4.5). peer_update / slot_resolved ride their own
 # endpoints (/peer/update, /peer/slot-resolved), not /peer/ask.
+# signal: fleet federation. Accepted on /peer/ask ONLY from the firm relay's
+# inbound credential (routes.py hands it to fleet/inbound.py before pairing
+# auth runs). A paired peer can neither send nor receive one directly.
 _PEER_KINDS = ("question", "handoff", "notify", "slot_request",
-               "org_digest", "org_priority", "org_escalate")
+               "org_digest", "org_priority", "org_escalate", "signal")
+_RELAY_ONLY_KINDS = ("signal",)
 _ORG_KINDS = ("org_digest", "org_priority", "org_escalate")
 
 

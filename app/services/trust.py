@@ -34,7 +34,7 @@ SENSITIVE = ("medical", "health", "financial", "bank", "ssn", "password")
 
 # Sources that may inform a draft but must never count as approval.
 NON_AUTHORIZING_PREFIXES = (
-    "omi:", "external:", "phone.", "exhaust.", "peer.", "org.",
+    "omi:", "external:", "phone.", "exhaust.", "peer.", "org.", "fleet.",
 )
 
 

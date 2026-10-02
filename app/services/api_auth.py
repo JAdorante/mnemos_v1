@@ -69,6 +69,9 @@ _PREFIX_EXEMPT = (
     "/peer/answer",
     "/peer/ping",
     "/capture/external",
+    "/fleet/publish",  # fleet agents present per-agent Bearer tokens
+    "/fleet/stream",
+    "/fleet/signals",
 )
 
 # GET-only prefixes: POST siblings (e.g. /phone/outbox/queue) need the LAN token.

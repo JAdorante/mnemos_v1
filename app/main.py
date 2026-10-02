@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from app.api.routes import router, start_all, stop_all
 from app.api.adoption import router as adoption_router
 from app.api.web_ingest import router as web_ingest_router
+from app.api.fleet_routes import router as fleet_router
 from app.config import settings
 from app.events import bus
 from app.services.api_auth import (
@@ -29,6 +30,7 @@ app.add_middleware(CsrfProtectMiddleware)
 app.include_router(router)
 app.include_router(adoption_router)
 app.include_router(web_ingest_router)
+app.include_router(fleet_router)
 
 
 # --- active-minute marker (WS-A) --------------------------------------------

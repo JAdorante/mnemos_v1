@@ -451,6 +451,11 @@ def detect(store, event_id: int, event: Event | dict, *,
            now: float | None = None) -> list[dict]:
     now = float(now if now is not None else time.time())
     results = []
+    # A fleet or peer signal is a view on an instrument, not evidence that
+    # the user did something; it never moves a task's state.
+    src = str(_ev_field(event, "source") or "")
+    if src.startswith("fleet.") or src == "peer.signal":
+        return results
     for task, why in candidate_tasks(store, event):
         verdict, evidence, detail = classify(task, event, store=store, now=now)
         res = {"fact_id": int(task["fact_id"]), "verdict": verdict,

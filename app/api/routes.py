@@ -5976,6 +5976,13 @@ def peer_ask_inbound(body: dict, authorization: str | None = Header(None)) -> di
     grounded, redacted answer synchronously (dev/sim)."""
     from app.services import peer_channel
 
+    # Fleet signals arrive only from the firm relay, on the relay's own
+    # inbound credential (services/fleet/inbound.py) — never a pairing token,
+    # never queued as an ask, never answered.
+    if isinstance(body, dict) and \
+            str(body.get("kind") or "").strip().lower() == "signal":
+        from app.api.fleet_routes import peer_signal
+        return peer_signal(authorization, body)
     peer = peer_channel.authenticate(authorization)
     if peer is None:
         raise HTTPException(status_code=401, detail="invalid or missing peer token")

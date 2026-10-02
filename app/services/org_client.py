@@ -117,7 +117,10 @@ def register(*, base_url: str = "", peer_id: str = "",
         "peer_id": peer_id or manager_peer_id(),
     }
     url = (coordinator_url or _cfg().coordinator_url).rstrip("/")
-    res = request_json("POST", "/register", body, auth=False,
+    # Re-registering the same node must present its current token (the
+    # coordinator refuses a takeover otherwise).
+    res = request_json("POST", "/register", body,
+                       auth=bool(node_token()) and nid == node_id(),
                        coordinator_url=url)
     if res.get("ok") and res.get("token"):
         st = {
