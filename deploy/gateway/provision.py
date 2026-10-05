@@ -67,6 +67,9 @@ def _seat_env(seat: str, token: str) -> dict[str, str]:
         "QUILL_PEER_DEFAULT_PACK": os.environ.get("SEAT_PEER_PACK", "pilot"),
         # Pilot posture: prepare freely, stop before anything irreversible.
         "AGENT_DRY_RUN": os.environ.get("SEAT_AGENT_DRY_RUN", "draft"),
+        # Records layer: claims -> org record at /records (org service on
+        # sparrow-net as sparrow-org:8100). Expiry stays dry_run by default.
+        "QUILL_RECORDS": os.environ.get("SEAT_RECORDS", "1"),
     }
     for optional in ("GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_SECRET",
                      "MS_OAUTH_CLIENT_ID", "MS_OAUTH_CLIENT_SECRET",

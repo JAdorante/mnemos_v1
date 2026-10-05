@@ -31,7 +31,7 @@ services:
       db:
         condition: service_healthy
     ports:
-      - "127.0.0.1:8100:8100"
+      - "127.0.0.1:${ORG_HOST_PORT:-8100}:8100"
     environment:
       QUILL_ORG_DATABASE_URL: "postgresql+psycopg://sparrow_org:${ORG_DB_PASSWORD}@db:5432/sparrow_org"
       QUILL_ORG_JWT_SECRET: "${ORG_JWT_SECRET:?set ORG_JWT_SECRET (>= 32 chars)}"

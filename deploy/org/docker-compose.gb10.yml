@@ -1,0 +1,25 @@
+# GB10 pilot overlay: put the Org Record Service where the seats can reach it.
+# Every gb10 seat is on gb10_default; gateway-provisioned seats are only on
+# sparrow-net. Seats call http://sparrow-org:8100. The database stays on this
+# project's private network.
+#
+#   docker compose -p sparrow-org -f docker-compose.yml -f docker-compose.gb10.yml \
+#       --env-file .env up -d --build
+services:
+  org:
+    networks:
+      default:
+      gb10_default:
+        aliases: [sparrow-org]
+      sparrow-net:
+        aliases: [sparrow-org]
+  worker:
+    networks:
+      default:
+      gb10_default:
+      sparrow-net:
+networks:
+  gb10_default:
+    external: true
+  sparrow-net:
+    external: true

@@ -77,6 +77,11 @@ x-env: &sparrow-env
   QUILL_ASR_LANGUAGE: en
   QUILL_ASR_CONDITION_PREVIOUS: "0"
   QUILL_ASR_BIAS_RECENT: "0"
+  # Records layer (2026-10-05): claims from capture, human-approved into the
+  # org record at /records. Org Record Service: http://sparrow-org:8100
+  # (deploy/org, gb10 overlay). Capture expiry stays at its dry_run default:
+  # receipts only, nothing deleted, until someone decides to enforce.
+  QUILL_RECORDS: "1"
 
 services:
   # Host Ollama binds 127.0.0.1 only and changing that needs root; this
