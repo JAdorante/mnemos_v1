@@ -184,6 +184,8 @@ services:
     volumes:
       - sparrow-user2-data:/srv/sparrow/data
     environment:
+      QUILL_FLEET: "1"
+      QUILL_FLEET_RELAY_URL: http://org-relay:8100
       <<: *sparrow-env
       QUILL_API_TOKEN: "${SPARROW_USER2_TOKEN:?set a per-user token in .env}"
       QUILL_LORA_TAG_SUFFIX: user2
@@ -230,6 +232,8 @@ services:
     volumes:
       - sparrow-user4-data:/srv/sparrow/data
     environment:
+      QUILL_FLEET: "1"
+      QUILL_FLEET_RELAY_URL: http://org-relay:8100
       <<: *sparrow-env
       QUILL_API_TOKEN: "${SPARROW_USER4_TOKEN:?set a per-user token in .env}"
       QUILL_LORA_TAG_SUFFIX: user4
@@ -243,6 +247,8 @@ services:
     volumes:
       - sparrow-user5-data:/srv/sparrow/data
     environment:
+      QUILL_FLEET: "1"
+      QUILL_FLEET_RELAY_URL: http://org-relay:8100
       <<: *sparrow-env
       QUILL_API_TOKEN: "${SPARROW_USER5_TOKEN:?set a per-user token in .env}"
       QUILL_LORA_TAG_SUFFIX: user5
@@ -256,6 +262,8 @@ services:
     volumes:
       - sparrow-user6-data:/srv/sparrow/data
     environment:
+      QUILL_FLEET: "1"
+      QUILL_FLEET_RELAY_URL: http://org-relay:8100
       <<: *sparrow-env
       QUILL_API_TOKEN: "${SPARROW_USER6_TOKEN:?set a per-user token in .env}"
       QUILL_LORA_TAG_SUFFIX: user6
