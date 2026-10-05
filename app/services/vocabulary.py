@@ -229,9 +229,17 @@ class SessionContext:
     """Rolling buffer of the last few accepted transcripts (per capture session) —
     the conversational continuity half of session-aware ASR."""
 
-    def __init__(self, maxlen: int = 5, label: str = "") -> None:
+    # Context older than this is another conversation: priming the next clip
+    # with it only invites Whisper to continue the old text. Observed on the
+    # pilot: a loop from one evening was still the prompt three days later.
+    DEFAULT_MAX_AGE_S = 300.0
+
+    def __init__(self, maxlen: int = 5, label: str = "",
+                 max_age_s: float = DEFAULT_MAX_AGE_S) -> None:
         self._recent: collections.deque = collections.deque(maxlen=max(1, maxlen))
         self.label = label
+        self.max_age_s = max_age_s
+        self._last_add = 0.0
         self._lock = threading.Lock()
 
     def add(self, text: str) -> None:
@@ -239,9 +247,13 @@ class SessionContext:
         if t:
             with self._lock:
                 self._recent.append(t)
+                self._last_add = time.time()
 
     def recent(self, n: int | None = None) -> list[str]:
         with self._lock:
+            if (self.max_age_s and self._recent
+                    and time.time() - self._last_add > self.max_age_s):
+                self._recent.clear()
             items = list(self._recent)
         return items[-n:] if n else items
 

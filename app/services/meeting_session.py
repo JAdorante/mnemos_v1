@@ -547,7 +547,16 @@ def spawn(
         created_at=now,
     )
     _set_runtime(row)
+    _reset_asr_context()
     return _row_to_runtime(row)
+
+
+def _reset_asr_context() -> None:
+    try:
+        from app.services import audio as _audio
+        _audio.reset_shared_context()
+    except Exception:
+        pass
 
 
 def _patch_row(store: Store, session_id: int, **fields: Any) -> dict[str, Any]:
@@ -687,6 +696,7 @@ def end(*, reason: str = "manual", store: Store | None = None) -> dict[str, Any]
         _runtime = None
     if not st:
         return {"ok": True, "active": False, "reason": reason}
+    _reset_asr_context()
     sid = st.get("id")
     now = time.time()
     if sid is not None:

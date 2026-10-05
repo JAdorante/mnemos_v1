@@ -65,6 +65,18 @@ x-env: &sparrow-env
   # draft-building all still run. Raise to "approval" (or unset) to restore
   # human-gated commits; "navigate" is stricter still (no typing or clicking).
   AGENT_DRY_RUN: draft
+  # Meeting transcription. On the 2026-09 pilot half of every meeting
+  # transcript was a repetition loop ("nd nd nd ..."), and a monologue over
+  # ~32 s killed capture. These close the configuration half of both:
+  #   - force-cut turns at 20 s so Whisper never decodes multi-window clips
+  #     (and the browser never ships a frame the server refuses);
+  #   - pin English, so a 1 s clip is not re-detected as Welsh;
+  #   - decode each clip on its own: no carry-over of the previous window,
+  #     and no recent transcript text in the prompt (names still bias it).
+  QUILL_ASR_MAX_UTTERANCE_S: "20"
+  QUILL_ASR_LANGUAGE: en
+  QUILL_ASR_CONDITION_PREVIOUS: "0"
+  QUILL_ASR_BIAS_RECENT: "0"
 
 services:
   # Host Ollama binds 127.0.0.1 only and changing that needs root; this

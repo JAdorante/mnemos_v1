@@ -124,7 +124,7 @@ class WhisperEngine:
                 vad_filter=False,          # the caller already ran VAD
                 beam_size=max(1, cfg.beam_size),
                 best_of=max(1, cfg.best_of),
-                temperature=cfg.temperature,
+                temperature=_temperatures(cfg.temperature),
                 condition_on_previous_text=cfg.condition_on_previous_text,
                 initial_prompt=context or None,
                 word_timestamps=self.word_timestamps,
@@ -151,6 +151,17 @@ class WhisperEngine:
             engine_id=self.engine_id,
             segments=segs,
         )
+
+
+def _temperatures(t: float) -> float | tuple[float, ...]:
+    """A greedy decode (t=0) gets faster-whisper's fallback ladder: a segment
+    that loops (compression ratio > 2.4) or reads as garbage is re-decoded
+    warmer instead of accepted. A single 0.0 disables that retry entirely,
+    which is how repetition loops reached the pilot's meeting transcripts."""
+    return FALLBACK_TEMPERATURES if t <= 0 else t
+
+
+FALLBACK_TEMPERATURES = (0.0, 0.2, 0.4, 0.6)
 
 
 # ---------------------------------------------------------------------------

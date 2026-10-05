@@ -337,6 +337,20 @@ class WsIngestTests(unittest.TestCase):
         self.assertEqual(d["sample_rate"], audio_mod.AudioCfg.sample_rate)
         self.assertEqual(d["frame_samples"], audio_mod.AudioCfg.frame_samples)
         self.assertEqual(d["vad_threshold"], audio_mod.AudioCfg.vad_threshold)
+        from app.api import web_ingest
+        # Always a positive cut that fits one frame, even when the server's
+        # own force-cut is 0 (never): an uncut monologue killed capture.
+        self.assertGreater(d["max_utterance_s"], 0)
+        self.assertLessEqual(d["max_utterance_s"] * d["sample_rate"] * 2,
+                             web_ingest.MAX_FRAME_BYTES)
+
+    def test_client_max_utterance_bounded(self):
+        from app.api import web_ingest
+        self.assertEqual(web_ingest.client_max_utterance_s(0),
+                         web_ingest.CLIENT_MAX_UTTERANCE_S)
+        self.assertEqual(web_ingest.client_max_utterance_s(20), 20)
+        self.assertEqual(web_ingest.client_max_utterance_s(90),
+                         web_ingest.CLIENT_MAX_UTTERANCE_S)
 
     def test_feed_utterance_defaults_timestamps(self):
         p = audio_mod.AudioPipeline(sink=lambda ev: None)

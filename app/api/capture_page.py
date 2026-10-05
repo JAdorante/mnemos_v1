@@ -421,6 +421,10 @@ class SourceChannel {
       } else if (m.type === 'throttle') {
         this.batchN = BATCH_THROTTLED;
         this.throttleUntil = Date.now() + 10000;
+      } else if (m.type === 'error' && m.error === 'frame_too_large') {
+        // One oversized utterance is lost, not the whole meeting: let the
+        // close below reconnect instead of tearing capture down.
+        console.warn('capture frame refused; reconnecting', m);
       } else if (m.type === 'error') {
         this.wanted = false;
         this.teardown();

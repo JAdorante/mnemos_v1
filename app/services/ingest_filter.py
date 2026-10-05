@@ -30,6 +30,8 @@ demoted, not vanish. Only confident hallucinations are truly dropped.
 from __future__ import annotations
 
 import re
+import zlib
+from collections import Counter
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -53,6 +55,20 @@ _MIN_LOGPROB = -1.5
 
 _PUNCT = re.compile(r"[^\w\s]")
 _WS = re.compile(r"\s+")
+
+# Degenerate-decode checks. A Whisper repetition loop ("nd nd nd ...") comes
+# back with HIGH token confidence, so the logprob floor never sees it; these
+# look at the text's shape instead. On the 2026-09 pilot they caught the loops
+# that made up half of every meeting transcript, and no clean line.
+# Whisper's own retry trigger: gzip ratio of the text. Speech sits ~1.2-1.8.
+MAX_COMPRESSION_RATIO = 2.4
+# Fast talkers reach ~20 chars/s; a loop emits hundreds from a 1 s clip.
+MAX_CHARS_PER_S = 40.0
+_RATE_MIN_CHARS = 30
+# One word making up most of a longer line is a loop, not a sentence.
+MAX_TOKEN_SHARE = 0.5
+_SHARE_MIN_WORDS = 6
+_UNDERSCORES = re.compile(r"_{3,}")
 
 # Actions that still yield a persisted transcript (vs. dropped / audio-only).
 _KEEP_ACTIONS = ("keep", "keep_low_confidence", "needs_user_review")
@@ -133,11 +149,42 @@ def _confidence(logp: float | None, nsp: float | None) -> float | None:
     return round(sum(parts) / len(parts), 2) if parts else None
 
 
-def assess(text: str, segments: Iterable, cfg=None) -> IngestVerdict:
+def compression_ratio(text: str) -> float:
+    """Whisper's repetition measure: raw bytes over zlib-compressed bytes."""
+    b = (text or "").encode("utf-8")
+    return len(b) / len(zlib.compress(b)) if b else 0.0
+
+
+def degenerate_reason(text: str, segments: Iterable = (),
+                      duration_s: float | None = None) -> str | None:
+    """Why this transcript is a decode failure rather than speech, else None."""
+    t = (text or "").strip()
+    if t and len(normalize(_UNDERSCORES.sub(" ", t))) < 2:
+        return "underscores"
+    seg_cr = [getattr(s, "compression_ratio", None) for s in segments or ()]
+    seg_cr = [c for c in seg_cr if isinstance(c, (int, float))]
+    cr = max([compression_ratio(t)] + seg_cr)
+    if cr > MAX_COMPRESSION_RATIO:
+        return f"compression_ratio={cr:.1f}"
+    words = normalize(t).split()
+    if len(words) >= _SHARE_MIN_WORDS:
+        top, n = Counter(words).most_common(1)[0]
+        if n / len(words) > MAX_TOKEN_SHARE:
+            return f"repeated_token:{top!r}"
+    if duration_s and duration_s > 0 and len(t) >= _RATE_MIN_CHARS:
+        rate = len(t) / duration_s
+        if rate > MAX_CHARS_PER_S:
+            return f"chars_per_s={rate:.0f}"
+    return None
+
+
+def assess(text: str, segments: Iterable, cfg=None, *,
+           duration_s: float | None = None) -> IngestVerdict:
     """Score one transcribed utterance into an IngestVerdict. `segments` are
     faster-whisper Segment objects (each with .avg_logprob and .no_speech_prob);
     an empty/degenerate list just means those signals are unavailable and we fall
-    back to the text-only checks."""
+    back to the text-only checks. `duration_s` is the clip length, for the
+    speaking-rate check."""
     cfg = cfg or settings.ingest
     seg_list = list(segments or [])
     logp = _mean([getattr(s, "avg_logprob", None) for s in seg_list])
@@ -162,6 +209,12 @@ def assess(text: str, segments: Iterable, cfg=None) -> IngestVerdict:
             or (nsp is None and logp is None))
     if norm in HALLUCINATION_PHRASES and weak:
         return v("drop_hallucination", [f"hallucination_phrase:{norm!r}"])
+
+    # 2b. A repetition loop or other degenerate decode. Keep the clip — real
+    #     speech may be under it — but never the text.
+    bad = degenerate_reason(text, seg_list, duration_s)
+    if bad:
+        return v("store_audio_only", [f"degenerate:{bad}"])
 
     # 3. Whisper itself thinks this was probably silence — no reliable text.
     if nsp is not None and nsp >= cfg.max_no_speech_prob:

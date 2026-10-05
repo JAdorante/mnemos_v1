@@ -64,8 +64,11 @@ async function init(msg) {
   cfg = msg.cfg;
   thr = cfg.vad_threshold;
   minSilenceSamples = SR * cfg.min_silence_ms / 1000;
-  maxUtterSamples = cfg.max_utterance_s > 0
-    ? Math.floor(cfg.max_utterance_s * SR) : 0;
+  // Always cut: an uncut utterance over ~32 s exceeds the server's 1 MB
+  // frame limit and the socket is refused. /capture/config already bounds
+  // this; the fallback covers an older server that sends 0.
+  maxUtterSamples = Math.floor(
+    (cfg.max_utterance_s > 0 ? cfg.max_utterance_s : 25) * SR);
   let loadedFrom = null;
   for (const base of msg.ortBases) {
     try {

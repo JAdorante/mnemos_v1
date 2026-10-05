@@ -57,6 +57,10 @@ DRAIN_TIMEOUT_S = 20.0
 THROTTLE_QUEUE_DEPTH = 24   # pending utterances before we ask clients to slow
 THROTTLE_INTERVAL_S = 5.0
 MAX_FRAME_BYTES = 1 << 20   # 1 MB ~ 32 s of audio; larger frames are abuse
+# Longest utterance a browser may hold before force-cutting it. With no cap
+# (max_utterance_s=0) one long monologue outgrew MAX_FRAME_BYTES, the socket
+# was refused, and capture died mid-meeting — three times on the pilot.
+CLIENT_MAX_UTTERANCE_S = 25.0
 
 
 class _RemoteFeed:
@@ -372,8 +376,16 @@ def capture_config() -> dict:
         "vad_threshold": a.vad_threshold,
         "min_silence_ms": a.min_silence_ms,
         "speech_pad_ms": a.speech_pad_ms,
-        "max_utterance_s": a.max_utterance_s,
+        "max_utterance_s": client_max_utterance_s(a.max_utterance_s),
     }
+
+
+def client_max_utterance_s(configured: float) -> float:
+    """The server's force-cut, bounded so a cut utterance always fits in one
+    frame. 0 (never cut) is fine server-side, never in a browser."""
+    if configured and configured > 0:
+        return min(float(configured), CLIENT_MAX_UTTERANCE_S)
+    return CLIENT_MAX_UTTERANCE_S
 
 
 @router.post("/speakers/enroll/web")

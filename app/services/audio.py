@@ -120,6 +120,14 @@ def _get_shared_session():
         return _shared_session
 
 
+def reset_shared_context() -> None:
+    """Forget the rolling ASR context. Called when a meeting starts or ends so
+    one conversation's words (or one bad decode) never prime the next."""
+    with _shared_session_lock:
+        if _shared_session is not None:
+            _shared_session.clear()
+
+
 def _ms_asr_terms() -> list[str]:
     try:
         from app.services import meeting_session as _ms
@@ -421,7 +429,8 @@ class AudioPipeline:
                 # engine on a different confidence scale is judged on numbers
                 # fitted for it, so a swap cannot quietly move the line between
                 # "kept as memory" and "discarded".
-                verdict = assess(text, segs, _ingest_cfg(res.engine_id))
+                verdict = assess(text, segs, _ingest_cfg(res.engine_id),
+                                 duration_s=len(audio) / self.cfg.sample_rate)
                 tele.update(avg_logprob=verdict.avg_logprob,
                             no_speech_prob=verdict.no_speech_prob,
                             filter_verdict=verdict.action,
@@ -605,7 +614,11 @@ class AudioPipeline:
             if t_speech_end:
                 tele["total_latency_ms"] = round((time.time() - t_speech_end) * 1000, 1)
             self._record_tele(tele, "kept")
-            self._session.add(text)   # feed accepted text into session context (#3)
+            # Feed only clean text into the session context (#3). A shaky line
+            # in the prompt primes the next decode to repeat it — that is how
+            # one "nd nd nd" became a whole meeting of them on the pilot.
+            if quality is None or quality.get("action") == "keep":
+                self._session.add(text)
 
     def _emit_audio_only(self, audio: "np.ndarray", *, reason: str,
                          aq: dict | None = None, transcript: str = "") -> None:
