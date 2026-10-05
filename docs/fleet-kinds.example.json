@@ -1,0 +1,49 @@
+{
+  "kinds": {
+    "status_update": {
+      "description": "Where a project or workstream stands, as one agent sees it.",
+      "subject": "required",
+      "fields": {
+        "status": {"enum": ["on_track", "at_risk", "blocked", "done"]},
+        "due": {"type": "string", "maxLength": 32},
+        "progress": {"type": "number", "minimum": 0, "maximum": 1},
+        "blockers": {"type": "array", "items": {"type": "string", "maxLength": 200}, "maxItems": 10}
+      },
+      "required": ["status"],
+      "forbidden": ["salary", "compensation", "performance_rating"]
+    },
+    "finding": {
+      "description": "Something an agent noticed in research, monitoring, or analysis.",
+      "subject": "optional",
+      "fields": {
+        "severity": {"enum": ["info", "low", "medium", "high"]},
+        "tags": {"type": "array", "items": {"type": "string", "maxLength": 40}, "maxItems": 10}
+      },
+      "required": [],
+      "forbidden": ["password", "api_key", "secret", "token"]
+    },
+    "lead": {
+      "description": "A sales or partnership lead, without contact details.",
+      "subject": "required",
+      "fields": {
+        "stage": {"enum": ["cold", "warm", "qualified"]},
+        "segment": {"type": "string", "maxLength": 60}
+      },
+      "required": ["stage"],
+      "forbidden": ["email", "phone", "address", "contact"]
+    },
+    "market_view": {
+      "description": "A view on a traded instrument. Never positions, orders, or P&L.",
+      "subject": "required",
+      "subject_pattern": "^[A-Za-z0-9][A-Za-z0-9.:/_-]{0,31}$",
+      "fields": {
+        "direction": {"enum": ["bullish", "bearish", "neutral"]},
+        "horizon": {"enum": ["intraday", "days", "weeks", "months", "long_term"]}
+      },
+      "required": ["direction", "horizon"],
+      "forbidden": ["quantity", "qty", "size", "shares", "notional", "price",
+                    "limit_price", "stop_price", "order", "order_id", "side",
+                    "position", "positions", "exposure", "pnl", "account"]
+    }
+  }
+}

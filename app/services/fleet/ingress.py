@@ -20,7 +20,7 @@ import time
 from collections import defaultdict, deque
 
 from app.config import settings
-from app.services.fleet import dedup, feed, registry, router, state
+from app.services.fleet import dedup, feed, kinds, registry, router, state
 from app.services.fleet import envelope as env
 
 
@@ -71,8 +71,9 @@ def _idempotent_hit(name: str, signal_id: str, now: float) -> dict | None:
 def publish(agent: dict, body) -> dict:
     if not settings.fleet.enabled:
         raise PublishError(404, "fleet_off", "fleet federation is off")
+    registry_ = kinds.registry()
     try:
-        env.check_agent_input(body)
+        env.check_agent_input(body, registry_)
     except env.SignalError as exc:
         raise PublishError(422, exc.code, exc.reason) from None
     name = agent["name"]
@@ -102,12 +103,15 @@ def publish(agent: dict, body) -> dict:
         "producer": f"agent:{name}",
         "ts": now,
         "expires_at": expires_at,
+        "kind": body.get("kind") or "note",
+        "body": body.get("body") or {},
         "sources": body.get("sources") or [],
         "hops": 0,
         "sig": "",
     }
     try:
-        sig = env.validate(stamped, now=now, max_hops=settings.fleet.max_hops)
+        sig = env.validate(stamped, kinds=registry_, now=now,
+                           max_hops=settings.fleet.max_hops)
     except env.SignalError as exc:
         raise PublishError(422, exc.code, exc.reason) from None
     # Store the normalized form so every later hash and signature is over the

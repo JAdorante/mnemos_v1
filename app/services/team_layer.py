@@ -34,16 +34,15 @@ _lock = threading.Lock()
 _stop = threading.Event()
 _thread: threading.Thread | None = None
 
-# Relationship templates. `personal` and `trading` are never auto (enforced
-# again at write, see peer_channel.NEVER_AUTO).
+# Relationship templates. `personal` is never auto (enforced again at write).
 POLICY_PACKS: dict[str, dict[str, str]] = {
     "teammate": {
         "availability": "offer", "work": "offer", "contact": "offer",
-        "personal": "offer", "trading": "offer", "other": "offer",
+        "personal": "offer", "other": "offer",
     },
     "manager": {
         "availability": "auto", "work": "auto", "contact": "offer",
-        "personal": "offer", "trading": "offer", "other": "offer",
+        "personal": "offer", "other": "offer",
     },
     # Same grants as `manager`, deliberately NOT the same label: these are
     # peer-to-peer trial pairs, and calling a colleague your manager in the
@@ -57,15 +56,15 @@ POLICY_PACKS: dict[str, dict[str, str]] = {
     # `personal` stays untouchable here as everywhere.
     "pilot": {
         "availability": "auto", "work": "auto", "contact": "offer",
-        "personal": "offer", "trading": "offer", "other": "offer",
+        "personal": "offer", "other": "offer",
     },
     "company": {
         "availability": "offer", "work": "deny", "contact": "deny",
-        "personal": "deny", "trading": "deny", "other": "deny",
+        "personal": "deny", "other": "deny",
     },
     "vendor": {
         "availability": "deny", "work": "deny", "contact": "deny",
-        "personal": "deny", "trading": "deny", "other": "deny",
+        "personal": "deny", "other": "deny",
     },
 }
 

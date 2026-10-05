@@ -15,7 +15,7 @@ from unittest import mock
 from fastapi.testclient import TestClient
 
 from app.services.fleet import envelope as env
-from tests.fleet_support import FleetEnvMixin, full_signal
+from tests.fleet_support import EXAMPLE_KINDS, FleetEnvMixin, full_signal
 
 ADMIN = "admin-token-0123456789abcdef"
 COMPLIANCE = "compliance-token-0123456789abcdef"
@@ -28,7 +28,8 @@ class RelayBase(FleetEnvMixin, unittest.TestCase):
         os.environ["QUILL_RELAY_ADMIN_TOKEN"] = ADMIN
         os.environ["QUILL_RELAY_COMPLIANCE_TOKEN"] = COMPLIANCE
         os.environ.pop("QUILL_RELAY_LOG", None)
-        os.environ.pop("QUILL_RELAY_RESTRICTED", None)
+        os.environ.pop("QUILL_RELAY_BLOCKED", None)
+        os.environ.pop("QUILL_RELAY_KINDS", None)
         from org_coordinator import main, relay, relay_log
         self.relay = relay
         self.relay_log = relay_log
@@ -48,10 +49,11 @@ class RelayBase(FleetEnvMixin, unittest.TestCase):
                            ("node-c", "research"), ("node-d", "sales")):
             self.put(f"/relay/admin/nodes/{nid}/group", {"group": group})
         # node-c is outside the topic; node-d is a member behind a barrier.
-        self.put("/relay/admin/topics/macro.rates",
+        self.put("/relay/admin/topics/eng.status",
                  {"members": ["node-a", "node-b", "node-d"],
                   "groups": ["research"]})
-        self.put("/relay/admin/restricted", {"instruments": ["XYZ"]})
+        self.put("/relay/admin/blocked", {"subjects": ["Project Falcon"]})
+        self.put("/relay/admin/kinds", EXAMPLE_KINDS)
         self.delivered = []
 
         def fake_post(recipient, signal, sender):
@@ -108,7 +110,7 @@ class ForwardTests(RelayBase):
 
     def test_signature_is_verified_and_tampering_refused(self) -> None:
         sig = self.signed()
-        bad = dict(sig, thesis="something else entirely")
+        bad = dict(sig, summary="something else entirely")
         self.assertEqual(self.publish(signal=bad).json()["error"],
                          "bad_signature")
         forged = env.sign(dict(sig, sig=""), env.link_key(self.tokens["node-b"]))
@@ -128,15 +130,36 @@ class ForwardTests(RelayBase):
                          env.link_key(self.tokens["node-a"]))
         self.assertEqual(self.publish(signal=stale).json()["error"], "expired")
 
-    def test_restricted_list_is_enforced_and_fails_closed(self) -> None:
-        r = self.publish(signal=self.signed(instrument="NYSE:XYZ"))
+    def test_blocked_list_is_enforced_and_fails_closed(self) -> None:
+        r = self.publish(signal=self.signed(subject="PROJECT falcon"))
         self.assertEqual((r.status_code, r.json()["error"]),
-                         (403, "restricted_instrument"))
-        self.relay.restricted_path().unlink()
+                         (403, "blocked_subject"))
+        self.relay.blocked_path().unlink()
         r = self.publish()
         self.assertEqual((r.status_code, r.json()["error"]),
-                         (503, "restricted_list_unavailable"))
+                         (503, "blocked_list_unavailable"))
         self.assertEqual(self.delivered, [])
+
+    def test_the_relay_checks_kinds_against_its_own_registry(self) -> None:
+        self.put("/relay/admin/kinds", {"kinds": {}})
+        r = self.publish()
+        self.assertEqual((r.status_code, r.json()["error"]),
+                         (422, "unknown_kind"))
+        note = self.signed(kind="note", subject=None, body={})
+        self.assertEqual(self.publish(signal=note).status_code, 200)
+
+    def test_forbidden_fields_are_refused_at_the_relay(self) -> None:
+        bad = self.signed(kind="market_view", subject="TLT",
+                          body={"direction": "bearish", "horizon": "weeks",
+                                "price": 101})
+        r = self.publish(signal=bad)
+        self.assertEqual((r.status_code, r.json()["error"]),
+                         (422, "forbidden_field"))
+
+    def test_bad_kind_definitions_are_rejected_by_the_admin_api(self) -> None:
+        r = self.client.put("/relay/admin/kinds", headers=self.admin,
+                            json={"kinds": {"k": {"fields": {"x": {}}}}})
+        self.assertEqual(r.status_code, 422)
 
     def test_replay_is_deduped_at_the_relay(self) -> None:
         sig = self.signed()

@@ -10,7 +10,9 @@ authenticate themselves; see api_auth._PREFIX_EXEMPT):
 Owner-facing (LAN gate as usual; never callable with an agent token):
     GET  /fleet/status, /fleet/schema
     GET/POST /fleet/agents, DELETE /fleet/agents/{name}
-    GET/PUT  /fleet/routes
+    GET/PUT  /fleet/routes          (rules + never_share)
+    GET/PUT  /fleet/kinds           signal kinds beyond the built-in `note`
+    GET/PUT  /fleet/blocked         subjects that may never leave
     GET  /fleet/offers, POST /fleet/offers/{id}/edit, /fleet/offers/{id}/decide
     POST /fleet/relay/register, /fleet/outbox/drain
 
@@ -30,7 +32,7 @@ from pydantic import BaseModel
 
 from app.config import settings
 from app.services.fleet import envelope as env
-from app.services.fleet import feed, inbound, ingress, registry
+from app.services.fleet import feed, inbound, ingress, kinds, registry
 from app.services.fleet import relay_client, router as fleet_router, state
 
 router = APIRouter()
@@ -181,6 +183,7 @@ def fleet_status(request: Request) -> dict:
         "relay": {"url": state.relay_url(), "node_id": relay.get("node_id"),
                   "registered": bool(relay.get("token"))},
         "rules": fleet_router.load_rules(),
+        "kinds": sorted(kinds.registry()),
         "pending_offers": len(fleet_router.list_offers("pending")),
         "outbox": len(relay_client.outbox()),
     }
@@ -188,7 +191,10 @@ def fleet_status(request: Request) -> dict:
 
 @router.get("/fleet/schema")
 def fleet_schema() -> dict:
-    return env.SIGNAL_SCHEMA
+    """The envelope plus every registered kind's body schema."""
+    return {**env.SIGNAL_SCHEMA,
+            "x-kinds": {k: env.kind_schema(k, v)
+                        for k, v in kinds.registry().items()}}
 
 
 class AgentIn(BaseModel):
@@ -225,20 +231,70 @@ def fleet_agent_revoke(name: str, request: Request) -> dict:
 
 class RulesIn(BaseModel):
     rules: list[dict]
+    never_share: dict | None = None
 
 
 @router.get("/fleet/routes")
 def fleet_routes_get(request: Request) -> dict:
     _owner(request)
-    return {"ok": True, "rules": fleet_router.load_rules()}
+    rules, never = fleet_router.load_policy()
+    return {"ok": True, "rules": rules, "never_share": never}
 
 
 @router.put("/fleet/routes")
 def fleet_routes_put(body: RulesIn, request: Request) -> dict:
     _owner(request)
     try:
-        return {"ok": True, "rules": fleet_router.save_rules(body.rules)}
+        return {"ok": True, **fleet_router.save_rules(body.rules,
+                                                     body.never_share)}
     except fleet_router.RouteError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+
+
+class KindsIn(BaseModel):
+    kinds: dict
+
+
+@router.get("/fleet/kinds")
+def fleet_kinds_get(request: Request) -> dict:
+    _owner(request)
+    return {"ok": True, "kinds": kinds.registry()}
+
+
+@router.put("/fleet/kinds")
+def fleet_kinds_put(body: KindsIn, request: Request) -> dict:
+    """Replace the custom kinds (the built-in `note` always stays). The relay
+    needs the same definitions or it refuses the kind."""
+    _owner(request)
+    try:
+        return {"ok": True, "kinds": kinds.save_registry(body.kinds)}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+
+
+class BlockedIn(BaseModel):
+    subjects: list[str] = []
+    patterns: list[str] = []
+
+
+@router.get("/fleet/blocked")
+def fleet_blocked_get(request: Request) -> dict:
+    _owner(request)
+    try:
+        b = kinds.blocklist()
+        return {"ok": True, "subjects": sorted(b.subjects),
+                "patterns": list(b.patterns)}
+    except kinds.BlockedListUnavailable as exc:
+        return {"ok": False, "error": str(exc), "subjects": [], "patterns": []}
+
+
+@router.put("/fleet/blocked")
+def fleet_blocked_put(body: BlockedIn, request: Request) -> dict:
+    _owner(request)
+    try:
+        return {"ok": True, **kinds.save_blocklist(body.subjects,
+                                                  body.patterns)}
+    except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
 
 

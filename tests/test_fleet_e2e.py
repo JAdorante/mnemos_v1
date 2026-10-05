@@ -81,8 +81,8 @@ class FleetEndToEndTests(unittest.TestCase):
             port = _free_port()
             data = cls.tmp / f"sparrow_{name}"
             data.mkdir(parents=True)
-            (data / "restricted_list.json").write_text(
-                '{"instruments": ["XYZ"]}', encoding="utf-8")
+            (data / "fleet_blocked.json").write_text(
+                '{"subjects": ["Project Falcon"]}', encoding="utf-8")
             env = {**base_env, "QUILL_DATA_DIR": str(data), "QUILL_FLEET": "1",
                    "QUILL_PORT": str(port), "QUILL_PEER_INGEST": "0",
                    "QUILL_PEER_TELEMETRY": "0", "QUILL_DESKTOP_JAIL":
@@ -116,13 +116,13 @@ class FleetEndToEndTests(unittest.TestCase):
         a, b = self.sparrows["a"], self.sparrows["b"]
         # Owners register their agents (the token is shown once).
         quant = _call("POST", f"{a}/fleet/agents",
-                      {"name": "quant", "topics": ["macro.rates"],
+                      {"name": "quant", "topics": ["eng.status"],
                        "role": "publisher"})["agent"]["token"]
         watcher_a = _call("POST", f"{a}/fleet/agents",
-                          {"name": "watch", "topics": ["macro.rates"],
+                          {"name": "watch", "topics": ["eng.status"],
                            "role": "subscriber"})["agent"]["token"]
         reader_b = _call("POST", f"{b}/fleet/agents",
-                         {"name": "reader", "topics": ["macro.rates"],
+                         {"name": "reader", "topics": ["eng.status"],
                           "role": "subscriber"})["agent"]["token"]
         # Each Sparrow enrolls with the relay; an admin sets the barrier.
         for name, url in (("node-a", a), ("node-b", b)):
@@ -132,22 +132,28 @@ class FleetEndToEndTests(unittest.TestCase):
             self.assertTrue(out["ok"], out)
             _call("PUT", f"{self.relay_url}/relay/admin/nodes/{name}/group",
                   {"group": "research"}, ADMIN)
-        _call("PUT", f"{self.relay_url}/relay/admin/topics/macro.rates",
+        _call("PUT", f"{self.relay_url}/relay/admin/topics/eng.status",
               {"members": ["node-a", "node-b"], "groups": ["research"]}, ADMIN)
-        _call("PUT", f"{self.relay_url}/relay/admin/restricted",
-              {"instruments": ["XYZ"]}, ADMIN)
+        _call("PUT", f"{self.relay_url}/relay/admin/blocked",
+              {"subjects": ["Project Falcon"]}, ADMIN)
+        # Kinds beyond `note` must be known to every hop, or they are refused.
+        kinds = json.loads((ROOT / "docs" / "fleet-kinds.example.json")
+                           .read_text(encoding="utf-8"))
+        _call("PUT", f"{self.relay_url}/relay/admin/kinds", kinds, ADMIN)
+        for url in (a, b):
+            _call("PUT", f"{url}/fleet/kinds", kinds)
         # Both owners opt the topic in. B sharing too would expose any
         # re-forward of inbound signals.
         for url in (a, b):
             _call("PUT", f"{url}/fleet/routes",
-                  {"rules": [{"topic": "macro.rates", "action": "share"}]})
+                  {"rules": [{"topic": "eng.status", "action": "share"}]})
 
         got_b: list[tuple[float, dict]] = []
         got_a: list[dict] = []
 
         def listen(url, token, sink, stamp):
             fc = FleetClient(url, token)
-            for item in fc.subscribe(["macro.rates"], max_s=6.0):
+            for item in fc.subscribe(["eng.status"], max_s=6.0):
                 sink.append((time.monotonic(), item) if stamp else item)
 
         threads = [threading.Thread(target=listen,
@@ -160,19 +166,19 @@ class FleetEndToEndTests(unittest.TestCase):
 
         t0 = time.monotonic()
         pub = FleetClient(a, quant).publish({
-            "topic": "macro.rates", "instrument": "TLT",
-            "direction": "bearish", "horizon": "weeks", "confidence": 0.7,
-            "thesis": "Term premium is rebuilding after the auction tail.",
-            "sources": [{"name": "desk notes", "license": "internal_ok"}]})
+            "topic": "eng.status", "kind": "status_update",
+            "subject": "Atlas migration", "confidence": 0.7,
+            "summary": "Cutover slipped a week; the backfill is slow.",
+            "body": {"status": "at_risk", "due": "2026-10-16"},
+            "sources": [{"name": "standup notes", "license": "internal_ok"}]})
         self.assertEqual(pub["route"]["action"], "share")
         origin = pub["signal"]["origin_id"]
 
-        # A restricted name never reaches the network.
+        # A blocked subject never reaches the network.
         refused = FleetClient(a, quant).publish({
-            "topic": "macro.rates", "instrument": "XYZ",
-            "direction": "bullish", "horizon": "days", "confidence": 0.5,
-            "thesis": "Restricted name.",
-            "sources": [{"name": "desk notes", "license": "internal_ok"}]})
+            "topic": "eng.status", "kind": "note",
+            "subject": "Project Falcon", "summary": "Blocked subject.",
+            "sources": [{"name": "standup notes", "license": "internal_ok"}]})
         self.assertEqual(refused["route"]["action"], "refused")
 
         for t in threads:
@@ -185,7 +191,9 @@ class FleetEndToEndTests(unittest.TestCase):
         self.assertEqual(item["provenance"], "peer")
         self.assertEqual(item["peer_node"], "node-a")
         self.assertEqual(item["hops"], 1)
-        self.assertEqual(item["signal"]["thesis"], pub["signal"]["thesis"])
+        self.assertEqual(item["signal"]["summary"], pub["signal"]["summary"])
+        self.assertEqual(item["signal"]["body"], {"status": "at_risk",
+                                                  "due": "2026-10-16"})
 
         # Nothing comes back to A: its watcher saw the local signal (and the
         # refused one, which stayed local) and never a peer copy.

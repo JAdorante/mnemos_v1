@@ -20,7 +20,7 @@ import time
 from urllib import error, request
 
 from app.config import settings
-from app.services.fleet import _files, state
+from app.services.fleet import _files, kinds, state
 from app.services.fleet import envelope as env
 from app.services.fleet import router as fleet_router
 
@@ -100,7 +100,8 @@ def register(relay_url: str, node_id: str, *, display_name: str = "",
 def prepare(signal: dict) -> dict:
     """The exact bytes that go on the wire: hop + 1, validated, signed."""
     out = fleet_router.outbound_copy(signal)
-    env.validate(out, max_hops=settings.fleet.max_hops, outbound=True)
+    env.validate(out, kinds=kinds.registry(),
+                 max_hops=settings.fleet.max_hops, outbound=True)
     return env.sign(out, env.link_key(state.relay().get("token") or ""))
 
 

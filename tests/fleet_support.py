@@ -6,6 +6,7 @@ cross-test env leakage).
 """
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import time
@@ -17,7 +18,8 @@ os.environ.setdefault("QUILL_DESKTOP_JAIL", tempfile.mkdtemp(prefix="quill_jail_
 FLEET_ENV = {
     "QUILL_FLEET_AGENTS": "fleet_agents.json",
     "QUILL_FLEET_ROUTES": "fleet_routes.json",
-    "QUILL_FLEET_RESTRICTED": "restricted_list.json",
+    "QUILL_FLEET_BLOCKED": "fleet_blocked.json",
+    "QUILL_FLEET_KINDS": "fleet_kinds.json",
     "QUILL_FLEET_STATE": "fleet_state.json",
     "QUILL_FLEET_OFFERS": "fleet_offers.json",
     "QUILL_FLEET_OUTBOX": "fleet_outbox.json",
@@ -27,15 +29,26 @@ FLAG_ENV = ("QUILL_FLEET", "QUILL_FLEET_SEND_SYNC", "QUILL_FLEET_RATE",
             "QUILL_FLEET_MAX_HOPS", "QUILL_FLEET_OWNER_AUTH",
             "QUILL_ORG_COORD_DATA", "QUILL_RELAY_ADMIN_TOKEN",
             "QUILL_RELAY_COMPLIANCE_TOKEN", "QUILL_RELAY_FORWARD_SYNC",
-            "QUILL_RELAY_LOG", "QUILL_RELAY_RESTRICTED")
+            "QUILL_RELAY_LOG", "QUILL_RELAY_BLOCKED", "QUILL_RELAY_KINDS",
+            "QUILL_FLEET_RING")
+
+
+ROOT = Path(__file__).resolve().parents[1]
+EXAMPLE_KINDS = json.loads((ROOT / "docs" / "fleet-kinds.example.json")
+                           .read_text(encoding="utf-8"))
+
+
+def kinds_registry() -> dict:
+    from app.services.fleet import envelope as env
+    return env.load_kinds(EXAMPLE_KINDS)
 
 
 def agent_body(**over) -> dict:
-    body = {"topic": "macro.rates", "instrument": "TLT",
-            "direction": "bearish", "horizon": "weeks", "confidence": 0.7,
-            "thesis": "Term premium is rebuilding after the auction tail.",
-            "sources": [{"name": "internal desk notes",
-                         "license": "internal_ok"}]}
+    body = {"topic": "eng.status", "kind": "status_update",
+            "subject": "Atlas migration", "confidence": 0.7,
+            "summary": "Cutover slipped a week; the schema backfill is slow.",
+            "body": {"status": "at_risk", "due": "2026-10-16"},
+            "sources": [{"name": "standup notes", "license": "internal_ok"}]}
     body.update(over)
     return body
 
@@ -43,11 +56,12 @@ def agent_body(**over) -> dict:
 def full_signal(**over) -> dict:
     now = time.time()
     sig = {"signal_id": "sid-1", "origin_id": "sabc:origin-1",
-           "producer": "agent:rates", "ts": now, "expires_at": now + 600,
-           "topic": "macro.rates", "instrument": "TLT",
-           "direction": "bearish", "horizon": "weeks", "confidence": 0.7,
-           "thesis": "Term premium is rebuilding.",
-           "sources": [{"name": "desk notes", "license": "internal_ok"}],
+           "producer": "agent:pm", "ts": now, "expires_at": now + 600,
+           "topic": "eng.status", "kind": "status_update",
+           "subject": "Atlas migration", "confidence": 0.7,
+           "summary": "Cutover slipped a week.",
+           "body": {"status": "at_risk"},
+           "sources": [{"name": "standup notes", "license": "internal_ok"}],
            "hops": 0, "thread_id": None, "derived_from": None, "sig": ""}
     sig.update(over)
     return sig
@@ -71,8 +85,10 @@ class FleetEnvMixin:
         for k in ("QUILL_FLEET_RATE", "QUILL_FLEET_MAX_HOPS",
                   "QUILL_FLEET_OWNER_AUTH"):
             os.environ.pop(k, None)
-        (self.tmp / "restricted_list.json").write_text(
-            '{"instruments": ["XYZ"]}', encoding="utf-8")
+        (self.tmp / "fleet_blocked.json").write_text(
+            '{"subjects": ["Project Falcon"]}', encoding="utf-8")
+        (self.tmp / "fleet_kinds.json").write_text(
+            json.dumps(EXAMPLE_KINDS), encoding="utf-8")
         from app.events import EventBus
         from app.services.fleet import feed, ingress
         # A private bus: a memory subscriber left attached by another module

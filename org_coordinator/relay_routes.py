@@ -8,7 +8,8 @@ Node (Bearer node token from POST /register):
 Admin (QUILL_RELAY_ADMIN_TOKEN):
     GET/PUT/DELETE /relay/admin/topics[/{name}]
     PUT  /relay/admin/nodes/{node_id}/group
-    GET/PUT /relay/admin/restricted
+    GET/PUT /relay/admin/blocked     subjects that may never be forwarded
+    GET/PUT /relay/admin/kinds       signal kinds the relay will accept
     GET  /relay/admin/queue, POST /relay/admin/queue/drain
 Compliance (QUILL_RELAY_COMPLIANCE_TOKEN), read-only:
     GET  /relay/compliance/feed?since=&limit=
@@ -62,8 +63,14 @@ class GroupIn(BaseModel):
     group: str | None = None
 
 
-class RestrictedIn(BaseModel):
-    instruments: list[str]
+class BlockedIn(BaseModel):
+    subjects: list[str] = []
+    patterns: list[str] = []
+    updated_by: str = ""
+
+
+class KindsIn(BaseModel):
+    kinds: dict
     updated_by: str = ""
 
 
@@ -112,20 +119,39 @@ def admin_node_group(node_id: str, body: GroupIn) -> dict:
     return {"ok": True, **row}
 
 
-@router.get("/relay/admin/restricted",
+@router.get("/relay/admin/blocked",
             dependencies=[Depends(topics.require_admin)])
-def admin_restricted() -> dict:
+def admin_blocked() -> dict:
     try:
-        return {"ok": True, "instruments": sorted(relay.load_restricted())}
+        b = relay.load_blocked()
+        return {"ok": True, "subjects": sorted(b.subjects),
+                "patterns": list(b.patterns)}
     except Exception as exc:
-        return {"ok": False, "error": str(exc), "instruments": []}
+        return {"ok": False, "error": str(exc), "subjects": [], "patterns": []}
 
 
-@router.put("/relay/admin/restricted",
+@router.put("/relay/admin/blocked",
             dependencies=[Depends(topics.require_admin)])
-def admin_restricted_put(body: RestrictedIn) -> dict:
-    return {"ok": True, **relay.save_restricted(body.instruments,
-                                                updated_by=body.updated_by)}
+def admin_blocked_put(body: BlockedIn) -> dict:
+    try:
+        return {"ok": True, **relay.save_blocked(
+            body.subjects, body.patterns, updated_by=body.updated_by)}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+
+
+@router.get("/relay/admin/kinds", dependencies=[Depends(topics.require_admin)])
+def admin_kinds() -> dict:
+    return {"ok": True, "kinds": relay.load_kinds()}
+
+
+@router.put("/relay/admin/kinds", dependencies=[Depends(topics.require_admin)])
+def admin_kinds_put(body: KindsIn) -> dict:
+    try:
+        return {"ok": True, "kinds": relay.save_kinds(
+            body.kinds, updated_by=body.updated_by)}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
 
 
 @router.get("/relay/admin/queue", dependencies=[Depends(topics.require_admin)])

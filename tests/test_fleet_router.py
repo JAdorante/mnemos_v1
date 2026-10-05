@@ -1,7 +1,8 @@
 """Outbound router: Sparrow, not the agent, decides what leaves.
 
-Unmatched means local, offer creates a packet, trading can never be auto,
-and restricted tickers are refused before anything reaches the network.
+Unmatched means local, offer creates a packet, never_share topics and kinds
+always need a human, and blocked subjects are refused before anything
+reaches the network.
 """
 from __future__ import annotations
 
@@ -57,11 +58,11 @@ class DecisionTests(RouterBase):
         self.assertEqual(router.route(self.signal()).action, "local")
 
     def test_a_rule_without_an_action_defaults_to_offer(self) -> None:
-        self.rules({"topic": "macro.rates"})
+        self.rules({"topic": "eng.status"})
         self.assertEqual(router.route(self.signal()).action, "offer")
 
     def test_share_signs_increments_hops_and_sends_unchanged_bytes(self) -> None:
-        self.rules({"topic": "macro.rates", "action": "share"})
+        self.rules({"topic": "eng.status", "action": "share"})
         sig = self.signal()
         d = router.apply(sig)
         self.assertEqual(d.action, "share")
@@ -75,125 +76,130 @@ class DecisionTests(RouterBase):
         self.assertEqual(strip(wire), strip(sig))
 
     def test_share_never_touches_the_peer_llm_egress_path(self) -> None:
-        self.rules({"topic": "macro.rates", "action": "share"})
+        self.rules({"topic": "eng.status", "action": "share"})
         from app.services import peer_channel
         with mock.patch.object(peer_channel, "compose_peer_claims",
                                side_effect=AssertionError("LLM egress used")):
             self.assertEqual(router.apply(self.signal()).action, "share")
 
     def test_local_rule(self) -> None:
-        self.rules({"topic": "macro.*", "action": "local"})
+        self.rules({"topic": "eng.*", "action": "local"})
         self.assertEqual(router.apply(self.signal()).action, "local")
 
     def test_most_specific_rule_wins_then_most_restrictive(self) -> None:
-        self.rules({"topic": "macro.*", "action": "share"},
-                   {"topic": "macro.rates", "producer": "agent:rates",
+        self.rules({"topic": "eng.*", "action": "share"},
+                   {"topic": "eng.status", "producer": "agent:pm",
                     "action": "local"},
-                   {"topic": "macro.rates", "action": "share"})
+                   {"topic": "eng.status", "action": "share"})
         self.assertEqual(router.route(self.signal()).action, "local")
         other = self.signal(producer="agent:fx")
         self.assertEqual(router.route(other).action, "share")
-        self.rules({"topic": "macro.rates", "action": "share"},
-                   {"topic": "macro.rates", "action": "offer"})
+        self.rules({"topic": "eng.status", "action": "share"},
+                   {"topic": "eng.status", "action": "offer"})
         self.assertEqual(router.route(self.signal()).action, "offer")
 
     def test_no_relay_means_nothing_leaves(self) -> None:
         state.clear_relay()
-        self.rules({"topic": "macro.rates", "action": "share"})
+        self.rules({"topic": "eng.status", "action": "share"})
         d = router.apply(self.signal())
         self.assertEqual(d.action, "local")
         self.assertEqual(self.sent, [])
 
 
-class RestrictedTests(RouterBase):
-    def test_restricted_ticker_is_refused_before_the_network(self) -> None:
-        self.rules({"topic": "macro.rates", "action": "share"})
-        d = router.apply(self.signal(instrument="xyz.n"))
+class BlockedSubjectTests(RouterBase):
+    def test_blocked_subject_is_refused_before_the_network(self) -> None:
+        self.rules({"topic": "eng.status", "action": "share"})
+        d = router.apply(self.signal(subject="project  FALCON"))
         self.assertEqual(d.action, "refused")
-        self.assertEqual(d.reason, "restricted_instrument")
+        self.assertEqual(d.reason, "blocked_subject")
         self.assertEqual(self.sent, [])
 
-    def test_restricted_offer_is_refused_too(self) -> None:
-        self.rules({"topic": "macro.rates", "action": "offer"})
-        self.assertEqual(router.apply(self.signal(instrument="XYZ")).action,
+    def test_blocked_offer_is_refused_too(self) -> None:
+        self.rules({"topic": "eng.status", "action": "offer"})
+        self.assertEqual(router.apply(self.signal(subject="Project Falcon")).action,
                          "refused")
         self.assertEqual(router.list_offers(), [])
 
-    def test_missing_restricted_list_fails_closed(self) -> None:
-        (self.tmp / "restricted_list.json").unlink()
-        self.rules({"topic": "macro.rates", "action": "share"})
+    def test_missing_blocked_list_fails_closed(self) -> None:
+        (self.tmp / "fleet_blocked.json").unlink()
+        self.rules({"topic": "eng.status", "action": "share"})
         d = router.apply(self.signal())
         self.assertEqual(d.action, "refused")
-        self.assertIn("restricted_list_unavailable", d.reason)
+        self.assertIn("blocked_list_unavailable", d.reason)
         self.assertEqual(self.sent, [])
 
     def test_unshareable_licence_is_refused(self) -> None:
-        self.rules({"topic": "macro.rates", "action": "share"})
+        self.rules({"topic": "eng.status", "action": "share"})
         d = router.apply(self.signal(sources=[{"name": "vendor",
                                               "license": "vendor_only"}]))
         self.assertEqual((d.action, d.reason),
                          ("refused", "license_not_shareable"))
 
     def test_signal_already_at_the_hop_cap_cannot_leave(self) -> None:
-        self.rules({"topic": "macro.rates", "action": "share"})
+        self.rules({"topic": "eng.status", "action": "share"})
         d = router.apply(self.signal(hops=2))
         self.assertEqual((d.action, d.reason), ("refused", "too_many_hops"))
 
 
-class TradingClassTests(RouterBase):
-    def test_positions_topic_can_never_be_share_at_write(self) -> None:
-        for topic in ("desk.positions", "orders", "book.pnl", "equities.fills"):
+class NeverShareTests(RouterBase):
+    NEVER = {"topics": ["hr.*", "*.positions"], "kinds": ["finding"]}
+
+    def test_never_share_topic_can_never_be_share_at_write(self) -> None:
+        for topic in ("hr.reviews", "hr.*", "desk.positions", "*"):
             with self.subTest(topic=topic):
                 with self.assertRaises(router.RouteError):
-                    self.rules({"topic": topic, "action": "share",
-                                "class": "trading"})
-        self.rules({"topic": "desk.positions", "action": "offer",
-                    "class": "trading"})
+                    router.save_rules([{"topic": topic, "action": "share"}],
+                                      self.NEVER)
+        router.save_rules([{"topic": "hr.reviews", "action": "offer"}],
+                          self.NEVER)
 
-    def test_hand_edited_share_on_positions_is_downgraded(self) -> None:
-        (self.tmp / "fleet_routes.json").write_text(json.dumps({"rules": [
-            {"topic": "desk.positions", "action": "share"}]}),
-            encoding="utf-8")
+    def test_saving_rules_keeps_the_current_never_share_list(self) -> None:
+        router.save_rules([], self.NEVER)
+        router.save_rules([{"topic": "eng.status", "action": "share"}])
+        self.assertEqual(router.load_policy()[1],
+                         {"topics": sorted(self.NEVER["topics"]),
+                          "kinds": self.NEVER["kinds"]})
+        with self.assertRaises(router.RouteError):
+            router.save_rules([{"topic": "hr.pay", "action": "share"}])
+
+    def test_hand_edited_share_on_a_never_share_topic_is_downgraded(self) -> None:
+        (self.tmp / "fleet_routes.json").write_text(json.dumps({
+            "rules": [{"topic": "hr.reviews", "action": "share"}],
+            "never_share": self.NEVER}), encoding="utf-8")
         self.assertEqual(router.load_rules()[0]["action"], "offer")
-        d = router.route(self.signal(topic="desk.positions"))
+        d = router.route(self.signal(topic="hr.reviews"))
         self.assertEqual(d.action, "offer")
 
     def test_enforcement_downgrades_even_if_load_is_bypassed(self) -> None:
-        rule = {"topic": "desk.positions", "producer": "*", "action": "share",
-                "class": "trading"}
+        router.save_rules([], self.NEVER)
+        rule = {"topic": "desk.positions", "producer": "*", "action": "share"}
         with mock.patch.object(router, "match", return_value=rule):
             self.assertEqual(router.route(
                 self.signal(topic="desk.positions")).action, "offer")
 
-    def test_peer_channel_trading_class_is_never_auto(self) -> None:
-        from app.services import peer_channel as pch
-        from app.services import team_layer
-        self.assertIn("trading", pch.CLASSES)
-        with self.assertRaises(ValueError):
-            pch._sanitize_policy({"trading": "auto"})
-        for name, pack in team_layer.POLICY_PACKS.items():
-            self.assertNotEqual(pack.get("trading", "offer"), "auto", name)
-        # Enforcement: a stored auto is downgraded even past sanitize.
-        with mock.patch.object(pch, "get_policy",
-                               return_value={c: "auto" for c in pch.CLASSES}):
-            action, topic = pch._decide_action(
-                {"peer_id": "p"}, "What's your position in NVDA right now?")
-        self.assertEqual((action, topic), ("offer", "trading"))
+    def test_never_share_kind_needs_a_human_on_any_topic(self) -> None:
+        router.save_rules([{"topic": "eng.*", "action": "share"}], self.NEVER)
+        finding = self.signal(kind="finding", subject=None,
+                              body={"severity": "high"})
+        self.assertEqual(router.route(finding).action, "offer")
+        self.assertEqual(router.route(self.signal()).action, "share")
 
-    def test_trading_questions_classify_without_the_model(self) -> None:
-        from app.services import peer_channel as pch
-        with mock.patch("app.services.model_router.router.complete_json",
-                        side_effect=AssertionError("model called")):
-            self.assertEqual(pch.classify_question("what's our P&L today?"),
-                             "trading")
-            self.assertEqual(pch.classify_question("are you long TSLA?"),
-                             "trading")
+    def test_unreadable_never_share_turns_every_share_into_offer(self) -> None:
+        (self.tmp / "fleet_routes.json").write_text(json.dumps({
+            "rules": [{"topic": "eng.status", "action": "share"}],
+            "never_share": "everything"}), encoding="utf-8")
+        self.assertEqual(router.route(self.signal()).action, "offer")
 
-    def test_hiring_positions_are_not_trading(self) -> None:
+    def test_unknown_kind_cannot_leave(self) -> None:
+        router.save_rules([{"topic": "eng.status", "action": "share"}])
+        (self.tmp / "fleet_kinds.json").unlink()
+        d = router.route(self.signal())
+        self.assertEqual((d.action, d.reason), ("refused", "unknown_kind"))
+
+    def test_the_peer_channel_has_no_domain_specific_class(self) -> None:
         from app.services import peer_channel as pch
-        self.assertIsNone(pch._TRADING_RE.search(
-            "any open positions in engineering?"))
-        self.assertIsNone(pch._TRADING_RE.search("what's the order of talks?"))
+        self.assertEqual(pch.CLASSES, ("availability", "work", "contact",
+                                       "personal", "other"))
 
     def test_a_paired_peer_cannot_send_or_receive_signals(self) -> None:
         from app.services import peer_channel as pch
@@ -209,7 +215,7 @@ class TradingClassTests(RouterBase):
 class OfferTests(RouterBase):
     def setUp(self) -> None:
         super().setUp()
-        self.rules({"topic": "macro.rates", "action": "offer"})
+        self.rules({"topic": "eng.status", "action": "offer"})
         self.assertEqual(router.apply(self.signal()).action, "offer")
         self.offer = router.list_offers("pending")[0]
 
@@ -228,17 +234,17 @@ class OfferTests(RouterBase):
     def test_an_edited_signal_needs_a_fresh_approval(self) -> None:
         old = self.offer["sha256"]
         edited = router.edit_offer(self.offer["offer_id"],
-                                   {"thesis": "Revised: auction was fine."})
+                                   {"summary": "Revised: auction was fine."})
         self.assertNotEqual(edited["sha256"], old)
         with self.assertRaises(router.RouteError):
             router.decide_offer(self.offer["offer_id"], True, sha256=old)
         router.decide_offer(self.offer["offer_id"], True,
                             sha256=edited["sha256"])
-        self.assertEqual(self.sent[0]["body"]["signal"]["thesis"],
+        self.assertEqual(self.sent[0]["body"]["signal"]["summary"],
                          "Revised: auction was fine.")
 
     def test_edits_are_limited_to_the_view(self) -> None:
-        for field in ("instrument", "topic", "producer", "origin_id"):
+        for field in ("subject", "kind", "topic", "producer", "origin_id"):
             with self.assertRaises(router.RouteError):
                 router.edit_offer(self.offer["offer_id"], {field: "X"})
 
@@ -248,8 +254,8 @@ class OfferTests(RouterBase):
         self.assertEqual(self.sent, [])
 
     def test_gates_rerun_at_approval_time(self) -> None:
-        (self.tmp / "restricted_list.json").write_text(
-            '{"instruments": ["TLT"]}', encoding="utf-8")
+        (self.tmp / "fleet_blocked.json").write_text(
+            '{"subjects": ["Atlas migration"]}', encoding="utf-8")
         row = router.decide_offer(self.offer["offer_id"], True,
                                   sha256=self.offer["sha256"])
         self.assertEqual(row["status"], "refused")
@@ -258,7 +264,7 @@ class OfferTests(RouterBase):
 
 class OutboxTests(RouterBase):
     def test_unreachable_relay_queues_and_drains(self) -> None:
-        self.rules({"topic": "macro.rates", "action": "share"})
+        self.rules({"topic": "eng.status", "action": "share"})
         relay_client._post.side_effect = lambda *a, **k: (0, {"error": "down"})
         router.apply(self.signal())
         self.assertEqual(len(relay_client.outbox()), 1)
@@ -269,7 +275,7 @@ class OutboxTests(RouterBase):
         self.assertEqual(relay_client.outbox(), [])
 
     def test_relay_refusal_is_not_retried(self) -> None:
-        self.rules({"topic": "macro.rates", "action": "share"})
+        self.rules({"topic": "eng.status", "action": "share"})
         relay_client._post.side_effect = lambda *a, **k: (403, {"error": "barrier"})
         res = relay_client.send(self.signal())
         self.assertFalse(res["ok"])

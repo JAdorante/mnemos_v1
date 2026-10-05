@@ -5,9 +5,10 @@ attempts as well as deliveries:
   1. authenticate the node (auth.require_node)
   2. verify the sender's HMAC (key = the node token's SHA-256, which is what
      the directory already stores; see envelope.link_key)
-  3. re-validate the envelope with the egress rules (internal_ok licences,
-     hop cap, expiry, no order-like fields)
-  4. check the restricted list (missing or malformed refuses everything)
+  3. re-validate the envelope with the egress rules (registered kind and its
+     body schema, forbidden fields, internal_ok licences, hop cap, expiry)
+  4. check the blocked-subjects list (missing or malformed refuses
+     everything); the kind must be in the relay's own registry
   5. check the topic barrier for the sender
   6. append to the chained log, then forward to each permitted recipient
 
@@ -73,33 +74,67 @@ def link(node_id: str) -> dict | None:
     return _links().get(node_id)
 
 
-# --- restricted list -------------------------------------------------------------------
-def restricted_path() -> Path:
-    return Path(os.environ.get("QUILL_RELAY_RESTRICTED",
-                               str(store.data_dir() / "restricted_list.json")))
-
-
-def load_restricted() -> frozenset[str]:
-    p = restricted_path()
-    if not p.is_file():
-        raise ValueError("restricted list missing")
-    return env.load_restricted(json.loads(p.read_text(encoding="utf-8")))
-
-
-def save_restricted(instruments: list[str], *, updated_by: str = "") -> dict:
-    body = {"instruments": sorted({str(i).strip().upper()
-                                   for i in instruments if str(i).strip()}),
-            "updated_at": time.time(), "updated_by": updated_by,
-            "owner": "compliance"}
-    env.load_restricted(body)  # validate before writing
-    p = restricted_path()
+# --- blocked subjects + kinds (admin-managed, fail closed) -----------------------------
+def _write_json(p: Path, body: dict) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(".tmp")
     tmp.write_text(json.dumps(body, indent=2), encoding="utf-8")
     tmp.replace(p)
-    relay_log.append("restricted_list_updated", sender=updated_by or "admin",
-                     recipients=[], count=len(body["instruments"]))
+
+
+def blocked_path() -> Path:
+    return Path(os.environ.get("QUILL_RELAY_BLOCKED",
+                               str(store.data_dir() / "blocked.json")))
+
+
+def load_blocked() -> env.Blocklist:
+    """Missing or malformed raises, and publish refuses everything (503)."""
+    p = blocked_path()
+    if not p.is_file():
+        raise ValueError("blocked list missing")
+    return env.load_blocklist(json.loads(p.read_text(encoding="utf-8")))
+
+
+def save_blocked(subjects: list[str], patterns: list[str] | None = None, *,
+                 updated_by: str = "") -> dict:
+    body = {"subjects": sorted({str(i).strip() for i in subjects
+                                if str(i).strip()}),
+            "patterns": [str(x) for x in patterns or []],
+            "updated_at": time.time(), "updated_by": updated_by}
+    env.load_blocklist(body)  # validate before writing
+    _write_json(blocked_path(), body)
+    relay_log.append("blocked_list_updated", sender=updated_by or "admin",
+                     recipients=[], count=len(body["subjects"]),
+                     patterns=len(body["patterns"]))
     return body
+
+
+def kinds_path() -> Path:
+    return Path(os.environ.get("QUILL_RELAY_KINDS",
+                               str(store.data_dir() / "fleet_kinds.json")))
+
+
+def load_kinds() -> dict:
+    """The relay's registry. A malformed file means built-ins only, so a
+    custom kind is refused rather than checked loosely."""
+    p = kinds_path()
+    if not p.is_file():
+        return env.load_kinds(None)
+    try:
+        return env.load_kinds(json.loads(p.read_text(encoding="utf-8")))
+    except Exception as exc:
+        print(f"[relay] fleet_kinds.json ignored ({exc}); built-ins only.")
+        return env.load_kinds(None)
+
+
+def save_kinds(kinds: dict, *, updated_by: str = "") -> dict:
+    body = {"kinds": kinds}
+    env.load_kinds(body)
+    _write_json(kinds_path(), {**body, "updated_at": time.time(),
+                               "updated_by": updated_by})
+    relay_log.append("kinds_updated", sender=updated_by or "admin",
+                     recipients=[], kinds=sorted(kinds))
+    return load_kinds()
 
 
 # --- relay-side replay guard ---------------------------------------------------------------
@@ -130,15 +165,16 @@ def publish(node: dict, body) -> tuple[int, dict]:
     if not env.verify(signal, node.get("token_sha256") or ""):
         return refuse(403, "bad_signature")
     try:
-        sig = env.validate(signal, max_hops=max_hops(), outbound=True)
+        sig = env.validate(signal, kinds=load_kinds(), max_hops=max_hops(),
+                           outbound=True)
     except env.SignalError as exc:
         return refuse(422, exc.code, exc.reason)
     try:
-        restricted = load_restricted()
+        blocked = load_blocked()
     except Exception as exc:
-        return refuse(503, "restricted_list_unavailable", str(exc))
-    if env.is_restricted(sig.instrument, restricted):
-        return refuse(403, "restricted_instrument", sig.instrument)
+        return refuse(503, "blocked_list_unavailable", str(exc))
+    if blocked.blocks(sig.subject):
+        return refuse(403, "blocked_subject", sig.subject or "")
     if not topics.allowed(sender, sig.topic):
         return refuse(403, "barrier", f"{sender} may not publish {sig.topic}")
     if not _seen_first(sig.origin_id, sig.expires_at):

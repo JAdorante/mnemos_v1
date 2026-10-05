@@ -24,7 +24,7 @@ the import graph to prove it).
 from __future__ import annotations
 
 from app.config import settings
-from app.services.fleet import dedup, feed, state
+from app.services.fleet import dedup, feed, kinds, state
 from app.services.fleet import envelope as env
 
 
@@ -41,7 +41,8 @@ def handle(authorization: str | None, body) -> tuple[int, dict]:
     if not env.verify(signal, state.inbound_key()):
         return 403, {"ok": False, "error": "bad_signature"}
     try:
-        sig = env.validate(signal, max_hops=settings.fleet.max_hops,
+        sig = env.validate(signal, kinds=kinds.registry(),
+                           max_hops=settings.fleet.max_hops,
                            outbound=True)
     except env.SignalError as exc:
         return 422, exc.as_dict()

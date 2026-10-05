@@ -1286,11 +1286,19 @@ class FleetConfig:
         return _get("QUILL_FLEET_ROUTES",
                     f"{_get('QUILL_DATA_DIR', 'data')}/fleet_routes.json")
 
-    # Compliance owns this file. Missing or malformed means nothing is shared.
+    # Subjects that may never leave (compliance or the owner keeps it).
+    # Missing or malformed means nothing is shared.
     @property
-    def restricted_list_path(self) -> str:
-        return _get("QUILL_FLEET_RESTRICTED",
-                    f"{_get('QUILL_DATA_DIR', 'data')}/restricted_list.json")
+    def blocked_list_path(self) -> str:
+        return _get("QUILL_FLEET_BLOCKED",
+                    f"{_get('QUILL_DATA_DIR', 'data')}/fleet_blocked.json")
+
+    # Signal kinds beyond the built-in `note` (envelope.load_kinds). The relay
+    # must hold the same definitions, or it refuses the kind.
+    @property
+    def kinds_path(self) -> str:
+        return _get("QUILL_FLEET_KINDS",
+                    f"{_get('QUILL_DATA_DIR', 'data')}/fleet_kinds.json")
 
     @property
     def state_path(self) -> str:

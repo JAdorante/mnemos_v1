@@ -1406,26 +1406,8 @@ def handle_slot_resolved(peer: dict, payload: dict) -> dict:
 #   work         — projects, tasks, documents, status, tools
 #   contact      — phone numbers, emails, addresses of people
 #   personal     — health, family, money, feelings, anything private
-#   trading      — positions, orders, fills, P&L, holdings (fleet federation)
 #   other        — everything else / unclear
-CLASSES = ("availability", "work", "contact", "personal", "trading", "other")
-# Classes that can never be auto-answered, whatever a pack or a hand-edited
-# registry says. Checked at write (_sanitize_policy) AND at enforcement
-# (_decide_action).
-NEVER_AUTO = ("personal", "trading")
-# Holdings and execution are never a judgment call for the classifier: a
-# question that names them is `trading`, deterministically.
-# Phrased narrowly on purpose: "open positions in engineering" is hiring and
-# "the order of the agenda" is not execution.
-_TRADING_RE = re.compile(
-    r"(?:p&l|\bpnl\b|\bp and l\b|profit and loss|\bblotter\b|"
-    r"\bnet (?:long|short)\b|"
-    r"\b(?:trading|stock|equity|options?|futures?|fx|bond|crypto|portfolio) "
-    r"(?:positions?|orders?|book|exposure|holdings?)\b|"
-    r"\b(?:buy|sell|limit|stop|market) orders?\b|"
-    r"\bposition (?:in|on|size)\b|\bholdings? (?:in|of)\b|"
-    r"\bhow (?:much|many) .{0,30}(?:shares|contracts|lots)\b|"
-    r"\bare (?:you|they|we) (?:long|short)\b)", re.I)
+CLASSES = ("availability", "work", "contact", "personal", "other")
 ACTIONS = ("auto", "offer", "deny")
 
 _CLASSIFY_SCHEMA = {
@@ -1434,9 +1416,7 @@ _CLASSIFY_SCHEMA = {
         "topic": {"type": "string", "enum": list(CLASSES),
                   "description": "What the question is about. Use `personal` "
                                  "for anything private (health, family, money, "
-                                 "salary, feelings); `trading` for positions, "
-                                 "orders, fills, P&L or holdings; `other` when "
-                                 "unclear."},
+                                 "salary, feelings); `other` when unclear."},
     },
     "required": ["topic"],
 }
@@ -1459,9 +1439,8 @@ def _sanitize_policy(policy: dict) -> dict:
         if action not in ACTIONS:
             raise ValueError(f"unknown action {action!r} (one of {', '.join(ACTIONS)})")
         out[cls] = action
-    for cls in NEVER_AUTO:
-        if out[cls] == "auto":
-            raise ValueError(f"the `{cls}` class can never be auto-answered")
+    if out["personal"] == "auto":
+        raise ValueError("the `personal` class can never be auto-answered")
     return out
 
 
@@ -1496,8 +1475,6 @@ def set_policy(peer_id: str, policy: dict, pack: str | None = None) -> dict:
 def classify_question(question: str) -> str | None:
     """The LOCAL model buckets the question (schema-enforced). None on any
     failure or hesitation — the caller treats None as 'ask the human'."""
-    if _TRADING_RE.search(question or ""):
-        return "trading"
     try:
         from app.services.model_router import router
         res = router.complete_json(
@@ -1507,9 +1484,7 @@ def classify_question(question: str) -> str | None:
                     "whereabouts, free/busy, deadlines, dates), work (projects, "
                     "tasks, documents, status, tools), contact (phone numbers, "
                     "emails, addresses), personal (health, family, money, "
-                    "salary, feelings — anything private), trading "
-                    "(positions, orders, fills, P&L, holdings), other "
-                    "(unclear). "
+                    "salary, feelings — anything private), other (unclear). "
                     "When in doubt between personal and anything else, answer "
                     "personal."),
             messages=[{"role": "user", "content": question}],
@@ -1532,7 +1507,7 @@ def _decide_action(peer: dict, question: str) -> tuple[str, str | None]:
     if topic is None:
         return "offer", None
     action = policy.get(topic, "offer")
-    if action == "auto" and topic in NEVER_AUTO:
+    if action == "auto" and topic == "personal":
         action = "offer"
     return action, topic
 

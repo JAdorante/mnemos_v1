@@ -67,10 +67,15 @@ def next_seq() -> int:
 
 
 def render(signal: dict) -> str:
-    return (f"{signal.get('producer', '?')} on {signal.get('instrument', '?')}: "
-            f"{signal.get('direction', '?')} ({signal.get('horizon', '?')}, "
-            f"confidence {float(signal.get('confidence') or 0):.2f}). "
-            f"{signal.get('thesis', '')}")
+    """One line for the timeline: who, what kind, about what, and the summary.
+    The structured body stays in meta.signal; it is not flattened into text."""
+    head = f"{signal.get('producer', '?')} ({signal.get('kind', 'note')})"
+    if signal.get("subject"):
+        head += f" on {signal['subject']}"
+    conf = signal.get("confidence")
+    if conf is not None:
+        head += f", confidence {float(conf):.2f}"
+    return f"{head}: {signal.get('summary', '')}"
 
 
 def emit(signal: dict, *, provenance: str, peer_node: str = "") -> dict:
@@ -95,10 +100,11 @@ def emit(signal: dict, *, provenance: str, peer_node: str = "") -> dict:
         meta["peer_node"] = peer_node
     ev = Event(time=time.time(), modality=Modality.SYSTEM, raw=text,
                summary=f"{prefix} {text[:200]}", source=source, meta=meta)
-    # "inferred": an agent's thesis is a view, so it never outranks what the
+    # "inferred": an agent's signal is a view, so it never outranks what the
     # user observed or said themselves.
+    conf = signal.get("confidence")
     _conf.attach(ev, _conf.INFERRED,
-                 model=float(signal.get("confidence") or 0.0))
+                 model=None if conf is None else float(conf))
     bus.publish_nowait(ev)
     return _item(meta)
 

@@ -7,8 +7,8 @@ Invariants every module here preserves:
      agent_planner execution, browser_agent, or desktop_agent.
   2. Sparrow decides what leaves, by rule. Agents publish locally and cannot
      address a peer.
-  3. Positions, orders, and P&L are never valid payloads (envelope.py has no
-     fields for them).
+  3. What a signal may carry is declared per kind (envelope.py); unknown
+     kinds, unknown fields, and a kind's forbidden fields never validate.
   4. Signal bytes are never rewritten by an LLM in transit.
   5. Everything fails closed: no rule, no route, no forward.
 

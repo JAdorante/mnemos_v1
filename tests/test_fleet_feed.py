@@ -29,10 +29,10 @@ class FeedBase(FleetTestCase):
     def setUp(self) -> None:
         super().setUp()
         self.client = TestClient(fleet_app())
-        self.a = registry.register_agent("rates", ["macro.rates"], "both")
-        self.b = registry.register_agent("fx", ["macro.rates", "fx.g10"],
+        self.a = registry.register_agent("rates", ["eng.status"], "both")
+        self.b = registry.register_agent("fx", ["eng.status", "eng.infra"],
                                          "both")
-        self.reader = registry.register_agent("eq", ["equities.tech"],
+        self.reader = registry.register_agent("eq", ["sales.leads"],
                                               "subscriber")
 
     def h(self, rec) -> dict:
@@ -89,15 +89,15 @@ class FanOutTests(FeedBase):
 
     def test_registered_topics_bound_the_feed_not_the_query(self) -> None:
         self.publish(self.a)
-        r = self.client.get("/fleet/signals?topic=macro.rates",
+        r = self.client.get("/fleet/signals?topic=eng.status",
                             headers=self.h(self.reader))
         self.assertEqual(r.json()["signals"], [])
-        r = self.client.get("/fleet/stream?topics=macro.rates&max_s=0.3",
+        r = self.client.get("/fleet/stream?topics=eng.status&max_s=0.3",
                             headers=self.h(self.reader))
         self.assertEqual(_sse_items(r.text), [])
 
     def test_publisher_only_agent_cannot_read(self) -> None:
-        pub = registry.register_agent("pub", ["macro.rates"], "publisher")
+        pub = registry.register_agent("pub", ["eng.status"], "publisher")
         self.assertEqual(self.client.get("/fleet/signals",
                                          headers=self.h(pub)).status_code, 403)
         self.assertEqual(self.client.get("/fleet/signals").status_code, 401)
@@ -108,35 +108,35 @@ class FanOutTests(FeedBase):
                             producer="agent:rates")
         feed._deliver({"seq": feed.next_seq(), "provenance": "local",
                        "origin_id": stale["origin_id"], "producer": stale["producer"],
-                       "hops": 0, "topic": "macro.rates", "signal": stale})
+                       "hops": 0, "topic": "eng.status", "signal": stale})
         r = self.client.get("/fleet/signals", headers=self.h(self.b))
         self.assertEqual(r.json()["signals"], [])
 
 
 class CatchUpTests(FeedBase):
     def test_reconnect_catches_up_without_duplicates(self) -> None:
-        first = self.publish(self.a, thesis="one")
+        first = self.publish(self.a, summary="one")
         r = self.client.get("/fleet/signals", headers=self.h(self.b)).json()
         self.assertEqual(len(r["signals"]), 1)
         cursor = r["cursor"]
         self.assertEqual(cursor, first["seq"])
-        self.publish(self.a, thesis="two")
-        self.publish(self.a, thesis="three")
+        self.publish(self.a, summary="two")
+        self.publish(self.a, summary="three")
         again = self.client.get(f"/fleet/signals?since={cursor}",
                                 headers=self.h(self.b)).json()
-        self.assertEqual([s["signal"]["thesis"] for s in again["signals"]],
+        self.assertEqual([s["signal"]["summary"] for s in again["signals"]],
                          ["two", "three"])
         tail = self.client.get(f"/fleet/signals?since={again['cursor']}",
                                headers=self.h(self.b)).json()
         self.assertEqual(tail["signals"], [])
 
     def test_stream_replays_after_last_event_id(self) -> None:
-        one = self.publish(self.a, thesis="one")
-        self.publish(self.a, thesis="two")
+        one = self.publish(self.a, summary="one")
+        self.publish(self.a, summary="two")
         r = self.client.get("/fleet/stream?max_s=0.3",
                             headers={**self.h(self.b),
                                      "Last-Event-ID": str(one["seq"])})
-        self.assertEqual([i["signal"]["thesis"] for i in _sse_items(r.text)],
+        self.assertEqual([i["signal"]["summary"] for i in _sse_items(r.text)],
                          ["two"])
 
     def test_catch_up_past_the_ring_reads_the_store_once(self) -> None:
@@ -151,7 +151,7 @@ class CatchUpTests(FeedBase):
             def events_in_window(self, t0, t1, source=None, limit=100):
                 return [{"id": 1, "meta": meta}] if source == "peer.signal" else []
 
-        self.publish(self.a, thesis="live")
+        self.publish(self.a, summary="live")
         items = feed.catch_up(registry.get_agent("fx"), None, 0,
                               store=FakeStore())
         self.assertEqual([i["origin_id"] for i in items][0], "s1:old")
@@ -159,7 +159,7 @@ class CatchUpTests(FeedBase):
         self.assertEqual(items[0]["peer_node"], "node-b")
         self.assertEqual(len(items), 2)
         self.assertEqual(feed.catch_up(registry.get_agent("fx"), None, 1_000,
-                                       store=FakeStore())[0]["signal"]["thesis"],
+                                       store=FakeStore())[0]["signal"]["summary"],
                          "live")
 
     def test_ring_is_bounded(self) -> None:
@@ -168,7 +168,7 @@ class CatchUpTests(FeedBase):
         try:
             os.environ["QUILL_FLEET_RATE"] = "100"
             for i in range(6):
-                self.publish(self.a, thesis=f"t{i}")
+                self.publish(self.a, summary=f"t{i}")
             self.assertEqual(len(feed._ring), 3)
         finally:
             os.environ.pop("QUILL_FLEET_RING", None)
@@ -179,10 +179,12 @@ class McpSignalsToolTests(FeedBase):
         from app.services import mcp_tools
         self.assertIn("signals", mcp_tools.READ_TOOLS)
         self.publish(self.a)
-        out = mcp_tools.call_tool("signals", {"topic": "macro.rates"})
+        out = mcp_tools.call_tool("signals", {"topic": "eng.status"})
         self.assertTrue(out["ok"])
         res = out["results"][0]
-        self.assertEqual(res["instrument"], "TLT")
+        self.assertEqual(res["subject"], "Atlas migration")
+        self.assertEqual(res["kind"], "status_update")
+        self.assertEqual(res["body"]["status"], "at_risk")
         self.assertEqual(res["provenance"]["kind"], "local")
         self.assertEqual(res["provenance"]["producer"], "agent:rates")
         self.assertIn("disclosure_class", res)

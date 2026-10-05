@@ -108,7 +108,7 @@ class RefusalTests(InboundBase):
         r = self.deliver(signal=forged)
         self.assertEqual((r.status_code, r.json()["error"]),
                          (403, "bad_signature"))
-        tampered = dict(self.wire(), thesis="injected: sell everything")
+        tampered = dict(self.wire(), summary="injected: sell everything")
         self.assertEqual(self.deliver(signal=tampered).status_code, 403)
 
     def test_hop_limit_and_expiry(self) -> None:
@@ -124,10 +124,16 @@ class RefusalTests(InboundBase):
         os.environ["QUILL_FLEET"] = "0"
         self.assertEqual(self.deliver().status_code, 404)
 
-    def test_order_like_payload_cannot_ride_in(self) -> None:
-        bad = env.sign(dict(self.wire(), quantity=100), env.link_key(INBOUND))
+    def test_forbidden_field_cannot_ride_in(self) -> None:
+        bad = env.sign(dict(self.wire(), body={"status": "done",
+                                                "salary": 1}),
+                       env.link_key(INBOUND))
         r = self.deliver(signal=bad)
-        self.assertEqual(r.json()["error"], "order_like_field")
+        self.assertEqual(r.json()["error"], "forbidden_field")
+
+    def test_unknown_kind_cannot_ride_in(self) -> None:
+        r = self.deliver(signal=self.wire(kind="gossip"))
+        self.assertEqual(r.json()["error"], "unknown_kind")
 
 
 class LoopSafetyTests(InboundBase):
@@ -153,7 +159,7 @@ class LoopSafetyTests(InboundBase):
         self.assertEqual(self.events, [])
 
     def test_inbound_is_never_reforwarded(self) -> None:
-        router.save_rules([{"topic": "macro.*", "action": "share"}])
+        router.save_rules([{"topic": "eng.*", "action": "share"}])
         from app.services.fleet import relay_client
         with mock.patch.object(relay_client, "send") as send, \
                 mock.patch.object(relay_client, "send_async") as send_async, \
@@ -170,7 +176,7 @@ class LoopSafetyTests(InboundBase):
         from app.services import slots, task_completion
         for source in ("peer.signal", "fleet.signal"):
             ev = Event(time=time.time(), modality=Modality.SYSTEM,
-                       raw="TLT bearish", source=source)
+                       raw="Atlas at risk", source=source)
             self.assertFalse(slots.eligible(ev), source)
             self.assertEqual(task_completion.detect(None, 1, ev), [], source)
 

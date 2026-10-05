@@ -152,7 +152,7 @@ details.fallback summary{cursor:pointer;color:var(--mut);font-size:.9rem}
 
   <div class="panel" id="fleetPanel" hidden>
     <h2>Fleet signals waiting to share</h2>
-    <p class="muted">Your agents' views on topics you set to <b>offer</b>. Sharing sends
+    <p class="muted">Signals your agents published on topics you set to <b>offer</b>. Sharing sends
     exactly what is shown, byte for byte, to the firm relay — no rewriting. If the signal
     changes, it needs a fresh approval.</p>
     <div id="fleetBox" class="muted">Nothing waiting.</div>
@@ -170,8 +170,7 @@ details.fallback summary{cursor:pointer;color:var(--mut);font-size:.9rem}
     <p class="muted">What each teammate's assistant may ask without interrupting you.
     Apply a <b>pack</b> (teammate / manager / company / vendor), then tweak one topic if needed.
     <b>Ask me</b> = you approve each one (the default). <b>Answer</b> = share automatically.
-    <b>Decline</b> = refuse automatically. Personal topics and positions &amp; orders can
-    never be shared automatically.
+    <b>Decline</b> = refuse automatically. Personal topics can never be shared automatically.
     Chat: <code>ask Name: …</code> or <code>ask #team: …</code>.</p>
     <div id="peersBox" class="muted">No teammates paired yet.</div>
   </div>
@@ -203,7 +202,7 @@ const $=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const post=(u,b)=>fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})}).then(r=>r.json());
 const LABEL={auto:'Answer',offer:'Ask me',deny:'Decline'};
-const TOPIC={availability:'Schedule & availability',work:'Work & projects',contact:'Contact details',personal:'Personal',trading:'Positions & orders',other:'Everything else'};
+const TOPIC={availability:'Schedule & availability',work:'Work & projects',contact:'Contact details',personal:'Personal',other:'Everything else'};
 let CLASSES=[],ACTIONS=[];
 let _peerSig=null;
 
@@ -247,9 +246,10 @@ async function refreshFleet(){
     if(!offers.length){$('fleetBox').textContent='Nothing waiting.';return}
     $('fleetBox').innerHTML=offers.map(o=>{const g=o.signal||{};
       return `<div class="ask">
-      <div class="q"><b>${esc(g.producer)}</b> on <b>${esc(g.instrument)}</b>:
-        ${esc(g.direction)} · ${esc(g.horizon)} · confidence ${Number(g.confidence||0).toFixed(2)}
-        <span class="tag">${esc(g.topic)}</span><br>“${esc(g.thesis)}”
+      <div class="q"><b>${esc(g.producer)}</b> · ${esc(g.kind)}${g.subject?` on <b>${esc(g.subject)}</b>`:''}
+        ${g.confidence!=null?`· confidence ${Number(g.confidence).toFixed(2)}`:''}
+        <span class="tag">${esc(g.topic)}</span><br>“${esc(g.summary)}”
+        ${Object.keys(g.body||{}).length?`<br><span class="muted">${Object.entries(g.body).map(([k,v])=>esc(k)+': '+esc(Array.isArray(v)?v.join(', '):v)).join(' · ')}</span>`:''}
         <span class="muted">#${esc(String(o.sha256||'').slice(0,12))}</span></div>
       <button class="btn btn-sm" onclick="fleetDecide('${esc(o.offer_id)}',true,'${esc(o.sha256)}')">Share</button>
       <button class="btn btn-ghost btn-sm" onclick="fleetDecide('${esc(o.offer_id)}',false,'')">Keep local</button>

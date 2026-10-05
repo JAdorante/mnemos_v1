@@ -3,10 +3,10 @@
 Rules live in data/fleet_routes.json and fail closed:
 
     {"rules": [
-        {"topic": "macro.rates", "producer": "*", "action": "share"},
-        {"topic": "equities.*", "producer": "agent:quant", "action": "offer",
-         "class": "trading"}
-    ]}
+        {"topic": "research.*", "producer": "*", "action": "share"},
+        {"topic": "sales.leads", "producer": "agent:scout", "action": "offer"}
+     ],
+     "never_share": {"topics": ["hr.*", "legal.*"], "kinds": ["incident"]}}
 
   share  signed and sent to the relay immediately (nothing, until opted in)
   offer  queued as an approval packet on the Team page (a rule's default)
@@ -16,38 +16,31 @@ The most specific matching rule wins (exact topic over glob, named producer
 over "*"); on a tie the most restrictive action wins. A missing or malformed
 routes file means no rules, so everything stays local.
 
-Like `personal` on the peer channel, a rule whose topic names positions,
-orders, or P&L can never be `share`: refused when written, and downgraded to
-`offer` when enforced, in case the file was edited by hand.
+`never_share` names topics and kinds that always need a human: a `share` rule
+on such a topic is refused when written, and any match (topic or kind) is
+downgraded to `offer` when enforced, in case the file was edited by hand.
 
 Outbound signals never pass through compose_peer_claims or any LLM: they get
-the envelope's egress validation (internal_ok licences, hop cap) and the
-compliance restricted list, and are forwarded byte-for-byte.
+the envelope's egress validation (registered kind, internal_ok licences, hop
+cap) and the blocked-subjects list, and are forwarded byte-for-byte.
 """
 from __future__ import annotations
 
 import fnmatch
-import json
 import re
 import sys
 import time
 from dataclasses import dataclass
-from pathlib import Path
 
 from app.config import settings
-from app.services.fleet import _files
+from app.services.fleet import _files, kinds
 from app.services.fleet import envelope as env
 
 ACTIONS = ("share", "offer", "local")
-CLASSES = ("trading", "work", "other")
 _RESTRICTIVENESS = {"local": 2, "offer": 1, "share": 0}
 _TOPIC_GLOB_RE = re.compile(r"^[a-z0-9*][a-z0-9._*-]{0,63}$")
 _PRODUCER_RE = re.compile(r"^(\*|agent:[a-z0-9][a-z0-9_-]{0,47})$")
-# Topics about holdings or execution. Signals cannot carry those fields, but a
-# topic named for them is a sign someone is trying to, so it never auto-shares.
-_POSITIONS_RE = re.compile(
-    r"(^|[._-])(positions?|orders?|fills?|pnl|p-and-l|p_and_l|exposures?|"
-    r"holdings?|book|blotter|trades?|executions?)($|[._-])")
+_KIND_RE = re.compile(r"^[a-z][a-z0-9_]{0,47}$")
 
 
 class RouteError(ValueError):
@@ -65,15 +58,39 @@ class Decision:
                 "rule": self.rule}
 
 
-def names_positions(topic: str) -> bool:
-    return bool(_POSITIONS_RE.search((topic or "").lower()))
+# --- never_share ------------------------------------------------------------------
+def _clean_never_share(raw) -> dict:
+    if raw is None:
+        return {"topics": [], "kinds": []}
+    if not isinstance(raw, dict) or set(raw) - {"topics", "kinds"}:
+        raise RouteError('never_share must be {"topics": [...], "kinds": [...]}')
+    topics, kinds_ = [], []
+    for t in raw.get("topics") or []:
+        t = str(t).strip().lower()
+        if not _TOPIC_GLOB_RE.match(t):
+            raise RouteError(f"bad never_share topic {t!r}")
+        topics.append(t)
+    for k in raw.get("kinds") or []:
+        k = str(k).strip().lower()
+        if not _KIND_RE.match(k):
+            raise RouteError(f"bad never_share kind {k!r}")
+        kinds_.append(k)
+    return {"topics": sorted(set(topics)), "kinds": sorted(set(kinds_))}
+
+
+def _globs_overlap(a: str, b: str) -> bool:
+    return fnmatch.fnmatchcase(a, b) or fnmatch.fnmatchcase(b, a)
+
+
+def topic_never_shares(topic: str, never: dict) -> bool:
+    return any(_globs_overlap(topic, p) for p in never["topics"])
 
 
 # --- rules ----------------------------------------------------------------------
-def _clean_rule(raw) -> dict:
+def _clean_rule(raw, never: dict) -> dict:
     if not isinstance(raw, dict):
         raise RouteError("each rule must be an object")
-    extra = set(raw) - {"topic", "producer", "action", "class", "note"}
+    extra = set(raw) - {"topic", "producer", "action", "note"}
     if extra:
         raise RouteError(f"unknown rule field(s): {', '.join(sorted(extra))}")
     topic = str(raw.get("topic") or "").strip().lower()
@@ -85,56 +102,65 @@ def _clean_rule(raw) -> dict:
     action = str(raw.get("action") or "offer").strip().lower()
     if action not in ACTIONS:
         raise RouteError(f"action must be one of {ACTIONS}")
-    cls = str(raw.get("class") or "other").strip().lower()
-    if cls not in CLASSES:
-        raise RouteError(f"class must be one of {CLASSES}")
-    if action == "share" and names_positions(topic):
-        raise RouteError(f"topic {topic!r} names positions or orders; it can "
+    if action == "share" and topic_never_shares(topic, never):
+        raise RouteError(f"topic {topic!r} is on the never_share list; it can "
                          "never be share (use offer or local)")
-    out = {"topic": topic, "producer": producer, "action": action,
-           "class": cls}
+    out = {"topic": topic, "producer": producer, "action": action}
     if raw.get("note"):
         out["note"] = str(raw["note"])[:200]
     return out
 
 
-def load_rules() -> list[dict]:
+def load_policy() -> tuple[list[dict], dict]:
+    """(rules, never_share). Malformed pieces fail toward local / human."""
     raw = _files.load(settings.fleet.routes_path, None)
     if raw is None:
-        return []
-    rules = raw.get("rules") if isinstance(raw, dict) else None
-    if not isinstance(rules, list):
+        return [], _clean_never_share(None)
+    if not isinstance(raw, dict) or not isinstance(raw.get("rules"), list):
         print("[fleet] fleet_routes.json has no 'rules' list; everything "
               "stays local.")
-        return []
+        return [], _clean_never_share(None)
+    try:
+        never = _clean_never_share(raw.get("never_share"))
+    except RouteError as exc:
+        # An unreadable never_share list must not loosen anything: with no
+        # way to know what is sensitive, nothing auto-shares.
+        print(f"[fleet] never_share unreadable ({exc}); share becomes offer.")
+        never = {"topics": ["*"], "kinds": []}
     out = []
-    for r in rules:
+    for r in raw["rules"]:
         try:
-            out.append(_clean_rule(r))
+            out.append(_clean_rule(r, never))
         except RouteError as exc:
-            # A share rule edited in by hand on a positions topic lands here
-            # too; enforcement below downgrades it if it ever slips through.
-            if isinstance(r, dict) and names_positions(str(r.get("topic"))) \
-                    and str(r.get("action")) == "share":
-                fixed = dict(r, action="offer")
+            # A hand-edited share rule on a never_share topic is kept as an
+            # offer; enforcement downgrades it again if it slips through.
+            if isinstance(r, dict) and str(r.get("action")) == "share":
                 try:
-                    out.append(_clean_rule(fixed))
+                    out.append(_clean_rule(dict(r, action="offer"), never))
                     continue
                 except RouteError:
                     pass
             print(f"[fleet] ignoring route rule {r!r} ({exc}).")
-    return out
+    return out, never
 
 
-def save_rules(rules) -> list[dict]:
-    """Validate every rule first; write nothing if any is bad."""
+def load_rules() -> list[dict]:
+    return load_policy()[0]
+
+
+def save_rules(rules, never_share=None) -> dict:
+    """Validate everything first; write nothing if any piece is bad.
+    `never_share=None` keeps the current list."""
     if not isinstance(rules, list):
         raise RouteError("rules must be a list")
-    clean = [_clean_rule(r) for r in rules]
+    never = (load_policy()[1] if never_share is None
+             else _clean_never_share(never_share))
+    clean = [_clean_rule(r, never) for r in rules]
     with _files.lock:
         _files.save(settings.fleet.routes_path,
-                    {"version": 1, "updated_at": time.time(), "rules": clean})
-    return clean
+                    {"version": 2, "updated_at": time.time(), "rules": clean,
+                     "never_share": never})
+    return {"rules": clean, "never_share": never}
 
 
 def _specificity(rule: dict) -> tuple[int, int]:
@@ -155,19 +181,6 @@ def match(topic: str, producer: str, rules: list[dict] | None = None
     return hits[0]
 
 
-# --- restricted list --------------------------------------------------------------
-def restricted() -> frozenset[str]:
-    """Compliance's list. Raises RouteError when missing or malformed so the
-    caller fails closed (nothing leaves) instead of treating it as empty."""
-    p = Path(settings.fleet.restricted_list_path)
-    if not p.is_file():
-        raise RouteError("restricted list missing")
-    try:
-        return env.load_restricted(json.loads(p.read_text(encoding="utf-8")))
-    except Exception as exc:
-        raise RouteError(f"restricted list unreadable ({exc})") from None
-
-
 # --- the decision -------------------------------------------------------------------
 def outbound_copy(signal: dict) -> dict:
     out = dict(signal)
@@ -179,26 +192,30 @@ def outbound_copy(signal: dict) -> dict:
 def egress_check(signal: dict) -> str | None:
     """None when `signal` may leave; otherwise the refusal reason."""
     try:
-        env.validate(outbound_copy(signal), max_hops=settings.fleet.max_hops,
-                     outbound=True)
+        env.validate(outbound_copy(signal), kinds=kinds.registry(),
+                     max_hops=settings.fleet.max_hops, outbound=True)
     except env.SignalError as exc:
         return exc.code
     try:
-        if env.is_restricted(signal.get("instrument", ""), restricted()):
-            return "restricted_instrument"
-    except RouteError as exc:
-        return f"restricted_list_unavailable: {exc}"
+        if kinds.blocklist().blocks(signal.get("subject")):
+            return "blocked_subject"
+    except kinds.BlockedListUnavailable as exc:
+        return f"blocked_list_unavailable: {exc}"
     return None
 
 
 def route(signal: dict) -> Decision:
-    rule = match(signal.get("topic", ""), signal.get("producer", ""))
+    rules, never = load_policy()
+    rule = match(signal.get("topic", ""), signal.get("producer", ""), rules)
     if rule is None:
         return Decision("local", "no matching rule")
     action = rule["action"]
     if action == "local":
         return Decision("local", "rule says local", rule)
-    if action == "share" and names_positions(rule["topic"]):
+    if action == "share" and (
+            topic_never_shares(signal.get("topic", ""), never)
+            or topic_never_shares(rule["topic"], never)
+            or signal.get("kind") in never["kinds"]):
         action = "offer"
     refusal = egress_check(signal)
     if refusal:
@@ -249,8 +266,10 @@ def create_offer(signal: dict, *, rule: dict | None = None) -> dict:
     rec = _recorder()
     if rec is not None:
         packet_id = rec.record_packet(
-            summary=f"Share {signal.get('producer')}'s view on "
-                    f"{signal.get('instrument')} ({signal.get('topic')})",
+            summary=f"Share {signal.get('producer')}'s {signal.get('kind')} "
+                    f"signal on {signal.get('topic')}"
+                    + (f" about {signal['subject']}" if signal.get("subject")
+                       else ""),
             fields={"action": "fleet_share", "signal_sha256": h,
                     "topic": signal.get("topic"),
                     "origin_id": signal.get("origin_id")},
@@ -276,7 +295,8 @@ def get_offer(offer_id: str) -> dict | None:
     return _offers().get(offer_id)
 
 
-EDITABLE = ("thesis", "confidence", "direction", "horizon", "expires_at")
+# The owner may revise the content, not the identity or routing of a signal.
+EDITABLE = ("summary", "confidence", "body", "expires_at")
 
 
 def edit_offer(offer_id: str, changes: dict) -> dict:
@@ -291,7 +311,8 @@ def edit_offer(offer_id: str, changes: dict) -> dict:
         if not row or row.get("status") != "pending":
             raise RouteError("no pending offer with that id")
         sig = dict(row["signal"], **changes)
-        env.validate(sig, max_hops=settings.fleet.max_hops)
+        env.validate(sig, kinds=kinds.registry(),
+                     max_hops=settings.fleet.max_hops)
         row["signal"] = sig
         row["sha256"] = env.digest(sig)
         row["edited_at"] = time.time()
@@ -321,7 +342,7 @@ def decide_offer(offer_id: str, approve: bool, *, sha256: str = "") -> dict:
                             approved_via="button")
     if not approve:
         return row
-    # Re-run every egress gate at send time: the restricted list may have
+    # Re-run every egress gate at send time: the blocked list may have
     # changed, or the signal may have expired while it waited.
     refusal = egress_check(row["signal"])
     if refusal:

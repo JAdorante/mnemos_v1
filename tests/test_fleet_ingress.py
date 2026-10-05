@@ -19,7 +19,7 @@ class IngressBase(FleetTestCase):
         self.client = TestClient(fleet_app())
         self.events = []
         self.bus.subscribe(self.events.append)
-        rec = registry.register_agent("rates", ["macro.rates"], "both")
+        rec = registry.register_agent("rates", ["eng.status"], "both")
         self.token = rec["token"]
         self.auth = {"Authorization": f"Bearer {self.token}"}
 
@@ -38,7 +38,7 @@ class RegistryTests(IngressBase):
                             for a in registry.list_agents()))
 
     def test_reregistering_rotates_the_token(self) -> None:
-        new = registry.register_agent("rates", ["macro.rates"])["token"]
+        new = registry.register_agent("rates", ["eng.status"])["token"]
         self.assertIsNone(registry.authenticate(f"Bearer {self.token}"))
         self.assertIsNotNone(registry.authenticate(f"Bearer {new}"))
 
@@ -110,7 +110,8 @@ class PublishTests(IngressBase):
         self.assertEqual(ev.meta["provenance"], "local")
         self.assertEqual(ev.meta["epistemic"], "inferred")
         self.assertTrue(ev.meta["never_authorizes"])
-        self.assertIn("TLT", ev.raw)
+        self.assertIn("Atlas migration", ev.raw)
+        self.assertIn("status_update", ev.raw)
         self.assertEqual(out["route"]["action"], "local")
 
     def test_timeline_summary_names_the_producer(self) -> None:
@@ -119,8 +120,11 @@ class PublishTests(IngressBase):
         self.assertTrue(self.events[0].summary.startswith("[fleet signal]"))
 
     def test_malformed_signals_get_422_with_a_reason(self) -> None:
-        for body, code in ((agent_body(quantity=500), "order_like_field"),
-                           (agent_body(direction="buy"), "bad_value"),
+        mv = {"kind": "market_view", "subject": "TLT",
+              "body": {"direction": "bearish", "horizon": "weeks"}}
+        for body, code in ((agent_body(**mv, quantity=500), "forbidden_field"),
+                           (agent_body(body={"status": "fine"}), "bad_value"),
+                           (agent_body(kind="gossip"), "unknown_kind"),
                            (agent_body(producer="agent:evil"), "stamped_field"),
                            (agent_body(hops=0), "stamped_field"),
                            (agent_body(sources=[{"name": "x"}]),
@@ -134,12 +138,12 @@ class PublishTests(IngressBase):
         self.assertEqual(self.events, [])
 
     def test_unregistered_topic_is_403(self) -> None:
-        r = self.publish(agent_body(topic="equities.tech"))
+        r = self.publish(agent_body(topic="sales.leads"))
         self.assertEqual(r.status_code, 403)
         self.assertEqual(r.json()["error"], "topic_not_allowed")
 
     def test_subscriber_role_cannot_publish(self) -> None:
-        tok = registry.register_agent("reader", ["macro.rates"],
+        tok = registry.register_agent("reader", ["eng.status"],
                                       "subscriber")["token"]
         r = self.publish(headers={"Authorization": f"Bearer {tok}"})
         self.assertEqual(r.status_code, 403)
@@ -155,7 +159,7 @@ class PublishTests(IngressBase):
 
     def test_rate_limit_is_per_agent(self) -> None:
         os.environ["QUILL_FLEET_RATE"] = "1"
-        other = registry.register_agent("other", ["macro.rates"])["token"]
+        other = registry.register_agent("other", ["eng.status"])["token"]
         self.assertEqual(self.publish().status_code, 200)
         self.assertEqual(self.publish(headers={
             "Authorization": f"Bearer {other}"}).status_code, 200)
@@ -176,6 +180,48 @@ class PublishTests(IngressBase):
     def test_default_ttl_is_applied(self) -> None:
         sig = self.publish().json()["signal"]
         self.assertAlmostEqual(sig["expires_at"] - sig["ts"], 3600, delta=1)
+
+
+class KindsAndBlockedApiTests(IngressBase):
+    def test_kind_defaults_to_note(self) -> None:
+        r = self.publish({"topic": "eng.status", "summary": "Lunch moved."})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["signal"]["kind"], "note")
+        self.assertEqual(r.json()["signal"]["body"], {})
+
+    def test_owner_manages_kinds_and_bad_ones_are_refused(self) -> None:
+        r = self.client.put("/fleet/kinds", json={"kinds": {
+            "incident": {"subject": "optional",
+                         "fields": {"sev": {"enum": [1, 2, 3]}},
+                         "required": ["sev"], "forbidden": ["customer"]}}})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(set(r.json()["kinds"]), {"note", "incident"})
+        self.assertEqual(self.client.put("/fleet/kinds", json={"kinds": {
+            "x": {"fields": {"a": {"type": "object"}}}}}).status_code, 422)
+        tok = registry.register_agent("ops", ["ops.incidents"])["token"]
+        h = {"Authorization": f"Bearer {tok}"}
+        ok = self.client.post("/fleet/publish", headers=h, json={
+            "topic": "ops.incidents", "kind": "incident",
+            "summary": "API latency spike", "body": {"sev": 2}})
+        self.assertEqual(ok.status_code, 200, ok.text)
+        bad = self.client.post("/fleet/publish", headers=h, json={
+            "topic": "ops.incidents", "kind": "incident",
+            "summary": "x", "body": {"sev": 2}, "customer": "ACME"})
+        self.assertEqual(bad.json()["error"], "forbidden_field")
+
+    def test_schema_publishes_every_kind(self) -> None:
+        sch = self.client.get("/fleet/schema").json()
+        self.assertIn("status_update", sch["x-kinds"])
+        self.assertIn("note", sch["x-kinds"])
+
+    def test_owner_manages_the_blocked_list(self) -> None:
+        r = self.client.put("/fleet/blocked",
+                            json={"subjects": ["Orion"], "patterns": ["acme*"]})
+        self.assertEqual(r.status_code, 200, r.text)
+        got = self.client.get("/fleet/blocked").json()
+        self.assertEqual(got["subjects"], ["orion"])
+        self.assertEqual(self.client.put("/fleet/kinds", headers=self.auth,
+                                         json={"kinds": {}}).status_code, 403)
 
 
 class SourcePolicyTests(FleetTestCase):

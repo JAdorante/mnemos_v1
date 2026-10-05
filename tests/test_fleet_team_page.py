@@ -17,18 +17,20 @@ except Exception:  # pragma: no cover
     sync_playwright = None
 
 OFFER = {"offer_id": "of:abc", "sha256": "f" * 64, "status": "pending",
-         "signal": {"producer": "agent:quant", "instrument": "TLT",
-                    "direction": "bearish", "horizon": "weeks",
-                    "confidence": 0.7, "topic": "macro.rates",
-                    "thesis": "<b>not markup</b> term premium"}}
+         "signal": {"producer": "agent:quant", "kind": "status_update",
+                    "subject": "Atlas migration",
+                    "body": {"status": "at_risk", "due": "Oct 16"},
+                    "confidence": 0.7, "topic": "eng.status",
+                    "summary": "<b>not markup</b> term premium"}}
 
 
 class StaticTests(unittest.TestCase):
-    def test_panel_and_trading_label_are_present(self) -> None:
+    def test_panel_is_present_and_domain_neutral(self) -> None:
         self.assertIn('id="fleetPanel"', PEER_PAGE)
         self.assertIn("/fleet/offers/", PEER_PAGE)
         self.assertIn("sha256:sha", PEER_PAGE)
-        self.assertIn("trading:'Positions & orders'", PEER_PAGE)
+        self.assertNotIn("instrument", PEER_PAGE)
+        self.assertNotIn("trading", PEER_PAGE)
 
 
 @unittest.skipIf(sync_playwright is None, "playwright not installed")
@@ -84,6 +86,8 @@ class LiveTeamPageTests(unittest.TestCase):
         errors, decided, html, hidden = self._run(True)
         self.assertEqual(errors, [])
         self.assertIn("agent:quant", html)
+        self.assertIn("status: at_risk", html)
+        self.assertIn("Atlas migration", html)
         self.assertNotIn("<b>not markup</b>", html)
         self.assertEqual(decided, [{"approve": True, "sha256": "f" * 64}])
         self.assertFalse(hidden)
