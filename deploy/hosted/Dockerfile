@@ -56,6 +56,9 @@ COPY run_all.py .
 # imports distill_curate and synthetic_pairs); without them the trainer's
 # pair count reads 0 forever and every run fails into the backoff.
 COPY scripts ./scripts
+# Fleet federation relay (docker-compose: org-relay). Same image, different
+# command; the seats never import it.
+COPY org_coordinator ./org_coordinator
 # The source-policy table ships with the repo but /srv/sparrow/data is a
 # per-user volume that starts empty; without the file the app runs on the
 # restrictive fallback (no people/commitment minting, no contacts). Stage it
