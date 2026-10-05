@@ -71,7 +71,9 @@ def build_payload(claim: dict[str, Any], *, packet_id: str, scope_id: str,
     member = m.get("member_id")
     evidence = []
     for e in claim.get("evidence") or []:
-        item = {"node_id": m.get("node_id"), "event_ref": int(e["event_id"]),
+        # An external read-back (drift) has no Tier 1 event: ref 0.
+        item = {"node_id": m.get("node_id"),
+                "event_ref": int(e.get("event_id") or 0),
                 "quote_hash": e["quote_hash"], "t": e.get("t"),
                 "source": e.get("source"),
                 "status": e.get("status") or "live"}
@@ -105,7 +107,12 @@ def build_payload(claim: dict[str, Any], *, packet_id: str, scope_id: str,
         "proposed_by": member,
         "minted_at": minted_at,
         "expires_at": expires_at,
-        "preview": None,     # connector field diff lands here in Phase 2
+        # Write-back field diffs from the service (Phase 2), filled by _mint
+        # before hashing so the approver signs the exact external change.
+        "preview": None,
+        "resolves_drift": ([str(claim["origin_ref"])[6:]]
+                           if str(claim.get("origin_ref") or "")
+                           .startswith("drift:") else []),
     }
 
 
@@ -117,6 +124,14 @@ def _mint(store, claim: dict[str, Any], *, scope_id: str,
     payload = build_payload(claim, packet_id=pid, scope_id=scope_id,
                             target_ref=target_ref, include_quote=include_quote,
                             minted_at=now, expires_at=expires)
+    try:
+        payload["preview"] = org_client.preview(payload)
+    except org_client.OrgUnavailable:
+        # Minted without a preview; if the scope writes anywhere the service
+        # answers preview_stale at submission and the claim is re-minted.
+        payload["preview"] = None
+    except org_client.OrgRefused as exc:
+        raise PromotionError(exc.code, exc.detail) from exc
     p_hash = canonical_hash(payload)
     node_store.insert_packet(store, {
         "id": pid, "claim_id": claim["id"],
@@ -145,7 +160,8 @@ def propose(store, claim_id: str, *, scope_id: str,
         raise PromotionError("no_scope")
     if include_quote and not quote_allowed(claim):
         raise PromotionError("quote_not_allowed")
-    if not [e for e in claim["evidence"] if e.get("event_id")]:
+    if not [e for e in claim["evidence"] if e.get("event_id")
+            or e.get("source") == "external_readback"]:
         raise PromotionError("no_evidence")
     # Re-proposing replaces the open packet: one live packet per claim.
     for p in node_store.packets_for_claim(store, claim_id):
@@ -313,9 +329,13 @@ def deliver(store, packet_id: str, *, now: float | None = None) -> dict[str, Any
     except org_client.OrgRefused as exc:
         node_store.update_packet(store, packet_id, state="failed",
                                  last_error=f"{exc.code}: {exc.detail}"[:500])
-        node_store.transition(store, claim["id"], "failed",
-                              reason=f"service refused: {exc.code}")
         _audit(store, "system", "packet.refused", packet_id, code=exc.code)
+        if exc.code == "preview_stale":
+            remint(store, claim["id"], reason="write-back changed since "
+                   "approval; review the new preview", now=now)
+        else:
+            node_store.transition(store, claim["id"], "failed",
+                                  reason=f"service refused: {exc.code}")
         raise
     except org_client.OrgUnavailable:
         node_store.update_packet(store, packet_id, state="approved")
@@ -446,3 +466,93 @@ def precision(store) -> dict[str, Any]:
         k["reviewed"] = reviewed
         k["precision"] = round(k["approved"] / reviewed, 3) if reviewed else None
     return out
+
+
+def remint(store, claim_id: str, *, reason: str,
+           now: float | None = None) -> dict[str, Any] | None:
+    """Back to `proposed` with a fresh packet and a fresh preview, for the
+    human to approve again. Used when the signed write-back went stale or
+    the external value moved before the write. Never re-approves itself."""
+    now = float(now if now is not None else time.time())
+    claim = node_store.get_claim(store, claim_id)
+    if claim is None or not claim.get("proposed_scope"):
+        return None
+    for p in node_store.packets_for_claim(store, claim_id):
+        if p["state"] == "open":
+            node_store.update_packet(store, p["id"], state="superseded")
+    try:
+        node_store.transition(store, claim_id, "proposed", reason=reason)
+    except node_store.TransitionError:
+        return None
+    claim = node_store.get_claim(store, claim_id)
+    try:
+        minted = _mint(store, claim, scope_id=claim["proposed_scope"],
+                       target_ref=claim.get("target_hint"),
+                       include_quote=False, now=now)
+    except PromotionError as exc:
+        node_store.update_claim(store, claim_id,
+                                status_reason=f"{reason} ({exc.code})")
+        return None
+    _audit(store, "system", "packet.remint", minted["packet_id"],
+           claim_id=claim_id, payload_hash=minted["payload_hash"])
+    return minted
+
+
+def reconcile(store, *, sync: list[dict], drift: list[dict],
+              now: float | None = None) -> dict[str, int]:
+    """Apply what the heartbeat reported: write-back outcomes for packets this
+    node approved or proposed, and drift on scopes this member approves."""
+    from app.services.records.canonical import quote_hash
+    now = float(now if now is not None else time.time())
+    counts = {"verified": 0, "conflict": 0, "failed": 0, "drift_claims": 0}
+    for item in sync:
+        claim = node_store.get_claim(store, item.get("claim_id") or "")
+        if claim is None:
+            continue
+        state = item.get("state")
+        if state == "conflict" and claim["status"] == "recorded" \
+                and claim.get("record_ref") == item.get("record_version_id"):
+            node_store.update_claim(store, claim["id"], sync_state="conflict")
+            remint(store, claim["id"], now=now,
+                   reason="the external value changed before Sparrow wrote; "
+                          "nothing was overwritten — review and re-approve")
+            counts["conflict"] += 1
+        elif state in ("verified", "failed", "pending", "writing") \
+                and claim.get("record_ref") == item.get("record_version_id"):
+            if claim.get("sync_state") != state:
+                node_store.update_claim(store, claim["id"], sync_state=state)
+                counts[state] = counts.get(state, 0) + 1
+    if drift and org_client.joined():
+        for d in drift:
+            origin = f"drift:{d['id']}"
+            if node_store.claim_by_origin(store, origin):
+                continue
+            text = (f"{d.get('field')} is now {d.get('external')!r} in the "
+                    f"external system; Sparrow wrote {d.get('written')!r}")[:500]
+            cid = node_store.insert_claim(store, {
+                "kind": "status", "subject_ref": d.get("subject_ref") or "",
+                "subject_label": d.get("subject_label"),
+                "predicate": "external_change",
+                "value": {"state": "externally_modified", "text": text},
+                "schema_version": claim_schemas.schema_version("status"),
+                "canonical_hash": canonical_hash({"drift": d["id"]}),
+                "confidence": 1.0,
+                "evidence": [{"event_id": None, "span": text,
+                              "quote_hash": quote_hash(text), "speaker": "",
+                              "t": float(d.get("detected_at") or now),
+                              "source": "external_readback", "status": "live",
+                              "drift_id": d["id"]}],
+                "privacy_class": "internal", "capture_source": "external",
+                "personal_only": False, "proposed_scope": d.get("scope_id"),
+                "status": "draft", "origin_ref": origin,
+                "status_reason": "someone changed a field Sparrow wrote — "
+                                 "approve to acknowledge it; Sparrow will not "
+                                 "overwrite it",
+                "created_at": now})
+            try:
+                propose(store, cid, scope_id=d.get("scope_id"),
+                        actor="drift", now=now)
+            except PromotionError:
+                pass
+            counts["drift_claims"] += 1
+    return counts

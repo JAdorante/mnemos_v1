@@ -224,7 +224,7 @@ class Harness:
                 return tl.handle_ping(peer, payload)
             raise AssertionError(f"unrouted {path}")
 
-    def compose_answer(self, question, *, question_class=None):
+    def compose_answer(self, question, *, question_class=None, peer=None):
         ans = self.current.answer
         if ans:
             return {"text": ans["text"], "claims": ans["claims"], "as_of": 1.0,

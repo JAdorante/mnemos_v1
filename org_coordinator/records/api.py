@@ -106,8 +106,9 @@ def auth_token(body: TokenIn) -> dict:
 
 
 @router.get("/nodes/heartbeat")
-def heartbeat(p: Principal = Depends(principal)) -> dict:
-    return service.heartbeat(get_db(), p)
+def heartbeat(peer_url: str | None = None,
+              p: Principal = Depends(principal)) -> dict:
+    return service.heartbeat(get_db(), p, peer_url=peer_url)
 
 
 @router.post("/orgs/{org_id}/invites")
@@ -207,3 +208,88 @@ def audit_log(from_: float | None = Query(None, alias="from"),
     return {"entries": service.read_audit(get_db(), p, t0=from_, t1=to,
                                           action=action, after_seq=after_seq,
                                           limit=limit)}
+
+
+# ------------------------------------------------------------- phase 2 --
+class PreviewIn(BaseModel):
+    payload: dict[str, Any]
+
+
+class ConnectorIn(BaseModel):
+    kind: str
+    name: str
+    config: dict[str, Any] = {}
+    secret: dict[str, Any] = {}
+
+
+class ConnectorStatusIn(BaseModel):
+    status: str
+
+
+class AnswerableIn(BaseModel):
+    asker_member_id: str
+    question: str
+
+
+@router.post("/packets/preview")
+def preview(body: PreviewIn, p: Principal = Depends(principal)) -> dict:
+    return service.preview_packet(get_db(), p, body.payload)
+
+
+@router.get("/orgs/{org_id}/connectors")
+def connectors(org_id: str, p: Principal = Depends(principal)) -> dict:
+    return {"connectors": service.list_connectors(get_db(), p, org_id)}
+
+
+@router.post("/orgs/{org_id}/connectors")
+def create_connector(org_id: str, body: ConnectorIn,
+                     p: Principal = Depends(principal)) -> dict:
+    return service.create_connector(get_db(), p, org_id, kind=body.kind,
+                                    name=body.name, config=body.config,
+                                    secret=body.secret)
+
+
+@router.patch("/connectors/{connector_id}")
+def connector_status(connector_id: str, body: ConnectorStatusIn,
+                     p: Principal = Depends(principal)) -> dict:
+    return service.set_connector_status(get_db(), p, connector_id, body.status)
+
+
+@router.get("/connectors/{connector_id}/mappings")
+def mappings(connector_id: str, p: Principal = Depends(principal)) -> dict:
+    return {"mappings": service.list_mappings(get_db(), p, connector_id)}
+
+
+@router.post("/connectors/{connector_id}/mappings")
+def add_mapping(connector_id: str, body: dict[str, Any],
+                p: Principal = Depends(principal)) -> dict:
+    return service.add_mapping(get_db(), p, connector_id, body)
+
+
+@router.delete("/mappings/{mapping_id}")
+def delete_mapping(mapping_id: str, p: Principal = Depends(principal)) -> dict:
+    return service.delete_mapping(get_db(), p, mapping_id)
+
+
+@router.get("/sync_jobs")
+def sync_jobs(state: str | None = None, limit: int = 200,
+              p: Principal = Depends(principal)) -> dict:
+    return {"jobs": service.list_sync_jobs(get_db(), p, state=state,
+                                           limit=limit)}
+
+
+@router.get("/alerts")
+def alerts(p: Principal = Depends(principal)) -> dict:
+    return {"alerts": service.list_alerts(get_db(), p)}
+
+
+@router.post("/alerts/{alert_id}/ack")
+def ack_alert(alert_id: str, p: Principal = Depends(principal)) -> dict:
+    return service.ack_alert(get_db(), p, alert_id)
+
+
+@router.post("/records/answerable")
+def answerable(body: AnswerableIn, p: Principal = Depends(principal)) -> dict:
+    return {"records": service.answerable(
+        get_db(), p, asker_member_id=body.asker_member_id,
+        question=body.question)}

@@ -168,10 +168,12 @@ def claim_detail(claim_id: str):
                                                 subject, claim["predicate"])
         except Exception as exc:
             current = {"error": str(exc)}
+    open_packet = next((p for p in reversed(packets) if p["state"] == "open"),
+                       None)
     return {"ok": True, "claim": claim, "packets": packets,
             "current_record": current,
             "quote_allowed": promotion.quote_allowed(claim),
-            "preview": None}
+            "preview": (open_packet or {}).get("payload", {}).get("preview")}
 
 
 @router.post("/claims/{claim_id}/propose")
@@ -294,7 +296,8 @@ def join(body: JoinBody, request: Request):
                              "detail": why}, status_code=403)
     node_id = _node_id()
     try:
-        out = org_client.join(body.service_url, body.invite_code, node_id)
+        out = org_client.join(body.service_url, body.invite_code, node_id,
+                              store=_store())
     except (org_client.OrgRefused, org_client.OrgUnavailable) as exc:
         return _org_err(exc)
     node_store.audit(_store(), out.get("member_id") or "owner", "org.join",
@@ -305,11 +308,12 @@ def join(body: JoinBody, request: Request):
 @router.post("/records/heartbeat")
 def heartbeat():
     try:
-        out = org_client.heartbeat()
+        out = org_client.heartbeat(_store())
     except (org_client.OrgRefused, org_client.OrgUnavailable) as exc:
         return _org_err(exc)
     return {"ok": True, "scopes": len(out.get("scopes") or []),
-            "policy_version": out.get("policy_version")}
+            "policy_version": out.get("policy_version"),
+            "reconciled": out.get("reconciled")}
 
 
 @router.get("/records/precision")

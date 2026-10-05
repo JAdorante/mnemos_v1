@@ -85,9 +85,18 @@ class RecordsEndToEnd(PgTestCase):
         os.environ["QUILL_CAPTURE_TTL_DAYS"] = "30"
         org_client.set_transport(self.transport)
         self.nodes: list[Node] = []
+        # Never let an org team sync reach the real data/peer_teams.json.
+        from app.services import team_layer
+        self._teams_dir = tempfile.mkdtemp(prefix="teams-")
+        self._teams = patch.object(
+            team_layer, "_teams_path",
+            lambda: Path(self._teams_dir) / "peer_teams.json")
+        self._teams.start()
 
     def tearDown(self) -> None:
         org_client.set_transport(None)
+        self._teams.stop()
+        shutil.rmtree(self._teams_dir, ignore_errors=True)
         for n in self.nodes:
             n.close()
         for k, v in self._env.items():

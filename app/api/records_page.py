@@ -37,6 +37,9 @@ h3 { font-size: 13px; color: var(--mut); font-weight: 600; margin: 14px 0 4px; }
 .ev.expired { text-decoration: line-through; }
 .meta { font-size: 12px; color: var(--mut); margin-top: 6px; }
 .cur { font-size: 13px; margin: 6px 0; }
+.diff { font-size: 13px; margin: 2px 0; padding: 4px 8px; border-radius: 6px;
+        background: color-mix(in srgb, var(--mut) 12%, transparent);
+        overflow-wrap: anywhere; font-family: ui-monospace, monospace; }
 .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
 button, select, input, textarea { font: inherit; font-size: 13px; }
 button { padding: 6px 14px; border-radius: 6px; cursor: pointer; }
@@ -103,7 +106,8 @@ function card(c) {
   box.append(el('div', 'value', valueText(c)));
   evidence(c, box);
   const meta = el('div', 'meta', 'confidence ' + (c.confidence || 0).toFixed(2)
-    + ' · ' + c.capture_source + (c.status_reason ? ' · ' + c.status_reason : ''));
+    + ' · ' + c.capture_source + (c.sync_state ? ' · write-back ' + c.sync_state : '')
+    + (c.status_reason ? ' · ' + c.status_reason : ''));
   box.append(meta);
   const msg = el('div', 'msg');
   const row = el('div', 'row');
@@ -133,12 +137,24 @@ function card(c) {
       + ' · packet ' + p.payload_hash.slice(0, 8) + ' · expires '
       + new Date(p.expires_at * 1000).toLocaleDateString()));
     const cur = el('div', 'cur'); box.append(cur);
+    const writes = el('div', 'writes'); box.append(writes);
     fetch('/claims/' + c.id).then(r => r.json()).then(d => {
       const rec = d.current_record;
       if (rec && rec.value_json) cur.textContent = 'Currently recorded: '
         + JSON.stringify(rec.value_json) + ' (v' + rec.version + ')';
       else if (rec && rec.error) cur.textContent = 'Org record unavailable: ' + rec.error;
       else cur.textContent = 'No current record — this creates one.';
+      // The external writes this approval signs (in the packet hash).
+      (d.preview || []).forEach(w => (w.diff || []).forEach(df => {
+        const line = el('div', 'diff');
+        const fmt = v => v === null || v === undefined ? '—'
+          : (typeof v === 'string' ? v : JSON.stringify(v));
+        line.textContent = 'Writes to ' + w.target + ' · ' + df.field + ': '
+          + fmt(df.before) + ' → ' + fmt(df.after);
+        writes.append(line);
+      }));
+      if (d.preview === null && scopes.length)
+        writes.append(el('div', 'meta', 'No write-back preview (org service was unreachable when this was proposed).'));
     });
     const perms = (scope && scope.permissions) || [];
     const canApprove = perms.includes('approve') || perms.includes('admin');

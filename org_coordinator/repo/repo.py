@@ -10,11 +10,14 @@ from typing import Any, Iterable, Iterator
 from sqlalchemy import func, insert, or_, select, text, update
 from sqlalchemy.engine import Connection
 
-from org_coordinator.repo.schema import (audit_anchors, audit_log,
-                                         forwarded_packets, holds, invites,
-                                         members, node_credentials, orgs,
+from org_coordinator.repo.schema import (alerts, audit_anchors, audit_log,
+                                         connector_mappings, connectors,
+                                         drift_notices, forwarded_packets,
+                                         holds, invites, members,
+                                         node_credentials, orgs,
                                          record_evidence, record_versions,
-                                         records, scope_grants, scopes)
+                                         records, scope_grants, scopes,
+                                         sync_jobs, sync_queue)
 
 
 class Conflict(Exception):
@@ -403,6 +406,180 @@ class Repo:
     def active_holds(self) -> list[dict]:
         return _rows(self.conn.execute(select(holds).where(
             holds.c.org_id == self.org_id, holds.c.released_at.is_(None))))
+
+    # ---------------------------------------------------- phase 2: roster --
+    def set_peer_url(self, member_id: str, url: str | None) -> None:
+        self.conn.execute(update(members).where(
+            members.c.org_id == self.org_id, members.c.id == member_id)
+            .values(peer_url=url))
+
+    def index_org(self) -> None:
+        self.conn.execute(text(
+            "INSERT INTO org_index (org_id) VALUES (:o) ON CONFLICT DO NOTHING"),
+            {"o": self.org_id})
+
+    # ------------------------------------------------ phase 2: connectors --
+    def insert_connector(self, **row: Any) -> dict:
+        self.conn.execute(insert(connectors).values(org_id=self.org_id, **row))
+        return self.get_connector(row["id"])
+
+    def get_connector(self, connector_id: str) -> dict | None:
+        return _row(self.conn.execute(select(connectors).where(
+            connectors.c.org_id == self.org_id,
+            connectors.c.id == connector_id)).first())
+
+    def list_connectors(self, *, active_only: bool = False) -> list[dict]:
+        q = select(connectors).where(connectors.c.org_id == self.org_id)
+        if active_only:
+            q = q.where(connectors.c.status == "active")
+        return _rows(self.conn.execute(q.order_by(connectors.c.created_at)))
+
+    def update_connector(self, connector_id: str, **values: Any) -> None:
+        self.conn.execute(update(connectors).where(
+            connectors.c.org_id == self.org_id,
+            connectors.c.id == connector_id).values(**values))
+
+    def insert_mapping(self, **row: Any) -> None:
+        self.conn.execute(text("""
+            INSERT INTO connector_mappings (id, org_id, connector_id, kind,
+                predicate, op, object_type, field, value_path, transform,
+                created_by, created_at)
+            VALUES (:id, :org, :connector_id, :kind, :predicate, :op,
+                    :object_type, :field, :value_path, :transform,
+                    :created_by, :created_at)
+            ON CONFLICT ON CONSTRAINT uq_mapping DO NOTHING
+        """), {"org": self.org_id, **row})
+
+    def delete_mapping(self, mapping_id: str) -> int:
+        r = self.conn.execute(connector_mappings.delete().where(
+            connector_mappings.c.org_id == self.org_id,
+            connector_mappings.c.id == mapping_id))
+        return int(r.rowcount or 0)
+
+    def mappings(self, connector_id: str | None = None) -> list[dict]:
+        q = select(connector_mappings).where(
+            connector_mappings.c.org_id == self.org_id)
+        if connector_id:
+            q = q.where(connector_mappings.c.connector_id == connector_id)
+        return _rows(self.conn.execute(q.order_by(connector_mappings.c.id)))
+
+    # ------------------------------------------------- phase 2: sync jobs --
+    def insert_sync_job(self, **row: Any) -> bool:
+        r = self.conn.execute(text("""
+            INSERT INTO sync_jobs (id, org_id, record_version_id, connector_id,
+                target_ref, plan_json, preview_json, idempotency_key, state,
+                attempts, proposed_by, created_at, updated_at)
+            VALUES (:id, :org, :record_version_id, :connector_id, :target_ref,
+                    CAST(:plan_json AS jsonb), CAST(:preview_json AS jsonb),
+                    :idempotency_key, 'pending', 0, :proposed_by,
+                    :created_at, :created_at)
+            ON CONFLICT ON CONSTRAINT uq_sync_once DO NOTHING
+        """), {"org": self.org_id, **row})
+        return bool(r.rowcount)
+
+    def get_sync_job(self, job_id: str) -> dict | None:
+        return _row(self.conn.execute(select(sync_jobs).where(
+            sync_jobs.c.org_id == self.org_id,
+            sync_jobs.c.id == job_id)).first())
+
+    def update_sync_job(self, job_id: str, **values: Any) -> None:
+        self.conn.execute(update(sync_jobs).where(
+            sync_jobs.c.org_id == self.org_id, sync_jobs.c.id == job_id)
+            .values(**values))
+
+    def list_sync_jobs(self, *, state: str | None = None,
+                       limit: int = 200) -> list[dict]:
+        q = select(sync_jobs).where(sync_jobs.c.org_id == self.org_id)
+        if state:
+            q = q.where(sync_jobs.c.state.in_(state.split(",")))
+        return _rows(self.conn.execute(
+            q.order_by(sync_jobs.c.created_at.desc()).limit(limit)))
+
+    def sync_jobs_for_version(self, version_id: str) -> list[dict]:
+        return _rows(self.conn.execute(select(sync_jobs).where(
+            sync_jobs.c.org_id == self.org_id,
+            sync_jobs.c.record_version_id == version_id)))
+
+    def sync_outcomes_for(self, member_id: str, since: float) -> list[dict]:
+        sj, rv = sync_jobs, record_versions
+        q = (select(sj.c.id, sj.c.state, sj.c.last_error, sj.c.connector_id,
+                    sj.c.target_ref, sj.c.updated_at, rv.c.packet_id,
+                    rv.c.claim_id, rv.c.id.label("record_version_id"))
+             .select_from(sj.join(rv, rv.c.id == sj.c.record_version_id))
+             .where(sj.c.org_id == self.org_id,
+                    or_(sj.c.proposed_by == member_id,
+                        rv.c.approved_by == member_id),
+                    sj.c.updated_at >= since))
+        return _rows(self.conn.execute(q.order_by(sj.c.updated_at)))
+
+    def verified_jobs_since(self, since: float) -> list[dict]:
+        return _rows(self.conn.execute(select(sync_jobs).where(
+            sync_jobs.c.org_id == self.org_id, sync_jobs.c.state == "verified",
+            sync_jobs.c.verified_at >= since)
+            .order_by(sync_jobs.c.verified_at)))
+
+    def queue_put(self, job_id: str, next_at: float) -> None:
+        self.conn.execute(text("""
+            INSERT INTO sync_queue (job_id, org_id, next_at)
+            VALUES (:j, :o, :t)
+            ON CONFLICT (job_id) DO UPDATE SET next_at = EXCLUDED.next_at
+        """), {"j": job_id, "o": self.org_id, "t": next_at})
+
+    def queue_delete(self, job_id: str) -> None:
+        self.conn.execute(sync_queue.delete().where(
+            sync_queue.c.job_id == job_id))
+
+    # ----------------------------------------------- phase 2: drift/alerts --
+    def insert_drift(self, **row: Any) -> bool:
+        r = self.conn.execute(text("""
+            INSERT INTO drift_notices (id, org_id, record_id, sync_job_id,
+                scope_id, field, written_value, external_value, detected_at)
+            VALUES (:id, :org, :record_id, :sync_job_id, :scope_id, :field,
+                    CAST(:written_value AS jsonb), CAST(:external_value AS jsonb),
+                    :detected_at)
+            ON CONFLICT ON CONSTRAINT uq_drift_open DO NOTHING
+        """), {"org": self.org_id, **row})
+        return bool(r.rowcount)
+
+    def open_drift(self, scope_ids: list[str] | None = None) -> list[dict]:
+        q = select(drift_notices).where(
+            drift_notices.c.org_id == self.org_id,
+            drift_notices.c.resolved_at.is_(None))
+        if scope_ids is not None:
+            if not scope_ids:
+                return []
+            q = q.where(drift_notices.c.scope_id.in_(scope_ids))
+        return _rows(self.conn.execute(q.order_by(drift_notices.c.detected_at)))
+
+    def drift_for_job(self, job_id: str) -> list[dict]:
+        return _rows(self.conn.execute(select(drift_notices).where(
+            drift_notices.c.org_id == self.org_id,
+            drift_notices.c.sync_job_id == job_id)))
+
+    def resolve_drift(self, drift_id: str, now: float) -> None:
+        self.conn.execute(update(drift_notices).where(
+            drift_notices.c.org_id == self.org_id,
+            drift_notices.c.id == drift_id).values(resolved_at=now))
+
+    def set_record_drift(self, record_id: str, status: str | None) -> None:
+        self.conn.execute(update(records).where(
+            records.c.org_id == self.org_id, records.c.id == record_id)
+            .values(drift_status=status))
+
+    def insert_alert(self, **row: Any) -> None:
+        self.conn.execute(insert(alerts).values(org_id=self.org_id, **row))
+
+    def list_alerts(self, *, open_only: bool = True) -> list[dict]:
+        q = select(alerts).where(alerts.c.org_id == self.org_id)
+        if open_only:
+            q = q.where(alerts.c.acked_at.is_(None))
+        return _rows(self.conn.execute(q.order_by(alerts.c.created_at)))
+
+    def ack_alert(self, alert_id: str, now: float) -> int:
+        r = self.conn.execute(update(alerts).where(
+            alerts.c.org_id == self.org_id, alerts.c.id == alert_id)
+            .values(acked_at=now))
+        return int(r.rowcount or 0)
 
 
 __all__ = ["Conflict", "Repo"]

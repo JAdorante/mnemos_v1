@@ -26,7 +26,7 @@ def records_tick() -> dict:
     if org_client.joined():
         try:
             out["outbox"] = org_client.drain_outbox()
-            org_client.heartbeat()
+            out["reconciled"] = org_client.heartbeat().get("reconciled")
             out["heartbeat"] = True
         except Exception as exc:
             out["org_error"] = str(exc)

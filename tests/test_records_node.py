@@ -34,6 +34,7 @@ class FakeOrg:
         self.refuse_code = "approver_lacks_grant"
         self.submitted: list[dict] = []
         self.versions: dict[str, str] = {}
+        self.preview: list[dict] = []
 
     def __call__(self, method, path, body, headers):
         if self.mode == "down":
@@ -54,6 +55,8 @@ class FakeOrg:
             return 200, {"record_id": "rec_1",
                          "record_version_id": self.versions[h],
                          "version": 1, "idempotent": False}
+        if path == "/packets/preview":
+            return 200, {"preview": list(self.preview)}
         if path.startswith("/records"):
             return 200, {"records": []}
         if path == "/evidence/expired":
@@ -77,9 +80,16 @@ class RecordsNodeBase(unittest.TestCase):
         os.environ["QUILL_CLAIM_PROPOSE_MIN_CONF"] = "2"   # no auto-propose
         self.org = FakeOrg()
         org_client.set_transport(self.org)
+        # team_layer reads its own module settings: pin its registry here so
+        # an org team sync can never touch the real data/peer_teams.json.
+        from app.services import team_layer
+        self._teams = patch.object(team_layer, "_teams_path",
+                                   lambda: Path(self.tmp) / "peer_teams.json")
+        self._teams.start()
 
     def tearDown(self) -> None:
         org_client.set_transport(None)
+        self._teams.stop()
         self._settings.stop()
         for k, v in self._env.items():
             if v is None:

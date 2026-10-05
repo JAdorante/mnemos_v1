@@ -25,9 +25,12 @@ _TRANSITIONS = {
                  "draft"},
     "conflicting": {"proposed", "rejected", "discarded", "expired"},
     "edited": {"approved", "rejected", "expired"},
-    "approved": {"recorded", "failed"},
-    "failed": {"approved"},
-    "recorded": set(),
+    # approved/recorded -> proposed: the write-back preview went stale or the
+    # external value moved before the write; the claim is re-minted with a
+    # fresh preview for re-approval (Phase 2). Nothing else reopens a record.
+    "approved": {"recorded", "failed", "proposed"},
+    "failed": {"approved", "proposed"},
+    "recorded": {"proposed"},
     "rejected": set(),
     "discarded": set(),
     "expired": set(),
@@ -72,8 +75,8 @@ def insert_claim(store, claim: dict[str, Any]) -> str:
                  value_json, schema_version, canonical_hash, confidence, evidence_json,
                  privacy_class, capture_source, consent_mode, personal_only,
                  proposed_scope, target_hint, status, status_reason,
-                 created_at, updated_at, expires_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 created_at, updated_at, expires_at, origin_ref)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (cid, claim.get("candidate_id"), claim["kind"],
              claim["subject_ref"], claim.get("subject_label"),
@@ -86,7 +89,7 @@ def insert_claim(store, claim: dict[str, Any]) -> str:
              claim.get("consent_mode"), int(bool(claim.get("personal_only"))),
              claim.get("proposed_scope"), claim.get("target_hint"),
              claim.get("status") or "draft", claim.get("status_reason"),
-             now, now, claim.get("expires_at")))
+             now, now, claim.get("expires_at"), claim.get("origin_ref")))
         store._conn.commit()
     return cid
 
@@ -336,3 +339,11 @@ def outbox_retry(store, row_id: int, error: str, *, delay_s: float) -> None:
             "next_at = ? WHERE id = ?",
             (error[:500], time.time() + delay_s, int(row_id)))
         store._conn.commit()
+
+
+def claim_by_origin(store, origin_ref: str) -> dict | None:
+    with store._lock:
+        r = store._conn.execute(
+            "SELECT * FROM claims WHERE origin_ref = ? ORDER BY created_at DESC "
+            "LIMIT 1", (origin_ref,)).fetchone()
+    return _claim_row(r) if r else None

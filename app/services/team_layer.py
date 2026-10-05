@@ -251,6 +251,9 @@ def list_teams() -> list[dict]:
             "peer_ids": list(rec.get("peer_ids") or []),
             "created_at": rec.get("created_at"),
             "policy": _policy_of(rec),
+            "managed_by": rec.get("managed_by"),
+            "scope_id": rec.get("scope_id"),
+            "unpaired": list(rec.get("unpaired") or []),
         })
     return out
 
@@ -306,7 +309,15 @@ def get_team(slug: str) -> dict | None:
     return {"slug": key, "name": rec.get("name") or key,
             "peer_ids": list(rec.get("peer_ids") or []),
             "created_at": rec.get("created_at"),
-            "policy": _policy_of(rec)}
+            "policy": _policy_of(rec),
+            "managed_by": rec.get("managed_by"),
+            "scope_id": rec.get("scope_id"),
+            "unpaired": list(rec.get("unpaired") or [])}
+
+
+_ORG_MANAGED = {"ok": False,
+                "error": "this group mirrors an org team; membership is "
+                         "managed by the org's scope grants"}
 
 
 def upsert_team(name: str, peer_ids: list[str] | None = None,
@@ -321,6 +332,8 @@ def upsert_team(name: str, peer_ids: list[str] | None = None,
     with _lock:
         reg = _load(_teams_path(), {})
         prev = reg.get(key) or {}
+        if prev.get("managed_by") == "org":
+            return dict(_ORG_MANAGED)
         rec = {
             "name": display,
             "peer_ids": ids or list(prev.get("peer_ids") or []),
@@ -339,13 +352,18 @@ def set_team_members(slug: str, peer_ids: list[str]) -> dict:
     t = get_team(slug)
     if t is None:
         return {"ok": False, "error": "unknown team"}
+    if t.get("managed_by") == "org":
+        return dict(_ORG_MANAGED)
     return upsert_team(t["name"], peer_ids=peer_ids, slug=t["slug"])
 
 
 def delete_team(slug: str) -> dict:
-    key = (get_team(slug) or {}).get("slug")
+    t = get_team(slug) or {}
+    key = t.get("slug")
     if not key:
         return {"ok": False, "error": "unknown team"}
+    if t.get("managed_by") == "org":
+        return dict(_ORG_MANAGED)
     with _lock:
         reg = _load(_teams_path(), {})
         if key not in reg:
@@ -353,6 +371,67 @@ def delete_team(slug: str) -> dict:
         del reg[key]
         _save(_teams_path(), reg)
     return {"ok": True}
+
+
+def _norm_url(url: str | None) -> str:
+    return (url or "").strip().rstrip("/").lower()
+
+
+def sync_org_teams(roster: list[dict], *, my_member_id: str | None = None,
+                   peers: list[dict] | None = None) -> dict:
+    """Mirror the org's team scopes as read-only groups (records layer).
+
+    The org is the authority for org teams; user-made groups are never
+    touched. A roster member becomes a group member when one of OUR paired
+    peers answers on the URL their node reported at heartbeat — the peer
+    channel's disclosure gate keeps working as before, it only needs to know
+    who is in a group. Members we have not paired with are listed as
+    `unpaired`, not silently dropped. Groups for scopes no longer in the
+    roster are removed; a user-made group is never overwritten by one."""
+    if peers is None:
+        from app.services import peer_channel
+        peers = peer_channel.peers()
+    by_url: dict[str, str] = {}
+    for p in peers or []:
+        for u in (p.get("base_url"), p.get("internal_url")):
+            if _norm_url(u):
+                by_url[_norm_url(u)] = p.get("peer_id") or ""
+    seen: set[str] = set()
+    changed = 0
+    with _lock:
+        reg = _load(_teams_path(), {})
+        for team in roster or []:
+            slug = _slugify(f"org-{team.get('name') or team.get('scope_id')}")
+            if not _SLUG_RE.match(slug):
+                continue
+            prev = reg.get(slug) or {}
+            if prev and prev.get("managed_by") != "org":
+                continue              # a user's own group keeps its name
+            ids, unpaired = [], []
+            for m in team.get("members") or []:
+                if m.get("member_id") == my_member_id:
+                    continue
+                pid = by_url.get(_norm_url(m.get("peer_url")))
+                if pid:
+                    ids.append(pid)
+                else:
+                    unpaired.append(m.get("display_name") or m.get("member_id"))
+            rec = {"name": (team.get("name") or slug)[:60],
+                   "peer_ids": sorted(set(ids)), "unpaired": sorted(unpaired),
+                   "created_at": prev.get("created_at") or time.time(),
+                   "policy": _policy_of(prev), "managed_by": "org",
+                   "scope_id": team.get("scope_id")}
+            if rec != prev:
+                reg[slug] = rec
+                changed += 1
+            seen.add(slug)
+        for slug in [k for k, v in reg.items()
+                     if v.get("managed_by") == "org" and k not in seen]:
+            del reg[slug]
+            changed += 1
+        if changed:
+            _save(_teams_path(), reg)
+    return {"ok": True, "groups": sorted(seen), "changed": changed}
 
 
 def parse_group_ask(text: str) -> dict | None:

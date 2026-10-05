@@ -1540,7 +1540,48 @@ def _format_peer_answer_chat(name: str, answer: str) -> str:
 
 
 # --- answering side (inbound asks) ------------------------------------------
-def compose_answer(question: str, *, question_class: str | None = None) -> dict:
+def _answer_from_records(peer: dict | None, question: str) -> dict | None:
+    """Records layer rule: when a team record the ASKER may read answers the
+    question, answer from that record and cite it, not from personal memory.
+    Same answer for every teammate, and less of this node's memory crosses.
+    The Org Record Service decides readability for both sides."""
+    if not peer:
+        return None
+    try:
+        from app.services.records import org_client as rec_client
+        if not rec_client.joined():
+            return None
+        asker = rec_client.member_for_peer(peer)
+        if not asker:
+            return None
+        hits = rec_client.answerable(asker, question)
+    except Exception as exc:
+        print(f"[peer] record lookup skipped ({exc}).")
+        return None
+    if not hits:
+        return None
+    claims = []
+    for h in hits:
+        v = h.get("value") or {}
+        body = (v.get("text") or v.get("state") or v.get("value")
+                or json.dumps(v, sort_keys=True))
+        when = time.strftime("%b %d, %Y", time.localtime(
+            float(h.get("valid_from") or h.get("recorded_at") or 0)))
+        claims.append({
+            "text": f"{h.get('subject_label') or h.get('subject_ref')} — "
+                    f"{h.get('predicate')}: {body}",
+            "record_id": h.get("record_id"), "record_version": h.get("version"),
+            "speaker": "team record", "when": when, "source": "record"})
+    newest = max(float(h.get("recorded_at") or 0) for h in hits)
+    prose = "From the team record:\n" + "\n".join(
+        f"- {c['text']} (record {c['record_id']} v{c['record_version']}, "
+        f"{c['when']})" for c in claims)
+    return {"text": prose, "claims": claims, "as_of": newest,
+            "near_miss": False, "redacted": [], "source": "records"}
+
+
+def compose_answer(question: str, *, question_class: str | None = None,
+                   peer: dict | None = None) -> dict:
     """Answer a teammate's question from OUR memory for peer egress.
 
     Phase 1: this is `compose_peer_claims` rendered for the wire. The answer
@@ -1552,6 +1593,9 @@ def compose_answer(question: str, *, question_class: str | None = None) -> dict:
     why identity blocks and assistant hedges kept crossing and had to be
     chased with substring filters. Untyped text is no longer a candidate.
     """
+    from_records = _answer_from_records(peer, question)
+    if from_records:
+        return from_records
     out = compose_peer_claims(question, question_class=question_class)
     if out["claims"]:
         return {"text": out["prose"], "claims": out["claims"],
@@ -1810,7 +1854,7 @@ def handle_ask(peer: dict, payload: dict) -> dict:
                 "topic": topic, "answer": "accepted notify",
                 "redacted": []}
     if action == "auto":
-        composed = compose_answer(question, question_class=topic)
+        composed = compose_answer(question, question_class=topic, peer=peer)
         if not composed.get("claims"):
             # A miss is not a denial (spec F4.1): typed null_result, and the
             # receiving human gets the four options — nothing runs on the
@@ -2139,7 +2183,7 @@ def decide_ask(local_id: str, approve: bool) -> dict:
             local_id, delivered, reply, outbound, "accepted")
 
     composed = compose_answer(item["question"],
-                              question_class=item.get("topic"))
+                              question_class=item.get("topic"), peer=peer_rec)
     if not composed.get("claims"):
         offered = _offer_null_options(
             peer_rec | {"peer_id": item.get("peer_id", "")},
@@ -2720,6 +2764,16 @@ def _sanitize_claims(raw) -> list | None:
         ts = _coerce_as_of(item.get("ts"))
         if ts is not None:
             claim["ts"] = ts
+        # A team-record citation (records layer) names an org-wide record,
+        # not a row in their database, so it keeps its name.
+        rid = str(item.get("record_id") or "").strip()[:64]
+        if rid:
+            claim["record_id"] = rid
+            claim["source"] = "record"
+            try:
+                claim["record_version"] = int(item.get("record_version"))
+            except (TypeError, ValueError):
+                pass
         out.append(claim)
     return out
 

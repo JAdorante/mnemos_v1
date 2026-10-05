@@ -142,7 +142,7 @@ def _access_token() -> str:
 
 
 def join(service_url: str, invite_code: str, node_id: str, *,
-         label: str = "") -> dict[str, Any]:
+         label: str = "", store=None) -> dict[str, Any]:
     out = _call("POST", "/join", {"invite_code": invite_code,
                                   "node_id": node_id, "label": label},
                 auth=False, base_url=service_url)
@@ -151,23 +151,76 @@ def join(service_url: str, invite_code: str, node_id: str, *,
            "credential": out["credential"], "joined_at": time.time(),
            "scopes": [], "policy": {}})
     _access.clear()
-    heartbeat()
+    heartbeat(store)
     return {k: v for k, v in out.items() if k != "credential"}
 
 
-def heartbeat() -> dict[str, Any]:
-    """Refresh policy + scope/grant caches. Missed pushes reconcile here."""
-    out = _call("GET", "/nodes/heartbeat")
+def _my_peer_url() -> str:
+    try:
+        from app.services import peer_channel
+        return peer_channel.my_base_url()
+    except Exception:
+        return ""
+
+
+def heartbeat(store=None) -> dict[str, Any]:
+    """Refresh policy + scope/grant caches, then reconcile what the service
+    reports back: write-back outcomes for my packets, drift on scopes I
+    approve, and the org team roster. Missed pushes reconcile here."""
+    from urllib.parse import urlencode
+    out = _call("GET", "/nodes/heartbeat?" + urlencode(
+        {"peer_url": _my_peer_url()}))
     m = membership()
     m.update(scopes=out.get("scopes") or [], policy=out.get("policy") or {},
-             heartbeat_at=time.time(), org_id=out.get("org_id", m.get("org_id")))
+             heartbeat_at=time.time(), org_id=out.get("org_id", m.get("org_id")),
+             roster=out.get("roster") or [])
     _save(m)
     try:
         from app.services.records import retention
         retention.save_org_policy(out.get("policy") or {})
     except Exception as exc:
         print(f"[records.org_client] policy save skipped ({exc}).")
+    try:
+        from app.services import team_layer
+        team_layer.sync_org_teams(out.get("roster") or [],
+                                  my_member_id=m.get("member_id"))
+    except Exception as exc:
+        print(f"[records.org_client] org team sync skipped ({exc}).")
+    if out.get("sync") or out.get("drift"):
+        try:
+            from app.services.records import promotion
+            if store is None:
+                from app.storage import get_store
+                store = get_store()
+            out["reconciled"] = promotion.reconcile(
+                store, sync=out.get("sync") or [], drift=out.get("drift") or [])
+        except Exception as exc:
+            print(f"[records.org_client] reconcile skipped ({exc}).")
     return out
+
+
+def preview(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    return list(_call("POST", "/packets/preview",
+                      {"payload": payload}).get("preview") or [])
+
+
+def member_for_peer(peer: dict[str, Any]) -> str | None:
+    """The org member behind a paired peer: the roster entry whose node
+    reported one of the peer's URLs at heartbeat."""
+    urls = {(peer.get(k) or "").strip().rstrip("/").lower()
+            for k in ("base_url", "internal_url")} - {""}
+    for team in membership().get("roster") or []:
+        for mem in team.get("members") or []:
+            u = (mem.get("peer_url") or "").strip().rstrip("/").lower()
+            if u and u in urls:
+                return mem.get("member_id")
+    return None
+
+
+def answerable(asker_member_id: str, question: str) -> list[dict[str, Any]]:
+    return list(_call("POST", "/records/answerable",
+                      {"asker_member_id": asker_member_id,
+                       "question": question}).get("records") or [])
 
 
 def submit_packet(body: dict[str, Any]) -> dict[str, Any]:

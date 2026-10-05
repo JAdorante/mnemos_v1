@@ -42,6 +42,7 @@ members = Table(
     Column("status", Text, nullable=False),          # invited | active | departed
     Column("joined_at", Double),
     Column("left_at", Double),
+    Column("peer_url", Text),
     UniqueConstraint("org_id", "email", name="uq_members_org_email"),
 )
 
@@ -104,6 +105,7 @@ records = Table(
     Column("kind", Text, nullable=False),
     Column("current_version", Integer, nullable=False),
     Column("created_at", Double, nullable=False),
+    Column("drift_status", Text),
     UniqueConstraint("org_id", "scope_id", "subject_ref", "predicate",
                      "record_key", name="uq_records_identity"),
 )
@@ -200,4 +202,94 @@ audit_anchors = Table(
     Column("location", Text, nullable=False),
     Column("anchored_at", Double, nullable=False),
     PrimaryKeyConstraint("org_id", "day"),
+)
+
+
+# --- Phase 2: write-back ----------------------------------------------------
+connectors = Table(
+    "connectors", metadata,
+    Column("id", Text, primary_key=True),
+    Column("org_id", Text, ForeignKey("orgs.id"), nullable=False),
+    Column("kind", Text, nullable=False),
+    Column("name", Text, nullable=False),
+    Column("config_json", JSONB, nullable=False),
+    Column("secret_enc", Text),
+    Column("status", Text, nullable=False),
+    Column("created_by", Text, nullable=False),
+    Column("created_at", Double, nullable=False),
+)
+
+connector_mappings = Table(
+    "connector_mappings", metadata,
+    Column("id", Text, primary_key=True),
+    Column("org_id", Text, ForeignKey("orgs.id"), nullable=False),
+    Column("connector_id", Text, ForeignKey("connectors.id"), nullable=False),
+    Column("kind", Text, nullable=False),
+    Column("predicate", Text, nullable=False),
+    Column("op", Text, nullable=False),
+    Column("object_type", Text),
+    Column("field", Text),
+    Column("value_path", Text, nullable=False),
+    Column("transform", Text, nullable=False),
+    Column("created_by", Text, nullable=False),
+    Column("created_at", Double, nullable=False),
+)
+
+sync_jobs = Table(
+    "sync_jobs", metadata,
+    Column("id", Text, primary_key=True),
+    Column("org_id", Text, ForeignKey("orgs.id"), nullable=False),
+    Column("record_version_id", Text, ForeignKey("record_versions.id"),
+           nullable=False),
+    Column("connector_id", Text, ForeignKey("connectors.id"), nullable=False),
+    Column("target_ref", Text, nullable=False),
+    Column("plan_json", JSONB, nullable=False),
+    Column("preview_json", JSONB),
+    Column("idempotency_key", Text, nullable=False),
+    Column("state", Text, nullable=False),
+    Column("attempts", Integer, nullable=False),
+    Column("last_error", Text),
+    Column("external_version", Text),
+    Column("written_json", JSONB),
+    Column("proposed_by", Text),
+    Column("created_at", Double, nullable=False),
+    Column("updated_at", Double, nullable=False),
+    Column("verified_at", Double),
+)
+
+sync_queue = Table(
+    "sync_queue", metadata,
+    Column("job_id", Text, primary_key=True),
+    Column("org_id", Text, nullable=False),
+    Column("next_at", Double, nullable=False),
+)
+
+org_index = Table(
+    "org_index", metadata,
+    Column("org_id", Text, primary_key=True),
+)
+
+drift_notices = Table(
+    "drift_notices", metadata,
+    Column("id", Text, primary_key=True),
+    Column("org_id", Text, ForeignKey("orgs.id"), nullable=False),
+    Column("record_id", Text, ForeignKey("records.id"), nullable=False),
+    Column("sync_job_id", Text, ForeignKey("sync_jobs.id"), nullable=False),
+    Column("scope_id", Text, ForeignKey("scopes.id"), nullable=False),
+    Column("field", Text, nullable=False),
+    Column("written_value", JSONB),
+    Column("external_value", JSONB),
+    Column("detected_at", Double, nullable=False),
+    Column("resolved_at", Double),
+)
+
+alerts = Table(
+    "alerts", metadata,
+    Column("id", Text, primary_key=True),
+    Column("org_id", Text, ForeignKey("orgs.id"), nullable=False),
+    Column("kind", Text, nullable=False),
+    Column("object_ref", Text, nullable=False),
+    Column("message", Text, nullable=False),
+    Column("created_at", Double, nullable=False),
+    Column("acked_at", Double),
 )

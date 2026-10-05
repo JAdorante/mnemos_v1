@@ -66,5 +66,30 @@ class Database:
                          {"o": org_id})
             yield Repo(conn, org_id)
 
+    @contextmanager
+    def claim_sync_job(self, now: float) -> Iterator[tuple["Repo", str] | None]:
+        """One transaction holding one due sync job's queue row
+        (FOR UPDATE SKIP LOCKED, so concurrent workers never share a job),
+        already bound to that job's org. Yields None when nothing is due."""
+        from org_coordinator.repo.repo import Repo
+        with self.engine.begin() as conn:
+            conn.execute(text(f"SET LOCAL ROLE {APP_ROLE}"))
+            row = conn.execute(text(
+                "SELECT job_id, org_id FROM sync_queue WHERE next_at <= :now "
+                "ORDER BY next_at FOR UPDATE SKIP LOCKED LIMIT 1"),
+                {"now": now}).first()
+            if row is None:
+                yield None
+                return
+            conn.execute(text("SELECT set_config('app.org_id', :o, true)"),
+                         {"o": row.org_id})
+            yield Repo(conn, row.org_id), row.job_id
+
+    def org_ids(self) -> list[str]:
+        with self.engine.begin() as conn:
+            conn.execute(text(f"SET LOCAL ROLE {APP_ROLE}"))
+            return [r.org_id for r in conn.execute(
+                text("SELECT org_id FROM org_index ORDER BY org_id"))]
+
     def dispose(self) -> None:
         self.engine.dispose()

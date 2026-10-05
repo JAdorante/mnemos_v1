@@ -3,8 +3,8 @@
 Sparrow produces an organization's records; it does not become the place
 that holds them. Capture stays private and expiring on each node, facts
 extracted from it become **claims**, and only claims a human approves become
-**records** in the Org Record Service. Writing records back to CRM, Drive
-and Notion is Phase 2.
+**records** in the Org Record Service. Phase 2 writes records back to
+HubSpot, Google Drive and webhooks; Notion is Phase 3.
 
 | Tier | What | Where | Who sees it |
 |---|---|---|---|
@@ -78,6 +78,7 @@ Operator CLI: `python -m org_coordinator.records migrate | bootstrap | anchor | 
 | `QUILL_ORG_DATABASE_URL` | unset | Service only. Mounts the records API. |
 | `QUILL_ORG_JWT_SECRET` | unset | Service only. At least 32 characters. |
 | `QUILL_ORG_AUDIT_ANCHOR_DIR` | unset | Service only. Where daily anchors go. |
+| `QUILL_ORG_SECRETS_KEY` | unset | Service only. Base64 of 32 bytes; seals connector tokens. |
 
 ## Tests
 
@@ -90,9 +91,36 @@ Operator CLI: `python -m org_coordinator.records migrate | bootstrap | anchor | 
 - **The packet carries `expires_at` inside the payload**, so the service enforces the TTL the human saw and the hash covers it.
 - **Teams.** Scopes are authoritative for org teams. `team_layer` keeps personal peer groups unchanged; the scope-to-group sync lands in Phase 2.
 
+## Phase 2: write-back (`org_coordinator/connectors/`, `records/sync.py`)
+
+Connectors run in the service, never on a node. The external system stays the system of record: Sparrow writes what a human approved, reads it back to prove it landed, and later reads it again to notice when someone changed it.
+
+| Connector | Ops | Target | Idempotency |
+|---|---|---|---|
+| HubSpot (private-app token) | `set_property`, `create_note`, `create_task` | `hubspot:deal/<id>` (also contact, company) | Values are strings on both sides. A field already holding the value is skipped. A created note or task carries `sparrow-<packet id>` and is searched for before any create. |
+| Google Drive (OAuth refresh token) | `append_entry` to a running-log doc | `gdrive:doc/<id>` | The entry's marker is checked before appending. |
+| Webhook (signing secret, https only) | `post` a signed record envelope | the connector's URL | `Idempotency-Key`, deduped by the receiver. `X-Sparrow-Signature: sha256=`. |
+
+- **Mapping** (`connector_mappings`): `(kind, predicate)` maps to an op plus a field, a value path, and one transform from a closed list (`identity`, `string`, `lower`, `upper`, `number`, `date_ms`, `enum:{…}`). `field: "$field"` lets a `field_update` claim name its own field. Mapping is deterministic, with no LLM anywhere.
+- **The preview is inside the hash.** At propose time the node calls `POST /packets/preview` and embeds the result (plan plus `before`→`after` diff) in the payload before hashing. At submit, the service recomputes every plan without network calls. If the signed preview no longer matches, it refuses with `preview_stale`, and the node re-mints for re-approval. A packet minted while the service was down has `preview: null` and goes down the same path.
+- **Sync worker** (`python -m org_coordinator.records worker`, a compose service of its own): it claims due jobs from `sync_queue` with `FOR UPDATE SKIP LOCKED`, so workers scale without sharing a job. Each job goes write, then read back, then `verified`.
+  - A field that moved since the preview becomes `conflict`. Nothing is written, and the heartbeat sends the claim back to `proposed` with a fresh preview.
+  - Transient errors back off at 1m, 5m, 30m, 2h, 6h and 14h (6 attempts, about 22.6h), then the job is `failed` and an admin alert is raised.
+  - Permanent errors fail at once, also with an alert.
+- **Drift** (nightly, inside the worker): reads back the latest verified write per (target, field) from the last 90 days. An external change Sparrow didn't make opens a `drift_notice`, marks the record `externally_modified`, and reaches the scope's approvers on heartbeat. Their node turns it into a `status` claim (`predicate external_change`, `origin_ref drift:<id>`) whose payload carries `resolves_drift`. Approving it acknowledges the change. Sparrow never writes over it.
+- **Secrets:** AES-256-GCM under `QUILL_ORG_SECRETS_KEY`, bound to org and connector id as associated data, never returned by the API.
+- **Peers cite records:** when a paired peer asks, the responder's node maps the peer to an org member through the roster (the peer URL each node reports at heartbeat). It then asks `POST /records/answerable` for records both sides may read, and answers from those, with citations, without consulting personal memory. A peer that matches nobody gets the memory path as before. On the asking side, `record_id` survives sanitizing because it is org-wide, not a remote row id.
+- **Org teams in `team_layer`:** on heartbeat, team scopes become read-only groups (`org-<name>`, `managed_by: org`) whose members are paired peers matched by URL. Unmatched members are listed as `unpaired`. Local edits are refused, user-made groups are never touched, and groups for scopes that disappear are removed.
+
+Tests: `test_records_connectors` (contract suites against fakes; the HubSpot suite also runs against a real sandbox when `QUILL_HUBSPOT_SANDBOX_TOKEN` and `QUILL_HUBSPOT_SANDBOX_DEAL` are set), `test_records_sync` and `test_records_e2e_writeback` (Postgres). The fakes are in `tests/connector_fakes.py`.
+
+Known limits:
+- A drift notice is unique per (job, field). After it is acknowledged, a second external edit of the same field isn't flagged until Sparrow writes that field again.
+- `decision`, `status` and `field_update` claims still aren't extracted, so most write-back today comes from commitments (`create_note` / `create_task`).
+- The Phase 2 gate's synthetic-audio and real-sandbox legs need the sandbox credentials.
+
 ## Not in Phase 1
 
-- Write-back connectors.
 - `decision`, `status` and `field_update` extraction. The schemas exist, but the extractor prompt doesn't ask for these kinds yet.
 - Hold stamping on new captures, and hold export.
 - Consent modes.

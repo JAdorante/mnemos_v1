@@ -6,3 +6,4 @@ pydantic>=2.7
 sqlalchemy>=2.0,<3
 alembic>=1.13
 psycopg[binary]>=3.1
+cryptography>=42            # AES-GCM for connector secrets at rest

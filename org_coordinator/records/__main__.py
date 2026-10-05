@@ -4,6 +4,8 @@
     python -m org_coordinator.records bootstrap --name "Acme" --admin-email a@acme.co
     python -m org_coordinator.records anchor [--org ORG_ID]
     python -m org_coordinator.records verify --org ORG_ID
+    python -m org_coordinator.records worker [--once]     # write-back sync
+    python -m org_coordinator.records drift [--org ORG_ID] # nightly sweep
 
 Reads QUILL_ORG_DATABASE_URL. `bootstrap` prints the admin's invite code
 once; the admin's Sparrow node redeems it (Records page -> Join an org).
@@ -29,6 +31,11 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--day", default=time.strftime("%Y-%m-%d", time.gmtime()))
     v = sub.add_parser("verify")
     v.add_argument("--org", required=True)
+    w = sub.add_parser("worker")
+    w.add_argument("--once", action="store_true")
+    w.add_argument("--idle-s", type=float, default=5.0)
+    d = sub.add_parser("drift")
+    d.add_argument("--org", default=None)
     args = ap.parse_args(argv)
 
     from org_coordinator.repo import Database, migrate
@@ -51,6 +58,15 @@ def main(argv: list[str] | None = None) -> int:
                 out = audit.anchor(repo, day=args.day)
             print(json.dumps(out, indent=2))
             return 0
+        if args.cmd == "worker":
+            from org_coordinator.records import sync
+            return _worker(db, sync, once=args.once, idle_s=args.idle_s)
+        if args.cmd == "drift":
+            from org_coordinator.records import sync
+            orgs = [args.org] if args.org else db.org_ids()
+            print(json.dumps({o: sync.drift_sweep(db, o) for o in orgs},
+                             indent=2))
+            return 0
         if args.cmd == "verify":
             from org_coordinator.records import service
             out = service.verify_chain(db, args.org)
@@ -59,6 +75,23 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         db.dispose()
     return 2
+
+
+def _worker(db, sync, *, once: bool, idle_s: float) -> int:
+    """Drain due sync jobs forever; run the drift sweep once per UTC day."""
+    last_drift_day = None
+    while True:
+        counts = sync.drain(db)
+        if counts:
+            print(json.dumps({"at": time.time(), "jobs": counts}))
+        day = time.strftime("%Y-%m-%d", time.gmtime())
+        if last_drift_day != day and time.gmtime().tm_hour >= 3:
+            for org in db.org_ids():
+                print(json.dumps({"drift": org, **sync.drift_sweep(db, org)}))
+            last_drift_day = day
+        if once:
+            return 0
+        time.sleep(idle_s)
 
 
 if __name__ == "__main__":

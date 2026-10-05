@@ -35,10 +35,23 @@ services:
     environment:
       QUILL_ORG_DATABASE_URL: "postgresql+psycopg://sparrow_org:${ORG_DB_PASSWORD}@db:5432/sparrow_org"
       QUILL_ORG_JWT_SECRET: "${ORG_JWT_SECRET:?set ORG_JWT_SECRET (>= 32 chars)}"
+      QUILL_ORG_SECRETS_KEY: "${ORG_SECRETS_KEY:?set ORG_SECRETS_KEY (base64 of 32 bytes)}"
       QUILL_ORG_AUDIT_ANCHOR_DIR: /srv/org/anchors
       QUILL_ORG_COORD_DATA: /srv/org/coordinator
     volumes:
       - org-anchors:/srv/org/anchors
+  # Write-back worker: drains sync jobs (SKIP LOCKED, so it can be scaled),
+  # and runs the nightly drift sweep. Same image, same configuration.
+  worker:
+    image: sparrow-org
+    restart: unless-stopped
+    depends_on:
+      org:
+        condition: service_started
+    command: ["python", "-m", "org_coordinator.records", "worker"]
+    environment:
+      QUILL_ORG_DATABASE_URL: "postgresql+psycopg://sparrow_org:${ORG_DB_PASSWORD}@db:5432/sparrow_org"
+      QUILL_ORG_SECRETS_KEY: "${ORG_SECRETS_KEY}"
 volumes:
   org-db:
   org-anchors:

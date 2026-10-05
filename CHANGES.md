@@ -1,3 +1,21 @@
+# Records layer, Phase 2: records reach HubSpot, Drive and webhooks — previewed, verified, never overwritten, October 2 2026
+
+Phase 1 made an approved claim a record in the org tier; Phase 2 writes it back to the systems the org already uses, with Sparrow tracking what it wrote and never claiming to be the system of record. Map and limits in `docs/records-layer.md`.
+
+**The approver signs the external change.** Proposing a claim asks the Org Record Service what the record would write — for every connector mapped to its kind and predicate, the plan and a before → after diff read from the live system — and that preview goes into the payload before it is hashed. The review page shows "Writes to hubspot:deals/77 · dealstage: appointmentscheduled → closedwon". At submission the service recomputes every plan and refuses `preview_stale` if what it would write is no longer what was signed; the node re-mints for re-approval rather than writing something nobody saw.
+
+**Three connectors, one deterministic contract.** HubSpot (property updates, notes and tasks on deals, contacts and companies), Google Drive (a dated entry in the scope's running-log doc) and a signed webhook. Field mappings are rows — predicate to field, a value path, one transform from a closed list — with no LLM in the write path. Every connector passes the same contract suite: deterministic mapping, preview, write, read-back, a retry that never writes twice, a moved field that is a conflict rather than an overwrite, transient-versus-permanent errors. Connector tokens are sealed with AES-GCM, bound to their org and connector.
+
+**A worker that proves each write.** One sync job per previewed write, keyed on the payload hash and version, claimed with `SKIP LOCKED`, written, read back, verified. If the external value moved between preview and write, the job stops at `conflict` and the claim returns to its author with a fresh preview — nothing overwritten. Transient failures back off over about a day, then fail with an admin alert. The node learns every outcome on heartbeat.
+
+**Drift is noticed, shown, and left alone.** Nightly, the worker reads back every field it verified in the last 90 days. A value someone changed in the CRM marks the record externally modified and reaches the scope's approvers as a status claim; approving it acknowledges the change. Sparrow never writes over it.
+
+**Teammates get the record, not someone's memory.** When a paired teammate asks something a team record answers, and both of them may read it, the answer comes from the record with its citation, and personal memory is not consulted. Org team scopes appear in `team_layer` as read-only groups of matching paired peers; personal groups are untouched.
+
+Tests: connector contracts (32, six of them live-sandbox and skipped without credentials), sync against Postgres (14), write-back end to end (5). A first test run let an end-to-end heartbeat write a test group into this machine's `data/peer_teams.json`; the entry was removed and every records test now pins the teams file to a temp dir. The extractor still does not produce status or field-update claims, so most write-back on a pilot today would be commitment notes and tasks.
+
+---
+
 # Records layer, Phase 1: claims, hash-bound promotion, and an org record on Postgres, October 2 2026
 
 The Records Layer spec (Oct 2) makes Sparrow the layer that produces an organization's records, not the place that holds them: capture stays private and expiring on the node, facts extracted from it become claims, and only a claim a human approves becomes a record. Phase 1 is the foundation — claims, approvals, an auditable org record, and a credible retention answer — with write-back to CRMs left for Phase 2. Map, flags and the deliberate departures from the spec are in `docs/records-layer.md`.

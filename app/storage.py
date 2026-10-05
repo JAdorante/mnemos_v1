@@ -1451,6 +1451,14 @@ class Store:
                 )
                 """
             )
+            # Phase 2: write-back outcome per claim, and where a non-capture
+            # claim came from (a drift notice: "drift:<id>").
+            ccols = {r["name"] for r in self._conn.execute(
+                "PRAGMA table_info(claims)").fetchall()}
+            for name in ("sync_state", "origin_ref"):
+                if name not in ccols:
+                    self._conn.execute(
+                        f"ALTER TABLE claims ADD COLUMN {name} TEXT")
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_claims_status ON claims(status)")
             self._conn.execute(

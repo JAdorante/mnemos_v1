@@ -110,6 +110,7 @@ def bootstrap_org(db, *, name: str, admin_email: str, rung: str = "connected",
         repo.insert_scope(id=scope_id, kind="org", name=name, parent_id=None,
                           external_ref=None, created_at=now)
         code = _mint_invite(repo, member_id, created_by="bootstrap", now=now)
+        repo.index_org()
         audit.append(repo, "bootstrap", "org.create", org_id,
                      {"name": name, "rung": rung, "admin": member_id}, at=now)
     return {"org_id": org_id, "admin_member_id": member_id,
@@ -246,9 +247,13 @@ def _scope_view(repo, member: dict, s: dict) -> dict[str, Any]:
             "permissions": sorted(effective_permissions(repo, member, s["id"]))}
 
 
-def heartbeat(db, principal: Principal) -> dict[str, Any]:
+def heartbeat(db, principal: Principal, *, peer_url: str | None = None,
+              now: float | None = None) -> dict[str, Any]:
+    now = _now(now)
     with db.tenant(principal.org_id) as repo:
         member = repo.get_member(principal.member_id)
+        if peer_url is not None and peer_url != member.get("peer_url"):
+            repo.set_peer_url(principal.member_id, peer_url[:300] or None)
         org = repo.get_org()
         scopes = [_scope_view(repo, member, s) for s in repo.list_scopes()]
         policy = dict(org["policy_json"] or {})
@@ -258,11 +263,53 @@ def heartbeat(db, principal: Principal) -> dict[str, Any]:
         forwarded = [{"packet_id": f["packet_id"], "state": f["state"],
                       "record_version_id": f["record_version_id"]}
                      for f in repo.forwarded_by(principal.member_id)]
+        sync_out = [{"job_id": j["id"], "state": j["state"],
+                     "packet_id": j["packet_id"], "claim_id": j["claim_id"],
+                     "record_version_id": j["record_version_id"],
+                     "connector_id": j["connector_id"],
+                     "target": j["target_ref"], "error": j["last_error"]}
+                    for j in repo.sync_outcomes_for(principal.member_id,
+                                                    now - 7 * 86400.0)]
+        approve_scopes = [s["id"] for s in scopes
+                          if {"approve", "admin"} & set(s["permissions"])]
+        drift = [_drift_view(repo, d) for d in repo.open_drift(approve_scopes)]
+        roster = _roster(repo, member, scopes)
     return {"org_id": principal.org_id, "member_id": principal.member_id,
             "role": member["role"], "rung": org["rung"],
             "policy_version": org["policy_version"], "policy": policy,
             "scopes": [s for s in scopes if s["permissions"]],
-            "forwarded": forwarded}
+            "forwarded": forwarded, "sync": sync_out, "drift": drift,
+            "roster": roster}
+
+
+def _drift_view(repo, d: dict) -> dict[str, Any]:
+    rec = repo.get_record(d["record_id"]) or {}
+    return {"id": d["id"], "record_id": d["record_id"],
+            "scope_id": d["scope_id"], "field": d["field"],
+            "written": d["written_value"], "external": d["external_value"],
+            "detected_at": d["detected_at"],
+            "subject_ref": rec.get("subject_ref"),
+            "subject_label": rec.get("subject_label"),
+            "predicate": rec.get("predicate"), "kind": rec.get("kind")}
+
+
+def _roster(repo, member: dict, scopes: list[dict]) -> list[dict[str, Any]]:
+    """Team scopes this member reads, with who else reads them — the source
+    for the node's read-only org groups in team_layer."""
+    people = {m["id"]: m for m in repo.list_members()
+              if m["status"] == "active"}
+    out = []
+    for s in scopes:
+        if s["kind"] != "team" or "read" not in s["permissions"]:
+            continue
+        team = []
+        for m in people.values():
+            if "read" in effective_permissions(repo, m, s["id"]):
+                team.append({"member_id": m["id"],
+                             "display_name": m.get("display_name") or m["email"],
+                             "peer_url": m.get("peer_url")})
+        out.append({"scope_id": s["id"], "name": s["name"], "members": team})
+    return out
 
 
 def list_scopes(db, principal: Principal, org_id: str) -> list[dict]:
@@ -447,8 +494,13 @@ def _submit_once(db, principal: Principal, body: dict[str, Any], *,
         if "approve" not in effective_permissions(repo, member, scope_id):
             raise ServiceError(403, "approver_lacks_grant",
                                "approver lacks approve on the scope")
+        from org_coordinator.records import sync
+        sync.check_preview(repo, payload)
         version = _write_version(repo, principal, payload, payload_hash,
                                  approved_via=approved_via, now=now)
+        sync.enqueue(repo, version_id=version["id"], payload=payload,
+                     payload_hash=payload_hash, version_no=version["version"],
+                     proposed_by=payload.get("proposed_by"), now=now)
         fwd = repo.get_forwarded(payload["packet_id"])
         if fwd is not None:
             repo.close_forwarded(payload["packet_id"], "recorded",
@@ -508,6 +560,19 @@ def _write_version(repo, principal: Principal, payload: dict, payload_hash: str,
         valid_to=float(valid_to) if valid_to is not None else None,
         recorded_at=now, superseded_at=None)
     repo.set_current_version(rec["id"], version_no)
+    # A newly approved value answers any open drift question on this record,
+    # and an approved acknowledgement (payload.resolves_drift) answers the
+    # drift notices it names — on whichever records they sit.
+    ack = {str(x) for x in (payload.get("resolves_drift") or [])}
+    cleared: set[str] = set()
+    for d in repo.open_drift():
+        if d["record_id"] == rec["id"] or d["id"] in ack:
+            repo.resolve_drift(d["id"], now)
+            cleared.add(d["record_id"])
+    still = {d["record_id"] for d in repo.open_drift()}
+    for rid in cleared | {rec["id"]}:
+        if rid not in still:
+            repo.set_record_drift(rid, None)
     quote_ok = bool(payload.get("include_quote"))
     repo.insert_evidence([{
         "record_version_id": vid, "node_id": e.get("node_id"),
@@ -716,3 +781,211 @@ def verify_chain(db, org_id: str) -> dict[str, Any]:
                         "file": f.get("day") or f.get("file")}
         result["anchor_files"] = len(files)
     return result
+
+
+# ------------------------------------------------------- phase 2: preview --
+def preview_packet(db, principal: Principal, payload: dict[str, Any], *,
+                   now: float | None = None) -> dict[str, Any]:
+    """The external changes this record would make, for the node to embed in
+    the payload before it hashes it. Needs `propose` on the scope."""
+    from org_coordinator import connectors as conn_mod
+    from org_coordinator.records import sync
+    if not isinstance(payload, dict) or payload.get("org_id") != principal.org_id:
+        raise ServiceError(403, "org_mismatch")
+    with db.tenant(principal.org_id) as repo:
+        _require(repo, principal, payload.get("scope_id") or "", "propose")
+        try:
+            return {"preview": sync.previews(repo, payload)}
+        except conn_mod.TransientError as exc:
+            raise ServiceError(503, "preview_unavailable", str(exc)) from exc
+        except conn_mod.ConnectorError as exc:
+            raise ServiceError(422, "preview_failed", str(exc)) from exc
+
+
+# ---------------------------------------------------- phase 2: connectors --
+def _connector_view(row: dict) -> dict[str, Any]:
+    return {k: row[k] for k in ("id", "kind", "name", "config_json", "status",
+                                "created_by", "created_at")} | {
+        "has_secret": bool(row.get("secret_enc"))}
+
+
+def create_connector(db, principal: Principal, org_id: str, *, kind: str,
+                     name: str, config: dict, secret: dict,
+                     now: float | None = None) -> dict[str, Any]:
+    from org_coordinator import connectors as conn_mod
+    from org_coordinator.connectors import secrets as sec
+    now = _now(now)
+    if org_id != principal.org_id:
+        raise ServiceError(403, "org_mismatch")
+    if kind not in conn_mod.KINDS:
+        raise ServiceError(400, "bad_connector_kind")
+    with db.tenant(org_id) as repo:
+        _require_org_admin(repo, principal)
+        cid = tokens.new_id("con")
+        try:
+            sealed = sec.seal(secret or {}, org_id=org_id, connector_id=cid)
+        except sec.SecretsError as exc:
+            raise ServiceError(500, "secrets_unavailable", str(exc)) from exc
+        row = repo.insert_connector(id=cid, kind=kind, name=name.strip()[:120],
+                                    config_json=config or {}, secret_enc=sealed,
+                                    status="active",
+                                    created_by=principal.member_id,
+                                    created_at=now)
+        try:
+            conn_mod.build(row)          # refuse a config that cannot work
+        except conn_mod.ConnectorError as exc:
+            raise ServiceError(422, "bad_connector_config", str(exc)) from exc
+        audit.append(repo, principal.member_id, "connector.connect", cid,
+                     {"kind": kind, "config": config or {}}, at=now)
+        return _connector_view(row)
+
+
+def list_connectors(db, principal: Principal, org_id: str) -> list[dict]:
+    if org_id != principal.org_id:
+        raise ServiceError(403, "org_mismatch")
+    with db.tenant(org_id) as repo:
+        _require_org_admin(repo, principal)
+        return [_connector_view(r) for r in repo.list_connectors()]
+
+
+def set_connector_status(db, principal: Principal, connector_id: str,
+                         status: str, *, now: float | None = None) -> dict:
+    now = _now(now)
+    if status not in ("active", "disabled"):
+        raise ServiceError(400, "bad_status")
+    with db.tenant(principal.org_id) as repo:
+        _require_org_admin(repo, principal)
+        if repo.get_connector(connector_id) is None:
+            raise ServiceError(404, "connector_not_found")
+        repo.update_connector(connector_id, status=status)
+        audit.append(repo, principal.member_id,
+                     "connector.disconnect" if status == "disabled"
+                     else "connector.connect", connector_id, {}, at=now)
+        return _connector_view(repo.get_connector(connector_id))
+
+
+def add_mapping(db, principal: Principal, connector_id: str,
+                body: dict[str, Any], *, now: float | None = None) -> dict:
+    from org_coordinator import connectors as conn_mod
+    from org_coordinator.connectors.mapping import MappingError, validate_row
+    now = _now(now)
+    row = {"kind": str(body.get("kind") or ""),
+           "predicate": str(body.get("predicate") or ""),
+           "op": str(body.get("op") or ""),
+           "object_type": body.get("object_type"),
+           "field": body.get("field"),
+           "value_path": str(body.get("value_path") or "value"),
+           "transform": str(body.get("transform") or "identity")}
+    if not row["kind"] or not row["predicate"]:
+        raise ServiceError(400, "bad_mapping", "kind and predicate required")
+    try:
+        validate_row(row)
+    except MappingError as exc:
+        raise ServiceError(400, "bad_mapping", str(exc)) from exc
+    with db.tenant(principal.org_id) as repo:
+        _require_org_admin(repo, principal)
+        con = repo.get_connector(connector_id)
+        if con is None:
+            raise ServiceError(404, "connector_not_found")
+        if row["op"] not in conn_mod.DEFAULT_OPS[con["kind"]]:
+            raise ServiceError(400, "bad_mapping",
+                               f"{con['kind']} supports {conn_mod.DEFAULT_OPS[con['kind']]}")
+        if row["op"] == "set_property" and not row["field"]:
+            raise ServiceError(400, "bad_mapping", "set_property needs a field")
+        mid = tokens.new_id("map")
+        repo.insert_mapping(id=mid, connector_id=connector_id,
+                            created_by=principal.member_id, created_at=now,
+                            **row)
+        audit.append(repo, principal.member_id, "connector.mapping.add",
+                     connector_id, row, at=now)
+        return {"mappings": repo.mappings(connector_id)}
+
+
+def list_mappings(db, principal: Principal, connector_id: str) -> list[dict]:
+    with db.tenant(principal.org_id) as repo:
+        _require_org_admin(repo, principal)
+        if repo.get_connector(connector_id) is None:
+            raise ServiceError(404, "connector_not_found")
+        return repo.mappings(connector_id)
+
+
+def delete_mapping(db, principal: Principal, mapping_id: str, *,
+                   now: float | None = None) -> dict:
+    now = _now(now)
+    with db.tenant(principal.org_id) as repo:
+        _require_org_admin(repo, principal)
+        n = repo.delete_mapping(mapping_id)
+        if n:
+            audit.append(repo, principal.member_id, "connector.mapping.delete",
+                         mapping_id, {}, at=now)
+    return {"ok": True, "deleted": n}
+
+
+def list_sync_jobs(db, principal: Principal, *, state: str | None = None,
+                   limit: int = 200) -> list[dict]:
+    with db.tenant(principal.org_id) as repo:
+        _require_org_admin(repo, principal)
+        return repo.list_sync_jobs(state=state, limit=min(limit, 1000))
+
+
+def list_alerts(db, principal: Principal) -> list[dict]:
+    with db.tenant(principal.org_id) as repo:
+        _require_org_admin(repo, principal)
+        return repo.list_alerts()
+
+
+def ack_alert(db, principal: Principal, alert_id: str, *,
+              now: float | None = None) -> dict:
+    now = _now(now)
+    with db.tenant(principal.org_id) as repo:
+        _require_org_admin(repo, principal)
+        return {"ok": True, "acked": repo.ack_alert(alert_id, now)}
+
+
+# --------------------------------------------- phase 2: peer answer rule --
+def _tokens(text: str) -> set[str]:
+    import re
+    stop = {"the", "a", "an", "and", "or", "to", "of", "for", "in", "on", "is",
+            "are", "what", "whats", "what's", "who", "when", "did", "does",
+            "do", "we", "our", "it", "that", "this", "with", "about", "status"}
+    return {w for w in re.findall(r"[a-z0-9$]{2,}", (text or "").lower())
+            if w not in stop}
+
+
+def answerable(db, principal: Principal, *, asker_member_id: str,
+               question: str, limit: int = 3,
+               now: float | None = None) -> list[dict[str, Any]]:
+    """Records that answer `question` and that BOTH the responder and the
+    asker may read. The responder's node answers from these and cites them
+    instead of reaching into personal memory."""
+    import json
+    now = _now(now)
+    want = _tokens(question)
+    if not want:
+        return []
+    with db.tenant(principal.org_id) as repo:
+        me = repo.get_member(principal.member_id)
+        asker = repo.get_member(asker_member_id)
+        if asker is None or asker["status"] != "active":
+            return []
+        shared = sorted(set(readable_scopes(repo, me)) &
+                        set(readable_scopes(repo, asker)))
+        rows = repo.query_records(scope_ids=shared, subject=None,
+                                  predicate=None, as_of=now, known_at=now,
+                                  limit=500)
+    scored = []
+    for r in rows:
+        hay = _tokens(" ".join([r.get("subject_label") or "",
+                                r.get("subject_ref") or "",
+                                (r.get("predicate") or "").replace(".", " "),
+                                json.dumps(r.get("value_json") or {})]))
+        hits = len(want & hay)
+        if hits and hits >= max(1, (len(want) + 1) // 2):
+            scored.append((hits, r["recorded_at"], r))
+    scored.sort(key=lambda t: (-t[0], -t[1]))
+    return [{"record_id": r["record_id"], "version": r["version"],
+             "scope_id": r["scope_id"], "subject_label": r["subject_label"],
+             "subject_ref": r["subject_ref"], "predicate": r["predicate"],
+             "kind": r["kind"], "value": r["value_json"],
+             "valid_from": r["valid_from"], "recorded_at": r["recorded_at"]}
+            for _h, _t, r in scored[:limit]]
