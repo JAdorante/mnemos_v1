@@ -144,6 +144,10 @@ services:
       # leaves the box. Off-box peers (the desktop at 10.0.0.81) are
       # unaffected — they only ever get the public URL.
       QUILL_PEER_INTERNAL_URL: http://sparrow-user1:8000
+      # Fleet federation pilot (docs/fleet-federation.md): this seat's
+      # agents publish signals; they leave only through org-relay, by rule.
+      QUILL_FLEET: "1"
+      QUILL_FLEET_RELAY_URL: http://org-relay:8100
       # Public Cloudflare tunnel URL — peers (and other devices) must call us
       # back over HTTPS. Loopback 127.0.0.1 only works on this host and shows
       # teammates as offline from a remote browser / other containers.
@@ -154,6 +158,24 @@ services:
       # Web-goal pilot: cloud routing + browser agent for this user only.
       # Optional (defaults empty) so the other users stay local-only chat.
       ANTHROPIC_API_KEY: "${SPARROW_ANTHROPIC_KEY:-}"
+
+  # Fleet federation relay: topics, barrier groups, kinds, blocked list, and
+  # the hash-chained log (org_coordinator/). Seats reach it on the compose
+  # network; the host reaches the admin API on loopback only. No tunnel: it
+  # is never public. Admin and compliance tokens live in .env; unset, those
+  # endpoints refuse everyone.
+  org-relay:
+    <<: *sparrow
+    command: ["uvicorn", "org_coordinator.main:app", "--host", "0.0.0.0",
+              "--port", "8100"]
+    ports:
+      - "127.0.0.1:8100:8100"
+    volumes:
+      - org-relay-data:/srv/relay
+    environment:
+      QUILL_ORG_COORD_DATA: /srv/relay
+      QUILL_RELAY_ADMIN_TOKEN: "${RELAY_ADMIN_TOKEN:?set RELAY_ADMIN_TOKEN in .env}"
+      QUILL_RELAY_COMPLIANCE_TOKEN: "${RELAY_COMPLIANCE_TOKEN:?set RELAY_COMPLIANCE_TOKEN in .env}"
 
   sparrow-user2:
     <<: *sparrow
@@ -189,6 +211,10 @@ services:
       QUILL_API_TOKEN: "${SPARROW_USER3_TOKEN:?set a per-user token in .env}"
       QUILL_LORA_TAG_SUFFIX: user3
       QUILL_PEER_INTERNAL_URL: http://sparrow-user3:8000
+      # Fleet federation pilot (docs/fleet-federation.md): this seat's
+      # agents publish signals; they leave only through org-relay, by rule.
+      QUILL_FLEET: "1"
+      QUILL_FLEET_RELAY_URL: http://org-relay:8100
       QUILL_PEER_BASE_URL: https://beyond-fool-finances-accessibility.trycloudflare.com
 
   sparrow-user4:
@@ -237,6 +263,7 @@ services:
       QUILL_PEER_BASE_URL: https://vegetarian-bought-ground-queensland.trycloudflare.com
 
 volumes:
+  org-relay-data:
   sparrow-user1-data:
   sparrow-user1-lora-venv:
   sparrow-user2-data:
