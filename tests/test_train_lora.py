@@ -39,6 +39,8 @@ class HelperTests(unittest.TestCase):
     def test_hf_base_mapping(self) -> None:
         self.assertEqual(tl.hf_base_for("qwen2.5:7b-instruct"),
                          "unsloth/Qwen2.5-7B-Instruct")
+        self.assertEqual(tl.hf_base_for("qwen2.5:14b-instruct"),
+                         "unsloth/Qwen2.5-14B-Instruct")
         self.assertEqual(tl.hf_base_for("LLAMA3.2"),
                          "unsloth/Llama-3.2-3B-Instruct")
         self.assertIsNone(tl.hf_base_for("some-unknown:latest"))

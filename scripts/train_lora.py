@@ -52,6 +52,8 @@ CONF_WRONG_SIM = 0.4
 HF_BASES = {
     "qwen2.5:7b-instruct": "unsloth/Qwen2.5-7B-Instruct",
     "qwen2.5:7b": "unsloth/Qwen2.5-7B-Instruct",
+    "qwen2.5:14b-instruct": "unsloth/Qwen2.5-14B-Instruct",
+    "qwen2.5:14b": "unsloth/Qwen2.5-14B-Instruct",
     "llama3.2": "unsloth/Llama-3.2-3B-Instruct",
     "llama3.2:3b": "unsloth/Llama-3.2-3B-Instruct",
     "llama3.2:1b": "unsloth/Llama-3.2-1B-Instruct",
