@@ -27,7 +27,11 @@ x-env: &sparrow-env
   QUILL_OLLAMA_URL: http://host.docker.internal:11435
   OLLAMA_HOST: host.docker.internal:11435
   # The app's default local model (llama3.2) isn't pulled on this box.
-  QUILL_TEXT_LOCAL_MODEL: qwen2.5:7b-instruct
+  # 14B since 2026-10-06: scripts/eval_substance.py on 93 replayed chats
+  # (user1+user3) put it with the fact-dense ANSWER_SYSTEM at substance
+  # 2.84 vs 2.63 for 7B (better on 28 rows, worse on 10), fact coverage
+  # 42% vs 35%, at ~2x latency (p50 4.0s vs 1.8s). Rollback = 7b-instruct.
+  QUILL_TEXT_LOCAL_MODEL: qwen2.5:14b-instruct
   # Google connector (Gmail + Calendar metadata).
   GOOGLE_OAUTH_CLIENT_ID: "${GOOGLE_OAUTH_CLIENT_ID:-}"
   GOOGLE_OAUTH_CLIENT_SECRET: "${GOOGLE_OAUTH_CLIENT_SECRET:-}"
