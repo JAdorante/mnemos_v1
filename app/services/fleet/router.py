@@ -27,6 +27,7 @@ cap) and the blocked-subjects list, and are forwarded byte-for-byte.
 from __future__ import annotations
 
 import fnmatch
+import json
 import re
 import sys
 import time
@@ -201,7 +202,24 @@ def egress_check(signal: dict) -> str | None:
             return "blocked_subject"
     except kinds.BlockedListUnavailable as exc:
         return f"blocked_list_unavailable: {exc}"
-    return None
+    return content_refusal(signal)
+
+
+def content_refusal(signal: dict) -> str | None:
+    """The same privacy rule every other egress surface applies: the words an
+    agent wrote (subject, summary, body) are classified, and sensitive or
+    never-send content stays home. Ingress stamps the persisted copy, but the
+    relay is sent the signal dict, so the check has to run on the dict."""
+    from app.services import privacy_class as pc
+    try:
+        body = json.dumps(signal.get("body") or {}, ensure_ascii=False,
+                          sort_keys=True)
+    except (TypeError, ValueError):
+        body = str(signal.get("body") or "")
+    blob = " ".join(str(x) for x in (signal.get("subject"), signal.get("summary"),
+                                     body) if x)
+    reason = pc.egress_refusal(blob, source="fleet.signal")
+    return f"content_{reason}" if reason else None
 
 
 def route(signal: dict) -> Decision:

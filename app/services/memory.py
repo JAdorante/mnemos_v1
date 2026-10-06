@@ -156,6 +156,21 @@ def erase_event(event_id: int, *, store=None, vectors=None,
     return out
 
 
+def signal_expired(payload: dict, now: float) -> bool:
+    """A fleet/peer signal past its own expires_at. The feed already hides
+    these; search and grounding (and MCP memory_search on top of them) did
+    not, so an expired view kept being cited as current."""
+    meta = payload.get("meta") if isinstance(payload, dict) else None
+    sig = meta.get("signal") if isinstance(meta, dict) else None
+    if not isinstance(sig, dict):
+        return False
+    try:
+        exp = float(sig.get("expires_at") or 0)
+    except (TypeError, ValueError):
+        return False
+    return 0 < exp < now
+
+
 def recency_adjusted(score: float, age_days: float, *,
                      weight: float | None = None,
                      half_life_days: float | None = None) -> float:
@@ -213,6 +228,8 @@ class MemoryEngine:
         # /bootstrap. Capture stays off until consent, so the SpeechBrain
         # import race Embedder.warmup documents cannot fire during boot.
         # encode() still serialises on _lock if a later call wins the race.
+        from app.storage import add_delete_hook
+        add_delete_hook(self._on_store_change)
         if self._semantic:
             def _warm() -> None:
                 try:
@@ -302,6 +319,50 @@ class MemoryEngine:
             except Exception as exc:
                 print(f"[memory] index error: {exc}")
 
+    def _on_store_change(self, store, change: dict) -> None:
+        """Delete hook (app.storage): whichever path deleted or rewrote event
+        rows, drop the matching Lance rows and timeline entries, so an erased,
+        expired or purged event stops surfacing before the next restart."""
+        if store is not self._store:
+            return  # a temp/replay store: its ids are not this index's ids
+        gone = change.get("deleted_events") or []
+        rewritten = change.get("rewritten_events") or []
+        ids = [int(i) for i, _ in gone] + [
+            FACT_ID_OFFSET + int(f) for f in change.get("deleted_facts") or []]
+        vectors = self._ensure_vectors()
+        if vectors and ids:
+            try:
+                vectors.delete_ids(ids)
+            except Exception as exc:
+                print(f"[memory] delete sync: vectors skipped ({exc}).")
+        # Event carries no row id; timestamps are effectively unique per event
+        # (Store.event_ids_at relies on the same property).
+        times = {float(t) for _, t in gone}
+        new_raw = {float(t): raw for _, t, raw in rewritten}
+        with self._lock:
+            if times:
+                self._events = [e for e in self._events if e.time not in times]
+            for e in self._events:
+                if e.time in new_raw:
+                    e.raw = new_raw[e.time]
+        if not (vectors and rewritten):
+            return
+        # The index embeds summary-or-raw: an event with no summary was indexed
+        # on its raw text, so a rewrite must replace that row too.
+        try:
+            rows = store.by_ids_map([int(i) for i, _, _ in rewritten])
+        except Exception:
+            rows = {}
+        for eid, ev in rows.items():
+            if ev.summary:
+                continue
+            try:
+                vectors.delete_ids([int(eid)])
+                vectors.add(int(eid), ev.time, ev.modality.value, ev.raw,
+                            self._embed(ev.raw))
+            except Exception as exc:
+                print(f"[memory] delete sync: reindex of {eid} skipped ({exc}).")
+
     def add(self, event: Event) -> None:
         self._on_event(event)
 
@@ -356,7 +417,10 @@ class MemoryEngine:
         return {"modality": f"fact:{f['kind']}", "raw": f.get("text", ""),
                 "summary": f.get("text", ""), "kind": f["kind"],
                 "fact_id": f["fact_id"], "status": f.get("status"),
-                "source_span": f.get("source_span"), "is_fact": True}
+                "source_span": f.get("source_span"),
+                "source_event_id": f.get("source_event_id"),
+                "source_privacy_class": f.get("source_privacy_class"),
+                "is_fact": True}
 
     def _vector_hits(self, query: str, limit: int,
                      modality: str | None) -> list[tuple[tuple, float, float, dict]]:
@@ -394,6 +458,7 @@ class MemoryEngine:
                         continue
                     key = ("event", hid)
                     d = ev.to_dict()
+                    d["event_id"] = hid  # Event.to_dict() carries no row id
                     ts = float(h.get("time") or 0)
                 out.append((key, float(h.get("score") or 0.0), ts, d))
             return out
@@ -428,7 +493,7 @@ class MemoryEngine:
                 for eid, ev in store.search_with_ids(query, limit=limit,
                                                      modality=modality):
                     out.append((("event", int(eid)), floor, float(ev.time),
-                                ev.to_dict()))
+                                {**ev.to_dict(), "event_id": int(eid)}))
             except Exception as exc:
                 print(f"[memory] event keyword search skipped ({exc}).")
         return out
@@ -445,9 +510,11 @@ class MemoryEngine:
         unchanged. QUILL_SEARCH_HYBRID=0 restores vector-first-with-fallback.
         """
         if not query.strip():
+            now = time.time()
             with self._lock:
-                evs = self._events[-limit:]
-            return [e.to_dict() for e in evs]
+                evs = [d for d in (e.to_dict() for e in self._events[-limit * 2:])
+                       if not signal_expired(d, now)]
+            return evs[-limit:]
         # Pilot ledger: count that a search happened — after the empty-query
         # early return, so a bare timeline load is not counted as a search. The
         # query text never reaches the ledger, only the +1 (WS-A, rule 5).
@@ -475,6 +542,8 @@ class MemoryEngine:
         now = time.time()
         ranked: list[tuple[float, dict]] = []
         for (score, ts, payload) in best.values():
+            if signal_expired(payload, now):
+                continue
             payload["score"] = score
             age_days = (now - ts) / 86400.0 if ts else 3650.0
             ranked.append((recency_adjusted(score, age_days), payload))

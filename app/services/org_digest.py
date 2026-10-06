@@ -11,6 +11,7 @@ import time
 from typing import Any
 
 from app.config import settings
+from app.services import privacy_class as _pc
 from app.storage import Store, get_store
 
 _DIGEST_SCHEMA = {
@@ -61,6 +62,8 @@ def _gather_packet(store: Store, *, period_hours: float = 24.0
     except Exception:
         open_comms = []
 
+    open_tasks = [f for f in open_tasks if _shareable_fact(f)]
+    open_comms = [f for f in open_comms if _shareable_fact(f)]
     lines.append("OPEN TASKS:")
     for t in open_tasks[:25]:
         lines.append(f"- { (t.get('text') or '')[:200]}")
@@ -70,8 +73,9 @@ def _gather_packet(store: Store, *, period_hours: float = 24.0
 
     try:
         prior = store.latest_reflection("daily")
-        if prior and prior.get("summary"):
-            lines.append(f"PRIOR REFLECTION:\n{(prior.get('summary') or '')[:600]}")
+        summary = (prior or {}).get("summary") or ""
+        if summary and not _pc.egress_refusal(summary):
+            lines.append(f"PRIOR REFLECTION:\n{summary[:600]}")
     except Exception:
         pass
 
@@ -84,13 +88,37 @@ def _gather_packet(store: Store, *, period_hours: float = 24.0
                 lines.append("AT-RISK / META:")
                 for r in risks[:12]:
                     if isinstance(r, dict):
-                        lines.append(f"- {(r.get('text') or r.get('summary') or str(r))[:200]}")
+                        text = r.get('text') or r.get('summary') or str(r)
                     else:
-                        lines.append(f"- {str(r)[:200]}")
+                        text = str(r)
+                    if not _pc.egress_refusal(text):
+                        lines.append(f"- {text[:200]}")
     except Exception as exc:
         lines.append(f"(meta_memory skipped: {exc})")
 
     return "\n".join(lines), since, now
+
+
+def _shareable_fact(f: dict) -> bool:
+    """The digest leaves this node (coordinator + manager peer), so a fact
+    from a sensitive or never-send capture never enters the packet."""
+    if not _pc.egress_allowed(f.get("source_privacy_class")):
+        return False
+    return not _pc.egress_refusal(f.get("text") or "")
+
+
+def _scrub_digest(digest: dict[str, Any]) -> dict[str, Any]:
+    """Second check on what the model wrote: drop any line that classifies
+    sensitive or above and redact secrets in the rest."""
+    from app.services.redact import redact_text
+    for key in ("progress", "blockers", "asks", "deps"):
+        digest[key] = [redact_text(str(x)) for x in digest.get(key) or []
+                       if not _pc.egress_refusal(str(x))]
+    summary = str(digest.get("summary") or "")
+    reason = _pc.egress_refusal(summary)
+    digest["summary"] = (f"(summary withheld: {reason})" if reason
+                         else redact_text(summary))
+    return digest
 
 
 def _fallback_digest(packet: str) -> dict[str, Any]:
@@ -140,7 +168,7 @@ def build_digest(*, period_hours: float = 24.0,
         "force_strategic": bool(out.get("strategic")),
         "period": {"since": since, "until": now, "hours": period_hours},
     }
-    return digest
+    return _scrub_digest(digest)
 
 
 def _format_peer_message(digest: dict, *, from_name: str) -> str:

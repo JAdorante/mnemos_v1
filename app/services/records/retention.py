@@ -277,21 +277,7 @@ def _expire_batch(store, rows, *, now: float, pol: dict, vectors) -> dict:
                 chunk)
         out["turns"] = len(turn_ids)
         # 4. kg_evidence; predicates left with none become unsupported
-        preds = [int(p["predicate_id"]) for p in store._conn.execute(
-            f"SELECT DISTINCT predicate_id FROM kg_evidence "
-            f"WHERE event_id IN ({marks})", ids).fetchall()]
-        cur = store._conn.execute(
-            f"DELETE FROM kg_evidence WHERE event_id IN ({marks})", ids)
-        out["kg_evidence"] = int(cur.rowcount or 0)
-        for pid in preds:
-            left = store._conn.execute(
-                "SELECT 1 FROM kg_evidence WHERE predicate_id = ? LIMIT 1",
-                (pid,)).fetchone()
-            if not left:
-                store._conn.execute(
-                    "UPDATE kg_predicates SET status = 'unsupported', "
-                    "updated_at = ? WHERE id = ?", (now, pid))
-                out["unsupported_predicates"] += 1
+        out.update(store._forget_event_evidence_unlocked(ids, now))
         # 5. tombstone, then the row
         for r in rows:
             store._conn.execute(
@@ -302,6 +288,10 @@ def _expire_batch(store, rows, *, now: float, pol: dict, vectors) -> dict:
                  r["privacy_class"], _content_hash(r), now, pol["version"]))
         store._conn.execute(f"DELETE FROM events WHERE id IN ({marks})", ids)
         store._conn.commit()
+    # Timeline mirror + index: the same hook every other delete path reports to.
+    from app.storage import _run_delete_hooks
+    _run_delete_hooks(store, deleted_events=[(int(r["id"]), float(r["time"]))
+                                             for r in rows])
     # 6. claims citing these events keep the pointer, marked expired
     _mark_claim_evidence_expired(store, expired)
     node_store.enqueue(store, "evidence_expired", f"expiry:{now:.3f}:{ids[0]}",

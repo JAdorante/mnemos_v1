@@ -253,6 +253,18 @@ def _prompt_chars(system: str | None, messages: list | None) -> int:
     return n
 
 
+def _redact_or_refuse(system: str | None, messages: list | None) -> tuple[str, list]:
+    """Fallback when the privacy gate itself failed: redact, or refuse the
+    call. Before, a failed redaction let the prompt through unredacted."""
+    try:
+        from app.services.redact import redact_text, redact_payload
+        return redact_text(system or ""), redact_payload(messages or [])
+    except Exception as exc:
+        raise RuntimeError(
+            f"privacy gate and redaction both unavailable ({exc}); "
+            "cloud call refused") from exc
+
+
 def _prompt_head(messages: list | None) -> str:
     """First ~500 chars of the last user message — enough to identify the call."""
     if not messages:
@@ -349,21 +361,11 @@ class ModelRouter:
                     except Exception:
                         pass
                     raise
-                try:
-                    from app.services.redact import redact_text, redact_payload
-                    system = redact_text(system or "")
-                    messages = redact_payload(messages or [])
-                    privacy_action = "redact_fallback"
-                except Exception:
-                    pass
-        else:
-            try:
-                from app.services.redact import redact_text, redact_payload
-                system = redact_text(system or "")
-                messages = redact_payload(messages or [])
+                system, messages = _redact_or_refuse(system, messages)
                 privacy_action = "redact_fallback"
-            except Exception:
-                pass
+        else:
+            system, messages = _redact_or_refuse(system, messages)
+            privacy_action = "redact_fallback"
         model = model or self.model_for(task)
         # The parent is a configured account: with a non-Anthropic provider
         # (OpenAI / Gemini / Grok, parent_model.py) the escalation detours to

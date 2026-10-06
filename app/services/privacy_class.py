@@ -4,7 +4,9 @@ Classes (ascending severity):
   public < internal < personal < sensitive < never-send
 
 Stamped onto events at insert time; enforced in `model_router` before any
-Claude/cloud call. Complements the 3-layer `redact.py` / privacy_gate —
+Claude/cloud call, and by `egress_refusal` / `event_egress_refusal` on every
+surface that hands data to someone else (MCP, peer answers, the org digest,
+the fleet relay). Complements the 3-layer `redact.py` / privacy_gate —
 those still block capture; this labels what *did* land and gates egress.
 """
 from __future__ import annotations
@@ -278,3 +280,64 @@ def gate_cloud(
             privacy_class=NEVER_SEND, kinds=kinds)
 
     return system, messages, cls, "allow"
+
+
+# --- egress: one rule for every surface that sends data off this node -------
+# Sensitive and never-send stay home, wherever they are headed. That matches
+# the two surfaces that already read the stamp (peer slot fills and the
+# records claim builder); personal may leave, and each surface still applies
+# its own redaction on top.
+EGRESS_CEILING = PERSONAL
+
+
+def egress_allowed(cls: str | None) -> bool:
+    return rank(cls) <= rank(EGRESS_CEILING)
+
+
+def egress_refusal(text: str, *, source: str = "",
+                   declared_class: str | None = None) -> str | None:
+    """None when `text` may leave; otherwise the reason. Classifies the text
+    itself, so content that never went through `Store.insert` (an agent's
+    fleet signal, a digest line) is held to the same rule as a stored row.
+    Fails closed: a classifier error refuses."""
+    try:
+        cls = max_class(declared_class, classify_text(text or "", source=source))
+    except Exception as exc:
+        return f"privacy_class unavailable ({type(exc).__name__})"
+    if egress_allowed(cls):
+        return None
+    return f"privacy_class={cls}"
+
+
+def event_privacy_class(store, event_id: int | None) -> str | None:
+    """The stamped class of a stored event, or None when the row is gone.
+    Reads the column first (records layer) and meta second (older rows)."""
+    if not event_id:
+        return None
+    import json
+    try:
+        with store._lock:
+            r = store._conn.execute(
+                "SELECT privacy_class, meta FROM events WHERE id = ?",
+                (int(event_id),)).fetchone()
+    except Exception:
+        return SENSITIVE  # unreadable: fail closed
+    if not r:
+        return None
+    if r["privacy_class"]:
+        return normalize(r["privacy_class"])
+    try:
+        meta = json.loads(r["meta"] or "{}")
+    except ValueError:
+        meta = {}
+    return normalize(meta.get("privacy_class")) if isinstance(meta, dict) else INTERNAL
+
+
+def event_egress_refusal(store, event_id: int | None) -> str | None:
+    """None when the stored event's stamp lets it leave; else the reason.
+    A missing row is not a refusal (callers decide what an absent source
+    means); an unreadable one is."""
+    cls = event_privacy_class(store, event_id)
+    if cls is None or egress_allowed(cls):
+        return None
+    return f"privacy_class={cls}"

@@ -122,6 +122,48 @@ def _run_insert_hooks(store, event_id: int, event: Event) -> None:
                   f"skipped ({exc}).")
 
 
+# --- post-delete hooks -------------------------------------------------------
+# An event's text lives in more places than this database: the LanceDB index
+# and the MemoryEngine timeline mirror. Every path that deletes or rewrites
+# event rows (erase, window erasure, purge, retention expiry, compaction)
+# reports here, so one registration keeps those copies in step instead of each
+# caller remembering a different subset. `change` carries
+#   deleted_events:   [(event_id, time), ...]
+#   deleted_facts:    [fact_id, ...]      (fact rows deleted, not tombstoned)
+#   rewritten_events: [(event_id, time, new_raw), ...]
+# Called OUTSIDE the lock, after commit; best-effort like the insert hooks.
+_delete_hooks: list = []
+
+
+def add_delete_hook(fn) -> None:
+    if fn not in _delete_hooks:
+        _delete_hooks.append(fn)
+
+
+def remove_delete_hook(fn) -> None:
+    try:
+        _delete_hooks.remove(fn)
+    except ValueError:
+        pass
+
+
+def _run_delete_hooks(store, *, deleted_events=(), deleted_facts=(),
+                      rewritten_events=()) -> None:
+    if not _delete_hooks or not (deleted_events or deleted_facts
+                                 or rewritten_events):
+        return
+    change = {"deleted_events": [(int(i), float(t)) for i, t in deleted_events],
+              "deleted_facts": [int(f) for f in deleted_facts],
+              "rewritten_events": [(int(i), float(t), r)
+                                   for i, t, r in rewritten_events]}
+    for fn in list(_delete_hooks):
+        try:
+            fn(store, change)
+        except Exception as exc:
+            print(f"[storage] delete hook {getattr(fn, '__name__', fn)!r} "
+                  f"skipped ({exc}).")
+
+
 class Store:
     def __init__(self, db_path: Path | None = None, audio_dir: Path | None = None,
                  *, readonly: bool = False) -> None:
@@ -2693,8 +2735,11 @@ class Store:
             from app.services.privacy_class import stamp_event
             stamp_event(event)
         except Exception as exc:
-            print(f"[storage] privacy_class stamp skipped ({exc}).")
-            event.meta.setdefault("privacy_class", "internal")
+            # Fail closed: an unclassified row is held back from every egress
+            # surface rather than defaulting to the shareable "internal".
+            print(f"[storage] privacy_class stamp failed ({exc}); holding as sensitive.")
+            event.meta.setdefault("privacy_class", "sensitive")
+            event.meta["privacy_class_error"] = type(exc).__name__
         d = event.to_dict()
         row = {k: (json.dumps(d[k]) if k in _JSON_FIELDS else d[k]) for k in (
             "time", "modality", "raw", "summary", "source", "confidence",
@@ -3038,10 +3083,11 @@ class Store:
         now = _time.time()
         with self._lock:
             row = self._conn.execute(
-                "SELECT id FROM events WHERE id = ?", (eid,)).fetchone()
+                "SELECT id, time FROM events WHERE id = ?", (eid,)).fetchone()
             if row is None:
                 return {"event_id": eid, "fact_ids": [], "events": 0,
                         "relations": 0, "ok": False, "reason": "missing"}
+            ev_time = float(row["time"])
             fact_ids = [int(r["id"]) for r in self._conn.execute(
                 "SELECT id FROM facts WHERE source_event_id = ?",
                 (eid,)).fetchall()]
@@ -3085,6 +3131,7 @@ class Store:
                     "DELETE FROM events_archive WHERE event_id = ?", (eid,))
             except Exception:
                 pass
+            kg = self._forget_event_evidence_unlocked([eid], now)
             n_events = self._conn.execute(
                 "DELETE FROM events WHERE id = ?", (eid,)).rowcount
             self._conn.commit()
@@ -3093,8 +3140,59 @@ class Store:
                     self._conn.execute("VACUUM")
                 except Exception as exc:
                     print(f"[storage] post-erase VACUUM skipped ({exc}).")
+        _run_delete_hooks(self, deleted_events=[(eid, ev_time)])
         return {"event_id": eid, "fact_ids": fact_ids, "events": int(n_events),
-                "relations": int(n_rel), "ok": True}
+                "relations": int(n_rel), "ok": True, **kg}
+
+    def _forget_event_evidence_unlocked(self, event_ids: list[int],
+                                        now: float) -> dict:
+        """KG v2 evidence quoting these events goes with them; a predicate left
+        with no evidence becomes 'unsupported'. Shared by every event delete
+        path (erase, window erasure, purge, retention expiry): kg_evidence holds
+        the verbatim `quote`, so leaving it behind kept erased words alive.
+        Caller holds the lock and commits."""
+        out = {"kg_evidence": 0, "unsupported_predicates": 0}
+        ids = [int(i) for i in event_ids]
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            marks = ",".join("?" for _ in chunk)
+            try:
+                preds = [int(r["predicate_id"]) for r in self._conn.execute(
+                    f"SELECT DISTINCT predicate_id FROM kg_evidence "
+                    f"WHERE event_id IN ({marks})", chunk).fetchall()]
+                cur = self._conn.execute(
+                    f"DELETE FROM kg_evidence WHERE event_id IN ({marks})", chunk)
+            except sqlite3.OperationalError:  # pre-KG-v2 database
+                return out
+            out["kg_evidence"] += int(cur.rowcount or 0)
+            for pid in preds:
+                left = self._conn.execute(
+                    "SELECT 1 FROM kg_evidence WHERE predicate_id = ? LIMIT 1",
+                    (pid,)).fetchone()
+                if not left:
+                    self._conn.execute(
+                        "UPDATE kg_predicates SET status = 'unsupported', "
+                        "updated_at = ? WHERE id = ?", (now, pid))
+                    out["unsupported_predicates"] += 1
+        return out
+
+    def _retract_kg_beliefs_unlocked(self, where: str, args: list,
+                                     now: float | None = None) -> int:
+        """Mirror a v1 edge removal into KG v2. Removing an edge is the user's
+        (or cleanup tooling's) decision, but v2 kept the belief 'active', so
+        grounding went on citing an affiliation the user had deleted. The row
+        stays, marked 'retracted', so the removal is auditable; readers that
+        ask for active/superseded beliefs no longer see it. Caller holds the
+        lock and commits."""
+        import time as _time
+        try:
+            cur = self._conn.execute(
+                "UPDATE kg_predicates SET status = 'retracted', updated_at = ? "
+                f"WHERE status IN ('active', 'superseded') AND ({where})",
+                [now if now is not None else _time.time(), *args])
+        except sqlite3.OperationalError:  # pre-KG-v2 database
+            return 0
+        return int(cur.rowcount or 0)
 
     def strip_event_audio(self, event_ids: list[int]) -> dict:
         """Meeting Layer P5 — delete WAV receipts; keep transcript text.
@@ -3221,9 +3319,10 @@ class Store:
         erasure) can also drop LanceDB vectors and frame files. VACUUM clears
         freelist remnants so the deleted text does not survive in raw pages
         (skippable for bulk callers that vacuum once at the end)."""
+        import time as _time
         with self._lock:
             ev_rows = self._conn.execute(
-                "SELECT id, meta, audio_path FROM events WHERE time >= ? AND "
+                "SELECT id, time, meta, audio_path FROM events WHERE time >= ? AND "
                 "time < ? AND source LIKE ?", (t0, t1, source_like)).fetchall()
             event_ids = [int(r["id"]) for r in ev_rows]
             frame_paths: list[str] = []
@@ -3257,6 +3356,7 @@ class Store:
                     n_facts = self._conn.execute(
                         f"DELETE FROM facts WHERE id IN ({fmarks})",
                         fact_ids).rowcount
+                self._forget_event_evidence_unlocked(event_ids, _time.time())
                 n_events = self._conn.execute(
                     f"DELETE FROM events WHERE id IN ({marks})",
                     event_ids).rowcount
@@ -3266,6 +3366,10 @@ class Store:
                         self._conn.execute("VACUUM")
                     except Exception as exc:
                         print(f"[storage] post-erasure VACUUM skipped ({exc}).")
+        _run_delete_hooks(
+            self, deleted_events=[(int(r["id"]), float(r["time"]))
+                                  for r in ev_rows],
+            deleted_facts=fact_ids)
         return {"event_ids": event_ids, "fact_ids": fact_ids,
                 "frame_paths": frame_paths, "events": n_events,
                 "facts": n_facts, "relations": n_rel}
@@ -3696,13 +3800,16 @@ class Store:
     def delete_relation(self, subj_type: str, subj_id: int, predicate: str,
                         obj_type: str, obj_id: int) -> bool:
         """Remove one specific edge (user removed an org/team from DETAILS)."""
+        edge = (subj_type, int(subj_id), predicate, obj_type, int(obj_id))
         with self._lock:
             cur = self._conn.execute(
                 "DELETE FROM relations WHERE subj_type=? AND subj_id=? AND "
-                "predicate=? AND obj_type=? AND obj_id=?",
-                (subj_type, int(subj_id), predicate, obj_type, int(obj_id)))
+                "predicate=? AND obj_type=? AND obj_id=?", edge)
+            n_v2 = self._retract_kg_beliefs_unlocked(
+                "subj_type=? AND subj_id=? AND predicate=? AND obj_type=? "
+                "AND obj_id=?", list(edge))
             self._conn.commit()
-            return cur.rowcount > 0
+            return cur.rowcount > 0 or n_v2 > 0
 
     def list_person_mentions(self, *, person_id: int | None = None,
                              unresolved_only: bool = False,
@@ -4517,7 +4624,9 @@ class Store:
                 "UPDATE events SET raw = ?, lifecycle = 'compacted' WHERE id = ?",
                 (stub_raw, int(event_id)))
             self._conn.commit()
-            return True
+        _run_delete_hooks(self, rewritten_events=[
+            (int(event_id), float(d["time"]), stub_raw)])
+        return True
 
     def restore_event(self, event_id: int) -> bool:
         """Undo a compaction: put the archived original raw back and return the
@@ -4540,7 +4649,10 @@ class Store:
                 "DELETE FROM events_archive WHERE event_id = ?",
                 (int(event_id),))
             self._conn.commit()
-            return True
+        if original.get("time") is not None:
+            _run_delete_hooks(self, rewritten_events=[
+                (int(event_id), float(original["time"]), original.get("raw") or "")])
+        return True
 
     def compacted_events(self, since: float | None = None,
                          limit: int = 200) -> list[dict]:
@@ -7017,6 +7129,9 @@ class Store:
             self._conn.execute(
                 "DELETE FROM relations WHERE (subj_type='person' AND subj_id=?) "
                 "OR (obj_type='person' AND obj_id=?)", (person_id, person_id))
+            self._retract_kg_beliefs_unlocked(
+                "(subj_type='person' AND subj_id=?) "
+                "OR (obj_type='person' AND obj_id=?)", [person_id, person_id])
             self._conn.execute(
                 "UPDATE tasks SET owner_person_id=NULL WHERE owner_person_id=?",
                 (person_id,))
@@ -7093,6 +7208,9 @@ class Store:
             self._conn.execute(
                 "DELETE FROM relations WHERE (subj_type='entity' AND subj_id=?) "
                 "OR (obj_type='entity' AND obj_id=?)", (entity_id, entity_id))
+            self._retract_kg_beliefs_unlocked(
+                "(subj_type='entity' AND subj_id=?) "
+                "OR (obj_type='entity' AND obj_id=?)", [entity_id, entity_id])
             self._conn.execute(
                 "DELETE FROM entity_attrs WHERE entity_id=?", (entity_id,))
             self._conn.execute("DELETE FROM entities WHERE id=?", (entity_id,))
@@ -7105,9 +7223,11 @@ class Store:
         the deleted event ids + fact ids (so a caller can drop their vectors and
         write a backup). Used to roll back a bad ingest wholesale (e.g. the
         document scan that ate a codebase's own docs)."""
+        import time as _time
         with self._lock:
-            ev_ids = [int(r["id"]) for r in self._conn.execute(
-                "SELECT id FROM events WHERE source = ?", (source,)).fetchall()]
+            ev_rows = self._conn.execute(
+                "SELECT id, time FROM events WHERE source = ?", (source,)).fetchall()
+            ev_ids = [int(r["id"]) for r in ev_rows]
             fact_ids: list[int] = []
             if ev_ids:
                 ph = ",".join("?" * len(ev_ids))
@@ -7127,9 +7247,13 @@ class Store:
                 self._conn.execute(
                     f"DELETE FROM relations WHERE (subj_type='event' AND subj_id IN ({eph})) "
                     f"OR (obj_type='event' AND obj_id IN ({eph}))", ev_ids + ev_ids)
+                self._forget_event_evidence_unlocked(ev_ids, _time.time())
                 self._conn.execute(f"DELETE FROM events WHERE id IN ({eph})", ev_ids)
             self._conn.commit()
-            return {"events": ev_ids, "facts": fact_ids}
+        _run_delete_hooks(
+            self, deleted_events=[(int(r["id"]), float(r["time"])) for r in ev_rows],
+            deleted_facts=fact_ids)
+        return {"events": ev_ids, "facts": fact_ids}
 
     def relations_of(self, node_type: str, node_id: int) -> dict:
         """All edges touching a node, split into outgoing/incoming."""
@@ -7150,6 +7274,15 @@ class Store:
                              *, predicates: list[str] | None = None) -> int:
         """Remove edges (both directions) between two nodes. Optional predicate filter."""
         with self._lock:
+            pair = ("((subj_type = ? AND subj_id = ? AND obj_type = ? AND obj_id = ?) "
+                    "OR (subj_type = ? AND subj_id = ? AND obj_type = ? AND obj_id = ?))")
+            pair_args = [type_a, id_a, type_b, id_b, type_b, id_b, type_a, id_a]
+            if predicates:
+                self._retract_kg_beliefs_unlocked(
+                    f"predicate IN ({','.join('?' * len(predicates))}) AND {pair}",
+                    [*predicates, *pair_args])
+            else:
+                self._retract_kg_beliefs_unlocked(pair, pair_args)
             if predicates:
                 ph = ",".join("?" * len(predicates))
                 cur = self._conn.execute(
@@ -7216,6 +7349,10 @@ class Store:
                 "AND subj_type = ? AND subj_id = ?",
                 (node_type, node_id),
             )
+            if not pinned:
+                self._retract_kg_beliefs_unlocked(
+                    "predicate = 'pins' AND subj_type = ? AND subj_id = ?",
+                    [node_type, node_id])
             self._conn.commit()
         if pinned:
             self.add_relation(
@@ -7244,6 +7381,10 @@ class Store:
                 "AND subj_type = ? AND subj_id = ?",
                 (node_type, node_id),
             )
+            if not hidden:
+                self._retract_kg_beliefs_unlocked(
+                    "predicate = 'constellation_hidden' AND subj_type = ? "
+                    "AND subj_id = ?", [node_type, node_id])
             self._conn.commit()
         if hidden:
             self.add_relation(
@@ -7521,10 +7662,21 @@ class Store:
                 self._conn.execute("DELETE FROM tasks WHERE fact_id = ?", (fact_id,))
                 self._conn.execute(
                     "UPDATE facts SET kind = 'commitment' WHERE id = ?", (fact_id,))
+                # Write state with status: open_loops and commitment_complete
+                # read state, so a done task reclassified with state left at
+                # the 'detected' default came back as an open loop.
+                from app.services.commitment_state import (
+                    TransitionError, state_for_status)
+                try:
+                    state = ("detected" if status == "open"
+                             else state_for_status(status))
+                except TransitionError:
+                    state = "detected"
                 self._conn.execute(
                     "INSERT INTO commitments (fact_id, text, from_person_id, "
-                    "to_person_id, due, status) VALUES (?, ?, ?, NULL, ?, ?)",
-                    (fact_id, text, owner, due, status),
+                    "to_person_id, due, status, state) "
+                    "VALUES (?, ?, ?, NULL, ?, ?, ?)",
+                    (fact_id, text, owner, due, status, state),
                 )
             else:
                 row = self._conn.execute(
@@ -7575,6 +7727,10 @@ class Store:
                COALESCE(f.updated_at, f.extracted_at) AS updated_at,
                e.time AS source_time, e.modality AS source_modality,
                e.source AS event_source,
+               COALESCE(e.privacy_class,
+                        CASE WHEN json_valid(e.meta)
+                             THEN json_extract(e.meta, '$.privacy_class') END)
+                   AS source_privacy_class,
                COALESCE(t.text, c.text, NULLIF(f.text, ''), f.source_span) AS text,
                COALESCE(t.status, c.status) AS status,
                COALESCE(t.due, c.due) AS due,

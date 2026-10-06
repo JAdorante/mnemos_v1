@@ -199,6 +199,14 @@ def _eligible(row: dict) -> bool:
     text = (row.get("text") or "").strip()
     if not text:
         return False
+    # The source event's stamped class, then the claim's own words: a claim
+    # lifted from a sensitive capture stays home even when its text alone
+    # reads harmless (the stamp also sees window titles and app cues).
+    from app.services import privacy_class as _pc
+    if not _pc.egress_allowed(row.get("source_privacy_class")):
+        return False
+    if _pc.egress_refusal(text):
+        return False
     # A question is not a fact. Shipping it as one makes the asker's Sparrow
     # echo their own question back dated "today".
     if is_question_shaped(text):

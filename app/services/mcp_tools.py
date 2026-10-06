@@ -101,15 +101,46 @@ def classify_text(text: str) -> str:
     return "other"
 
 
+_EVENT_REF_KEYS = ("event_id", "source_event_id")
+
+
+def _withheld(obj: dict, blob: str, store_box: list) -> str | None:
+    """Why this item may not leave over MCP, or None. MCP clients are
+    usually cloud models, so the stored privacy_class applies here exactly as
+    it does on peer answers and records: sensitive and never-send stay home.
+    The topic classes below are a second, separate filter on top."""
+    from app.services import privacy_class as pc
+    if "privacy_class" in obj and not pc.egress_allowed(obj.get("privacy_class")):
+        return f"privacy_class={pc.normalize(obj.get('privacy_class'))}"
+    if blob.strip():
+        reason = pc.egress_refusal(blob)
+        if reason:
+            return reason
+    for k in _EVENT_REF_KEYS:
+        v = obj.get(k)
+        if not isinstance(v, int) or isinstance(v, bool):
+            continue
+        if not store_box:
+            from app.services.memory import memory
+            store_box.append(memory._ensure_store())
+        reason = pc.event_egress_refusal(store_box[0], v)
+        if reason:
+            return reason
+    return None
+
+
 def redact_result(payload: Any,
                   *, text_keys: tuple[str, ...] = (
                       "text", "summary", "quote", "source_span")) -> Any:
     from app.services import redact
     policy = load_policy()
+    store_box: list = []
 
     def walk(obj):
         if isinstance(obj, dict):
             blob = " ".join(str(obj.get(k) or "") for k in text_keys)
+            if _withheld(obj, blob, store_box):
+                return None
             topic = classify_text(blob) if blob.strip() else "other"
             action = policy.get(topic, "offer")
             if action == "deny":
@@ -209,14 +240,19 @@ def call_tool(name: str, arguments: dict | None = None) -> dict[str, Any]:
                 limit=int(args.get("limit") or 8))
             items = []
             for hit in hits or []:
+                eid = hit.get("event_id") or hit.get("source_event_id")
                 items.append({
                     "text": hit.get("text") or hit.get("raw") or hit.get("summary"),
                     "source": hit.get("source"),
-                    "event_id": hit.get("id") or hit.get("event_id"),
+                    "event_id": eid,
+                    "fact_id": hit.get("fact_id"),
                     "source_span": hit.get("source_span"),
                     "kind": hit.get("kind"),
+                    "privacy_class": ((hit.get("meta") or {}).get("privacy_class")
+                                      or hit.get("source_privacy_class")
+                                      or "internal"),
                     "provenance": {
-                        "event_id": hit.get("id") or hit.get("event_id"),
+                        "event_id": eid,
                         "source": hit.get("source"),
                     },
                 })
@@ -333,6 +369,11 @@ def call_tool(name: str, arguments: dict | None = None) -> dict[str, Any]:
                 row = None
             if not row:
                 return {"ok": False, "error": "no such event"}
+            from app.services import privacy_class as _pc
+            reason = (_pc.event_egress_refusal(store, eid)
+                      or _pc.egress_refusal(row.get("raw") or row.get("summary") or ""))
+            if reason:
+                return {"ok": False, "error": f"withheld: {reason}"}
             payload = {
                 "event_id": eid,
                 "text": row.get("raw") or row.get("summary"),

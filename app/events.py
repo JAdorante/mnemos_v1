@@ -94,21 +94,47 @@ class EventBus:
         self._subscribers.append(fn)
 
     async def publish(self, event: Event) -> None:
+        # Each subscriber is isolated: Memory subscribes first, so one SQLite
+        # error used to skip every later subscriber (watchers, context feeder,
+        # the fleet feed) without a trace.
         for fn in list(self._subscribers):
-            result = fn(event)
-            if asyncio.iscoroutine(result):
-                await result
+            try:
+                result = fn(event)
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception as exc:
+                _report(fn, event, exc)
 
     def publish_nowait(self, event: Event) -> None:
         """Publish from a non-async thread (e.g. the audio callback thread)."""
         if self._loop is not None and self._loop.is_running():
-            asyncio.run_coroutine_threadsafe(self.publish(event), self._loop)
+            fut = asyncio.run_coroutine_threadsafe(self.publish(event), self._loop)
+            fut.add_done_callback(_log_dropped)
         else:
             # No loop bound (e.g. standalone CLI): call sync subscribers directly.
             for fn in list(self._subscribers):
-                res = fn(event)
-                if asyncio.iscoroutine(res):
-                    res.close()
+                try:
+                    res = fn(event)
+                    if asyncio.iscoroutine(res):
+                        res.close()
+                except Exception as exc:
+                    _report(fn, event, exc)
+
+
+def _report(fn: Subscriber, event: Event, exc: BaseException) -> None:
+    name = getattr(fn, "__qualname__", None) or repr(fn)
+    print(f"[bus] subscriber {name} failed on {event.source or event.modality.value} "
+          f"event ({type(exc).__name__}: {exc}).")
+
+
+def _log_dropped(fut) -> None:
+    """publish_nowait hands back no future, so surface what it would have hidden."""
+    try:
+        exc = fut.exception()
+    except Exception as cancelled:  # CancelledError when the loop shuts down
+        exc = cancelled
+    if exc is not None:
+        print(f"[bus] publish failed ({type(exc).__name__}: {exc}).")
 
 
 bus = EventBus()
