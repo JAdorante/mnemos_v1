@@ -235,9 +235,10 @@ body:has(> .dock){--composer-min:152px}
 #mnemosDockBR{
   position:fixed;right:16px;bottom:calc(16px + max(var(--composer-h, 0px), var(--composer-min, 0px)));z-index:var(--z-float);
   display:flex;flex-direction:column;gap:10px;align-items:flex-end;
-  /* Wide enough for Mic+Screen+System audio on one wrap line; RecBar must
-     never outgrow this or flex-end clips the left edge (overflow:auto). */
-  max-width:min(320px,calc(100vw - 24px));
+  /* No fixed cap here: flex-end + overflow:auto clips the LEFT edge of any
+     child wider than the dock, which cut the ghost pane (380px, 720px in
+     take-over) down to 320px. Each child caps itself instead (RecBar below). */
+  max-width:calc(100vw - 24px);
   max-height:calc(100vh - var(--chrome-h) - max(var(--composer-h, 0px), var(--composer-min, 0px)) - 32px);
   max-height:calc(100dvh - var(--chrome-h) - max(var(--composer-h, 0px), var(--composer-min, 0px)) - 32px);
   overflow-x:visible;overflow-y:auto;pointer-events:none;
@@ -249,7 +250,8 @@ body:has(> .dock){--composer-min:152px}
 #mnemosRecBar{
   position:relative;z-index:auto;right:auto;bottom:auto;
   display:flex;flex-direction:column;gap:4px;align-items:stretch;
-  box-sizing:border-box;width:max-content;max-width:100%;
+  /* Wide enough for Mic+Screen+System audio on one wrap line. */
+  box-sizing:border-box;width:max-content;max-width:min(320px,100%);
   pointer-events:auto;font-family:var(--font);
   background:var(--surface);border:1px solid var(--line);
   border-radius:var(--radius-sm);padding:5px;
