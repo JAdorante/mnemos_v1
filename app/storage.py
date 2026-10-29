@@ -1598,6 +1598,40 @@ class Store:
                 "ON records_outbox(done_at, next_at)")
             self._conn.commit()
 
+            # Meeting debrief (services/meeting_debrief.py): one thank-you
+            # draft per note and recipient. A `sent` row is final — the
+            # UNIQUE key is what makes "never twice to the same person for
+            # the same meeting" a schema fact rather than a code path.
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS meeting_debriefs (
+                    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                    reflection_id       INTEGER NOT NULL,
+                    meeting_session_id  INTEGER,
+                    recipient_key       TEXT NOT NULL,  -- lower email | name:<name>
+                    name                TEXT,
+                    email               TEXT,
+                    person_id           INTEGER,
+                    relationship        TEXT,
+                    subject             TEXT NOT NULL DEFAULT '',
+                    body                TEXT NOT NULL DEFAULT '',
+                    body_hash           TEXT NOT NULL DEFAULT '',
+                    source_fact_ids     TEXT,           -- JSON list
+                    status              TEXT NOT NULL DEFAULT 'draft',
+                                                        -- draft|sending|sent|failed
+                    provider            TEXT,
+                    provider_message_id TEXT,
+                    error               TEXT,
+                    model               TEXT,
+                    created_at          REAL NOT NULL,
+                    updated_at          REAL NOT NULL,
+                    sent_at             REAL,
+                    UNIQUE (reflection_id, recipient_key)
+                )
+                """
+            )
+            self._conn.commit()
+
     def _migrate(self) -> None:
         """Additive, idempotent migrations for DBs created before a column existed.
 

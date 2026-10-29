@@ -70,6 +70,9 @@ def _seat_env(seat: str, token: str) -> dict[str, str]:
         # Records layer: claims -> org record at /records (org service on
         # sparrow-net as sparrow-org:8100). Expiry stays dry_run by default.
         "QUILL_RECORDS": os.environ.get("SEAT_RECORDS", "1"),
+        # Meeting debrief sends: human-selected, live-session only, through a
+        # separate send-only grant — not the agent (see gb10 compose).
+        "QUILL_MAIL_SEND": os.environ.get("SEAT_MAIL_SEND", "1"),
     }
     for optional in ("GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_SECRET",
                      "MS_OAUTH_CLIENT_ID", "MS_OAUTH_CLIENT_SECRET",

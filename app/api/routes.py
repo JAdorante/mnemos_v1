@@ -2728,6 +2728,135 @@ def meeting_note_draft(reflection_id: int, body: MeetingDraftIn | None = None) -
     return out
 
 
+# --- Meeting debrief: thank-you recaps to the people on the call ------------
+class DebriefDraftIn(BaseModel):
+    keys: list[str] | None = None
+    regenerate: bool = False
+
+
+class DebriefEditIn(BaseModel):
+    key: str
+    subject: str
+    body: str
+    email: str | None = None
+
+
+class DebriefPersonIn(BaseModel):
+    key: str
+    name: str = ""
+    email: str = ""
+    relationship: str = ""
+
+
+class DebriefSendItem(BaseModel):
+    key: str
+    body_hash: str
+
+
+class DebriefSendIn(BaseModel):
+    items: list[DebriefSendItem]
+
+
+class MailSendGrantIn(BaseModel):
+    provider: str
+    return_path: str | None = None
+
+
+@router.get("/meeting/note/{reflection_id}/debrief")
+def meeting_debrief_state(reflection_id: int) -> dict:
+    from app.services import meeting_debrief
+    out = meeting_debrief.state(memory._ensure_store(), int(reflection_id))
+    if not out.get("ok"):
+        raise HTTPException(status_code=404, detail=out.get("error"))
+    return out
+
+
+@router.post("/meeting/note/{reflection_id}/debrief/draft")
+def meeting_debrief_draft(reflection_id: int,
+                          body: DebriefDraftIn | None = None) -> dict:
+    """Draft (or redraft) one thank-you email per selected attendee. Never sends."""
+    from app.services import meeting_debrief
+    body = body or DebriefDraftIn()
+    out = meeting_debrief.draft(memory._ensure_store(), int(reflection_id),
+                                keys=body.keys, regenerate=body.regenerate)
+    if not out.get("ok"):
+        raise HTTPException(status_code=404, detail=out.get("error"))
+    return out
+
+
+@router.post("/meeting/note/{reflection_id}/debrief/edit")
+def meeting_debrief_edit(reflection_id: int, body: DebriefEditIn) -> dict:
+    from app.services import meeting_debrief
+    out = meeting_debrief.edit(memory._ensure_store(), int(reflection_id),
+                               body.key, subject=body.subject, body=body.body,
+                               email=body.email)
+    if not out.get("ok"):
+        raise HTTPException(status_code=409, detail=out.get("error"))
+    return out
+
+
+@router.post("/meeting/note/{reflection_id}/debrief/person")
+def meeting_debrief_person(reflection_id: int, body: DebriefPersonIn) -> dict:
+    """Remember a relationship (and, when typed in, an email) on the person —
+    the same record the People tab shows, so the next meeting already knows."""
+    from app.services import meeting_debrief
+    store = memory._ensure_store()
+    out = meeting_debrief.set_relationship(
+        store, name=body.name, email=body.email, relationship=body.relationship)
+    if not out.get("ok"):
+        raise HTTPException(status_code=400, detail=out.get("error"))
+    if body.email and "@" in body.email:
+        known = (store.person_attrs(out["person_id"]).get("email") or {}).get("value")
+        if (known or "").lower() != body.email.strip().lower():
+            person_detail_set(out["person_id"], PersonDetailField(
+                key="email", value=body.email.strip(), op="set"))
+    return out
+
+
+@router.post("/meeting/note/{reflection_id}/debrief/send")
+def meeting_debrief_send(reflection_id: int, body: DebriefSendIn,
+                         request: Request) -> dict:
+    """Send the selected drafts. Only a live human session on the page may —
+    decided here from the request (records_routes.live_session), never from
+    the body — and each item must carry the hash of the draft it shows."""
+    from app.api.records_routes import live_session
+    from app.services import meeting_debrief
+    ok, why = live_session(request)
+    if not ok:
+        raise HTTPException(status_code=403, detail=f"not a live session: {why}")
+    out = meeting_debrief.send_selected(
+        memory._ensure_store(), int(reflection_id),
+        [i.model_dump() for i in body.items], live_human=True)
+    if not out.get("ok") and not out.get("results"):
+        raise HTTPException(status_code=409, detail=out.get("error"))
+    return out
+
+
+@router.get("/mail/send/status")
+def mail_send_status() -> dict:
+    from app.services import mail_send
+    return mail_send.status()
+
+
+@router.post("/mail/send/grant")
+def mail_send_grant(body: MailSendGrantIn, request: Request) -> dict:
+    """Start the separate send-only OAuth grant; returns the consent URL."""
+    from app.services import mail_send
+    from app.services.connectors import request_public_base
+    out = mail_send.begin_grant((body.provider or "").strip().lower(),
+                                public_base=request_public_base(request),
+                                return_path=body.return_path)
+    if not out.get("ok"):
+        raise HTTPException(status_code=400, detail=out.get("error"))
+    return out
+
+
+@router.post("/mail/send/revoke")
+def mail_send_revoke(body: MailSendGrantIn) -> dict:
+    from app.services import mail_send
+    return mail_send.revoke((body.provider or "").strip().lower())
+
+
 # --- Meeting Layer P5: meeting mode + retention ----------------------------
 class MeetingModeIn(BaseModel):
     until: float | None = None

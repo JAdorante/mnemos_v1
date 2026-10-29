@@ -1,3 +1,26 @@
+# Meeting debrief: a thank-you with what was covered, to the people you pick, October 29 2026
+
+When a meeting note lands, Sparrow offers in chat to draft debriefs. Saying yes drafts one short email per person on the call. Each one thanks them for their time and recaps what was covered: their own items first, then your commitments, then anything else worth repeating. The meeting page's new Debrief panel lists everyone on the roster with a checkbox, their relationship to you, and an editable draft. Nothing sends until you press Send selected and confirm the list.
+
+**Sparrow knows how you know them.** Each attendee has a relationship: colleague, manager, client, vendor, investor and so on. That relationship sets the tone of their email. One you set is kept on the person (`person_attrs.relationship`), so the next meeting already knows it. Until then Sparrow suggests one from the email domain (your domain → colleague, any other → external) and marks it as suggested. Recipients come from the meeting's roster (the calendar invite, or "who's on the call" at manual start), never from the transcript, and you are never one of them. If an attendee has no email on the invite, the address you saved in People is used. You can also type one in the panel, which saves it to People the same way the People tab does.
+
+**Sending is a separate, send-only permission.** The Gmail and Outlook connectors stay metadata-only. "Allow sending from Gmail/Outlook" runs a second OAuth grant for `gmail.send` or `Mail.Send` only, with its own token beside the connector's (`send_token.json`). It shares the provider's one registered callback, and its state is marked `purpose=send` (`app/services/mail_send.py`). A wider grant is refused and not stored. Revoking it leaves the read connector alone. On Microsoft, consent is per app, so a later read token may also list `Mail.Send`; the Outlook read guard tolerates that only where `QUILL_MAIL_SEND=1`.
+
+**The send gate.**
+- Only a live human session may send: the records layer's `live_session` check, made from the request rather than the body. Bearer and cross-site callers get a 403.
+- Each send carries the hash of the subject, body and address on screen; an edit made elsewhere refuses it.
+- Each row is claimed `draft → sending` atomically, and `(note, recipient)` is UNIQUE with `sent` final, so a double click, a second tab or a redraft cannot mail anyone twice.
+- A failed send can be retried.
+- The yes in chat only drafts.
+
+**What never reaches a draft.** Your notepad jots, items you dismissed, and items whose text or evidence the egress rule keeps home (`privacy_class`). The panel shows how many were withheld. With no model reachable, a plain template draft is written so there is still something to review.
+
+**Pilot.** `QUILL_MAIL_SEND: "1"` is set on every gb10 seat and in gateway provisioning (`SEAT_MAIL_SEND`). `AGENT_DRY_RUN` stays `draft`, so the browser agent still cannot send; this is the only send path on the pilot. `test_hosted_posture` asserts both, and that the route stays live-session gated. Before "Allow sending" can work, `gmail.send` has to be added to the Google OAuth consent screen and `Mail.Send` (delegated) to the Entra app. Seats need a rebuild.
+
+Flags: `QUILL_MEETING_DEBRIEF` (default on: the offer and drafts), `QUILL_MAIL_SEND` (default off: the send grant and sending), `QUILL_DEBRIEF_MODEL` (default `claude-sonnet-4-6`; seats with the local text model draft locally). Tests: `tests/test_meeting_debrief.py` (25). A browser pass in Chromium at phone width found that a re-render re-ticked a recipient you had unticked, and the send went to them. Ticks and typed edits now survive re-renders.
+
+---
+
 # Records layer, Phase 2: records reach HubSpot, Drive and webhooks — previewed, verified, never overwritten, October 2 2026
 
 Phase 1 made an approved claim a record in the org tier; Phase 2 writes it back to the systems the org already uses, with Sparrow tracking what it wrote and never claiming to be the system of record. Map and limits in `docs/records-layer.md`.

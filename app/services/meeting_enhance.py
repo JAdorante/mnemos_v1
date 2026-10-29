@@ -549,6 +549,13 @@ def enhance_session(
     except Exception as exc:
         print(f"[meeting_enhance] first-win note skipped ({exc}).")
 
+    # Debrief: offer thank-you drafts to the people on the call (yes/no).
+    try:
+        from app.services import meeting_debrief
+        meeting_debrief.offer(store, int(rid))
+    except Exception as exc:
+        print(f"[meeting_enhance] debrief offer skipped ({exc}).")
+
     return {
         "reflection_id": rid,
         "summary": summary,

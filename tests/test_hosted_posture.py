@@ -74,6 +74,21 @@ class HostedPostureTests(unittest.TestCase):
         self.assertNotIn("QUILL_PEER_CLIP_PLAYBACK", os.environ)
         self.assertFalse(settings.peer.clip_playback)
 
+    def test_debrief_sending_is_the_only_send_path_and_is_human_gated(self) -> None:
+        """QUILL_MAIL_SEND opens exactly one outbound path: debrief emails a
+        human selects and sends from the meeting page. It must not arrive
+        with an autonomous agent, and the route must stay live-session gated."""
+        import inspect
+        from app.api import routes
+        for seat in self.seats:
+            env = self._env(seat)
+            self.assertIn(str(env.get("QUILL_MAIL_SEND", "0")), ("0", "1"), seat)
+            if str(env.get("QUILL_MAIL_SEND", "0")) == "1":
+                self.assertEqual(str(env.get("AGENT_DRY_RUN", "")).lower(),
+                                 "draft", seat)
+        src = inspect.getsource(routes.meeting_debrief_send)
+        self.assertIn("live_session(request)", src)
+
     def test_phone_link_stays_off(self) -> None:
         """An outbound channel to a real phone is not part of this trial."""
         for seat in self.seats:

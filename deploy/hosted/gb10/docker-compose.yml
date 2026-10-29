@@ -69,6 +69,16 @@ x-env: &sparrow-env
   # draft-building all still run. Raise to "approval" (or unset) to restore
   # human-gated commits; "navigate" is stricter still (no typing or clicking).
   AGENT_DRY_RUN: draft
+  # Meeting debrief (2026-10-29): after a note lands, Sparrow drafts a
+  # thank-you to each person on the call; the tester picks recipients on the
+  # meeting page and presses Send. This is the ONE send path on the pilot and
+  # it is not the agent: it goes through a separate send-only OAuth grant
+  # (gmail.send / Mail.Send — the read connectors stay metadata-only), only
+  # from a signed-in human session on the page, only the exact draft shown,
+  # once per person per meeting. AGENT_DRY_RUN above still keeps the browser
+  # agent from sending anything. Needs gmail.send on the Google consent screen
+  # and Mail.Send on the Entra app before "Allow sending" can succeed.
+  QUILL_MAIL_SEND: "1"
   # Meeting transcription. On the 2026-09 pilot half of every meeting
   # transcript was a repetition loop ("nd nd nd ..."), and a monologue over
   # ~32 s killed capture. These close the configuration half of both:

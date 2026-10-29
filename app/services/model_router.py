@@ -66,6 +66,8 @@ MODELS: dict[str, str] = {
                                                  "claude-opus-4-8")),
     # Meeting Layer P3 — session enhance (quality over cost; Sonnet-class).
     "enhance": os.environ.get("QUILL_ENHANCE_MODEL", "claude-sonnet-4-6"),
+    # Meeting debrief — one short thank-you email per attendee (Sonnet-class).
+    "debrief": os.environ.get("QUILL_DEBRIEF_MODEL", "claude-sonnet-4-6"),
     # Mint-time person-vs-entity adjudication — rare (only brand-new person
     # candidates), small classification; Haiku-class is plenty.
     "person_adjudicate": os.environ.get("QUILL_PERSON_ADJUDICATE_MODEL",

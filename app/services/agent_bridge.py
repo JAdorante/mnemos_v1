@@ -1027,6 +1027,8 @@ class AgentWorker:
         if kind == "peer_tell":
             who = (pend.get("peer_name") or "").strip() or "a teammate"
             return f"Waiting: yes/no to send the update to {who}"
+        if kind == "meeting_debrief":
+            return f"Waiting: yes/no to draft debriefs — {title or 'meeting'}"
         if kind == "task":
             goal = items[0] if items else "heard task"
             return f"Waiting: yes/no for task — {goal}"
@@ -1388,6 +1390,34 @@ class AgentWorker:
             out = {"ok": False, "accepted": True, "error": str(exc)}
         self._advance_offers()
         return out
+
+    def _resolve_meeting_debrief(self, pend: dict, accept: bool) -> dict:
+        """Yes drafts the thank-you emails; sending stays on the meeting page,
+        where the human picks recipients and presses Send."""
+        from app.services import meeting_debrief
+        rid = int(pend.get("reflection_id") or 0)
+        if not accept or not rid:
+            self._emit("system", "Okay — no debrief for this one.")
+            self._advance_offers()
+            return {"ok": True, "accepted": False}
+        href = meeting_debrief.note_href(rid)
+
+        def _run() -> None:
+            try:
+                from app.storage import get_store
+                out = meeting_debrief.draft(get_store(), rid)
+                n = len([a for a in out.get("attendees") or []
+                         if a.get("status") in ("draft", "failed")])
+                self._emit("result",
+                           f"Drafted {n} debrief{'s' if n != 1 else ''}. "
+                           f"Review, pick who gets one, and send: {href}")
+            except Exception as exc:
+                self._emit("error", f"Couldn't draft the debriefs ({exc}).")
+
+        threading.Thread(target=_run, name="meeting-debrief", daemon=True).start()
+        self._emit("system", "Drafting the debriefs…")
+        self._advance_offers()
+        return {"ok": True, "accepted": True, "href": href}
 
     def propose_calendar(self, event: dict) -> bool:
         """Offer to add a parsed calendar event (yes/no in chat). On 'yes' it
@@ -1883,6 +1913,8 @@ class AgentWorker:
             return self._resolve_calendar(pend, accept)
         if pend.get("kind") == "peer_tell":
             return self._resolve_peer_tell(pend, accept)
+        if pend.get("kind") == "meeting_debrief":
+            return self._resolve_meeting_debrief(pend, accept)
         if pend.get("kind") in ("task_question", "slot_fill", "slot_undo",
                                 "slot_create", "peer_null_options"):
             return self._resolve_fulfillment(pend, accept, choice)

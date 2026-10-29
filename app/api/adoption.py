@@ -433,6 +433,19 @@ def oauth_callback(provider: str, request: Request,
     if error:
         return RedirectResponse(_dest(back, "oauth_error", error),
                                 status_code=302)
+    # The separate send-only grant (mail_send) shares this registered URI and
+    # state file; its state is marked purpose=send and never reaches the
+    # read connector's exchange (which would refuse the scope anyway).
+    from app.services import mail_send
+    if mail_send.is_send_state(provider, state or ""):
+        result = mail_send.complete_grant(provider, code or "", state or "")
+        back = result.get("return_path") or back
+        if not result.get("ok"):
+            return RedirectResponse(
+                _dest(back, "oauth_error", str(result.get("error") or "oauth failed")),
+                status_code=302)
+        return RedirectResponse(_dest(back, "send_granted", provider),
+                                status_code=302)
     # Empty redirect_uri → the connector uses the URI saved with oauth state
     # (minted from the live Origin/Host at connect time).
     result = c.complete_connect(code or "", state or "", redirect_uri="")

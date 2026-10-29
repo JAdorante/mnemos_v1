@@ -118,6 +118,34 @@ body{
   white-space:pre-wrap;
 }
 .ask-out .err{color:#8B3A2A}
+.db-grant{
+  margin:0 0 12px;padding:10px 12px;border:1px dashed var(--line);border-radius:8px;
+  font-size:13px;color:var(--mut);display:flex;gap:8px;flex-wrap:wrap;align-items:center;
+}
+.db-grant button,.db-row button{
+  border-radius:8px;padding:7px 12px;font:500 12px var(--font);cursor:pointer;
+  border:1px solid var(--line);background:var(--panel);color:var(--navy);
+}
+.db-list{display:flex;flex-direction:column;gap:8px}
+.db-row{border:1px solid var(--line);border-radius:8px;padding:10px 12px;background:var(--panel)}
+.db-row.sent{opacity:.7}
+.db-head{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.db-head label{display:flex;gap:8px;align-items:center;cursor:pointer;color:var(--navy);font-weight:500}
+.db-meta{font:12px var(--mono);color:var(--mut)}
+.db-head select,.db-row input[type=email],.db-row input.db-subj,.db-row textarea{
+  border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--navy);
+  font:13px var(--font);padding:5px 8px;
+}
+.db-pill{font:11px var(--mono);padding:2px 7px;border-radius:999px;border:1px solid var(--line);color:var(--mut)}
+.db-pill.sent{color:var(--acc);border-color:var(--acc)}
+.db-pill.failed{color:#8B3A2A;border-color:#8B3A2A}
+.db-row details{margin-top:8px}
+.db-row summary{cursor:pointer;font-size:13px;color:var(--mut)}
+.db-row input.db-subj{width:100%;margin-top:8px}
+.db-row textarea{width:100%;min-height:150px;margin-top:6px;line-height:1.45;resize:vertical}
+.db-email{margin-top:8px;display:flex;gap:6px;align-items:center;font-size:13px;color:var(--mut)}
+.db-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.draft-btn[disabled]{opacity:.45;cursor:default}
 .foot{margin-top:28px;display:flex;gap:14px;flex-wrap:wrap;font-size:13px}
 .foot a{color:var(--navy)}
 @media(max-width:640px){
@@ -168,6 +196,17 @@ body{
       <button type="button" id="askBtn">Ask</button>
     </div>
     <div class="ask-out" id="askOut"></div>
+  </section>
+  <section class="panel" id="debriefPanel" hidden>
+    <h2>Debrief</h2>
+    <p class="hint">A thank-you to each person on the call with what you covered, written for how you know them. Pick who gets one — nothing sends until you press Send.</p>
+    <div class="db-grant" id="dbGrant" hidden></div>
+    <div class="db-list" id="dbList"></div>
+    <div class="db-actions">
+      <button type="button" class="draft-btn" id="dbDraft">Draft selected</button>
+      <button type="button" class="draft-btn" id="dbSend" disabled>Send selected</button>
+    </div>
+    <div class="ask-out" id="dbOut"></div>
   </section>
   <section class="panel" id="draftPanel" hidden>
     <h2>Follow-up</h2>
@@ -295,6 +334,7 @@ async function load() {
   document.getElementById('askPanel').hidden = !rid;
   document.getElementById('draftPanel').hidden = !rid;
   window.__meetingNoteId = rid || null;
+  if (rid) loadDebrief();
   // The meeting's own id when the note has one (stable); a derived session
   // id only for legacy notes.
   window.__meetingSessionId = note.meeting_session_id || null;
@@ -437,6 +477,227 @@ async function draftFollowup() {
   }
 }
 
+// --- Debrief: one thank-you per person on the call ------------------------
+let __db = null;
+// The user's ticks survive every re-render (a relationship change reloads the
+// list) — a recipient they unticked must never come back ticked.
+const __dbPick = {};
+// MnemosEsc leaves quotes alone; attribute values here can come from an
+// invite a stranger wrote, so they get the full treatment.
+function dbAttr(v) {
+  return MnemosEsc(v).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function dbRow(a, rels) {
+  const sent = a.status === 'sent';
+  const opts = ['<option value="">relationship…</option>'].concat(rels.map(r =>
+    '<option value="' + dbAttr(r) + '"' + (r === a.relationship ? ' selected' : '') + '>'
+    + MnemosEsc(r) + '</option>')).join('');
+  const meta = [a.role, a.org, a.email || 'no email yet'].filter(Boolean).join(' · ');
+  const relTag = a.relationship_source === 'suggested'
+    ? '<span class="db-pill" title="' + dbAttr(a.relationship_why || '') + '">suggested</span>' : '';
+  const status = a.status === 'none' ? '' : '<span class="db-pill ' + dbAttr(a.status) + '">'
+    + MnemosEsc(a.status) + '</span>';
+  const pick = !sent && ((a.key in __dbPick) ? __dbPick[a.key]
+                                            : (a.status !== 'none' || !!a.email));
+  let html = '<div class="db-row' + (sent ? ' sent' : '') + '" data-key="' + dbAttr(a.key) + '">'
+    + '<div class="db-head"><label><input type="checkbox" class="db-pick"'
+    + (pick ? ' checked' : '') + (sent ? ' disabled' : '') + '> ' + MnemosEsc(a.name) + '</label>'
+    + '<span class="db-meta">' + MnemosEsc(meta) + '</span>'
+    + '<select class="db-rel"' + (sent ? ' disabled' : '') + '>' + opts + '</select>' + relTag + status
+    + '</div>';
+  if (!a.email && !sent) {
+    html += '<div class="db-email">Email <input type="email" class="db-addr" placeholder="name@company.com">'
+      + '<button type="button" class="db-addr-save">Save</button></div>';
+  }
+  if (a.error) html += '<div class="ask-out"><span class="err">' + MnemosEsc(a.error) + '</span></div>';
+  if (a.body) {
+    html += '<details' + (a.status === 'failed' ? ' open' : '') + '><summary>'
+      + (sent ? 'Sent' : 'Draft') + ' · ' + MnemosEsc(a.subject) + '</summary>'
+      + '<input class="db-subj" value="' + dbAttr(a.subject) + '"' + (sent ? ' disabled' : '') + '>'
+      + '<textarea class="db-body"' + (sent ? ' disabled' : '') + '>' + MnemosEsc(a.body) + '</textarea>'
+      + '</details>';
+  }
+  return html + '</div>';
+}
+
+function dbGrant(st) {
+  const box = document.getElementById('dbGrant');
+  const send = st.send || {};
+  if (!send.enabled) {
+    box.hidden = false;
+    box.textContent = 'Sending is off on this install — drafts only.';
+    return;
+  }
+  if (send.provider) {
+    const p = (send.providers || []).find(x => x.id === send.provider) || {};
+    box.hidden = false;
+    box.innerHTML = 'Sends from your ' + MnemosEsc(p.label || send.provider)
+      + (p.account ? ' (' + MnemosEsc(p.account) + ')' : '') + '.';
+    return;
+  }
+  const btns = (send.providers || []).filter(p => p.configured).map(p =>
+    '<button type="button" data-grant="' + dbAttr(p.id) + '">Allow sending from '
+    + MnemosEsc(p.label) + '</button>').join('');
+  box.hidden = false;
+  box.innerHTML = btns
+    ? ('To send, allow Sparrow to send mail as you — a separate permission from reading. ' + btns)
+    : 'No mail account is set up for sending on this install.';
+  box.querySelectorAll('[data-grant]').forEach(b => b.onclick = async () => {
+    try {
+      const r = await fetch('/mail/send/grant', {method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({provider: b.dataset.grant,
+                              return_path: location.pathname})});
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || 'could not start');
+      location.href = d.auth_url;
+    } catch (e) { dbSay(String(e.message || e), true); }
+  });
+}
+
+function dbSay(msg, err) {
+  const out = document.getElementById('dbOut');
+  out.innerHTML = err ? '<span class="err">' + MnemosEsc(msg) + '</span>' : MnemosEsc(msg);
+}
+
+function dbRender(st) {
+  __db = st;
+  const panel = document.getElementById('debriefPanel');
+  panel.hidden = !st.enabled || !(st.attendees || []).length;
+  dbGrant(st);
+  const list = document.getElementById('dbList');
+  list.innerHTML = (st.attendees || []).map(a => dbRow(a, st.relationships || [])).join('');
+  if (st.withheld) {
+    list.insertAdjacentHTML('beforeend', '<div class="db-meta">' + st.withheld
+      + ' item' + (st.withheld === 1 ? '' : 's') + ' kept out of every draft as sensitive.</div>');
+  }
+  list.querySelectorAll('.db-row').forEach(row => {
+    const a = st.attendees.find(x => x.key === row.dataset.key);
+    const rel = row.querySelector('.db-rel');
+    if (rel) rel.onchange = () => dbPerson(a, {relationship: rel.value});
+    const save = row.querySelector('.db-addr-save');
+    if (save) save.onclick = () => dbPerson(a, {email: row.querySelector('.db-addr').value.trim()});
+    row.querySelectorAll('.db-subj,.db-body').forEach(el => el.oninput = () => { row.dataset.dirty = '1'; });
+    const pick = row.querySelector('.db-pick');
+    if (pick) pick.onchange = () => { __dbPick[row.dataset.key] = pick.checked; dbButtons(); };
+  });
+  dbButtons();
+}
+
+function dbPicked() {
+  return Array.from(document.querySelectorAll('.db-row')).filter(r => {
+    const c = r.querySelector('.db-pick');
+    return c && c.checked && !c.disabled;
+  });
+}
+
+function dbButtons() {
+  const picked = dbPicked();
+  const sendable = picked.filter(r => {
+    const a = __db.attendees.find(x => x.key === r.dataset.key);
+    return a && a.body && a.email && (a.status === 'draft' || a.status === 'failed');
+  });
+  const btn = document.getElementById('dbSend');
+  btn.disabled = !__db.can_send || !sendable.length;
+  btn.textContent = sendable.length ? ('Send selected (' + sendable.length + ')') : 'Send selected';
+  document.getElementById('dbDraft').disabled = !picked.length;
+}
+
+async function loadDebrief() {
+  const rid = window.__meetingNoteId;
+  if (!rid) return;
+  try {
+    const r = await fetch('/meeting/note/' + rid + '/debrief');
+    if (!r.ok) return;
+    dbRender(await r.json());
+  } catch (e) {}
+}
+
+async function dbPerson(a, change) {
+  const rid = window.__meetingNoteId;
+  try {
+    // Save typed edits first: the reload below re-renders every draft.
+    await dbSaveEdits(Array.from(document.querySelectorAll('.db-row')));
+    const r = await fetch('/meeting/note/' + rid + '/debrief/person', {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(Object.assign({key: a.key, name: a.name, email: a.email || '',
+                                          relationship: a.relationship || ''}, change))});
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || 'could not save');
+    if (change.email && a.body) {
+      await fetch('/meeting/note/' + rid + '/debrief/edit', {method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({key: a.key, subject: a.subject, body: a.body, email: change.email})});
+    }
+    dbSay(change.relationship !== undefined
+      ? 'Saved. Redraft ' + a.name + ' to match the new relationship.' : 'Saved.');
+    await loadDebrief();
+  } catch (e) { dbSay(String(e.message || e), true); }
+}
+
+async function dbSaveEdits(rows) {
+  const rid = window.__meetingNoteId;
+  for (const row of rows) {
+    if (!row.dataset.dirty) continue;
+    const r = await fetch('/meeting/note/' + rid + '/debrief/edit', {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({key: row.dataset.key,
+        subject: row.querySelector('.db-subj').value,
+        body: row.querySelector('.db-body').value})});
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || 'could not save the edit');
+    delete row.dataset.dirty;
+  }
+}
+
+async function dbDraft() {
+  const rid = window.__meetingNoteId;
+  const rows = dbPicked();
+  const keys = rows.map(r => r.dataset.key);
+  const redo = __db.attendees.filter(a => keys.includes(a.key) && a.body);
+  if (redo.length && !confirm('Redraft ' + redo.length + ' existing draft'
+      + (redo.length === 1 ? '' : 's') + '? Edits you made will be replaced.')) return;
+  dbSay('Drafting…');
+  try {
+    const r = await fetch('/meeting/note/' + rid + '/debrief/draft', {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({keys: keys, regenerate: true})});
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || 'draft failed');
+    dbRender(d);
+    dbSay('Drafted ' + d.drafted + '. Open each one to read or edit it before sending.');
+  } catch (e) { dbSay(String(e.message || e), true); }
+}
+
+async function dbSend() {
+  const rid = window.__meetingNoteId;
+  const rows = dbPicked();
+  try {
+    await dbSaveEdits(rows);
+    const st = await (await fetch('/meeting/note/' + rid + '/debrief')).json();
+    const keys = rows.map(r => r.dataset.key);
+    const items = st.attendees.filter(a => keys.includes(a.key) && a.body && a.email
+      && (a.status === 'draft' || a.status === 'failed'));
+    if (!items.length) return;
+    const names = items.map(a => a.name + ' <' + a.email + '>').join('\n');
+    if (!confirm('Send ' + items.length + ' email' + (items.length === 1 ? '' : 's')
+        + ' as you to:\n\n' + names)) return;
+    dbSay('Sending…');
+    const r = await fetch('/meeting/note/' + rid + '/debrief/send', {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({items: items.map(a => ({key: a.key, body_hash: a.body_hash}))})});
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || 'send failed');
+    const bad = (d.results || []).filter(x => !x.ok);
+    dbSay('Sent ' + d.sent + (bad.length ? (' · ' + bad.length + ' not sent: '
+      + bad.map(x => x.error).join('; ')) : '.'), bad.length > 0);
+    await loadDebrief();
+  } catch (e) { dbSay(String(e.message || e), true); }
+}
+
+document.getElementById('dbDraft').onclick = dbDraft;
+document.getElementById('dbSend').onclick = dbSend;
 document.getElementById('askBtn').onclick = askMeeting;
 document.getElementById('askQ').addEventListener('keydown', e => {
   if (e.key === 'Enter') { e.preventDefault(); askMeeting(); }

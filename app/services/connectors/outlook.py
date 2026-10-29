@@ -120,7 +120,12 @@ def assert_metadata_scopes(scope_string: str) -> None:
         if s and s not in _PLATFORM_SCOPES:
             got.add(s)
     allowed = set(SCOPES)
-    extra = got - allowed
+    # Consent is per app on Microsoft: once the user has granted the separate
+    # send permission (mail_send), a read token may list Mail.Send too. The
+    # read path never calls a send endpoint; tolerated only where sending is on.
+    from app.services import mail_send
+    tolerated = {mail_send.GRAPH_SEND_SCOPE} if mail_send.enabled() else set()
+    extra = got - allowed - tolerated
     if extra:
         raise PermissionError(
             f"OAuth grant includes disallowed scopes: {sorted(extra)}")
