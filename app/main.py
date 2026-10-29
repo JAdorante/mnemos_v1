@@ -103,6 +103,13 @@ async def _startup() -> None:
     ensure_api_token()
     bus.bind_loop(asyncio.get_running_loop())
     memory.attach()  # Memory Engine subscribes to every event
+    # Teammates' shared exemplars (QUILL_FLEET_EXEMPLARS_ACCEPT, read per
+    # event); attaching while the flag is off does nothing.
+    try:
+        from app.services.fleet import exemplar_intake
+        exemplar_intake.attach(bus)
+    except Exception as exc:
+        print(f"[fleet] exemplar intake not attached ({exc}).")
     # Pilot usage ledger (WS-A): counts an app start and begins the 60 s flush
     # timer. Numbers only, local only — see services/usage_ledger.py.
     try:

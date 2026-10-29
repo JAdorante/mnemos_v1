@@ -1,3 +1,21 @@
+# Shared exemplars: one person's correction can improve a teammate's local model, October 29 2026
+
+This is the first learned artifact to cross between Sparrows. When you accept or correct the local model's answer, that verified example can now be offered to teammates over the fleet relay. A teammate's Sparrow then uses it as a few-shot example for its own local model. Both directions are off by default.
+
+**Sending (`QUILL_FLEET_EXEMPLARS_OFFER=1`).** A confirmed accepted or edited learning pair becomes an `exemplar` signal on `learn.<task_type>`. It is always an approval offer on the Team page, never an automatic share, and your route rules still decide whether `learn.*` may leave at all. Only these pairs qualify:
+- confirmed by a human (shadow verdicts never ride);
+- one of the three `extraction.*` task types. `escalation.text` is held back because its targets are often a parent model's answer, and sharing those waits on a provider-terms review;
+- at most 5,000 characters on each side (longer pairs are skipped, not truncated);
+- classed no higher than `internal`. That is stricter than the firm-wide `personal`, and the class stamped on the raw text is the floor.
+
+The signal carries no subject and nothing that points back at your local records. Each pair is offered once.
+
+**Receiving (`QUILL_FLEET_EXEMPLARS_ACCEPT=1`).** A teammate's exemplar is filed as tier `peer_shared`. The receiver re-checks the privacy ceiling. A peer exemplar ranks below your own exemplars at equal similarity and rides only the local prompt. It never becomes a learning pair, so it never reaches LoRA training. The `_peer` gate silences all of them, and `POST /fleet/exemplars/purge` deletes them. `GET /fleet/exemplars` shows both flags and the counts.
+
+`exemplar` is a built-in envelope kind, so the relay needs no registry change. The receiving side is a bus subscriber, not part of `fleet/inbound.py`, which keeps inbound's import boundary intact.
+
+Not yet on the pilot: no gb10 seat sets either flag, and the relay needs `learn.*` topics and a barrier group before two seats can trade exemplars (see "Shared exemplars" in `docs/fleet-federation.md`). Tests: `tests/test_fleet_exemplars.py` (30).
+
 # Meeting debrief: a thank-you with what was covered, to the people you pick, October 29 2026
 
 When a meeting note lands, Sparrow offers in chat to draft debriefs. Saying yes drafts one short email per person on the call. Each one thanks them for their time and recaps what was covered: their own items first, then your commitments, then anything else worth repeating. The meeting page's new Debrief panel lists everyone on the roster with a checkbox, their relationship to you, and an editable draft. Nothing sends until you press Send selected and confirm the list.

@@ -348,6 +348,31 @@ def fleet_relay_register(body: RelayIn, request: Request) -> dict:
     return res
 
 
+@router.get("/fleet/exemplars")
+def fleet_exemplars(request: Request) -> dict:
+    """Exemplar sharing at a glance: both flags, pending offers, and how many
+    teammates' exemplars this Sparrow holds."""
+    _owner(request)
+    from app.services import exemplar_store as xs
+    from app.services.fleet import exemplar_intake, exemplar_share
+    held = [r for r in xs.exemplar_store.list_rows(limit=100000)
+            if r.get("quality_tier") == "peer_shared"]
+    pending = [o for o in fleet_router.list_offers("pending")
+               if (o.get("signal") or {}).get("kind") == exemplar_share.KIND]
+    return {"ok": True, "offer": exemplar_share.offer_enabled(),
+            "accept": exemplar_intake.accept_enabled(),
+            "pending_offers": len(pending), "peer_exemplars": len(held),
+            "peer_gate_off": xs.exemplar_store._gated(xs.PEER_GATE)}
+
+
+@router.post("/fleet/exemplars/purge")
+def fleet_exemplars_purge(request: Request) -> dict:
+    """Delete every exemplar that arrived from a teammate."""
+    _owner(request)
+    from app.services import exemplar_store as xs
+    return {"ok": True, "removed": xs.exemplar_store.purge_peer()}
+
+
 @router.post("/fleet/outbox/drain")
 def fleet_outbox_drain(request: Request) -> dict:
     _owner(request)

@@ -195,7 +195,7 @@ class KindsAndBlockedApiTests(IngressBase):
                          "fields": {"sev": {"enum": [1, 2, 3]}},
                          "required": ["sev"], "forbidden": ["customer"]}}})
         self.assertEqual(r.status_code, 200, r.text)
-        self.assertEqual(set(r.json()["kinds"]), {"note", "incident"})
+        self.assertEqual(set(r.json()["kinds"]), {"note", "exemplar", "incident"})
         self.assertEqual(self.client.put("/fleet/kinds", json={"kinds": {
             "x": {"fields": {"a": {"type": "object"}}}}}).status_code, 422)
         tok = registry.register_agent("ops", ["ops.incidents"])["token"]

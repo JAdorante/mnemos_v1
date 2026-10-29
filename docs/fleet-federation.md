@@ -66,6 +66,22 @@ The built-in `note` kind (no body, optional subject) is always available. Every 
 
 The blocked list (`GET/PUT /fleet/blocked`, `data/fleet_blocked.json`; relay: `PUT /relay/admin/blocked`) names subjects that may never leave. Matching is exact (case- and space-insensitive) or by glob pattern: `{"subjects": ["Project Falcon"], "patterns": ["acme*"]}`.
 
+## Shared exemplars (learning over the relay)
+
+A human-verified answer on one Sparrow can improve a teammate's local model. The built-in `exemplar` kind carries one LearningPair's `task_type`, `input_text`, `target_text`, and `quality_tier` (`human_edited` or `human_accepted`). The subject is forbidden, and so are the fields that point back at the sender's local records (`learning_pair_id`, `source_refs`, `local_output`, `parent_output`, `model_tag`, `privacy_class`). Because the kind is built into the envelope, the relay accepts it with no registry copy.
+
+Sending (`fleet/exemplar_share.py`, `QUILL_FLEET_EXEMPLARS_OFFER=1`): when `learning_store` records or confirms an accepted or edited pair that a human confirmed, the pair is built into a signal on topic `learn.<task_type>` (for example `learn.extraction.task`) under the producer `agent:sparrow-learning`. The route rules still decide whether it may leave: with no rule it stays local. Any `share` is downgraded to `offer`, so a human approves every exemplar on the Team page. Only the three extraction task types qualify (`extraction.task`, `extraction.commitment`, `extraction.claim`). `escalation.text` is left out on purpose: its targets are often a parent model's accepted answer, and training teammates' models on those waits on a provider-terms review. Pairs over 5,000 characters on either side are skipped rather than truncated. The privacy ceiling is `internal`, which is stricter than the firm-wide `personal`, and the pair's stamped class is the floor. Each pair is offered once (`signal_id = lp-<pair id>`), and the TTL is the 7-day cap so approval can wait.
+
+Receiving (`fleet/exemplar_intake.py`, `QUILL_FLEET_EXEMPLARS_ACCEPT=1`): a bus subscriber, attached at startup, files each `peer.signal` of kind `exemplar` into the exemplar store as tier `peer_shared`, on a worker thread. It is a separate module from `inbound.py`, because the exemplar store lazily reaches `app.storage` and the import boundary forbids that. The receiver re-runs the `internal` ceiling. A peer exemplar:
+
+- rides only the local model's prompt, like every exemplar, and creates no learning pair, so it never feeds LoRA curation;
+- ranks below every local tier at equal similarity;
+- is keyed `peer:<origin_id>`, so a redelivery replaces it.
+
+The `_peer` gate in `exemplar_type_gates.json` silences every peer exemplar at retrieval. `POST /fleet/exemplars/purge` deletes them, and `GET /fleet/exemplars` shows both flags, pending exemplar offers, and how many peer exemplars this Sparrow holds.
+
+To pilot it between two seats, set both flags (and `QUILL_EXEMPLARS=1`) on each seat, add `{"topic": "learn.*", "action": "offer"}` to each seat's routes, and put both nodes on the relay topics `learn.extraction.task` and friends in the same barrier group.
+
 ## Files
 
 Sparrow side, `app/services/fleet/`:
@@ -80,6 +96,7 @@ Sparrow side, `app/services/fleet/`:
 - `inbound.py` — relay deliveries.
 - `dedup.py` — origin-id ledgers.
 - `state.py` — instance tag and relay credentials.
+- `exemplar_share.py` / `exemplar_intake.py` — shared exemplars, sending and receiving.
 
 HTTP: `app/api/fleet_routes.py`; `/peer/ask` in `routes.py` hands `kind="signal"` to it before pairing auth runs. Team page panel in `app/api/peer_page.py`. MCP: read-only `signals` tool. Agent client: `fleet_client.py` (stdlib only).
 
@@ -106,6 +123,8 @@ Compliance reads `GET /relay/compliance/feed` and `GET /relay/compliance/verify`
 | `QUILL_FLEET_TTL_S` | `3600` | Default `expires_at` (cap 7 days) |
 | `QUILL_FLEET_RING` | `1000` | In-memory catch-up ring |
 | `QUILL_FLEET_RELAY_URL` | — | Default relay URL |
+| `QUILL_FLEET_EXEMPLARS_OFFER` | `0` | Offer confirmed learning pairs to teammates as `exemplar` signals (always approval) |
+| `QUILL_FLEET_EXEMPLARS_ACCEPT` | `0` | File teammates' exemplars into the local exemplar store as `peer_shared` |
 | `QUILL_FLEET_OWNER_AUTH` | `0` | Require the API token or an unlocked session for owner routes even from loopback |
 | `QUILL_FLEET_KINDS` / `_BLOCKED` / `_AGENTS` / `_ROUTES` / `_STATE` / `_OFFERS` / `_OUTBOX` / `_ORIGINS` | `data/fleet_*.json` | Stores |
 | `QUILL_RELAY_ADMIN_TOKEN` / `QUILL_RELAY_COMPLIANCE_TOKEN` | unset (refuse all) | Relay role tokens |
@@ -135,7 +154,7 @@ Compliance reads `GET /relay/compliance/feed` and `GET /relay/compliance/verify`
 
 ## Tests
 
-`test_fleet_envelope` (core, kinds, forbidden fields, registry validation, HMAC, blocklist), `test_fleet_ingress` (401/403/422/429, provenance, kinds and blocked-list APIs, source policy), `test_fleet_feed` (fan-out under 1 s, SSE, catch-up without duplicates, MCP tool), `test_fleet_router` (local/offer/share, `never_share`, blocked subjects, unknown kinds, offers bound to hashes, outbox), `test_relay` (barriers, signatures, kinds and forbidden fields at the relay, log chain and tamper detection, retry queue, register guard), `test_fleet_inbound` (dedupe, own-origin drop, hop limit, no re-forward, `source_can_authorize`, import boundary), `test_fleet_team_page` (live chromium), `test_fleet_e2e` (two Sparrows and a relay as real uvicorn processes). Set `QUILL_SKIP_E2E=1` to skip the subprocess test.
+`test_fleet_envelope` (core, kinds, forbidden fields, registry validation, HMAC, blocklist), `test_fleet_ingress` (401/403/422/429, provenance, kinds and blocked-list APIs, source policy), `test_fleet_feed` (fan-out under 1 s, SSE, catch-up without duplicates, MCP tool), `test_fleet_router` (local/offer/share, `never_share`, blocked subjects, unknown kinds, offers bound to hashes, outbox), `test_relay` (barriers, signatures, kinds and forbidden fields at the relay, log chain and tamper detection, retry queue, register guard), `test_fleet_inbound` (dedupe, own-origin drop, hop limit, no re-forward, `source_can_authorize`, import boundary), `test_fleet_team_page` (live chromium), `test_fleet_exemplars` (the exemplar kind, every offer and intake gate, ranking, purge, and a two-node round trip through the real inbound handler), `test_fleet_e2e` (two Sparrows and a relay as real uvicorn processes). Set `QUILL_SKIP_E2E=1` to skip the subprocess test.
 
 ## Open questions
 

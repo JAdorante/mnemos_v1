@@ -80,6 +80,30 @@ BUILTIN_KINDS: dict = {
                             "optional subject, no structured body.",
              "subject": "optional", "fields": {}, "required": [],
              "forbidden": []},
+    # A learned (input -> verified answer) pair one Sparrow offers a teammate's
+    # exemplar store (services/fleet/exemplar_share.py). Built in, so the relay
+    # knows it without a registry copy. Only human-confirmed tiers ride, and
+    # nothing that points back at the sender's local records may.
+    "exemplar": {"description": "A human-verified example (input and the "
+                                "answer a person accepted or wrote) for a "
+                                "teammate's local model to learn from.",
+                 "subject": "forbidden",
+                 "fields": {
+                     # No escalation.text: its targets are often a parent
+                     # model's accepted answer, and training teammates'
+                     # models on those waits on a provider-terms review.
+                     "task_type": {"enum": ["extraction.task",
+                                            "extraction.commitment",
+                                            "extraction.claim"]},
+                     "input_text": {"type": "string", "maxLength": 5000},
+                     "target_text": {"type": "string", "maxLength": 5000},
+                     "quality_tier": {"enum": ["human_edited",
+                                               "human_accepted"]}},
+                 "required": ["task_type", "input_text", "target_text",
+                              "quality_tier"],
+                 "forbidden": ["learning_pair_id", "source_refs",
+                               "local_output", "parent_output", "model_tag",
+                               "privacy_class"]},
 }
 
 

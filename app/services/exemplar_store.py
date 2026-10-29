@@ -42,9 +42,18 @@ TABLE = "exemplars"
 
 # Descending trust: the tier decides ranking ties and curation weight (E.1).
 QUALITY_TIERS = ("human_edited", "human_accepted",
-                 "shadow_confirmed", "shadow_autotrust")
+                 "shadow_confirmed", "shadow_autotrust", "peer_shared")
+# peer_shared: a teammate's human-verified example that arrived over the relay
+# (fleet/exemplar_intake.py). Verified, but by someone else for their own
+# work, so it ranks below every local tier at equal similarity.
 _TIER_BONUS = {"human_edited": 0.06, "human_accepted": 0.03,
-               "shadow_confirmed": 0.015, "shadow_autotrust": 0.0}
+               "shadow_confirmed": 0.015, "shadow_autotrust": 0.0,
+               "peer_shared": -0.02}
+
+# learning_pair_id prefix for peer exemplars: there is no local pair row.
+PEER_PREFIX = "peer:"
+# Gate key that silences every peer exemplar at retrieval (Console switch).
+PEER_GATE = "_peer"
 
 # Near-tie window for the rotation rule: candidates within this cosine band
 # are considered equivalent and the least-used one wins.
@@ -205,6 +214,55 @@ class ExemplarStore:
             print(f"[exemplar_store] ingest skipped ({exc}).")
             return None
 
+    def ingest_peer(self, *, origin_id: str, task_type: str, input_text: str,
+                    target_text: str, created_at: float | None = None
+                    ) -> str | None:
+        """Embed + upsert one exemplar a teammate's Sparrow shared. Keyed on
+        the signal's origin_id, so a redelivery replaces rather than
+        duplicates, and purge_peer() can remove every one. Never raises."""
+        try:
+            if not enabled():
+                return None
+            if not (origin_id and task_type and input_text and target_text):
+                return None
+            vec = _embed([input_text])[0]
+            eid = uuid.uuid4().hex
+            key = PEER_PREFIX + str(origin_id)
+            with self._lock:
+                table = self._ensure(len(vec))
+                table.delete(f"learning_pair_id = '{_q(key)}'")
+                table.add([{
+                    "exemplar_id": eid,
+                    "learning_pair_id": key,
+                    "task_type": str(task_type),
+                    "input_text": str(input_text),
+                    "target_text": str(target_text),
+                    "quality_tier": "peer_shared",
+                    "created_at": float(created_at or time.time()),
+                    "use_count": 0,
+                    "last_used_at": 0.0,
+                    "vector": [float(x) for x in vec],
+                }])
+            return eid
+        except Exception as exc:
+            print(f"[exemplar_store] peer ingest skipped ({exc}).")
+            return None
+
+    def purge_peer(self) -> int:
+        """Remove every exemplar that arrived from a teammate. Returns how
+        many were removed (0 on any failure)."""
+        try:
+            with self._lock:
+                table = self._ensure()
+                if table is None:
+                    return 0
+                before = table.count_rows()
+                table.delete("quality_tier = 'peer_shared'")
+                return max(0, before - table.count_rows())
+        except Exception as exc:
+            print(f"[exemplar_store] peer purge skipped ({exc}).")
+            return 0
+
     def delete_for_pair(self, pair_id: str) -> None:
         """Cascade from learning_store.delete — a deleted pair's exemplar must
         never be retrievable again (C.4)."""
@@ -250,6 +308,7 @@ class ExemplarStore:
             types = tuple(t for t in task_types if not self._gated(t))
             if not types or k <= 0:
                 return []
+            peer_off = self._gated(PEER_GATE)
             vec = _embed([query])[0]
             with self._lock:
                 table = self._ensure()
@@ -267,6 +326,8 @@ class ExemplarStore:
                     continue
                 if str(r.get("learning_pair_id") or "") in exclude_pair_ids:
                     continue          # eval contamination guard (C.5)
+                if peer_off and r.get("quality_tier") == "peer_shared":
+                    continue
                 cands.append({
                     "id": str(r["exemplar_id"]),
                     "pair_id": str(r.get("learning_pair_id") or ""),
@@ -371,6 +432,11 @@ class ExemplarStore:
             by[str(r.get("task_type"))] = by.get(str(r.get("task_type")), 0) + 1
         return {"enabled": enabled(), "count": len(rows), "by_type": by,
                 "gates": self.gates()}
+
+
+def _q(v: str) -> str:
+    """Quote a value for a Lance filter: origin ids come from another node."""
+    return str(v).replace("'", "''")
 
 
 exemplar_store = ExemplarStore()

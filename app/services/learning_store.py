@@ -190,6 +190,20 @@ def _notify_exemplars(row: dict, store=None) -> None:
         pass
     except Exception as exc:
         print(f"[learning_store] exemplar ingest skipped ({exc}).")
+    _offer_to_fleet(row)
+
+
+def _offer_to_fleet(row: dict) -> None:
+    """With QUILL_FLEET_EXEMPLARS_OFFER=1, queue a confirmed pair as an
+    approval offer for teammates (fleet/exemplar_share.py). Off by default;
+    the module applies every gate itself and never raises."""
+    if row.get("verdict") not in _POSITIVE or not row.get("human_confirmed"):
+        return
+    try:
+        from app.services.fleet import exemplar_share
+        exemplar_share.offer_pair(row)
+    except Exception as exc:
+        print(f"[learning_store] fleet exemplar offer skipped ({exc}).")
 
 
 def delete(pair_id: str, store=None) -> bool:

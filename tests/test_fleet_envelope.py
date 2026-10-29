@@ -163,7 +163,7 @@ class KindBodyTests(unittest.TestCase):
 
 class KindRegistryTests(unittest.TestCase):
     def test_example_registry_loads_with_builtins(self) -> None:
-        self.assertEqual(set(K), {"note", "status_update", "finding", "lead",
+        self.assertEqual(set(K), {"note", "exemplar", "status_update", "finding", "lead",
                                   "market_view"})
 
     def test_bad_definitions_raise(self) -> None:
