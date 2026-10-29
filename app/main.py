@@ -15,6 +15,7 @@ from app.api.adoption import router as adoption_router
 from app.api.web_ingest import router as web_ingest_router
 from app.api.fleet_routes import router as fleet_router
 from app.api.records_routes import router as records_router
+from app.api.assistants_routes import router as assistants_router
 from app.config import settings
 from app.events import bus
 from app.services.api_auth import (
@@ -33,6 +34,7 @@ app.include_router(adoption_router)
 app.include_router(web_ingest_router)
 app.include_router(fleet_router)
 app.include_router(records_router)
+app.include_router(assistants_router)
 
 
 # --- active-minute marker (WS-A) --------------------------------------------
@@ -434,6 +436,8 @@ async def _startup() -> None:
             # Typed chat -> memory: /chat stores a TEXT event + queues this.
             from app.services import chat_ingest
             worker.register("chat_ingest", chat_ingest.run_job)
+            # Accepted assistant captures (/assistants inbox) -> same extractor.
+            worker.register("assistant_capture", chat_ingest.run_job)
             # Web/agent research answers -> memory (testing-first writeback).
             from app.services import research_ingest
             worker.register("research_ingest", research_ingest.run_job)

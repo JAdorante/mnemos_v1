@@ -5124,8 +5124,17 @@ def console_desktop_access_reload() -> dict:
 def console_desktop_access() -> dict:
     """The Desktop Access read-model: environment posture + one row per
     allowlisted app (installed?, resolved path, capabilities, UI control, risk,
-    disabled?). Everything the desktop agent may do, made inspectable."""
-    from desktop_agent import access
+    disabled?). Everything the desktop agent may do, made inspectable.
+
+    Hosted seats do not ship desktop_agent. A missing module must be JSON the
+    page can show, not a text 500 the page then fails to parse."""
+    try:
+        from desktop_agent import access
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Desktop control is not installed on this Sparrow.",
+        ) from exc
     return access.desktop_access_state()
 
 

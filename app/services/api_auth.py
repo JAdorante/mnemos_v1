@@ -39,6 +39,9 @@ _CSRF_EXACT_EXEMPT = frozenset({
     "/auth/login",           # ditto — password is the auth
     "/phone/pair/claim",     # single-use pairing code is the auth
     "/peer/pair/claim",
+    "/oauth/mcp/register",   # remote MCP: open registration, consent gates use
+    "/oauth/mcp/token",      # code + PKCE / refresh token is the auth
+    "/mcp",                  # remote MCP: OAuth Bearer checked in the route
 })
 
 # Paths that must stay reachable without the LAN API token.
@@ -55,6 +58,18 @@ _EXACT_EXEMPT = frozenset({
     "/peer/pair/claim",   # peer pairing: the single-use code IS the auth
     "/oauth/google/callback",   # OAuth redirects: the state is the auth
     "/oauth/outlook/callback",  # (browser arrives with no LAN token)
+    # Remote MCP (services/remote_mcp.py): every one checks its own
+    # credentials, loopback included — a local tunnel daemon makes public
+    # requests look local. /oauth/mcp/authorize stays under CSRF.
+    "/.well-known/oauth-protected-resource",
+    "/.well-known/oauth-protected-resource/mcp",
+    "/.well-known/oauth-authorization-server",
+    "/.well-known/oauth-authorization-server/mcp",
+    "/.well-known/openid-configuration",
+    "/oauth/mcp/register",
+    "/oauth/mcp/authorize",
+    "/oauth/mcp/token",
+    "/mcp",
     "/docs",
     "/openapi.json",
     "/redoc",
@@ -102,6 +117,7 @@ _HTML_EXEMPT = frozenset({
     "/bootstrap",
     "/help/mcp",
     "/help/trust",
+    "/assistants",  # shell only; /assistants/* JSON needs the LAN token
 })
 
 

@@ -319,10 +319,74 @@ async def ws_ingest(ws: WebSocket) -> None:
 _OAUTH_CALLBACK_RE = re.compile(r"^oauth/[a-z0-9_-]+/callback$")
 
 
+# Remote MCP (app/services/remote_mcp.py): ChatGPT / Claude / Grok call a
+# seat server-to-server with their own OAuth Bearer and no gateway cookie, so
+# these routes pick the seat from the URL — https://<host>/mcp/<seat>/mcp —
+# and forward the CLIENT's Authorization untouched. The seat token is never
+# injected for them: the seat checks its own MCP tokens. Only the consent
+# screen (authorize) is a human in a browser, and it needs the gateway
+# session of the seat's own owner, exactly like every other page.
+_SEAT = r"(?P<seat>[a-z0-9][a-z0-9-]{0,39})"
+_MCP_PREFIXED_RE = re.compile(r"^mcp/" + _SEAT + r"(?P<rest>/.*)$")
+_MCP_OPEN = frozenset({
+    "/mcp", "/oauth/mcp/register", "/oauth/mcp/token",
+    "/.well-known/oauth-protected-resource",
+    "/.well-known/oauth-protected-resource/mcp",
+    "/.well-known/oauth-authorization-server",
+    "/.well-known/openid-configuration",
+})
+_MCP_AUTHORIZE = "/oauth/mcp/authorize"
+# RFC 8414 / RFC 9728 path insertion: clients put the well-known segment
+# BEFORE the issuer's or resource's path.
+_MCP_WELLKNOWN_RE = re.compile(
+    r"^\.well-known/(?P<doc>oauth-authorization-server|openid-configuration|"
+    r"oauth-protected-resource)/mcp/" + _SEAT + r"(?:/mcp)?$")
+
+
+def _mcp_route(path: str) -> tuple[str, str] | None:
+    """(seat, upstream path) for a remote-MCP URL, else None."""
+    m = _MCP_PREFIXED_RE.match(path)
+    if m and (m["rest"] in _MCP_OPEN or m["rest"] == _MCP_AUTHORIZE):
+        return m["seat"], m["rest"]
+    m = _MCP_WELLKNOWN_RE.match(path)
+    if m:
+        doc = m["doc"]
+        if doc == "openid-configuration":
+            doc = "oauth-authorization-server"
+        return m["seat"], f"/.well-known/{doc}"
+    return None
+
+
+async def _proxy_mcp(request: Request, seat: str, upstream: str) -> Response:
+    if store.user_for_seat(seat) is None:
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    if upstream != _MCP_AUTHORIZE:
+        return await _forward(request, seat, upstream,
+                              authorization=request.headers.get("authorization"),
+                              keep_cookies=False)
+    user = _current_user(request)
+    if not user or user.get("seat") != seat:
+        if request.method.upper() in {"GET", "HEAD"}:
+            nxt = request.url.path
+            if request.url.query:
+                nxt += "?" + request.url.query
+            return RedirectResponse(f"/signin?next={nxt}", status_code=303)
+        return JSONResponse({"detail": "not signed in"}, status_code=401)
+    if not _origin_ok(request):
+        return JSONResponse(
+            {"detail": "CSRF rejected: cross-origin request"}, status_code=403)
+    return await _forward(request, seat, upstream,
+                          authorization=f"Bearer {user['token']}",
+                          keep_cookies=True)
+
+
 @app.api_route("/{path:path}",
                methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD",
                         "OPTIONS"])
 async def proxy(path: str, request: Request) -> Response:
+    mcp = _mcp_route(path)
+    if mcp is not None:
+        return await _proxy_mcp(request, *mcp)
     user = _current_user(request)
     if not user and request.method.upper() == "GET" \
             and _OAUTH_CALLBACK_RE.match(path):
@@ -342,33 +406,47 @@ async def proxy(path: str, request: Request) -> Response:
     if not _origin_ok(request):
         return JSONResponse(
             {"detail": "CSRF rejected: cross-origin request"}, status_code=403)
+    # The seat token is the credential for this hop; a client-supplied
+    # Authorization is dropped so nobody can present a token of their own.
+    return await _forward(request, user["seat"], f"/{path}",
+                          authorization=f"Bearer {user['token']}",
+                          keep_cookies=True)
 
+
+async def _forward(request: Request, seat: str, path: str, *,
+                   authorization: str | None, keep_cookies: bool) -> Response:
     # Keys are lower-cased on the way in so the client's own "authorization"
     # cannot survive alongside the one we set — a dict treats "Authorization"
     # and "authorization" as two entries, and httpx would forward both.
     headers = {k.lower(): v for k, v in request.headers.items()
                if k.lower() not in _HOP and k.lower() != "authorization"}
-    # The seat token is the credential for this hop; a client-supplied
-    # Authorization is dropped above so nobody can present a token of their own.
-    headers["authorization"] = f"Bearer {user['token']}"
+    if authorization:
+        headers["authorization"] = authorization
     # Strip our session cookie so the gateway credential never reaches the app.
     cookie = "; ".join(
         f"{k}={v}" for k, v in request.cookies.items() if k != COOKIE_NAME)
-    if cookie:
+    if cookie and keep_cookies:
         headers["cookie"] = cookie
     else:
         headers.pop("cookie", None)
     headers["x-forwarded-proto"] = request.url.scheme
     headers["x-forwarded-host"] = request.headers.get("host", PUBLIC_HOST)
+    # Where this seat's remote MCP lives publicly, so its Assistants page and
+    # OAuth metadata name /mcp/<seat>/… URLs. Set on every hop (overriding
+    # anything the client sent) — the seat cannot know its own seat id.
+    headers["x-sparrow-mcp-mount"] = f"/mcp/{seat}"
 
-    url = f"{provision.seat_url(user['seat'])}/{path}"
+    url = f"{provision.seat_url(seat)}{path}"
     client = await http()
     req = client.build_request(
         request.method, url, headers=headers,
         params=request.url.query, content=request.stream())
     try:
         upstream = await client.send(req, stream=True)
-    except httpx.ConnectError:
+    except httpx.RequestError as exc:
+        # ConnectError and ReadError both mean the seat never produced a
+        # response. A dropped read used to escape this handler and become
+        # an HTTP 500 on the long-polls the open app keeps running.
         return JSONResponse(
             {"detail": "your instance is starting — try again in a moment"},
             status_code=503)

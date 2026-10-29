@@ -128,6 +128,11 @@ go.onclick=async()=>{
     location.href='/provisioning';
   }catch(e){msg.textContent=e.message;go.disabled=false;}
 };
+for(const id of ['email','pw','pw2'])
+  document.getElementById(id).addEventListener('keydown',
+    e=>{if(e.key==='Enter'){
+      go.click();
+    }});
 """)
 
 

@@ -167,6 +167,11 @@ def classify_source(
     # (meta.never_authorizes, enforced in trust.py).
     if src.startswith("agent.fetch"):
         return "agent_fetch"
+    # Notes a cloud assistant (ChatGPT / Claude / Grok) saved over remote MCP
+    # and the user accepted from the /assistants inbox. Must precede the
+    # "chat" test below — "assistant.chatgpt" is not the user typing.
+    if src.startswith("assistant."):
+        return "assistant_capture"
     if "." in src and src.split(".", 1)[0] in _connector_ids():
         kind = src.split(".", 1)[1]
         if kind in ("mail", "gmail", "email", "dm", "message", "chat"):

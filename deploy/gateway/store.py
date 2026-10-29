@@ -115,6 +115,16 @@ def relay_user() -> dict[str, Any] | None:
     return oldest
 
 
+def user_for_seat(seat: str) -> dict[str, Any] | None:
+    """The account that owns ``seat``, or None. Remote MCP routes by seat id
+    in the URL (a cloud assistant carries no gateway cookie), so a seat id
+    nobody owns must route nowhere."""
+    for row in _read(users_path()).values():
+        if row.get("seat") == seat:
+            return row
+    return None
+
+
 def create_user(email: str, password: str, seat: str, token: str) -> dict[str, Any]:
     """Record a new human and the seat minted for them. Caller has already
     validated the password and provisioned the container."""

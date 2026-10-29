@@ -174,6 +174,25 @@ root instead (`sudo tailscale funnel --bg http://127.0.0.1:8001`) — user1's
 app is then publicly reachable, but still behind the `/auth` token wall,
 same posture as the quick tunnels.
 
+## Remote MCP (ChatGPT / Claude / Grok)
+
+Users can connect their cloud assistants to their own seat so project notes
+flow back into Sparrow (setup and security model in `docs/mcp.md`). It is off
+by default. To turn it on:
+
+- **Gateway-provisioned seats:** set `SEAT_MCP_REMOTE=1` in the gateway's
+  environment. It applies to seats created afterwards; existing seats need
+  `QUILL_MCP_REMOTE=1` added to their container env and a restart.
+- **Compose seats (`user1`…):** add `QUILL_MCP_REMOTE: "1"` to the seat's
+  `environment:` and rebuild.
+
+Each user's connector URL is `https://sparrow.ravenry.us/mcp/<seat>/mcp`, and
+their Assistants page (`/assistants`) shows it. The gateway passes only the
+MCP/OAuth paths through without a gateway session, forwards the assistant's
+own bearer, and never injects the seat token for it. The consent screen still
+needs the seat owner signed in. Don't hand out a `*.trycloudflare.com` URL
+for this: assistants store the URL, so a tunnel restart breaks the connection.
+
 ## Adding a user
 
 Copy a service block in `docker-compose.yml` (new name, port, volume,

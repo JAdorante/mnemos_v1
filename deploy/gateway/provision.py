@@ -73,6 +73,10 @@ def _seat_env(seat: str, token: str) -> dict[str, str]:
         # Meeting debrief sends: human-selected, live-session only, through a
         # separate send-only grant — not the agent (see gb10 compose).
         "QUILL_MAIL_SEND": os.environ.get("SEAT_MAIL_SEND", "1"),
+        # Remote MCP for ChatGPT / Claude / Grok, reached through the gateway
+        # at /mcp/<seat>/mcp (gateway._mcp_route). Off until the operator
+        # opts in; saves always wait in the seat's /assistants inbox.
+        "QUILL_MCP_REMOTE": os.environ.get("SEAT_MCP_REMOTE", "0"),
     }
     for optional in ("GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_SECRET",
                      "MS_OAUTH_CLIENT_ID", "MS_OAUTH_CLIENT_SECRET",

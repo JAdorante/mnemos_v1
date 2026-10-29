@@ -127,7 +127,20 @@ function note(t){ msg.textContent = t; if(t) setTimeout(()=>{if(msg.textContent=
 function envChip(k,v,cls){ return `<div class="chip ${cls||''}"><span class="k">${k}:</span> <b>${v}</b></div>`; }
 
 async function load(){
-  const s = await (await fetch('/console/desktop-access')).json();
+  let r, s;
+  try {
+    r = await fetch('/console/desktop-access');
+    s = await r.json();
+  } catch (e) {
+    document.getElementById('env').textContent =
+      'Desktop control is not available on this Sparrow.';
+    return;
+  }
+  if (!r.ok || !s || !s.environment) {
+    document.getElementById('env').textContent =
+      (s && s.detail) || 'Desktop control is not available on this Sparrow.';
+    return;
+  }
   const e = s.environment;
   document.getElementById('env').innerHTML =
     envChip('jail', e.jail) +

@@ -21,6 +21,22 @@ Flags: `QUILL_MEETING_DEBRIEF` (default on: the offer and drafts), `QUILL_MAIL_S
 
 ---
 
+# ChatGPT, Claude and Grok connect to Sparrow over remote MCP, and what they save waits for review, October 29 2026
+
+Until now Sparrow's MCP server was stdio-only and read-only, so the cloud assistants people actually plan their projects in had no way to reach it. Now one Streamable-HTTP endpoint, `POST /mcp`, serves all three. Each registers it as a custom connector, signs in through Sparrow's own consent screen, and can save what it learns back into Sparrow. Off unless `QUILL_MCP_REMOTE=1`. Setup per assistant is in `docs/mcp.md`.
+
+**Saves are proposals.** The one write tool, `save_to_sparrow`, puts a note (text, project, kind, source link) into a review inbox on the new Assistants page. Nothing becomes memory until the user accepts it, and they can correct the text or project first. An accepted note is stored as an observed-tier, `never_authorizes` event with source `assistant.<chatgpt|claude|grok>`, secrets redacted, and goes through the same extractor as typed chat under a new `assistant_capture` source class (claims, tasks and project links; no contacts, no identity evidence). A rejected note keeps an audit row but loses its text. Which assistant sent a note is inferred from its OAuth redirect host, so provenance survives into memory.
+
+**Read access is the user's choice per connection.** The consent screen offers two scopes: `capture`, and `read` (the existing stdio read tools behind the same `privacy_class` and `mcp_policy.json` filtering). Since a read result leaves for that assistant's servers, the screen says so.
+
+**A small OAuth server, because all three connector UIs require one.** Discovery (RFC 8414 / 9728), open dynamic client registration (RFC 7591), authorization code with PKCE S256 only, single-use codes (a replayed code revokes everything it minted), one-hour access tokens, rotating refresh tokens, and only SHA-256 hashes stored. Clients that can only send a header (the xAI API's remote MCP tools, Claude Code) use a revocable access token minted on the page. Every remote route checks its own credentials even on loopback, because a tunnel daemon on the same box makes public traffic look local.
+
+**Hosted seats get stable URLs through the gateway.** A cloud assistant has no gateway cookie, and the gateway used to replace every client `Authorization` header with the seat token, so a connector could never reach a seat. The gateway now routes `https://sparrow.ravenry.us/mcp/<seat>/…` to that seat for the MCP and OAuth paths only, passes the client's own bearer through, never injects the seat token for them, and requires the seat owner's gateway session for the consent screen. Every hop also tells the seat its public mount, so the Assistants page shows the right URL. Quick-tunnel hostnames still work but change on restart, which breaks every saved connection; the page warns about that.
+
+Tests: 27 for the seat side (OAuth flow, scopes, inbox, CSRF, gating, source class) and 8 for gateway routing. The official MCP Python SDK (2.3.0) also completed discovery, registration, PKCE consent, tokens, tool listing and a save against a live server. The server negotiates protocol versions up to 2025-06-18, and the SDK negotiated down to it without trouble. Not verified: the three real connector UIs against a deployed seat, and whether ChatGPT allows write tools on Plus/Pro.
+
+---
+
 # Records layer, Phase 2: records reach HubSpot, Drive and webhooks — previewed, verified, never overwritten, October 2 2026
 
 Phase 1 made an approved claim a record in the org tier; Phase 2 writes it back to the systems the org already uses, with Sparrow tracking what it wrote and never claiming to be the system of record. Map and limits in `docs/records-layer.md`.

@@ -386,6 +386,12 @@ async function loadPeople(force){
   let rows=d.people||[];
   // Main network view: hide zero-evidence rows (same floor as home).
   if(!showCand) rows=rows.filter(p=>(p.weight||0)>=1.0 || p.is_self);
+  // A /profile?tab=people&pid= link must open that person even when the
+  // evidence floor would have hidden the row.
+  if(openPersonId!==null && !rows.some(p=>p.id===openPersonId)){
+    const extra=(d.people||[]).find(p=>p.id===openPersonId);
+    if(extra) rows=[extra].concat(rows);
+  }
   const sig=JSON.stringify({c:showCand,p:rows});
   if(!force && sig===peopleSig) return;   // no visible change — don't touch the DOM
   peopleSig=sig;
@@ -934,7 +940,17 @@ async function memCheck(){
   }catch(e){}
 }
 load();
-setTab(MnemosMemory.get('profile.tab','profile')||'profile');
+(function(){
+  const qp=new URLSearchParams(location.search);
+  const requested=qp.get('tab');
+  const known={profile:1,people:1,entities:1,work:1};
+  const tab=(requested&&known[requested])
+    ? requested
+    : (MnemosMemory.get('profile.tab','profile')||'profile');
+  const pid=parseInt(qp.get('pid')||'',10);
+  if(tab==='people'&&pid) openPersonId=pid;
+  setTab(tab);
+})();
 let profileStreamOn=false;
 let profilePollTimer=null;
 function startProfilePoll(){

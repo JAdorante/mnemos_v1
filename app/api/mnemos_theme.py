@@ -1013,6 +1013,7 @@ def nav_markup() -> str:
     more = (
         ('/meetings', 'Meetings', 'meetings'),
         ('/peer', 'Team', 'team'),
+        ('/assistants', 'Assistants', 'assistants'),
         ('/phone', 'Phone', 'phone'),
         ('/desktop-access', 'Desktop', 'desktop'),
         ('/org-network', 'Org', 'org'),

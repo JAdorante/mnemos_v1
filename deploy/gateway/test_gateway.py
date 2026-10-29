@@ -10,11 +10,13 @@ import os
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 
 _TMP = tempfile.mkdtemp(prefix="gw-test-")
 os.environ["GATEWAY_DATA_DIR"] = _TMP
 os.environ["COOKIE_SECURE"] = "0"          # TestClient speaks http://
 
+import httpx
 import uvicorn
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
@@ -50,6 +52,26 @@ def _setcookies():
 @seat_app.get("/echoquery")
 def _echoquery(request: Request):
     return {"q": request.url.query}
+
+
+def _echo(request: Request) -> dict:
+    return {"path": request.url.path, "q": request.url.query,
+            "auth": request.headers.get("authorization", ""),
+            "cookie": request.headers.get("cookie", ""),
+            "mount": request.headers.get("x-sparrow-mcp-mount", "")}
+
+
+@seat_app.post("/mcp")
+def _mcp(request: Request):
+    return _echo(request)
+
+
+@seat_app.get("/.well-known/oauth-authorization-server")
+@seat_app.get("/.well-known/oauth-protected-resource")
+@seat_app.get("/oauth/mcp/authorize")
+@seat_app.get("/assistants/status")
+def _mcp_get(request: Request):
+    return _echo(request)
 
 
 @seat_app.get("/oauth/{provider}/callback")
@@ -180,6 +202,18 @@ class GatewayTest(unittest.TestCase):
         r = self.c.post("/some/api", json={})
         self.assertEqual(r.status_code, 401)
 
+    def test_upstream_read_error_is_503_not_500(self):
+        """A seat that drops the connection mid-request must not surface as 500."""
+        self._signup()
+
+        async def fail(self, request, **kwargs):
+            raise httpx.ReadError("seat dropped the connection")
+
+        with patch.object(httpx.AsyncClient, "send", fail):
+            r = self.c.get("/whoami", follow_redirects=False)
+        self.assertEqual(r.status_code, 503, r.text)
+        self.assertIn("starting", r.json()["detail"])
+
     # -- OAuth callback relay ----------------------------------------------
     def test_anonymous_oauth_callback_is_relayed_to_a_seat(self):
         """Google/Microsoft redirect the browser here with no gateway cookie
@@ -208,6 +242,87 @@ class GatewayTest(unittest.TestCase):
     def test_oauth_relay_with_no_accounts_is_503(self):
         r = self.c.get("/oauth/outlook/callback?code=1", follow_redirects=False)
         self.assertEqual(r.status_code, 503)
+
+    # -- remote MCP (seat routed by URL, client Bearer passed through) ------
+    def test_mcp_forwards_the_clients_bearer_not_the_seat_token(self):
+        self._signup()
+        self.c.cookies.clear()
+        r = self.c.post("/mcp/seat-test/mcp", json={"jsonrpc": "2.0"},
+                        headers={"Authorization": "Bearer spa_client"})
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertEqual(body["path"], "/mcp")
+        self.assertEqual(body["auth"], "Bearer spa_client")
+        self.assertEqual(body["mount"], "/mcp/seat-test")
+
+    def test_mcp_never_leaks_cookies_or_the_seat_token(self):
+        self._signup()   # signed in: the gateway cookie is present
+        body = self.c.post("/mcp/seat-test/mcp", json={},
+                           headers={"Cookie": "quill_api_session=s"}).json()
+        self.assertEqual(body["auth"], "")
+        self.assertEqual(body["cookie"], "")
+
+    def test_mcp_unknown_seat_is_404(self):
+        self._signup()
+        r = self.c.post("/mcp/seat-nobody/mcp", json={})
+        self.assertEqual(r.status_code, 404)
+
+    def test_mcp_prefix_opens_only_the_mcp_paths(self):
+        self._signup()
+        self.c.cookies.clear()
+        r = self.c.get("/mcp/seat-test/assistants/status",
+                       follow_redirects=False)
+        self.assertEqual(r.status_code, 303)
+        self.assertIn("/signin", r.headers["location"])
+
+    def test_mcp_well_known_path_insertion(self):
+        self._signup()
+        self.c.cookies.clear()
+        for path, want in (
+                ("/.well-known/oauth-authorization-server/mcp/seat-test",
+                 "/.well-known/oauth-authorization-server"),
+                ("/.well-known/openid-configuration/mcp/seat-test",
+                 "/.well-known/oauth-authorization-server"),
+                ("/.well-known/oauth-protected-resource/mcp/seat-test/mcp",
+                 "/.well-known/oauth-protected-resource"),
+                ("/mcp/seat-test/.well-known/oauth-authorization-server",
+                 "/.well-known/oauth-authorization-server")):
+            gateway._http = None   # see setUp: one upstream client per loop
+            r = self.c.get(path)
+            self.assertEqual(r.status_code, 200, path)
+            self.assertEqual(r.json()["path"], want, path)
+
+    def test_mcp_consent_needs_the_seat_owner_signed_in(self):
+        self._signup()
+        self.c.cookies.clear()
+        r = self.c.get("/mcp/seat-test/oauth/mcp/authorize?client_id=x",
+                       follow_redirects=False)
+        self.assertEqual(r.status_code, 303)
+        self.assertIn("next=/mcp/seat-test/oauth/mcp/authorize?client_id=x",
+                      r.headers["location"])
+        self.c.post("/api/signin", json={
+            "email": "a@b.com", "password": "correct-horse-battery"})
+        body = self.c.get("/mcp/seat-test/oauth/mcp/authorize?client_id=x").json()
+        self.assertEqual(body["auth"], "Bearer upstream-token-abc")
+        self.assertEqual(body["q"], "client_id=x")
+
+    def test_mcp_consent_refuses_another_users_seat(self):
+        provision.create_seat = lambda: ("seat-other", "upstream-token-xyz")
+        try:
+            self._signup("other@b.com")
+        finally:
+            provision.create_seat = lambda: ("seat-test", "upstream-token-abc")
+        self.c.cookies.clear()
+        self._signup()   # signed in as the owner of seat-test, not seat-other
+        r = self.c.get("/mcp/seat-other/oauth/mcp/authorize",
+                       follow_redirects=False)
+        self.assertEqual(r.status_code, 303)
+
+    def test_every_hop_names_the_seat_mount_and_clients_cannot_forge_it(self):
+        self._signup()
+        body = self.c.get("/assistants/status",
+                          headers={"X-Sparrow-Mcp-Mount": "/mcp/evil"}).json()
+        self.assertEqual(body["mount"], "/mcp/seat-test")
 
     def test_proxy_injects_the_seat_token(self):
         self._signup()

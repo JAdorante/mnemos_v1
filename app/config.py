@@ -961,7 +961,11 @@ class OutlookConfig:
 
 @dataclass(frozen=True)
 class McpConfig:
-    """Read-only MCP memory server (mcp_server/). Off until QUILL_MCP=1."""
+    """Read-only MCP memory server (mcp_server/). Off until QUILL_MCP=1.
+
+    The remote endpoint for ChatGPT / Claude / Grok (services/remote_mcp.py)
+    is separate: QUILL_MCP_REMOTE=1, read env-first at call time, with
+    QUILL_MCP_PUBLIC_URL pinning the public origin."""
     enabled: bool = _get("QUILL_MCP", "0") not in ("0", "false", "False")
     bind: str = _get("QUILL_MCP_BIND", "127.0.0.1")
 
