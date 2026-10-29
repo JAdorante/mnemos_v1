@@ -26,6 +26,8 @@ services:
       - sparrow-user1-data:/srv/sparrow/data
     environment:
       QUILL_API_TOKEN: "${SPARROW_USER1_TOKEN:?set a per-user token}"
+      QUILL_FLEET: "1"
+      QUILL_FLEET_RELAY_URL: "http://org-relay:8100"
       # --- GPU ASR (uncomment with the nvidia runtime + CUDA base image) ---
       # QUILL_WHISPER_DEVICE: cuda
       # QUILL_WHISPER_COMPUTE: float16
