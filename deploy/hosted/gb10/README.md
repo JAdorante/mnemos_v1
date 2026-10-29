@@ -178,7 +178,8 @@ same posture as the quick tunnels.
 
 Users can connect their cloud assistants to their own seat so project notes
 flow back into Sparrow (setup and security model in `docs/mcp.md`). It is off
-by default. To turn it on:
+by default in the code; on this deployment it is ON for every gb10 seat and
+every gateway-provisioned seat (since 2026-10-29). How it is turned on:
 
 - **Gateway-provisioned seats:** set `SEAT_MCP_REMOTE=1` in the gateway's
   environment. It applies to seats created afterwards; existing seats need

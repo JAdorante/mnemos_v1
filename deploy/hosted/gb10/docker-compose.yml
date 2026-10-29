@@ -79,6 +79,11 @@ x-env: &sparrow-env
   # agent from sending anything. Needs gmail.send on the Google consent screen
   # and Mail.Send on the Entra app before "Allow sending" can succeed.
   QUILL_MAIL_SEND: "1"
+  # Remote MCP (2026-10-29): ChatGPT / Claude / Grok connect to a seat at
+  # https://sparrow.ravenry.us/mcp/<seat>/mcp through the gateway. Saves land
+  # in the /assistants review inbox and become memory only when accepted; read
+  # access is a per-connection scope the user grants on the consent screen.
+  QUILL_MCP_REMOTE: "1"
   # Meeting transcription. On the 2026-09 pilot half of every meeting
   # transcript was a repetition loop ("nd nd nd ..."), and a monologue over
   # ~32 s killed capture. These close the configuration half of both:
