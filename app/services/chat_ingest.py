@@ -83,6 +83,36 @@ def ingest(message: str) -> int | None:
         return None
 
 
+_SELF = ("me", "myself", "i")
+
+
+def _drop_speaker_self(facts: dict) -> dict:
+    """'me' in an assistant-written note is the assistant, which owns
+    nothing: clear it to unspecified, and drop relations about it."""
+    if not isinstance(facts, dict):
+        return facts
+    out = dict(facts)
+    for key, rows in facts.items():
+        if not isinstance(rows, list):
+            continue
+        kept = []
+        for row in rows:
+            if not isinstance(row, dict):
+                kept.append(row)
+                continue
+            row = dict(row)
+            if any(str(row.get(k) or "").strip().lower() in _SELF
+                   for k in ("subject", "object")):
+                continue
+            for k, v in row.items():
+                if k not in ("text", "source_span") and isinstance(v, str) \
+                        and v.strip().lower() in _SELF:
+                    row[k] = ""
+            kept.append(row)
+        out[key] = kept
+    return out
+
+
 def run_job(payload: dict) -> None:
     """Job handler: mine one stored chat turn for facts (same extractor, same
     hygiene gate as speech), then chain a graph rebuild so the constellation's
@@ -116,7 +146,16 @@ def run_job(payload: dict) -> None:
                 event_source = str(ev["source"]).strip()
         except Exception:
             pass
+    if event_source.startswith("assistant."):
+        # A cloud assistant wrote this note, not the user: label it as the
+        # assistant so its first person ("I'll draft it") is not read as the
+        # user's own commitment. Only owners the note names get assigned.
+        from app.services.remote_mcp import ASSISTANT_LABELS
+        who = ASSISTANT_LABELS.get(event_source.split(".", 1)[1], "Assistant")
+        speaker = f"{who} (AI assistant, relaying a note)"
     facts = extractor._extract_text(text, speaker=speaker)
+    if event_source.startswith("assistant."):
+        facts = _drop_speaker_self(facts)
     n = _persist_facts(store, facts, anchor, text, now,
                        event_source=event_source)
     try:

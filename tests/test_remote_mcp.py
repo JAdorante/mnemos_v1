@@ -355,6 +355,44 @@ class InboxTests(RemoteMcpBase):
         again = self.ui_post(f"/assistants/inbox/{item['id']}/accept")
         self.assertFalse(again.json()["ok"])
 
+    def test_remove_erases_an_accepted_note(self):
+        _, tok = self.connect()
+        self.save(tok["access_token"], text="Kickoff moved to Dec 3.")
+        item = assistant_inbox.items("pending")[0]
+        erased = []
+
+        class FakeStore:
+            def insert(self, ev):
+                return 77
+
+            def erase_event(self, eid):
+                erased.append(eid)
+                return {"event_id": eid, "ok": True}
+
+        from app.services.worker import worker
+        with mock.patch("app.storage.get_store", return_value=FakeStore()), \
+                mock.patch("app.services.attachments._index_event"), \
+                mock.patch.object(worker, "enqueue"):
+            self.ui_post(f"/assistants/inbox/{item['id']}/accept")
+            r = self.ui_post(f"/assistants/inbox/{item['id']}/remove")
+            again = self.ui_post(f"/assistants/inbox/{item['id']}/remove")
+        self.assertTrue(r.json()["ok"])
+        self.assertEqual(erased, [77])
+        self.assertFalse(again.json()["ok"])
+        gone = assistant_inbox.items("removed")[0]
+        self.assertEqual(gone["text"], "")
+        self.assertEqual(assistant_inbox.items("accepted"), [])
+
+    def test_assistant_first_person_is_not_the_user(self):
+        from app.services import chat_ingest
+        facts = {"tasks": [{"text": "Draft the spec", "owner": "me"},
+                           {"text": "Send deck", "owner": "Dana"}],
+                 "relations": [{"subject": "me", "object": "Dana"}]}
+        out = chat_ingest._drop_speaker_self(facts)
+        self.assertEqual(out["tasks"][0]["owner"], "")
+        self.assertEqual(out["tasks"][1]["owner"], "Dana")
+        self.assertEqual(out["relations"], [])
+
     def test_cross_origin_ui_posts_are_refused(self):
         r = self.client.post("/assistants/tokens", json={"label": "x"},
                              headers={"Origin": "https://evil.example"})

@@ -10,7 +10,7 @@
   POST /mcp                                          JSON-RPC (Bearer only)
   GET  /assistants                                   connect + inbox page
   GET  /assistants/status | /assistants/inbox
-  POST /assistants/inbox/{id}/accept | /reject
+  POST /assistants/inbox/{id}/accept | /reject | /remove
   POST /assistants/connections/{id}/revoke
   POST /assistants/tokens                            static token, shown once
 
@@ -291,8 +291,9 @@ def assistants_status(request: Request) -> dict:
 def assistants_inbox(status: str = "pending", limit: int = 200) -> dict:
     _gate()
     from app.services import assistant_inbox
-    if status not in ("pending", "accepted", "rejected"):
-        raise HTTPException(400, "status must be pending|accepted|rejected")
+    if status not in ("pending", "accepted", "rejected", "removed"):
+        raise HTTPException(
+            400, "status must be pending|accepted|rejected|removed")
     return {"items": assistant_inbox.items(status, limit)}
 
 
@@ -314,6 +315,13 @@ def assistants_reject(item_id: int) -> dict:
     _gate()
     from app.services import assistant_inbox
     return assistant_inbox.reject(item_id)
+
+
+@router.post("/assistants/inbox/{item_id}/remove")
+def assistants_remove(item_id: int) -> dict:
+    _gate()
+    from app.services import assistant_inbox
+    return assistant_inbox.remove(item_id)
 
 
 @router.post("/assistants/connections/{grant_id}/revoke")

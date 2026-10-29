@@ -7,7 +7,8 @@ here as `pending` and nothing reaches memory until the user accepts it on
 chat uses, so tasks / claims / people / project links come out of it the
 normal way. The event is observed-tier (an assistant wrote it, not the
 user) and carries ``never_authorizes`` — a saved note can inform Sparrow,
-never instruct it. Rejecting wipes the text and keeps only the audit row.
+never instruct it. Rejecting wipes the text and keeps only the audit row;
+removing an accepted note erases its event and everything extracted from it.
 """
 from __future__ import annotations
 
@@ -179,3 +180,29 @@ def reject(inbox_id: int) -> dict[str, Any]:
         if not cur.rowcount:
             return {"ok": False, "error": "no such pending item"}
     return {"ok": True}
+
+
+def remove(inbox_id: int) -> dict[str, Any]:
+    """Undo an accept: erase the stored event (and, through erase_event,
+    the facts, graph evidence and commitments drawn from it), then wipe the
+    text like a reject."""
+    with connect() as c:
+        row = c.execute("SELECT event_id FROM captures WHERE id=? AND "
+                        "status='accepted'", (int(inbox_id),)).fetchone()
+        if not row:
+            return {"ok": False, "error": "no such accepted item"}
+    event_id = row[0]
+    if event_id is not None:
+        from app.storage import get_store
+        try:
+            res = get_store().erase_event(int(event_id))
+        except Exception as exc:
+            return {"ok": False, "error": f"could not remove: {exc}"}
+        # Already forgotten elsewhere (memory delete) is fine — finish the undo.
+        if not (res or {}).get("ok", True) and res.get("reason") != "missing":
+            return {"ok": False, "error": "could not remove the stored note"}
+    with connect() as c:
+        c.execute("UPDATE captures SET status='removed', decided_at=?, "
+                  "text='', title='', source_url='', conversation='' "
+                  "WHERE id=?", (time.time(), int(inbox_id)))
+    return {"ok": True, "event_id": event_id}

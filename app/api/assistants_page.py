@@ -93,6 +93,8 @@ th{color:var(--mut);font-weight:600}
   <div class="panel" id="inboxPanel" hidden>
     <h2>Review inbox <span class="mut" id="inboxCount"></span></h2>
     <div id="inbox"></div>
+    <h2 style="margin-top:20px">Recently accepted</h2>
+    <div id="accepted"></div>
   </div>
 
   <div class="panel" id="connPanel" hidden>
@@ -137,7 +139,7 @@ async function load(){
   un.hidden=!warn.length; un.textContent=warn.join(' ');
   ['inboxPanel','connPanel','tokPanel'].forEach(id=>document.getElementById(id).hidden=false);
   renderConns(st.connections||[]);
-  await loadInbox();
+  await loadInbox(); await loadAccepted();
 }
 
 async function loadInbox(){
@@ -162,6 +164,31 @@ async function loadInbox(){
     </div>`).join('');
 }
 
+async function loadAccepted(){
+  const r=await (await fetch('/assistants/inbox?status=accepted')).json();
+  const items=(r.items||[]).slice(0,20);
+  const box=document.getElementById('accepted');
+  if(!items.length){ box.innerHTML='<p class="empty">Nothing accepted yet.</p>'; return; }
+  box.innerHTML=items.map(it=>`
+    <div class="item" data-id="${it.id}">
+      <div class="meta"><span class="chip">${esc(it.assistant_label)}</span>
+        <span class="chip">${esc(it.kind)}</span>
+        ${it.project?`<span class="chip">${esc(it.project)}</span>`:''}
+        <span>${esc(when(it.decided_at))}</span></div>
+      <p>${esc(it.text)}</p>
+      <div class="row"><button class="btn btn-ghost" data-remove type="button">Remove from memory</button></div>
+    </div>`).join('');
+}
+
+document.getElementById('accepted').addEventListener('click',async e=>{
+  const b=e.target.closest('button[data-remove]'); if(!b) return;
+  if(!confirm('Remove this note and everything Sparrow learned from it?')) return;
+  const el=b.closest('.item'); b.disabled=true;
+  const r=await post('/assistants/inbox/'+el.dataset.id+'/remove');
+  if(!r.ok){ alert(r.error||'Failed'); b.disabled=false; return; }
+  loadAccepted();
+});
+
 document.getElementById('inbox').addEventListener('click',async e=>{
   const b=e.target.closest('button[data-act]'); if(!b) return;
   const el=b.closest('.item'); const id=el.dataset.id;
@@ -170,7 +197,7 @@ document.getElementById('inbox').addEventListener('click',async e=>{
     ? await post('/assistants/inbox/'+id+'/accept',{text:el.querySelector('textarea').value,project:el.querySelector('input').value})
     : await post('/assistants/inbox/'+id+'/reject');
   if(!r.ok){ alert(r.error||'Failed'); el.querySelectorAll('button').forEach(x=>x.disabled=false); return; }
-  loadInbox();
+  loadInbox(); loadAccepted();
 });
 
 function renderConns(rows){
