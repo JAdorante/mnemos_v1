@@ -101,6 +101,10 @@ x-env: &sparrow-env
   # (deploy/org, gb10 overlay). Capture expiry stays at its dry_run default:
   # receipts only, nothing deleted, until someone decides to enforce.
   QUILL_RECORDS: "1"
+  # Distillation step 1 (2026-10-29): confirmed learning pairs become
+  # retrieval exemplars for the local model on every seat. Kill switch
+  # without a rebuild: the "_all" gate in data/exemplar_type_gates.json.
+  QUILL_EXEMPLARS: "1"
 
 services:
   # Host Ollama binds 127.0.0.1 only and changing that needs root; this
@@ -167,6 +171,17 @@ services:
       # agents publish signals; they leave only through org-relay, by rule.
       QUILL_FLEET: "1"
       QUILL_FLEET_RELAY_URL: http://org-relay:8100
+      # Shared exemplars (docs/fleet-federation.md "Shared exemplars"):
+      # user1 and user3 offer confirmed extraction pairs to each other over
+      # org-relay (each one approved on the Team page) and file the other's
+      # as peer_shared. No other seat sets these.
+      QUILL_FLEET_EXEMPLARS_OFFER: "1"
+      QUILL_FLEET_EXEMPLARS_ACCEPT: "1"
+      # Shadow eval: Claude Haiku re-grades up to 20 kept local answers a
+      # night (personal rows never sent). user1 only: it is the one seat
+      # with a cloud key, and the grades are the quality half of
+      # scripts/distill_weekly.py.
+      QUILL_SHADOW_EVAL: "1"
       # Public Cloudflare tunnel URL — peers (and other devices) must call us
       # back over HTTPS. Loopback 127.0.0.1 only works on this host and shows
       # teammates as offline from a remote browser / other containers.
@@ -236,6 +251,12 @@ services:
       # agents publish signals; they leave only through org-relay, by rule.
       QUILL_FLEET: "1"
       QUILL_FLEET_RELAY_URL: http://org-relay:8100
+      # Shared exemplars (docs/fleet-federation.md "Shared exemplars"):
+      # user1 and user3 offer confirmed extraction pairs to each other over
+      # org-relay (each one approved on the Team page) and file the other's
+      # as peer_shared. No other seat sets these.
+      QUILL_FLEET_EXEMPLARS_OFFER: "1"
+      QUILL_FLEET_EXEMPLARS_ACCEPT: "1"
       QUILL_PEER_BASE_URL: https://beyond-fool-finances-accessibility.trycloudflare.com
 
   sparrow-user4:
