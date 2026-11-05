@@ -197,6 +197,37 @@ def join(db, *, invite_code: str, node_id: str, label: str = "",
             "credential": tokens.compose(org_id, cred_id, cred_secret)}
 
 
+def members_view(db, org_id: str) -> list[dict[str, Any]]:
+    """Operator CLI: who is in the org. Holds no secrets."""
+    with db.tenant(org_id) as repo:
+        return [{k: m.get(k) for k in ("id", "email", "display_name", "role",
+                                       "status", "node_id", "peer_url")}
+                for m in repo.list_members()]
+
+
+def reissue_credential(db, org_id: str, *, member_id: str,
+                       now: float | None = None) -> dict[str, Any]:
+    """Operator CLI, for a node that lost its credential (a crash zeroed the
+    membership file). create_invite refuses an active member and the org admin
+    may be the one locked out, so this is not an API route. The member keeps
+    their id, role and grants, so their records stay attributed to them. Old
+    credentials are revoked, and redeeming the invite mints a new one."""
+    now = _now(now)
+    with db.tenant(org_id) as repo:
+        member = repo.get_member(member_id)
+        if member is None:
+            raise ServiceError(404, "member_not_found")
+        if member["status"] != "active":
+            raise ServiceError(409, "member_not_active", member["status"])
+        revoked = repo.revoke_credentials(member_id, now)
+        code = _mint_invite(repo, member_id, created_by="operator", now=now)
+        audit.append(repo, "operator", "member.reissue", member_id,
+                     {"revoked_credentials": revoked}, at=now)
+    return {"member_id": member_id, "node_id": member.get("node_id"),
+            "role": member["role"], "revoked_credentials": revoked,
+            "invite_code": code}
+
+
 def issue_token(db, credential: str, *, now: float | None = None) -> dict[str, Any]:
     now = _now(now)
     try:

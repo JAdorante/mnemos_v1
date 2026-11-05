@@ -1,3 +1,7 @@
+# A crash no longer takes a seat out of its org, November 5 2026
+
+The box went down on November 4, and that zeroed `org_membership.json` and `org_policy.json` on four pilot seats. Those seats then read as never having joined, with no warning. Both files are now synced to disk before they replace the old copy, and an unreadable membership file logs a warning. To recover a seat, `python -m org_coordinator.records reissue` revokes the member's credentials and mints a one-time invite that keeps their id, role and grants. `scripts/restore_org_membership.py` does this for gb10 seats and refuses any seat whose membership is healthy. Tests: `tests/test_org_membership_recovery.py`.
+
 # Assistant notes file under projects, and teammates can read them, November 5 2026
 
 A note saved from ChatGPT, Claude or Grok used to become loose personal memory. The project field was a hint nothing read, and a teammate had no direct way to see it. Now every note lands in a project, and you can share any note with that project's team.

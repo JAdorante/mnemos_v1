@@ -68,7 +68,9 @@ Not covered yet: desktop `perception.db` rows and CAS frames. The perception era
 - Credentials take the form `<org>.<id>.<secret>`, so the tenant can be bound before any lookup. Access tokens are 15-minute HS256 JWTs signed with `QUILL_ORG_JWT_SECRET`. Member status and credential revocation are re-checked on every request.
 - The API mounts on the existing coordinator app only when `QUILL_ORG_DATABASE_URL` is set. Deploy files are in `deploy/org/`, and dependencies are in `requirements-org.txt`. Nodes never install those dependencies.
 
-Operator CLI: `python -m org_coordinator.records migrate | bootstrap | anchor | verify`.
+Operator CLI: `python -m org_coordinator.records migrate | bootstrap | anchor | verify | members | reissue`.
+
+**A node that lost its credential.** A crash can zero `org_membership.json`, and the node then reads as never having joined. `reissue` revokes the member's credentials and prints a one-time invite, and the node redeems it with the same member id, role and grants. `scripts/restore_org_membership.py` does both on the gb10 seats. It refuses a seat whose membership is healthy and changes nothing without `--apply`.
 
 ## Flags
 

@@ -6,6 +6,8 @@
     python -m org_coordinator.records verify --org ORG_ID
     python -m org_coordinator.records worker [--once]     # write-back sync
     python -m org_coordinator.records drift [--org ORG_ID] # nightly sweep
+    python -m org_coordinator.records members --org ORG_ID
+    python -m org_coordinator.records reissue --org ORG_ID --member MEMBER_ID
 
 Reads QUILL_ORG_DATABASE_URL. `bootstrap` prints the admin's invite code
 once; the admin's Sparrow node redeems it (Records page -> Join an org).
@@ -36,6 +38,11 @@ def main(argv: list[str] | None = None) -> int:
     w.add_argument("--idle-s", type=float, default=5.0)
     d = sub.add_parser("drift")
     d.add_argument("--org", default=None)
+    m = sub.add_parser("members")
+    m.add_argument("--org", required=True)
+    r = sub.add_parser("reissue")
+    r.add_argument("--org", required=True)
+    r.add_argument("--member", required=True)
     args = ap.parse_args(argv)
 
     from org_coordinator.repo import Database, migrate
@@ -66,6 +73,15 @@ def main(argv: list[str] | None = None) -> int:
             orgs = [args.org] if args.org else db.org_ids()
             print(json.dumps({o: sync.drift_sweep(db, o) for o in orgs},
                              indent=2))
+            return 0
+        if args.cmd == "members":
+            from org_coordinator.records import service
+            print(json.dumps(service.members_view(db, args.org), indent=2))
+            return 0
+        if args.cmd == "reissue":
+            from org_coordinator.records import service
+            print(json.dumps(service.reissue_credential(
+                db, args.org, member_id=args.member), indent=2))
             return 0
         if args.cmd == "verify":
             from org_coordinator.records import service

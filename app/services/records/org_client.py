@@ -13,15 +13,17 @@ service's FastAPI app in-process (`set_transport`).
 from __future__ import annotations
 
 import json
-import os
 import time
 from pathlib import Path
 from typing import Any, Callable
 from urllib import error, request
 
+from app.atomic_json import write_json
+
 _TIMEOUT_S = 10.0
 _transport: Callable[..., tuple[int, dict]] | None = None
 _access: dict[str, Any] = {}
+_warned_unreadable = False
 
 
 class OrgUnavailable(RuntimeError):
@@ -49,22 +51,28 @@ def _path() -> Path:
 
 def membership() -> dict[str, Any]:
     try:
-        data = json.loads(_path().read_text("utf-8"))
+        raw = _path().read_text("utf-8")
+    except OSError:
+        return {}
+    try:
+        data = json.loads(raw)
         return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
+    except ValueError:
+        # A crash can leave this file zeroed, and the node then looks like it
+        # never joined. Say so, or nobody notices until sharing stops working.
+        global _warned_unreadable
+        if not _warned_unreadable:
+            _warned_unreadable = True
+            print(f"[records.org_client] {_path().name} is unreadable; this "
+                  "node is out of the org until it is restored.")
         return {}
 
 
 def _save(data: dict[str, Any]) -> None:
     p = _path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True), "utf-8")
-    try:
-        os.chmod(tmp, 0o600)          # holds the node credential
-    except OSError:
-        pass
-    os.replace(tmp, p)
+    # Synced before the replace: this holds the node credential, and a power
+    # loss must not zero it. The temp file is already mode 0600.
+    write_json(p, data, sort_keys=True)
 
 
 def joined() -> bool:

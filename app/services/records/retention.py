@@ -30,6 +30,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from app.atomic_json import write_json
 from app.services.records.canonical import canonical_hash
 
 DAY = 86400.0
@@ -77,11 +78,7 @@ def org_policy() -> dict[str, Any]:
 
 
 def save_org_policy(policy: dict[str, Any]) -> None:
-    p = _org_policy_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(policy, indent=2, sort_keys=True), "utf-8")
-    os.replace(tmp, p)
+    write_json(_org_policy_path(), policy, sort_keys=True)
 
 
 def _clamp(name: str, value: Any, capture_ttl: float | None = None) -> Any:
