@@ -1566,7 +1566,7 @@ def _answer_from_records(peer: dict | None, question: str) -> dict | None:
             float(h.get("valid_from") or h.get("recorded_at") or 0)))
         claims.append({
             "text": f"{h.get('subject_label') or h.get('subject_ref')} — "
-                    f"{h.get('predicate')}: {body}",
+                    f"{h.get('predicate')}: {str(body)[:600]}",
             "record_id": h.get("record_id"), "record_version": h.get("version"),
             "speaker": "team record", "when": when, "source": "record"})
     newest = max(float(h.get("recorded_at") or 0) for h in hits)

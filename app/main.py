@@ -16,6 +16,7 @@ from app.api.web_ingest import router as web_ingest_router
 from app.api.fleet_routes import router as fleet_router
 from app.api.records_routes import router as records_router
 from app.api.assistants_routes import router as assistants_router
+from app.api.projects_routes import router as projects_router
 from app.config import settings
 from app.events import bus
 from app.services.api_auth import (
@@ -35,6 +36,7 @@ app.include_router(web_ingest_router)
 app.include_router(fleet_router)
 app.include_router(records_router)
 app.include_router(assistants_router)
+app.include_router(projects_router)
 
 
 # --- active-minute marker (WS-A) --------------------------------------------
@@ -445,6 +447,9 @@ async def _startup() -> None:
             worker.register("chat_ingest", chat_ingest.run_job)
             # Accepted assistant captures (/assistants inbox) -> same extractor.
             worker.register("assistant_capture", chat_ingest.run_job)
+            # A note saved with no project: the local model suggests one.
+            from app.services import assistant_inbox
+            worker.register("assistant_route", assistant_inbox.run_route_job)
             # Web/agent research answers -> memory (testing-first writeback).
             from app.services import research_ingest
             worker.register("research_ingest", research_ingest.run_job)

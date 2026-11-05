@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Iterator
 
-from sqlalchemy import func, insert, or_, select, text, update
+from sqlalchemy import bindparam, func, insert, or_, select, text, update
 from sqlalchemy.engine import Connection
 
 from org_coordinator.repo.schema import (alerts, audit_anchors, audit_log,
@@ -344,6 +344,41 @@ class Repo:
             seen.add(row["record_id"])
             out.append(row)
         return out[:limit]
+
+    def search_records(self, *, scope_ids: list[str], query: str, now: float,
+                       limit: int = 8) -> list[dict]:
+        """Current versions whose string values match any word of `query`,
+        best match first. Words are OR'd because a teammate types a question,
+        not a list of terms that must all appear."""
+        if not scope_ids or not (query or "").strip():
+            return []
+        stmt = text("""
+            WITH q AS (SELECT replace(plainto_tsquery('english', :query)::text,
+                                      '&', '|')::tsquery AS tsq),
+            hits AS (
+                SELECT rv.*, ts_rank(jsonb_to_tsvector(
+                    'english'::regconfig, rv.value_json, '["string"]'::jsonb),
+                    q.tsq) AS rank
+                FROM record_versions rv, q
+                WHERE rv.org_id = :org AND rv.recorded_at <= :now
+                  AND rv.superseded_at IS NULL AND rv.valid_from <= :now
+                  AND (rv.valid_to IS NULL OR rv.valid_to > :now)
+                  AND jsonb_to_tsvector('english'::regconfig, rv.value_json,
+                                        '["string"]'::jsonb) @@ q.tsq
+            )
+            SELECT r.id AS record_id, r.scope_id, r.subject_ref,
+                   r.subject_label, r.predicate, r.record_key, r.kind,
+                   r.current_version, h.id AS version_id, h.version,
+                   h.value_json, h.valid_from, h.valid_to, h.recorded_at,
+                   h.superseded_at, h.approved_by, h.payload_hash, h.rank
+            FROM hits h JOIN records r ON r.id = h.record_id
+            WHERE r.org_id = :org AND r.scope_id IN :scopes
+            ORDER BY h.rank DESC, h.recorded_at DESC
+            LIMIT :limit
+        """).bindparams(bindparam("scopes", expanding=True))
+        return _rows(self.conn.execute(stmt, {
+            "query": query, "org": self.org_id, "now": now,
+            "scopes": list(scope_ids), "limit": limit}))
 
     def insert_evidence(self, rows: list[dict]) -> None:
         if rows:

@@ -151,7 +151,10 @@ def most_restrictive(sources: list[str]) -> str:
 
 
 def capture_expires_at(event, *, pol: dict | None = None) -> float | None:
-    """The deadline stamped on a new event: event time + capture TTL."""
+    """The deadline stamped on a new event: event time + capture TTL. A note
+    the user reviewed and accepted is theirs to keep, so it never expires."""
+    if (getattr(event, "meta", None) or {}).get("reviewed_keep"):
+        return None
     pol = pol or policy()
     try:
         t = float(event.time)

@@ -213,7 +213,10 @@ def _scope_suggestion(subject_label: str) -> tuple[str | None, str | None]:
             return s["id"], s.get("external_ref")
     # The org root is almost never where a record belongs; an admin holds it
     # on top of their team, which must not make the team ambiguous.
-    narrow = [s for s in usable if s.get("kind") != "org"] or usable
+    # Project scopes hold notes filed there on purpose, so they must not make
+    # a member's team ambiguous either.
+    narrow = ([s for s in usable if s.get("kind") not in ("org", "project")]
+              or [s for s in usable if s.get("kind") != "project"])
     if len(narrow) == 1:
         return narrow[0]["id"], narrow[0].get("external_ref")
     return None, None

@@ -1,3 +1,15 @@
+# Assistant notes file under projects, and teammates can read them, November 5 2026
+
+A note saved from ChatGPT, Claude or Grok used to become loose personal memory. The project field was a hint nothing read, and a teammate had no direct way to see it. Now every note lands in a project, and you can share any note with that project's team.
+
+**Filing.** A note goes under an existing project if it fits, a new project if it clearly is one, and otherwise Miscellaneous. The assistant chooses first, and the local model handles notes saved with no project. It never escalates to a paid model, and any doubt means Miscellaneous. The choice is a suggestion you can change at review. A new project only exists once you accept a note into it. Accepted notes no longer expire, and the facts drawn from them link to the project.
+
+**Sharing.** "Share with this project's team" on the review card publishes the note as an org record. Project members need no second approver, and the project's scope is created on first share. A decision is marked as suggested unless you confirm a person made it. Sharing shows similar records, so a new decision can replace an old one and the old one stays in its history. Removing a shared note takes it off the project.
+
+**Reading.** `/projects` lists each project's shared records and your own notes. Web chat grounds on team records and cites them. Peer asks already answered from records, and now include these. Cloud assistants get `project_context`, and team records need a new `team` permission that is off unless you tick it. Each record passes the egress rule before it leaves. Assistants are also told to check a project before working on it and to offer to save at the end. The inbox groups notes by conversation.
+
+**Deploying.** Rebuild the seats and the org service, which applies revision `0003_project_search` on start. Existing assistant connections must reconnect to get the `team` permission. Details: `docs/mcp.md`. Tests: `tests/test_project_filing.py` and `tests/test_project_records_e2e.py` (Postgres).
+
 # Shared exemplars: one person's correction can improve a teammate's local model, October 29 2026
 
 This is the first learned artifact to cross between Sparrows. When you accept or correct the local model's answer, that verified example can now be offered to teammates over the fleet relay. A teammate's Sparrow then uses it as a few-shot example for its own local model. Both directions are off by default.

@@ -1,13 +1,14 @@
 """One egress policy, decided once.
 
-Data leaves this node five ways: the peer channel, the team layer, org
-digests, the fleet relay and the records outbox. Each still owns its policy
+Data leaves this node six ways: the peer channel, the team layer, org
+digests, the fleet relay, the records outbox and team records read by a
+connected cloud assistant. Each still owns its policy
 *configuration* (a peer's per-class disclosure map, a fleet routing rule, a
 human-approved records packet); this module owns the *decision*. Every
 outbound path calls `decide()` with (path, destination, scope, data class,
 content) plus what its own configuration says, and gets back allow, offer or
 deny. Every outcome is written to the same egress trail that /privacy/egress
-reads, so the view covers all five paths, not just the two that used to log.
+reads, so the view covers all six paths, not just the two that used to log.
 
 The rule, most restrictive wins:
 
@@ -35,7 +36,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-PATHS = ("peer", "team", "org_digest", "fleet_relay", "records")
+PATHS = ("peer", "team", "org_digest", "fleet_relay", "records", "assistant")
 RUNGS = ("connected", "sealed", "perimeter")
 ACTIONS = ("allow", "offer", "deny")
 

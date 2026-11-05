@@ -78,14 +78,43 @@ Each assistant opens Sparrow's consent screen. Sign in if asked, then choose wha
 
 - **Save to your review inbox** (`capture` scope): enables `save_to_sparrow` and `list_projects`.
 - **Read your Sparrow memory** (`read` scope): the same read tools as stdio, with the same `privacy_class` + `mcp_policy.json` filtering. Results go to that assistant's servers.
+- **Read your team's shared project records** (`team` scope): off unless you tick it, even if the assistant asks. `project_context` then includes records your team shared. Each record passes the shared egress rule before it leaves, so the `sealed` and `perimeter` rungs withhold them. Connections made before this scope existed have to reconnect to get it.
 
-Then ask: *"save the decision we just made to Sparrow under the onboarding project."*
+Then ask: *"save the decision we just made to Sparrow."*
 
 ### What happens to a save
 
-1. It lands in the inbox on `/assistants`, tagged with the assistant, project, kind, and source link. Text that looks like a key or password is flagged.
-2. **Accept** (after editing the text or project if you like) stores it as an event with source `assistant.<chatgpt|claude|grok>`. The event is observed-tier and `never_authorizes`, secrets are redacted, and it goes through the same extractor as typed chat. The `assistant_capture` source class may produce claims, tasks, and project links, but not contacts or identity evidence.
-3. **Reject** wipes the text and keeps only an audit row.
+1. It lands in the inbox on `/assistants`, tagged with the assistant, suggested project, kind, and source link. Text that looks like a key or password is flagged.
+2. **Accept** (after editing the text or project if you like) stores it as an event with source `assistant.<chatgpt|claude|grok>` and files it under the project. The event is observed-tier and `never_authorizes`, secrets are redacted, and it goes through the same extractor as typed chat. The `assistant_capture` source class may produce claims, tasks, and project links, but not contacts or identity evidence. Every fact drawn from the note links to the project. Accepted notes don't expire.
+3. **Share with this project's team** (optional, per note) publishes it as a record. See below.
+4. **Reject** wipes the text and keeps only an audit row.
+5. **Remove from memory** erases the note and everything drawn from it, and takes a shared copy off the project. The record's history stays for audit.
+
+### Which project a note lands in
+
+One rule, in `services/projects.py`:
+
+1. **An existing project, if it fits.** The assistant calls `list_projects` and names one. Case, "the … project" and small typos still match. Numbers must match exactly, so "Onboarding v1" and "Onboarding v2" stay separate.
+2. **A new project, if it clearly is one.** A name matching nothing is suggested as new. The project only comes to exist when you accept a note into it.
+3. **Otherwise Miscellaneous.** Generic names ("general", "misc", "n/a") land here, as does anything left blank at review.
+
+A note saved with no project goes to the local model, which picks from the same three. It never escalates to a paid model, a new project name must appear in the note, and any doubt or an unavailable model means Miscellaneous. `QUILL_PROJECT_ROUTE_LLM=0` turns it off. The route is only a suggestion, and the box on the review card decides.
+
+`list_projects` draws on org project scopes, then projects you've filed notes under, then project entities that pass a name check. The extractor's `project` tag alone is too noisy to file under, so the check drops people's names, lowercase words and generic words.
+
+### Sharing with a project
+
+Ticking the share box publishes the note as a `project_note` record in the project's org scope (`records/note_claims.py`):
+
+- **Direct, not through the extractor.** The extractor can't promote a decision or requirement, and would rewrite text you just reviewed.
+- **Created on first share.** A new project's scope sits under your team, and everyone who can read the team can read it. If you are on more than one team, Sparrow refuses rather than guess the audience, and an org admin creates the project.
+- **No second approver for project members.** Anyone who can propose on the team gets `approve` on the project scope the first time they share there. It's a normal audited grant. If that member can't get the grant, the note is forwarded to the scope's approvers instead.
+- **A person, not a token.** Sharing needs the same live-session proof as `/records`. Bearer callers are refused before anything is created.
+- **Decisions say who decided.** A decision is marked `suggested` unless the reviewer confirms a person made it. The label travels with the record.
+- **Replacing.** Sharing shows similar records in that project. Choosing one makes this note its next version, so the old decision stops being current and stays in its history.
+- **Miscellaneous is personal.** It can't be shared until you file the note under a project.
+
+Teammates read shared records on `/projects`, in chat (with the record cited), through peer asks, and through `project_context` on a connection with the `team` scope.
 
 Disconnect any assistant on `/assistants`; its tokens stop working immediately.
 

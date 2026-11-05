@@ -94,8 +94,11 @@ def build_payload(claim: dict[str, Any], *, packet_id: str, scope_id: str,
         "predicate": claim["predicate"],
         # Multi-valued predicates (one person owes many things) key the
         # record on the value too; single-valued ones version in place.
-        "record_key": (claim["canonical_hash"]
-                       if claim["predicate"] in MULTI_VALUED else ""),
+        # A claim can also name its key outright: a shared project note that
+        # replaces an earlier one becomes that record's next version.
+        "record_key": (claim.get("record_key") or (
+            claim["canonical_hash"] if claim["predicate"] in MULTI_VALUED
+            else "")),
         "value": claim["value"],
         "valid_from": min(times) if times else minted_at,
         "claim": {"id": claim["id"], "canonical_hash": claim["canonical_hash"],

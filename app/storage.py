@@ -1503,7 +1503,7 @@ class Store:
             # claim came from (a drift notice: "drift:<id>").
             ccols = {r["name"] for r in self._conn.execute(
                 "PRAGMA table_info(claims)").fetchall()}
-            for name in ("sync_state", "origin_ref"):
+            for name in ("sync_state", "origin_ref", "record_key"):
                 if name not in ccols:
                     self._conn.execute(
                         f"ALTER TABLE claims ADD COLUMN {name} TEXT")

@@ -68,6 +68,9 @@ MODELS: dict[str, str] = {
     "enhance": os.environ.get("QUILL_ENHANCE_MODEL", "claude-sonnet-4-6"),
     # Meeting debrief — one short thank-you email per attendee (Sonnet-class).
     "debrief": os.environ.get("QUILL_DEBRIEF_MODEL", "claude-sonnet-4-6"),
+    # Which project a saved note belongs to. Runs local-only (speculative).
+    "project_route": os.environ.get("QUILL_PROJECT_ROUTE_MODEL",
+                                    "claude-haiku-4-5"),
     # Mint-time person-vs-entity adjudication — rare (only brand-new person
     # candidates), small classification; Haiku-class is plenty.
     "person_adjudicate": os.environ.get("QUILL_PERSON_ADJUDICATE_MODEL",

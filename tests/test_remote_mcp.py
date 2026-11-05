@@ -341,7 +341,8 @@ class InboxTests(RemoteMcpBase):
                 mock.patch.object(worker, "enqueue") as enq:
             r = self.ui_post(f"/assistants/inbox/{item['id']}/accept",
                              {"project": "Onboarding v2"})
-        self.assertEqual(r.json(), {"ok": True, "event_id": 4242})
+        self.assertEqual(r.json(), {"ok": True, "event_id": 4242,
+                                    "project": "Onboarding v2"})
         ev = stored[0]
         self.assertEqual(ev.source, "assistant.claude")
         self.assertTrue(ev.meta["never_authorizes"])

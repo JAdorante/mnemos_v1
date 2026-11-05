@@ -46,7 +46,13 @@ h1{font-family:var(--display);font-weight:400;font-size:2rem;letter-spacing:-.02
   border:1px solid var(--line);border-radius:10px;padding:8px 10px}
 .item textarea{min-height:84px;resize:vertical}
 .item .row{display:flex;gap:10px;margin-top:10px;flex-wrap:wrap;align-items:center}
-.item .row input{flex:1;min-width:160px}
+.item .row input[type=text]{flex:1;min-width:160px}
+.item input[type=checkbox],.item input[type=radio]{width:auto;flex:none;margin-top:4px}
+.item select{font:inherit;font-size:14px;color:var(--text);background:var(--paper);border:1px solid var(--line);border-radius:10px;padding:8px 10px}
+.convo{font-size:13px;font-weight:600;color:var(--mut);margin:16px 0 4px}
+.replaces{margin-top:8px;font-size:14px}
+.replaces label{display:flex;gap:8px;align-items:flex-start;margin:4px 0}
+.err{color:var(--danger);font-size:14px;margin-top:6px}
 table{width:100%;border-collapse:collapse;font-size:14px}
 td,th{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line)}
 th{color:var(--mut);font-weight:600}
@@ -66,8 +72,9 @@ th{color:var(--mut);font-weight:600}
 <div class="wrap">
   <h1>Assistants</h1>
   <p class="lead">Connect ChatGPT, Claude, and Grok so what you work out with them comes back to
-  @@BRAND@@ for your projects. Every saved note waits here for your review. Nothing they send
-  becomes memory until you accept it, and nothing they send can make @@BRAND@@ act.</p>
+  @@BRAND@@, filed under your <a href="/projects">projects</a>. Every saved note waits here for your
+  review. Nothing they send becomes memory until you accept it, and nothing they send can make
+  @@BRAND@@ act.</p>
 
   <div class="panel" id="connectPanel">
     <h2>Connect an assistant</h2>
@@ -86,12 +93,14 @@ th{color:var(--mut);font-weight:600}
           on the @@BRAND@@ screen. For the xAI API, use an access token below instead.</div>
       </div>
       <p class="mut" style="margin-top:12px">Then just ask, e.g. <i>"save the decision we just made to
-      Sparrow under the onboarding project"</i>.</p>
+      Sparrow"</i>. It goes under the project it fits, a new project if it clearly is one, or
+      Miscellaneous. You can change that when you review it.</p>
     </div>
   </div>
 
   <div class="panel" id="inboxPanel" hidden>
     <h2>Review inbox <span class="mut" id="inboxCount"></span></h2>
+    <datalist id="projectNames"></datalist>
     <div id="inbox"></div>
     <h2 style="margin-top:20px">Recently accepted</h2>
     <div id="accepted"></div>
@@ -110,6 +119,7 @@ th{color:var(--mut);font-weight:600}
       <input type="text" id="tokLabel" placeholder="Label, e.g. Grok API" maxlength="60">
       <label class="mut"><input type="checkbox" id="tokCapture" checked> save</label>
       <label class="mut"><input type="checkbox" id="tokRead" checked> read</label>
+      <label class="mut"><input type="checkbox" id="tokTeam"> team records</label>
       <button class="btn" id="tokBtn" type="button">Create token</button>
     </div>
     <div id="tokOut" class="note" hidden></div>
@@ -117,7 +127,9 @@ th{color:var(--mut);font-weight:600}
 </div>
 <script>
 const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const post=(u,b)=>fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})}).then(r=>r.json());
+const CSRF=(document.cookie.split('; ').find(c=>c.startsWith('quill_csrf='))||'').split('=')[1]||'';
+const post=(u,b)=>fetch(u,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':CSRF},body:JSON.stringify(b||{})}).then(r=>r.json());
+let canShare=false, projects=[], miscName='Miscellaneous', inboxKey=null;
 const when=t=>t?new Date(t*1000).toLocaleString():'—';
 
 async function load(){
@@ -139,31 +151,71 @@ async function load(){
   un.hidden=!warn.length; un.textContent=warn.join(' ');
   ['inboxPanel','connPanel','tokPanel'].forEach(id=>document.getElementById(id).hidden=false);
   renderConns(st.connections||[]);
+  canShare=!!st.can_share; projects=st.projects||[]; miscName=st.misc||miscName;
+  document.getElementById('projectNames').innerHTML=[...projects.map(p=>p.name),miscName].map(n=>`<option value="${esc(n)}">`).join('');
   await loadInbox(); await loadAccepted();
 }
 
-async function loadInbox(){
-  const r=await (await fetch('/assistants/inbox?status=pending')).json();
-  const items=r.items||[];
-  document.getElementById('inboxCount').textContent=items.length?'· '+items.length+' waiting':'';
-  const box=document.getElementById('inbox');
-  if(!items.length){ box.innerHTML='<p class="empty">Nothing waiting. Saved notes from your assistants will appear here.</p>'; return; }
-  box.innerHTML=items.map(it=>`
+function isMisc(name){ return !name.trim() || name.trim().toLowerCase()===miscName.toLowerCase(); }
+function routeLabel(name){
+  if(isMisc(name)) return 'Not about a project';
+  return projects.some(p=>p.name.toLowerCase()===name.trim().toLowerCase())?'Existing project':'New project';
+}
+function itemHtml(it){
+  const d=it.details||{};
+  const person=d.decided_by||'';
+  return `
     <div class="item" data-id="${it.id}">
       <div class="meta"><span class="chip">${esc(it.assistant_label)}</span>
         <span class="chip">${esc(it.kind)}</span>
         ${(it.flags||[]).map(f=>`<span class="chip warn" title="Looks like it contains a secret">${esc(f)}</span>`).join('')}
         <span>${esc(when(it.created_at))}</span>
-        ${it.conversation?`<span>· ${esc(it.conversation)}</span>`:''}
         ${it.source_url?`<a href="${esc(it.source_url)}" target="_blank" rel="noopener noreferrer">source</a>`:''}</div>
       ${it.title?`<b>${esc(it.title)}</b>`:''}
       <textarea aria-label="Note text">${esc(it.text)}</textarea>
-      <div class="row"><input type="text" placeholder="Project" aria-label="Project" value="${esc(it.project)}">
-        <button class="btn" data-act="accept" type="button">Accept</button>
+      ${d.rationale?`<p class="mut">Why: ${esc(d.rationale)}</p>`:''}
+      ${d.owner||d.due?`<p class="mut">${esc([d.owner&&('Owner: '+d.owner),d.due&&('Due '+d.due)].filter(Boolean).join(' · '))}</p>`:''}
+      ${it.kind==='decision'?`<div class="row">
+        <select data-status aria-label="Was this decided?">
+          <option value="suggested"${person?'':' selected'}>The assistant only suggested this</option>
+          <option value="decided"${person?' selected':''}>A person decided this</option></select>
+        <input type="text" data-decider placeholder="Who decided?" aria-label="Who decided" value="${esc(person)}"${person?'':' hidden'}></div>`:''}
+      <div class="row"><input type="text" data-project list="projectNames" placeholder="Project" aria-label="Project" value="${esc(it.project)}">
+        <span class="mut" data-route title="${esc(it.route_reason||'')}">${it.project?esc(routeLabel(it.project)):'Sorting…'}</span></div>
+      ${canShare?`<div class="row" data-share-row${it.project&&isMisc(it.project)?' hidden':''}><label class="mut"><input type="checkbox" data-share> Share with this project's team</label></div>
+      <div class="replaces" data-replaces hidden></div>`:''}
+      <div class="row"><button class="btn" data-act="accept" type="button">Accept</button>
         <button class="btn btn-ghost" data-act="reject" type="button">Reject</button></div>
-    </div>`).join('');
+    </div>`;
+}
+async function loadInbox(){
+  const r=await (await fetch('/assistants/inbox?status=pending')).json();
+  const items=r.items||[];
+  document.getElementById('inboxCount').textContent=items.length?'· '+items.length+' waiting':'';
+  const box=document.getElementById('inbox');
+  // The refresh must not wipe what the reviewer is typing or ticking.
+  const key=items.map(i=>[i.id,i.project,i.route_action].join(':')).join('|')+'#'+projects.length;
+  if(key===inboxKey) return;
+  const busy=box.contains(document.activeElement) || box.querySelector('[data-share]:checked');
+  if(busy && items.every(i=>box.querySelector(`.item[data-id="${i.id}"]`))) return;
+  inboxKey=key;
+  if(!items.length){ box.innerHTML='<p class="empty">Nothing waiting. Saved notes from your assistants will appear here.</p>'; return; }
+  const groups=new Map();
+  items.forEach(it=>{ const k=it.conversation||''; groups.has(k)||groups.set(k,[]); groups.get(k).push(it); });
+  box.innerHTML=[...groups].map(([name,rows])=>(name?`<div class="convo">From “${esc(name)}” · ${rows.length} ${rows.length===1?'note':'notes'}</div>`:'')+rows.map(itemHtml).join('')).join('');
 }
 
+function shareChip(it){
+  const st=it.share_state;
+  if(st==='recorded') return '<span class="chip">Shared</span>';
+  if(st==='queued') return '<span class="chip">Sharing when the org is reachable</span>';
+  if(st==='forwarded') return '<span class="chip">Waiting for an approver</span>';
+  if(st==='failed') return `<span class="chip warn" title="${esc(it.share_error||'')}">Not shared</span>`;
+  return '';
+}
+function canShareItem(it){
+  return canShare && it.project!==miscName && !['recorded','queued','forwarded'].includes(it.share_state);
+}
 async function loadAccepted(){
   const r=await (await fetch('/assistants/inbox?status=accepted')).json();
   const items=(r.items||[]).slice(0,20);
@@ -174,29 +226,86 @@ async function loadAccepted(){
       <div class="meta"><span class="chip">${esc(it.assistant_label)}</span>
         <span class="chip">${esc(it.kind)}</span>
         ${it.project?`<span class="chip">${esc(it.project)}</span>`:''}
+        ${shareChip(it)}
         <span>${esc(when(it.decided_at))}</span></div>
       <p>${esc(it.text)}</p>
-      <div class="row"><button class="btn btn-ghost" data-remove type="button">Remove from memory</button></div>
+      ${it.share_state==='failed'&&it.share_error?`<p class="err">${esc(it.share_error)}</p>`:''}
+      <div class="row">${canShareItem(it)?'<button class="btn btn-ghost" data-share-now type="button">Share with this project\'s team</button>':''}
+        <button class="btn btn-ghost" data-remove type="button">Remove from memory</button></div>
     </div>`).join('');
 }
 
 document.getElementById('accepted').addEventListener('click',async e=>{
+  const sh=e.target.closest('button[data-share-now]');
+  if(sh){
+    const el=sh.closest('.item'); sh.disabled=true;
+    const r=await post('/assistants/inbox/'+el.dataset.id+'/share');
+    if(!r.ok) alert(r.error||'Could not share this note.');
+    loadAccepted(); return;
+  }
   const b=e.target.closest('button[data-remove]'); if(!b) return;
-  if(!confirm('Remove this note and everything Sparrow learned from it?')) return;
+  if(!confirm('Remove this note and everything Sparrow learned from it? If you shared it, it also comes off the project.')) return;
   const el=b.closest('.item'); b.disabled=true;
   const r=await post('/assistants/inbox/'+el.dataset.id+'/remove');
   if(!r.ok){ alert(r.error||'Failed'); b.disabled=false; return; }
+  if(r.warning) alert(r.warning);
   loadAccepted();
 });
 
+async function showReplaces(el){
+  const box=el.querySelector('[data-replaces]'); if(!box) return;
+  const on=el.querySelector('[data-share]').checked;
+  box.hidden=!on; box.innerHTML='';
+  if(!on) return;
+  const project=el.querySelector('[data-project]').value;
+  const r=await (await fetch('/assistants/inbox/'+el.dataset.id+'/similar?project='+encodeURIComponent(project))).json();
+  const recs=r.records||[];
+  if(!recs.length) return;
+  box.innerHTML='<span class="mut">Does this replace something already shared?</span>'
+    +`<label><input type="radio" name="rep${el.dataset.id}" value="" checked><span>No, add it as a new record</span></label>`
+    +recs.map(x=>`<label><input type="radio" name="rep${el.dataset.id}" value="${esc(x.record_id)}"><span>Replace: ${esc(x.title||x.text.slice(0,140))}</span></label>`).join('');
+}
+document.getElementById('inbox').addEventListener('change',e=>{
+  const el=e.target.closest('.item'); if(!el) return;
+  if(e.target.matches('[data-project]')){
+    const out=el.querySelector('[data-route]');
+    out.textContent=routeLabel(e.target.value); out.title='';
+    const row=el.querySelector('[data-share-row]');
+    if(row){
+      row.hidden=isMisc(e.target.value);
+      if(row.hidden) row.querySelector('[data-share]').checked=false;
+    }
+  }
+  if(e.target.matches('[data-share],[data-project]')) showReplaces(el);
+  if(e.target.matches('[data-status]')){
+    const who=el.querySelector('[data-decider]');
+    who.hidden=e.target.value!=='decided';
+  }
+});
 document.getElementById('inbox').addEventListener('click',async e=>{
   const b=e.target.closest('button[data-act]'); if(!b) return;
   const el=b.closest('.item'); const id=el.dataset.id;
   el.querySelectorAll('button').forEach(x=>x.disabled=true);
-  const r=b.dataset.act==='accept'
-    ? await post('/assistants/inbox/'+id+'/accept',{text:el.querySelector('textarea').value,project:el.querySelector('input').value})
-    : await post('/assistants/inbox/'+id+'/reject');
+  let r;
+  if(b.dataset.act==='accept'){
+    const status=el.querySelector('[data-status]');
+    const share=el.querySelector('[data-share]');
+    const rep=el.querySelector('[data-replaces] input:checked');
+    r=await post('/assistants/inbox/'+id+'/accept',{text:el.querySelector('textarea').value,
+      project:el.querySelector('[data-project]').value,
+      share:!!(share&&share.checked), replaces:rep&&rep.value?rep.value:null,
+      decision_status:status?status.value:null,
+      decided_by:status&&status.value==='decided'?el.querySelector('[data-decider]').value:null});
+  }else{
+    r=await post('/assistants/inbox/'+id+'/reject');
+  }
   if(!r.ok){ alert(r.error||'Failed'); el.querySelectorAll('button').forEach(x=>x.disabled=false); return; }
+  if(r.shared&&!r.shared.ok) alert('Saved to your notes, but not shared: '+(r.shared.error||'unknown error'));
+  if(r.project&&!isMisc(r.project)&&!projects.some(p=>p.name===r.project)){
+    projects.push({name:r.project,shared:false});
+    document.getElementById('projectNames').insertAdjacentHTML('beforeend',`<option value="${esc(r.project)}">`);
+  }
+  el.remove(); inboxKey=null;
   loadInbox(); loadAccepted();
 });
 
@@ -222,8 +331,8 @@ document.getElementById('copyBtn').addEventListener('click',()=>{
 });
 
 document.getElementById('tokBtn').addEventListener('click',async ()=>{
-  const scope=[document.getElementById('tokCapture').checked?'capture':'',document.getElementById('tokRead').checked?'read':''].join(' ').trim();
-  if(!scope){ alert('Choose save, read, or both.'); return; }
+  const scope=[document.getElementById('tokCapture').checked?'capture':'',document.getElementById('tokRead').checked?'read':'',document.getElementById('tokTeam').checked?'team':''].join(' ').trim();
+  if(!scope){ alert('Choose at least one permission.'); return; }
   const r=await post('/assistants/tokens',{label:document.getElementById('tokLabel').value,scope});
   const out=document.getElementById('tokOut'); out.hidden=false;
   out.innerHTML=r.ok?'Copy it now. It will not be shown again:<br><code style="word-break:break-all">'+esc(r.token)+'</code>':esc(r.error||'Failed');

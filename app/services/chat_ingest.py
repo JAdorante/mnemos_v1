@@ -206,6 +206,16 @@ def run_job(payload: dict) -> None:
         facts = _drop_speaker_self(facts)
     n = _persist_facts(store, facts, anchor, text, now,
                        event_source=event_source)
+    if event_source.startswith("assistant.") and anchor is not None:
+        # The reviewer confirmed the project, so what the note yields belongs
+        # to it even when no sentence names it.
+        try:
+            from app.services import projects
+            meta = (raw_ev or {}).get("meta") or {}
+            if isinstance(meta, dict) and meta.get("project"):
+                projects.stamp_event_facts(store, int(anchor), meta["project"])
+        except Exception as exc:
+            print(f"[chat_ingest] project link skipped ({exc}).")
     try:
         if anchor is not None:
             store.mark_extracted([anchor], now)

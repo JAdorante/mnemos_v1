@@ -14,7 +14,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-KINDS = ("decision", "commitment", "status", "field_update", "fact")
+KINDS = ("decision", "commitment", "status", "field_update", "fact",
+         "project_note")
 
 _SCHEMA_DIR = Path(__file__).resolve().parents[2] / "schemas" / "claims"
 _KNOWN_KEYWORDS = {

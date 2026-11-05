@@ -122,6 +122,18 @@ def scopes(org_id: str, p: Principal = Depends(principal)) -> dict:
     return {"scopes": service.list_scopes(get_db(), p, org_id)}
 
 
+class ProjectIn(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    parent_id: str
+
+
+@router.post("/orgs/{org_id}/projects")
+def ensure_project(org_id: str, body: ProjectIn,
+                   p: Principal = Depends(principal)) -> dict:
+    return service.ensure_project(get_db(), p, org_id, name=body.name,
+                                  parent_id=body.parent_id)
+
+
 @router.post("/orgs/{org_id}/scopes")
 def create_scope(org_id: str, body: ScopeIn,
                  p: Principal = Depends(principal)) -> dict:
@@ -171,6 +183,18 @@ def records(scope: str | None = None, subject: str | None = None,
     return {"records": service.query_records(
         get_db(), p, scope=scope, subject=subject, predicate=predicate,
         as_of=as_of, known_at=known_at, limit=limit)}
+
+
+@router.get("/records/search")
+def search_records(q: str, scope: str | None = None, limit: int = 8,
+                   p: Principal = Depends(principal)) -> dict:
+    return {"records": service.search_records(get_db(), p, query=q, scope=scope,
+                                              limit=limit)}
+
+
+@router.post("/records/{record_id}/retract")
+def retract_record(record_id: str, p: Principal = Depends(principal)) -> dict:
+    return service.retract_record(get_db(), p, record_id)
 
 
 @router.get("/records/{record_id}/versions")

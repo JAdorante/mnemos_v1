@@ -224,6 +224,35 @@ def answerable(asker_member_id: str, question: str) -> list[dict[str, Any]]:
                        "question": question}).get("records") or [])
 
 
+def ensure_project(name: str, parent_id: str) -> dict[str, Any]:
+    return _call("POST", f"/orgs/{membership().get('org_id')}/projects",
+                 {"name": name, "parent_id": parent_id})
+
+
+def search_records(query: str, *, scope: str | None = None,
+                   limit: int = 8) -> list[dict[str, Any]]:
+    from urllib.parse import urlencode
+    params = {"q": query, "limit": limit, **({"scope": scope} if scope else {})}
+    return list(_call("GET", "/records/search?" + urlencode(params))
+                .get("records") or [])
+
+
+def scope_records(scope_id: str, *, limit: int = 200) -> list[dict[str, Any]]:
+    from urllib.parse import urlencode
+    q = urlencode({"scope": scope_id, "limit": limit})
+    return list(_call("GET", f"/records?{q}").get("records") or [])
+
+
+def record_versions(record_id: str) -> dict[str, Any]:
+    from urllib.parse import quote
+    return _call("GET", f"/records/{quote(record_id, safe='')}/versions")
+
+
+def retract_record(record_id: str) -> dict[str, Any]:
+    from urllib.parse import quote
+    return _call("POST", f"/records/{quote(record_id, safe='')}/retract", {})
+
+
 def submit_packet(body: dict[str, Any]) -> dict[str, Any]:
     return _call("POST", "/packets", body)
 

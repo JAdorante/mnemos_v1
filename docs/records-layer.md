@@ -17,7 +17,8 @@ HubSpot, Google Drive and webhooks; Notion is Phase 3.
 | Module | Job |
 |---|---|
 | `canonical.py` | Canonical JSON, `canonical_hash`, `quote_hash`, `audit_entry_hash`. Standard library only, and imported by the service too, so both sides hash identically. |
-| `claim_schemas.py` + `app/schemas/claims/*.json` | Versioned JSON Schema per kind (`decision`, `commitment`, `status`, `field_update`, `fact`). The small validator covers only the keywords those files use. |
+| `note_claims.py` | A reviewed assistant note becomes a `project_note` claim directly, then a packet that the same live session approves or forwards. See `docs/mcp.md`. |
+| `claim_schemas.py` + `app/schemas/claims/*.json` | Versioned JSON Schema per kind (`decision`, `commitment`, `status`, `field_update`, `fact`, `project_note`). The small validator covers only the keywords those files use. |
 | `claim_builder.py` | Turns accepted `fact_candidates` into `claims`. Every claim needs evidence (an event id plus the verbatim span). Handles dedup and conflicts, the personal-only gates, and scope suggestion. Optionally auto-proposes when confidence ≥ `QUILL_CLAIM_PROPOSE_MIN_CONF`. |
 | `promotion.py` | Propose (mints a packet with a 7-day TTL), decide (approve, edit or reject; live session only), deliver, forward, discard, retry. Also the learning-loop verdicts and precision per kind. |
 | `org_client.py` | Membership (`data/org_membership.json`, mode 0600), access token exchange, heartbeat caches (policy, scopes and grants, UI only), and the outbox drain. |
@@ -60,6 +61,8 @@ Not covered yet: desktop `perception.db` rows and CAS frames. The perception era
 - The app role cannot UPDATE or DELETE `audit_log`. On `record_versions` it may only stamp `superseded_at`.
 - `migrations/` holds Alembic revisions as explicit SQL. Revision 0001 creates the tables, RLS, the role and its grants.
 - `records/service.py` is the business logic. Permissions are `admin > approve > propose > read` and inherit down the scope tree; an org admin is admin on every scope. Packet submission checks the hash, then the TTL, then the grant at submission time, and is idempotent on `payload_hash`, including when two identical submissions race.
+- Project scopes: `POST /orgs/{id}/projects` finds or creates a `project` scope under a team, and gives a caller who can propose on the team `approve` on it. Names match case-insensitively per parent, and the audit head lock serializes creators. Project scopes don't count when `_scope_suggestion` looks for a member's one team.
+- `GET /records/search` is full-text search over a version's string values (GIN index from revision 0003), with words OR'd and ranked. `POST /records/{id}/retract` needs `approve`: it stamps `superseded_at` on the believed versions and writes no new one, so current reads stop returning the record and its history stays.
 - Bi-temporal records: superseding a version stamps its `superseded_at`. If the old value started earlier in valid time, a `derived` row keeps believing it for the interval before the change. `GET /records?as_of=&known_at=` answers "what did we believe on date X about date Y".
 - `records/audit.py` is the hash chain. The head lock is `FOR NO KEY UPDATE` on the org row; plain `FOR UPDATE` deadlocks against the FK key-share locks that every insert takes. `anchor` writes the head to `QUILL_ORG_AUDIT_ANCHOR_DIR` as a write-once file. `scripts/verify_audit_chain.py` walks the chain and checks the anchors.
 - Credentials take the form `<org>.<id>.<secret>`, so the tenant can be bound before any lookup. Access tokens are 15-minute HS256 JWTs signed with `QUILL_ORG_JWT_SECRET`. Member status and credential revocation are re-checked on every request.

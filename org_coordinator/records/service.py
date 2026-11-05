@@ -347,6 +347,57 @@ def create_scope(db, principal: Principal, org_id: str, *, kind: str,
         return _scope_view(repo, member, s)
 
 
+def _project_key(name: str) -> str:
+    return " ".join((name or "").casefold().split())
+
+
+def ensure_project(db, principal: Principal, org_id: str, *, name: str,
+                   parent_id: str | None,
+                   now: float | None = None) -> dict[str, Any]:
+    """Find or create a project scope under a team, and make the caller able
+    to publish in it. Anyone who may propose on the parent counts as a project
+    member, so they need no admin and no second approver. Two teammates who
+    name the same project land on one scope."""
+    now = _now(now)
+    if org_id != principal.org_id:
+        raise ServiceError(403, "org_mismatch")
+    clean = " ".join((name or "").split())[:120]
+    if not clean:
+        raise ServiceError(400, "bad_name")
+    if not parent_id:
+        raise ServiceError(400, "parent_required")
+    with db.tenant(org_id) as repo:
+        member = _require(repo, principal, parent_id, "propose")
+        if repo.get_scope(parent_id)["kind"] == "project":
+            raise ServiceError(400, "bad_parent")
+        # Serializes concurrent creators in this org: the chain head is the
+        # org-wide lock audit.append would take anyway.
+        repo.lock_audit_head()
+        want = _project_key(clean)
+        scope = next((s for s in repo.list_scopes()
+                      if s["kind"] == "project" and s["parent_id"] == parent_id
+                      and _project_key(s["name"]) == want), None)
+        created = scope is None
+        if created:
+            sid = tokens.new_id("scp")
+            scope = repo.insert_scope(id=sid, kind="project", name=clean,
+                                      parent_id=parent_id, external_ref=None,
+                                      created_at=now)
+            audit.append(repo, principal.member_id, "scope.create", sid,
+                         {"kind": "project", "parent_id": parent_id,
+                          "external_ref": None}, at=now)
+        if "approve" not in effective_permissions(repo, member, scope["id"]):
+            repo.insert_grant(scope_id=scope["id"],
+                              member_id=principal.member_id,
+                              permission="approve",
+                              granted_by=principal.member_id, created_at=now)
+            audit.append(repo, principal.member_id, "grant.add",
+                         f"{scope['id']}:{principal.member_id}",
+                         {"permission": "approve", "via": "project_member"},
+                         at=now)
+        return {**_scope_view(repo, member, scope), "created": created}
+
+
 def update_scope(db, principal: Principal, org_id: str, scope_id: str,
                  changes: dict[str, Any], *, now: float | None = None) -> dict:
     now = _now(now)
@@ -635,11 +686,11 @@ def query_records(db, principal: Principal, *, scope: str | None = None,
             if scope not in readable:
                 raise ServiceError(403, "lacks_read")
             readable = [s for s in readable if scope in repo.ancestors(s)]
-        return repo.query_records(
+        return _named(repo, repo.query_records(
             scope_ids=readable, subject=subject, predicate=predicate,
             as_of=float(as_of if as_of is not None else now),
             known_at=float(known_at if known_at is not None else now),
-            limit=min(int(limit), 1000))
+            limit=min(int(limit), 1000)))
 
 
 def _readable_record(repo, principal: Principal, record_id: str) -> dict:
@@ -650,6 +701,48 @@ def _readable_record(repo, principal: Principal, record_id: str) -> dict:
     if "read" not in effective_permissions(repo, member, rec["scope_id"]):
         raise ServiceError(404, "record_not_found")   # don't leak existence
     return rec
+
+
+def _named(repo, rows: list[dict]) -> list[dict]:
+    """Add who approved each version, for a reader who knows names, not ids."""
+    people = {m["id"]: m.get("display_name") or m["email"]
+              for m in repo.list_members()}
+    return [{**r, "approved_by_name": people.get(r.get("approved_by"))}
+            for r in rows]
+
+
+def search_records(db, principal: Principal, *, query: str,
+                   scope: str | None = None, limit: int = 8,
+                   now: float | None = None) -> list[dict]:
+    now = _now(now)
+    with db.tenant(principal.org_id) as repo:
+        member = repo.get_member(principal.member_id)
+        readable = readable_scopes(repo, member)
+        if scope:
+            if scope not in readable:
+                raise ServiceError(403, "lacks_read")
+            readable = [s for s in readable if scope in repo.ancestors(s)]
+        rows = repo.search_records(scope_ids=readable,
+                                   query=(query or "")[:500], now=now,
+                                   limit=max(1, min(int(limit), 50)))
+        return _named(repo, rows)
+
+
+def retract_record(db, principal: Principal, record_id: str, *,
+                   now: float | None = None) -> dict[str, Any]:
+    """Stop believing a record without erasing it: its versions stay for
+    history and audit, and current reads and searches no longer return it."""
+    now = _now(now)
+    with db.tenant(principal.org_id) as repo:
+        rec = repo.get_record(record_id)
+        if rec is None:
+            raise ServiceError(404, "record_not_found")
+        _require(repo, principal, rec["scope_id"], "approve")
+        believed = repo.believed_versions(record_id, now)
+        repo.supersede([b["id"] for b in believed], now)
+        audit.append(repo, principal.member_id, "record.retract", record_id,
+                     {"versions": len(believed)}, at=now)
+    return {"ok": True, "record_id": record_id, "retracted": len(believed)}
 
 
 def record_versions(db, principal: Principal, record_id: str) -> dict[str, Any]:

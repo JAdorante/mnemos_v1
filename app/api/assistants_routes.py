@@ -10,7 +10,8 @@
   POST /mcp                                          JSON-RPC (Bearer only)
   GET  /assistants                                   connect + inbox page
   GET  /assistants/status | /assistants/inbox
-  POST /assistants/inbox/{id}/accept | /reject | /remove
+  POST /assistants/inbox/{id}/accept | /reject | /remove | /share
+  GET  /assistants/inbox/{id}/similar                shared records it may replace
   POST /assistants/connections/{id}/revoke
   POST /assistants/tokens                            static token, shown once
 
@@ -284,6 +285,13 @@ def assistants_status(request: Request) -> dict:
     if out["unavailable"] is None:
         out["connections"] = remote_mcp.connections()
         out["counts"] = assistant_inbox.counts()
+        from app.services import projects
+        from app.services.records import org_client
+        out["projects"] = [
+            {"name": p["name"], "shared": bool(p.get("shared"))}
+            for p in projects.registry()]
+        out["misc"] = projects.MISC
+        out["can_share"] = org_client.joined()
     return out
 
 
@@ -297,17 +305,54 @@ def assistants_inbox(status: str = "pending", limit: int = 200) -> dict:
     return {"items": assistant_inbox.items(status, limit)}
 
 
+def _share_source(request: Request) -> str:
+    """Sharing approves a record, so it takes the same proof of a live human
+    the records page does, read from the request and never from the body."""
+    from app.api.records_routes import live_session
+    from app.services.records.promotion import LIVE_SESSION
+    return LIVE_SESSION if live_session(request)[0] else "http.unverified"
+
+
 class AcceptIn(BaseModel):
     text: str | None = None
     project: str | None = None
+    share: bool = False
+    replaces: str | None = None
+    decided_by: str | None = None
+    decision_status: str | None = None
 
 
 @router.post("/assistants/inbox/{item_id}/accept")
-def assistants_accept(item_id: int, body: AcceptIn | None = None) -> dict:
+def assistants_accept(item_id: int, request: Request,
+                      body: AcceptIn | None = None) -> dict:
     _gate()
     from app.services import assistant_inbox
     body = body or AcceptIn()
-    return assistant_inbox.accept(item_id, text=body.text, project=body.project)
+    return assistant_inbox.accept(
+        item_id, text=body.text, project=body.project, share=body.share,
+        replaces=body.replaces, decided_by=body.decided_by,
+        decision_status=body.decision_status, source=_share_source(request))
+
+
+class ShareIn(BaseModel):
+    replaces: str | None = None
+
+
+@router.post("/assistants/inbox/{item_id}/share")
+def assistants_share(item_id: int, request: Request,
+                     body: ShareIn | None = None) -> dict:
+    _gate()
+    from app.services import assistant_inbox
+    return assistant_inbox.share_note(
+        item_id, replaces=(body or ShareIn()).replaces,
+        source=_share_source(request))
+
+
+@router.get("/assistants/inbox/{item_id}/similar")
+def assistants_similar(item_id: int, project: str | None = None) -> dict:
+    _gate()
+    from app.services import assistant_inbox
+    return assistant_inbox.similar_records(item_id, project)
 
 
 @router.post("/assistants/inbox/{item_id}/reject")
@@ -409,6 +454,10 @@ chats. Nothing becomes memory until you accept it.</span></span></label>
 <span><b>Read your Sparrow memory.</b> <span class="mut">Search, people, open loops — filtered by
 your disclosure policy; personal and sensitive items stay home. Results go to
 {esc(who)}'s servers.</span></span></label>
+<label class="opt"><input type="checkbox" name="scope_team" value="1">
+<span><b>Read your team's shared project records.</b> <span class="mut">Notes your team chose
+to share, so {esc(who)} can build on them. This sends your team's content to {esc(who)}'s
+servers, so check that your team is comfortable with that.</span></span></label>
 {signin}
 <div class="row">
 <button type="submit" name="decision" value="allow">Allow</button>

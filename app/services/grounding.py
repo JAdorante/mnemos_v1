@@ -817,6 +817,15 @@ def compose(question: str, *, semantic_limit: int = 5, min_score: float = 0.15,
     except Exception as exc:
         print(f"[grounding] org priorities skipped ({exc}).")
 
+    # Reviewed notes the team shared to its projects.
+    try:
+        from app.services import projects as _projects
+        sec = _projects.grounding_lines(question)
+        if sec:
+            _add("team records", sec)
+    except Exception as exc:
+        print(f"[grounding] team records skipped ({exc}).")
+
     # Paired teammates — so "who is User 2?" is answerable without minting junk people.
     try:
         sec = _peers_section(question)
