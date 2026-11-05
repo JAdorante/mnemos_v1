@@ -192,6 +192,17 @@ def ship_digest(digest: dict | None = None, *,
     if not org_client.enabled():
         return {"ok": False, "error": "org network disabled"}
     digest = digest or build_digest()
+    from app.services import egress
+    try:
+        blob = json.dumps(digest, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        blob = str(digest)
+    verdict = egress.decide(path="org_digest", destination="org coordinator",
+                            policy="allow", scope="org", data_class="work",
+                            text=blob)
+    if not verdict.allowed:
+        return {"ok": False, "error": f"digest held: {verdict.reason}",
+                "egress": verdict.action, "digest": digest}
     res = org_client.post_digest(digest)
     peer_res = None
     if notify_manager_peer:

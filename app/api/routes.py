@@ -1047,6 +1047,38 @@ def console_escalate(recent: int = 20) -> dict:
     return escalate_log.stats(recent=max(0, min(int(recent), 100)))
 
 
+# --- deployment profile: what is actually running for this seat ------------
+@router.get("/deployment")
+def deployment_running() -> dict:
+    """The seat's deployment profile and every stage, on or off, with the
+    flag values behind it and where each came from (app/profiles.py)."""
+    from app import profiles
+    return profiles.running()
+
+
+# --- decisions: every human verdict, one trail -------------------------------
+@router.get("/decisions")
+def decisions_list(surface: str = "", subject: str = "",
+                   limit: int = 100) -> dict:
+    """Every human verdict, newest first, from whichever surface asked:
+    what was shown (by hash), the options, the verdict and any edit, who
+    decided, and the learning pair derived from it."""
+    from app.services import decisions
+    rows = decisions.recent(surface=surface or None, subject=subject or None,
+                            limit=max(1, min(int(limit), 500)),
+                            store=memory._ensure_store())
+    return {"count": len(rows), "decisions": rows}
+
+
+@router.get("/decisions/summary")
+def decisions_summary(days: float = 7.0) -> dict:
+    """Per-surface verdict counts and how many became learning pairs."""
+    import time as _time
+    from app.services import decisions
+    since = _time.time() - max(0.0, float(days)) * 86400 if days else None
+    return decisions.summary(since=since, store=memory._ensure_store())
+
+
 # --- learning loop (Workstream A): the user-trust surface -------------------
 @router.get("/learning/pairs")
 def learning_pairs_list(task_type: str = "", limit: int = 200) -> dict:
@@ -4461,6 +4493,11 @@ def console_queue_slo() -> dict:
 def fact_done(fact_id: int) -> dict:
     fact = _get_or_404(fact_id)
     memory._ensure_store().set_fact_status(fact_id, "done")
+    from app.services import decisions
+    decisions.record(surface="facts.review", subject=f"fact:{fact_id}",
+                     verdict="done", via="route",
+                     shown={"text": fact.get("text"), "kind": fact.get("kind")},
+                     store=memory._ensure_store())
     refreshed = memory._ensure_store().get_fact(fact_id) or fact
     return {"ok": True, "fact_id": fact_id, "status": "done",
             "commitment_state": refreshed.get("commitment_state")}
@@ -4655,6 +4692,12 @@ def reflection_item_convert(item_id: int) -> dict:
     except Exception as exc:
         print(f"[reflect] convert index skipped ({exc}).")
     store.set_reflection_item_converted(item_id, fid)
+    from app.services import decisions
+    decisions.record(surface="reflection.review",
+                     subject=f"reflection_item:{item_id}", verdict="converted",
+                     via="route", shown={"text": it.get("text"),
+                                         "kind": it.get("kind")},
+                     meta={"fact_id": fid}, store=store)
     return {"ok": True, "item_id": item_id, "fact_id": fid}
 
 
@@ -4670,6 +4713,11 @@ class ChatIn(BaseModel):
     # before the turn so Claude-style toggles take effect immediately.
     connectors: list[str] | None = None
     connectors_off: list[str] | None = None
+    # Which thread this tab is on, and the retry key for this send.
+    session_id: str | None = None
+    client_msg_id: str | None = None
+    # Per-message: skip chat→memory ingest for this turn only.
+    off_the_record: bool = False
 
 
 class ChatModeBody(BaseModel):
@@ -4699,6 +4747,12 @@ def chat_mode_set(body: ChatModeBody) -> dict:
         mode = _smode.set_manual(body.mode)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if agent.worker.persist:
+        try:
+            from app.services.chat_log import get_log
+            get_log().save_study(mode.get("id"), mode.get("until"))
+        except Exception as exc:
+            print(f"[chat_log] study mode skipped ({exc}).")
     return {"ok": True, "mode": mode}
 
 
@@ -4831,218 +4885,111 @@ def chat(body: ChatIn) -> dict:
             agent_goal = f"{guide}\n\n{agent_goal}"
     except Exception:
         pass
-    # Learning Memory: short homework/quiz verdicts update mastery (best-effort).
-    if study_mode in ("homework", "study_quiz"):
+    accepted = agent.worker.begin_turn(
+        text=display or agent_goal,
+        session_id=(body.session_id or "").strip() or None,
+        client_msg_id=(body.client_msg_id or "").strip() or None,
+    )
+    if accepted.get("switched"):
+        return {"ok": True, "switched": True,
+                "session_id": accepted.get("session_id")}
+    if accepted.get("duplicate"):
+        return {"ok": True, "duplicate": True,
+                "since": accepted.get("seq"), "seq": accepted.get("seq"),
+                "session_id": accepted.get("session_id"),
+                "turn_id": accepted.get("turn_id")}
+    if accepted.get("dropped"):
+        return {"ok": False, "error": "that chat was closed",
+                "session_id": accepted.get("session_id")}
+    seq = accepted.get("seq")
+    since = seq
+    session_id = accepted.get("session_id")
+    turn_id = accepted.get("turn_id")
+    if agent.worker.persist:
         try:
-            from app.services import learning_memory as _lme
-            from app.services import memory as _mem
-            _lme.apply_chat_verdict(_mem._ensure_store(), display)
+            from app.services.chat_log import get_log
+            _log = get_log()
+            _cur = _smode.current()
+            _log.save_study(_cur.get("id"), _cur.get("until"))
+            from app.services.connectors import session as _conn_session
+            _log.save_connectors(_conn_session.snapshot())
         except Exception as exc:
-            print(f"[learning_memory] chat verdict skipped ({exc}).")
-    # Typed statements are memory too: store + queue extraction so a new
-    # person / commitment / tool told to the chat reaches the graph without
-    # being spoken aloud. Best-effort and non-blocking (LLM work runs on the
-    # job worker); short approvals/verdicts are filtered inside.
+            print(f"[chat_log] session prefs skipped ({exc}).")
+
+    def _turn(payload: dict) -> dict:
+        payload = dict(payload)
+        payload["since"] = since
+        payload["seq"] = seq
+        if session_id:
+            payload["session_id"] = session_id
+        if turn_id:
+            payload["turn_id"] = turn_id
+        return payload
+
     try:
-        from app.services import chat_ingest
-        chat_ingest.ingest(display)
-    except Exception as exc:
-        print(f"[chat_ingest] hook skipped ({exc}).")
-    if _agent_disabled():
-        return llm.answer(agent_goal)
-    # Drop stale yes/no offers so they can't swallow a fresh instruction.
-    agent.worker.expire_stale_offers()
-    with agent.worker.lock:
-        since = agent.worker.next_id
-        pending = (agent.worker.awaiting or agent.worker.awaiting_fast
-                   or agent.worker.pending_todo is not None)
-    # Approvals / offer replies ignore sticky context — only the short message.
-    if pending:
-        return {**agent.worker.handle_reply(display), "since": since}
-    # Bare yes/no with nothing pending: never route it as a goal (the router
-    # would just re-answer the previous result) — accept/decline the last
-    # reply's trailing offer, or say that nothing is waiting.
-    idle = agent.worker.handle_idle_verdict(display)
-    if idle is not None:
-        return {**idle, "since": since}
-    # Calendar-add intent -> approval-gated iCloud write (skips the browser
-    # agent). Only a CREATE request is intercepted; "what's on my calendar?"
-    # falls through to normal grounding, which already sees synced events.
-    try:
-        from app.services import calendar_intent
-        if calendar_intent.looks_like_calendar_add(display):
-            event = calendar_intent.parse(display)
-            if event:
-                from app.services import icloud_account
-                agent.worker._emit("user", display)
-                if not icloud_account.status()["connected"]:
-                    agent.worker._emit(
-                        "result", "To add calendar events I need your iCloud "
-                        "connected — do it once on the Phone page (/phone), then "
-                        "ask me again.")
-                    return {"ok": True, "routed": "calendar_unconnected",
-                            "since": since}
-                agent.worker.propose_calendar(event)
-                return {"ok": True, "routed": "calendar_offer", "since": since}
-    except Exception as exc:
-        print(f"[calendar_intent] skipped ({exc}).")
-    # Typed tasks that close themselves / wait for data (spec F2.5, F3.1c):
-    # "Have a call with Marc" mints a task with counterparty=Marc, kind=call;
-    # "get me the Boston quote" / "keep an eye out for …" offers a slot.
-    try:
-        from app.services import task_completion as _tc
-        intent = _tc.parse_task_intent(display)
-        if intent and not peer_channel_addressed(display):
-            store = memory._ensure_store()
-            agent.worker._emit("user", display)
-            if intent["kind"] == "slot":
-                from app.services import slots as _slots
-                if _slots.enabled():
-                    need = _slots.normalize_need(intent["need"])
-                    hits = _slots.search_assist(store, need, allow_connectors=False,
-                                                timeout_s=3)
-                    if hits and hits[0].get("event_id") is not None:
-                        h = hits[0]
-                        agent.worker._emit(
-                            "result",
-                            f"I already have something on the {need}:\n\n"
-                            f"“{(h.get('text') or '')[:400]}”\n\n"
-                            f"Source: /memory?event={h['event_id']}. Want me "
-                            "to keep watching for a newer one? Reply 'yes'.")
-                    agent.worker.propose_slot_create({
-                        "need": need, "requester": {"kind": "user", "id": None},
-                        "requester_name": "you"})
-                    return {"ok": True, "routed": "slot_offer", "since": since}
-            else:
-                fid = _tc.create_user_task(
-                    store, intent.get("text") or display,
-                    counterparty=intent.get("counterparty"), kind=intent.get("kind"))
-                if fid:
-                    agent.worker._emit(
-                        "result",
-                        f"Added to your tasks: {intent.get('text') or display} "
-                        f"(with {intent.get('counterparty')}). I'll mark it done "
-                        "when I see evidence, and ask if I'm unsure.",
-                        stream={"type": "task.created", "task_id": fid})
-                else:
-                    agent.worker._emit(
-                        "result", "You declined that one earlier — not re-adding it.")
-                return {"ok": True, "routed": "task_created", "since": since,
-                        "task_id": fid}
-    except Exception as exc:
-        print(f"[task_intent] skipped ({exc}).")
-    # Team ask ("ask sarah: are the slides done?") -> the peer channel, not
-    # the browser agent. Deterministic: only fires when the addressee resolves
-    # to a PAIRED peer. The ask runs on a background thread (the teammate's
-    # compose/approval can take a while); every outcome surfaces in chat.
-    # Push form ("tell Justin what we did today") composes from OUR memory
-    # and delivers as kind=notify — models talking to each other.
-    try:
-        from app.services import peer_channel
-        team = peer_channel.parse_team_ask(display)
-        tell = None if team else peer_channel.parse_team_tell(display)
-        recall = None if (team or tell) else peer_channel.parse_peer_recall(display)
-        know = None if (team or tell or recall) else peer_channel.parse_what_we_know(display)
-        if know:
-            agent.worker._emit("user", display)
-            agent.worker._emit(
-                "result", peer_channel.synthesize_topic_knowledge(know))
-            return {"ok": True, "routed": "topic_knowledge", "since": since}
-        if recall:
-            agent.worker._emit("user", display)
-            hits = peer_channel.find_peer_answers(
-                recall["peer_id"], recall["topic"])
-            usable = [h for h in hits if h.get("usable")]
-            if usable:
-                best = usable[-1]
-                agent.worker._emit(
-                    "result",
-                    f"From {recall['peer_name']}'s Sparrow "
-                    f"(asked “{best['question'][:120]}”):\n\n{best['answer']}")
-                return {"ok": True, "routed": "peer_recall", "since": since}
-            # No usable stored answer — ask fresh instead of narrating a task.
-            q = recall["topic"]
-            if not q.lower().startswith(("what", "who", "when", "where",
-                                         "why", "how", "do ", "does ", "is ",
-                                         "are ", "can ", "could ")):
-                q = f"what do you know about {q}?"
-            peer_channel.chat_ask_async(recall["peer_id"], q, "question")
-            agent.worker._emit(
-                "result",
-                f"I don't have a usable answer from {recall['peer_name']}'s "
-                f"Sparrow about “{recall['topic'][:80]}” yet — asking them now…")
-            return {"ok": True, "routed": "peer_recall_reask", "since": since}
-        if tell:
-            agent.worker._emit("user", display)
-            peer_channel.chat_tell_async(
-                tell["peer_id"], tell["peer_name"], tell["topic"])
-            agent.worker._emit(
-                "result",
-                f"Composing an update for {tell['peer_name']} — I'll show "
-                "it here for your OK before anything is sent.")
-            return {"ok": True, "routed": "peer_tell", "since": since}
-        if peer_channel.looks_like_team_tell(display) and not team:
-            agent.worker._emit("user", display)
-            agent.worker._emit(
-                "result",
-                "I can only push updates to a paired Sparrow. Pair them on "
-                "Team (/peer), or say `email …` / `text …` to draft outbound.")
-            return {"ok": True, "routed": "peer_tell_unpaired", "since": since}
-        if team:
-            agent.worker._emit("user", display)
-            if team.get("fanout"):
-                from app.services import team_layer
-                if team.get("unknown"):
-                    agent.worker._emit(
-                        "result",
-                        f"No team named {team.get('team_name')!r} yet — "
-                        "create it on the Team page (/peer).")
-                    return {"ok": True, "routed": "peer_team_unknown",
-                            "since": since}
-                if not team.get("peer_ids"):
-                    agent.worker._emit(
-                        "result",
-                        f"The {team.get('team_name') or 'that'} team has no "
-                        "paired members yet — add them on /peer.")
-                    return {"ok": True, "routed": "peer_team_empty",
-                            "since": since}
-                team_layer.chat_team_ask_async(
-                    team["team_slug"], team["question"],
-                    team.get("kind", "question"))
-                n = len(team["peer_ids"])
-                verb = ("Handing off to" if team.get("kind") == "handoff"
-                        else "Asking")
-                agent.worker._emit(
-                    "result",
-                    f"{verb} the {team.get('team_name')} team "
-                    f"({n} teammate{'s' if n != 1 else ''})…")
-                return {"ok": True, "routed": "peer_team_ask", "since": since}
-            peer_channel.chat_ask_async(team["peer_id"], team["question"],
-                                        team.get("kind", "question"))
-            verb = ("Handing off to" if team.get("kind") == "handoff"
-                    else "Asking")
-            agent.worker._emit("result",
-                               f"{verb} {team['peer_name']}'s Sparrow…")
-            return {"ok": True, "routed": "peer_ask", "since": since}
-    except Exception as exc:
-        print(f"[peer_intent] skipped ({exc}).")
-    # Trigger authoring ("whenever I make progress on X, offer to email Z") ->
-    # compile + backtest on a background thread, then an approval card. Nothing
-    # persists until the user answers yes on the draft.
-    try:
-        from app.services.triggers import authoring as trigger_authoring
-        if trigger_authoring.looks_like_trigger_request(display):
-            agent.worker._emit("user", display)
-            agent.worker._emit(
-                "result", "Designing that trigger — I'll show you a draft "
-                "to approve in a moment…")
-            trigger_authoring.author_async(display)
-            return {"ok": True, "routed": "trigger_draft", "since": since}
-    except Exception as exc:
-        print(f"[trigger_intent] skipped ({exc}).")
-    agent.worker.send(agent_goal, dry_run=body.dry_run, display=display,
-                      study_mode=study_mode)
-    return {"ok": True, "routed": "goal", "since": since, "mode": study_mode}
+        # Learning Memory: short homework/quiz verdicts update mastery (best-effort).
+        if study_mode in ("homework", "study_quiz"):
+            try:
+                from app.services import learning_memory as _lme
+                from app.services import memory as _mem
+                _lme.apply_chat_verdict(_mem._ensure_store(), display)
+            except Exception as exc:
+                print(f"[learning_memory] chat verdict skipped ({exc}).")
+        if _agent_disabled():
+            # One write path: the event log. The page only paints /chat/poll,
+            # so a JSON answer here was a silent no-op.
+            try:
+                answer = llm.answer(agent_goal)
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=502, detail=f"answer failed: {exc}") from exc
+            text = str((answer or {}).get("answer") or "").strip() or "(no answer)"
+            sources = (answer or {}).get("sources") or None
+            agent.worker._emit("result", text, sources=sources, question=display)
+            # Phase 5: ingest after the answer lands (not before routing).
+            try:
+                from app.services import chat_ingest
+                chat_ingest.ingest(
+                    display, answer=text,
+                    off_the_record=bool(body.off_the_record))
+            except Exception as exc:
+                print(f"[chat_ingest] hook skipped ({exc}).")
+            return _turn({"ok": True, "routed": "memory", "since": since,
+                    "mode": study_mode})
+        # Drop stale yes/no offers so they can't swallow a fresh instruction.
+        agent.worker.expire_stale_offers()
+        with agent.worker.lock:
+            pending = (agent.worker.awaiting or agent.worker.awaiting_fast
+                       or agent.worker.pending_todo is not None)
+        # Approvals / offer replies ignore sticky context — only the short message.
+        if pending:
+            return _turn({**agent.worker.handle_reply(display), "since": since})
+        # Bare yes/no with nothing pending: never route it as a goal (the router
+        # would just re-answer the previous result) — accept/decline the last
+        # reply's trailing offer, or say that nothing is waiting.
+        idle = agent.worker.handle_idle_verdict(display)
+        if idle is not None:
+            return _turn({**idle, "since": since})
+        # Deterministic parsers become chips under the answer. They no longer
+        # consume the turn. Calendar LLM parse runs only if the user accepts
+        # the calendar chip (off this request thread).
+        suggestions: list = []
+        try:
+            from app.services import chat_suggestions as _csug
+            suggestions = _csug.collect(display)
+        except Exception as exc:
+            print(f"[chat_suggestions] collect skipped ({exc}).")
+        agent.worker.send(agent_goal, dry_run=body.dry_run, display=display,
+                          study_mode=study_mode, suggestions=suggestions or None,
+                          off_the_record=bool(body.off_the_record))
+        return _turn({"ok": True, "routed": "goal", "since": since,
+                      "mode": study_mode,
+                      "suggestions": len(suggestions or [])})
+    finally:
+        if not accepted.get("enqueued"):
+            agent.worker._finish_goal(accepted.get("job_id"))
+        agent.worker.clear_turn()
+
 
 class DesktopIn(BaseModel):
     message: str
@@ -5187,24 +5134,65 @@ def desktop_access_page() -> HTMLResponse:
 
 
 @router.get("/chat/poll")
-def chat_poll(since: int = 0) -> dict:
-    """Tail the agent's event log (progress/result/ask/error) since an id."""
-    if _agent_disabled():
-        return {"events": [], "state": {"error": "agent disabled (QUILL_AGENT=0)"}}
+def chat_poll(since: int = 0, session_id: str | None = None) -> dict:
+    """Tail the live session since a seq.
+
+    QUILL_AGENT=0 still writes user/result events. Poll returns those. It does
+    not put an error in state — the page would render that as a failure bubble
+    on top of the answer. A tab whose session_id is not the live thread gets
+    ``switched`` and an empty page so it reloads instead of appending.
+    """
     events, state = agent.worker.snapshot(since)
+    if agent.worker.persist:
+        from app.services.chat_log import get_log
+        log = get_log()
+        live = log.live_id()
+        if session_id and session_id != live:
+            events = []
+            state = {**state, "switched": True, "session_id": live,
+                     "progress": [], "job_id": None}
+        else:
+            events = log.events_since(live, since)
+            jobs = log.running_jobs(live)
+            chat_jobs = [j for j in jobs if j.get("lane") != "browser"]
+            web_jobs = [j for j in jobs if j.get("lane") == "browser"]
+            chat_job = chat_jobs[-1] if chat_jobs else None
+            web_job = web_jobs[-1] if web_jobs else None
+            state = {
+                **state,
+                "session_id": live,
+                "progress": (chat_job or {}).get("progress") or [],
+                "job_id": (chat_job or {}).get("id"),
+                "lane": (chat_job or {}).get("lane"),
+                "web": ({
+                    "busy": True,
+                    "job_id": web_job["id"],
+                    "lane": "browser",
+                    "progress": web_job.get("progress") or [],
+                } if web_job else None),
+            }
+    if _agent_disabled():
+        state = {**state, "agent": False}
+        state.pop("error", None)
     return {"events": events, "state": state}
 
 
 @router.get("/chat/stream")
-async def chat_stream():
+async def chat_stream(request: Request):
     """SSE push when chat events or agent state change (S-1).
 
-    Clients call ``poll()`` on ``change``; 1–2s HTTP poll remains fallback.
+    Clients call ``poll()`` on ``change``; the HTTP poll remains the fallback.
+    The loop waits on a condition ``_emit`` notifies. It does not spin.
+    A side task reads the ASGI receive channel because Starlette's
+    ``is_disconnected`` does not block; when the client leaves, that task
+    wakes the condition so this handler returns on the same cycle.
     """
     import asyncio
     import json as _json
 
     from fastapi.responses import StreamingResponse
+
+    cond = agent.worker.bind_chat_stream()
 
     def _sig() -> tuple:
         w = agent.worker
@@ -5212,34 +5200,85 @@ async def chat_stream():
             return (
                 w.next_id,
                 bool(w.awaiting or w.awaiting_fast),
-                bool(w.busy or w.busy_fast),
+                bool(w.busy or w.busy_fast or w.busy_chat),
                 w.pending_todo is not None,
                 w.error,
                 w.url,
                 round(w.cost, 4),
+                w._chat_epoch,
             )
 
+    async def _watch_disconnect() -> None:
+        """Block on the ASGI receive channel and wake the stream loop.
+
+        ``Request.is_disconnected`` cancels its receive immediately, so it
+        only observes a disconnect that is already queued. Something has to
+        actually wait on ``receive`` or a closed client leaves this handler
+        parked until the next heartbeat.
+        """
+        try:
+            while True:
+                message = await request._receive()
+                if message["type"] == "http.disconnect":
+                    request._is_disconnected = True
+                    return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # A dead receive channel must end the handler, not leave it
+            # parked on the 15s heartbeat.
+            request._is_disconnected = True
+        finally:
+            try:
+                async with cond:
+                    cond.notify_all()
+            except RuntimeError:
+                pass
+
+    async def _client_left() -> bool:
+        # The watcher is the only reader of the ASGI receive channel while the
+        # loop waits. is_disconnected() takes that channel when the flag is
+        # still clear, so it is only called once the watcher has set the flag
+        # (then it returns without a second read).
+        if not request._is_disconnected:
+            return False
+        return await request.is_disconnected()
+
     async def _events():
+        if await request.is_disconnected():
+            return
+        # First frame so a client (and the route test) can observe the open
+        # stream and close it without waiting on a heartbeat.
+        yield "event: ping\ndata: {}\n\n"
+        watcher = asyncio.create_task(_watch_disconnect())
         last = None
-        beats = 0
-        for _ in range(7200):          # ~1h at 0.5s; client reconnects
-            if _agent_disabled():
-                yield "event: ping\ndata: {}\n\n"
-                await asyncio.sleep(2.0)
-                continue
-            sig = _sig()
-            if last is not None and sig != last:
-                last, beats = sig, 0
-                yield ("event: change\ndata: "
-                       + _json.dumps({"next": sig[0]}) + "\n\n")
-            else:
-                if last is None:
-                    last = sig
-                beats += 1
-                if beats >= 30:         # ~15s heartbeat
-                    beats = 0
+        try:
+            while True:
+                if await _client_left():
+                    return
+                try:
+                    async with cond:
+                        if await _client_left():
+                            return
+                        await asyncio.wait_for(cond.wait(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    if await _client_left():
+                        return
                     yield "event: ping\ndata: {}\n\n"
-            await asyncio.sleep(0.5)
+                    continue
+                if await _client_left():
+                    return
+                sig = _sig()
+                if last is None or sig != last:
+                    last = sig
+                    yield ("event: change\ndata: "
+                           + _json.dumps({"next": sig[0]}) + "\n\n")
+        finally:
+            watcher.cancel()
+            try:
+                await watcher
+            except asyncio.CancelledError:
+                pass
 
     return StreamingResponse(
         _events(),
@@ -5344,12 +5383,69 @@ def chat_answer(body: ChatAnswerIn) -> dict:
     return agent.worker.handle_reply(body.text)
 
 
+class ChatSuggestionApplyIn(BaseModel):
+    action: str
+    payload: dict | None = None
+
+
+@router.post("/chat/suggestions/apply")
+def chat_suggestion_apply(body: ChatSuggestionApplyIn) -> dict:
+    """Run a chip under an answer (task / calendar / peer / trigger)."""
+    if _agent_disabled():
+        return {"ok": False, "error": "agent disabled (QUILL_AGENT=0)"}
+    from app.services import chat_suggestions as _csug
+    result = _csug.apply(body.action, body.payload, worker=agent.worker)
+    if not result.get("ok"):
+        from fastapi.responses import JSONResponse
+        return JSONResponse(result, status_code=400)
+    from fastapi.responses import JSONResponse
+    return JSONResponse(result)
+
+
+class ChatOfferResolveIn(BaseModel):
+    payload_hash: str
+    verdict: str  # yes|no|accepted|declined|true|false|1|0
+    choice: str | None = None
+
+
+@router.post("/chat/offers/{offer_id}/resolve")
+def chat_offer_resolve(offer_id: str, body: ChatOfferResolveIn) -> dict:
+    """Compare-and-set resolve for one chat offer.
+
+    Succeeds only while ``state='open'`` and ``expires_at > now``, and only
+    when ``payload_hash`` matches the hash minted with the card. A second
+    click or a stale hash is refused.
+    """
+    if _agent_disabled():
+        return {"ok": False, "error": "agent disabled (QUILL_AGENT=0)"}
+    raw = (body.verdict or "").strip().lower()
+    if raw in ("yes", "y", "true", "1", "accepted", "accept", "approve"):
+        accept = True
+    elif raw in ("no", "n", "false", "0", "declined", "decline", "cancel",
+                 "skip"):
+        accept = False
+    else:
+        raise HTTPException(status_code=400, detail="verdict must be yes or no")
+    from fastapi.responses import JSONResponse
+
+    result = agent.worker.resolve_offer(
+        offer_id, body.payload_hash, accept, choice=body.choice)
+    if not result.get("ok"):
+        err = result.get("error")
+        code = 409 if err in (
+            "payload_hash_mismatch", "already_resolved", "expired",
+            "not_found", "refused",
+        ) else 400
+        return JSONResponse(result, status_code=code)
+    return JSONResponse(result)
+
+
 @router.post("/chat/new")
 def chat_new() -> dict:
-    """Archive the live chat (when it has turns) and start a fresh conversation.
+    """Retire the live session and open a new one.
 
-    Clears the in-memory bubble log and both agents' LLM transcripts. Prior
-    chats are written under data/chat_sessions/ and listed via GET /chat/sessions.
+    Clears the in-memory bubble log and both agents' LLM transcripts. The
+    retired thread stays in the chat log (and older JSON archives still load).
     """
     if _agent_disabled():
         return {"ok": False, "error": "agent disabled (QUILL_AGENT=0)"}
@@ -5359,21 +5455,53 @@ def chat_new() -> dict:
         _conn_session.reset()
     except Exception:
         pass
-    return {"ok": True, "archived": archived or None}
+    try:
+        from app.services import agent_chat_mode as _smode
+        _smode.set_manual("clear")
+    except Exception:
+        pass
+    session_id = None
+    if agent.worker.persist:
+        try:
+            from app.services.chat_log import get_log
+            log = get_log()
+            log.save_study("general", None)
+            log.save_connectors({"enabled": [], "disabled": []})
+            session_id = log.live_id()
+        except Exception as exc:
+            print(f"[chat_log] new session skipped ({exc}).")
+    return {"ok": True, "archived": archived or None, "session_id": session_id}
 
 
 @router.get("/chat/sessions")
 def chat_sessions(limit: int = Query(50, ge=1, le=200)) -> dict:
     """List archived chat conversations (newest first)."""
     from app.services import chat_sessions as _cs
-    return {"ok": True, "sessions": _cs.list_sessions(limit=limit)}
+    rows = _cs.list_sessions(limit=limit)
+    if agent.worker.persist:
+        try:
+            from app.services.chat_log import get_log
+            db_rows = get_log().list_sessions(limit=limit)
+        except Exception:
+            db_rows = []
+        seen = {row.get("id") for row in db_rows}
+        rows = db_rows + [row for row in rows if row.get("id") not in seen]
+    return {"ok": True, "sessions": rows[:limit]}
 
 
 @router.get("/chat/sessions/{session_id}")
 def chat_session(session_id: str) -> dict:
     """Load one archived conversation (read-only replay for the Chat UI)."""
     from app.services import chat_sessions as _cs
-    data = _cs.load_session(session_id)
+    data = None
+    if agent.worker.persist:
+        try:
+            from app.services.chat_log import get_log
+            data = get_log().load_session(session_id)
+        except Exception:
+            data = None
+    if not data:
+        data = _cs.load_session(session_id)
     if not data:
         raise HTTPException(status_code=404, detail="session not found")
     return {"ok": True, "session": data}

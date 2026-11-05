@@ -169,6 +169,12 @@ def redact_payload(obj: Any) -> Any:
     if isinstance(obj, str):
         return redact_text(obj)
     if isinstance(obj, dict):
+        # An inline media source ({"type": "base64", "data": ...}) is encoded
+        # bytes, not text: a secret pattern matching inside it would corrupt
+        # the image without removing anything readable.
+        if obj.get("type") == "base64" and "data" in obj:
+            return {k: (v if k == "data" else redact_payload(v))
+                    for k, v in obj.items()}
         return {k: redact_payload(v) for k, v in obj.items()}
     if isinstance(obj, list):
         return [redact_payload(v) for v in obj]

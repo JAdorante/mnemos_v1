@@ -451,6 +451,11 @@ def resolve(agent_worker, accept: bool) -> dict[str, Any]:
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
     try:
+        offer = state.get("offer") if isinstance(state.get("offer"), dict) else {}
+        oid, phash = offer.get("offer_id"), offer.get("payload_hash")
+        if oid and phash and hasattr(agent_worker, "resolve_offer"):
+            return agent_worker.resolve_offer(
+                str(oid), str(phash), bool(accept))
         return agent_worker.resolve_todo(bool(accept))
     except Exception as exc:
         return {"ok": False, "error": str(exc)}

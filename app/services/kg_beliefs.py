@@ -355,6 +355,12 @@ def resolve_conflict_both_true(store, pred_a: int, pred_b: int, *,
         kind="conflict_both_true", decision="both_true", decided_by=decided_by,
         features={"predicates": [int(pred_a), int(pred_b)],
                   "posteriors_after": confs}, predicate_id=int(pred_a), ts=now)
+    if decided_by == "user":
+        from app.services import decisions
+        decisions.record(surface="kg.adjudication",
+                         subject=f"kg_conflict:{int(pred_a)}:{int(pred_b)}",
+                         verdict="approved", options=["both_true", "pick_one"],
+                         meta={"decision": "both_true"}, store=store)
     return {"ok": True, "confidence": confs}
 
 
@@ -524,6 +530,14 @@ def manual_split(store, *, node_type: str, node_id: int, new_name: str,
                   "moved_predicates": moved,
                   "requested": [int(p) for p in predicate_ids]},
         node_a=int(node_id), node_b=int(new_id), ts=now)
+    if decided_by == "user":
+        from app.services import decisions
+        decisions.record(surface="kg.adjudication",
+                         subject=f"{node_type}:{int(node_id)}",
+                         verdict="approved", store=store,
+                         edit={"split_to": int(new_id), "new_name": new_name,
+                               "moved_predicates": moved},
+                         meta={"decision": "split"})
     return {"ok": True, "new_node_id": int(new_id), "moved": moved,
             "confidence": confs}
 

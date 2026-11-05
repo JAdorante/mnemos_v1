@@ -42,6 +42,19 @@ TASK_TYPES = (
     # never mapped by exemplar ROUTER_TASK_TYPES, so agent trajectories can't
     # leak into chat/extract training or prompts.
     "agent.act",
+    # Outbound drafts the human approved, cancelled or asked to revise
+    # (decisions surface agent.packet). An edited pair's target is the
+    # revision instruction. Same agent.* rung: never curated into LoRA.
+    "agent.draft",
+    # Claims a human approved or rejected for an org record, written as
+    # records.claim.<kind> (commitment, decision, fact, ...).
+    "records.claim",
+    # Peer disclosure asks a human allowed or denied; the target is the
+    # disclosure class decision, not an answer.
+    "peer.disclosure",
+    # Notes an assistant proposed over MCP that the human kept, edited or
+    # turned away.
+    "assistant.save",
 )
 
 _VERDICTS = frozenset(
@@ -60,6 +73,7 @@ _MIN_TARGET_CHARS: dict[str, int] = {
     "extraction.commitment": 6,
     "extraction.claim": 6,
     "agent.act": 10,      # a serialized {"name": ..., "args": ...} action
+    "assistant.save": 10,
 }
 _MIN_TARGET_DEFAULT = 4
 
@@ -283,6 +297,16 @@ def _fact_input(fact: dict, store) -> str:
     return str(fact.get("source_span") or fact.get("text") or "")
 
 
+def _decide(*, surface: str, subject: str, verdict: str, learn: dict,
+            store=None, edit=None, shown=None) -> str | None:
+    """A human verdict: write the decisions row and derive the pair from it
+    (app/services/decisions.py). Returns the pair id, as `record` does."""
+    from app.services import decisions
+    res = decisions.record(surface=surface, subject=subject, verdict=verdict,
+                           edit=edit, shown=shown, learn=learn, store=store)
+    return (res or {}).get("learning_pair_id")
+
+
 def record_fact_verdict(fact: dict, verdict: str, *,
                         edited_text: str | None = None, store=None) -> str | None:
     """facts review queue: approve/dismiss/edit on extracted tasks/commitments."""
@@ -294,17 +318,20 @@ def record_fact_verdict(fact: dict, verdict: str, *,
     text = str(fact.get("text") or fact.get("source_span") or "")
     target = (edited_text if verdict == "edited" else
               text if verdict == "accepted" else "")
-    return record(
-        task_type=_fact_task_type(fact),
-        input_text=_fact_input(fact, st),
-        local_output=text,
-        final_target=target or "",
-        verdict=verdict,
-        verdict_source="facts.review",
-        source_refs={"fact_id": fact.get("id"),
-                     "source_event_id": fact.get("source_event_id")},
-        store=st,
-    )
+    # Store.get_fact names the id `fact_id`; list views name it `id`.
+    fid = fact.get("id") if fact.get("id") is not None else fact.get("fact_id")
+    return _decide(
+        surface="facts.review", subject=f"fact:{fid}", verdict=verdict,
+        edit=edited_text if verdict == "edited" else None, store=st,
+        shown={"text": text, "kind": fact.get("kind")},
+        learn=dict(
+            task_type=_fact_task_type(fact),
+            input_text=_fact_input(fact, st),
+            local_output=text,
+            final_target=target or "",
+            source_refs={"fact_id": fid,
+                         "source_event_id": fact.get("source_event_id")},
+        ))
 
 
 # Reflection-item kinds → task types. Meta-memory audit kinds get their own
@@ -323,19 +350,20 @@ def record_reflection_verdict(item: dict, verdict: str, *,
     detail = str(item.get("detail") or "")
     target = (edited_text if verdict == "edited" else
               text if verdict == "accepted" else "")
-    return record(
-        task_type=_REFLECTION_KINDS.get(str(item.get("kind") or ""),
-                                        "brief.section"),
-        input_text=(text + ("\n" + detail if detail else "")),
-        local_output=text,
-        final_target=target or "",
-        verdict=verdict,
-        verdict_source="reflection.review",
-        source_refs={"reflection_item_id": item.get("id"),
-                     "reflection_id": item.get("reflection_id"),
-                     "source_fact_ids": item.get("source_fact_ids") or []},
-        store=store,
-    )
+    return _decide(
+        surface="reflection.review", subject=f"reflection_item:{item.get('id')}",
+        verdict=verdict, edit=edited_text if verdict == "edited" else None,
+        shown={"text": text, "kind": item.get("kind")}, store=store,
+        learn=dict(
+            task_type=_REFLECTION_KINDS.get(str(item.get("kind") or ""),
+                                            "brief.section"),
+            input_text=(text + ("\n" + detail if detail else "")),
+            local_output=text,
+            final_target=target or "",
+            source_refs={"reflection_item_id": item.get("id"),
+                         "reflection_id": item.get("reflection_id"),
+                         "source_fact_ids": item.get("source_fact_ids") or []},
+        ))
 
 
 def record_person_merge(survivor: dict, absorbed: dict, *,
@@ -346,17 +374,20 @@ def record_person_merge(survivor: dict, absorbed: dict, *,
     a_name = str((absorbed or {}).get("name") or "")
     if not s_name or not a_name:
         return None
-    return record(
-        task_type="person.resolution",
-        input_text=f"Are '{a_name}' and '{s_name}' the same person?",
-        final_target=f"same_person: '{a_name}' merges into '{s_name}'",
-        verdict="accepted",
-        verdict_source="people.soft_merge",
-        source_refs={"merge_id": merge_id,
-                     "survivor_id": (survivor or {}).get("id"),
-                     "absorbed_id": (absorbed or {}).get("id")},
-        store=store,
-    )
+    return _decide(
+        surface="people.soft_merge",
+        subject=f"merge:{merge_id}" if merge_id is not None
+        else f"person:{(absorbed or {}).get('id')}",
+        verdict="accepted", store=store,
+        shown={"survivor": s_name, "absorbed": a_name},
+        learn=dict(
+            task_type="person.resolution",
+            input_text=f"Are '{a_name}' and '{s_name}' the same person?",
+            final_target=f"same_person: '{a_name}' merges into '{s_name}'",
+            source_refs={"merge_id": merge_id,
+                         "survivor_id": (survivor or {}).get("id"),
+                         "absorbed_id": (absorbed or {}).get("id")},
+        ))
 
 
 def record_kg_evidence_verdict(evidence: dict, predicate: dict, verdict: str,
@@ -368,17 +399,17 @@ def record_kg_evidence_verdict(evidence: dict, predicate: dict, verdict: str,
                 or (evidence or {}).get("text") or "")
     if not (pred_text or quote):
         return None
-    return record(
-        task_type="extraction.claim",
-        input_text=quote or pred_text,
-        local_output=pred_text,
-        final_target=pred_text if v == "accepted" else "",
-        verdict=v,
-        verdict_source="kg.evidence",
-        source_refs={"evidence_id": (evidence or {}).get("id"),
-                     "predicate_id": (evidence or {}).get("predicate_id")},
-        store=store,
-    )
+    return _decide(
+        surface="kg.evidence", subject=f"kg_evidence:{(evidence or {}).get('id')}",
+        verdict=v, store=store, shown={"predicate": pred_text, "quote": quote},
+        learn=dict(
+            task_type="extraction.claim",
+            input_text=quote or pred_text,
+            local_output=pred_text,
+            final_target=pred_text if v == "accepted" else "",
+            source_refs={"evidence_id": (evidence or {}).get("id"),
+                         "predicate_id": (evidence or {}).get("predicate_id")},
+        ))
 
 
 def _distill_input(row: dict) -> str:
@@ -411,15 +442,13 @@ def record_from_distill(row: dict, outcome: str, *,
         target = parent_text or local_text
     else:
         target = ""
-    return record(
+    learn = dict(
         task_type=("escalation.vision" if modality == "vision"
                    else "escalation.text"),
         input_text=_distill_input(row),
         local_output=local_text or None,
         parent_output=parent_text or None,
         final_target=target,
-        verdict=outcome,
-        verdict_source=verdict_source,
         source_refs={"distill_id": row.get("id"),
                      "task": row.get("task"),
                      "reason": row.get("reason"),
@@ -430,5 +459,11 @@ def record_from_distill(row: dict, outcome: str, *,
                      "frame_path": row.get("frame_path") or None},
         model_tag=row.get("local_model"),
         created_at=row.get("time"),
-        store=store,
     )
+    if verdict_source != "chat.outcome":
+        # Backfills replay old labels; no human is deciding anything now.
+        return record(verdict=outcome, verdict_source=verdict_source,
+                      store=store, **learn)
+    return _decide(surface="chat.outcome", subject=f"distill:{row.get('id')}",
+                   verdict=outcome, learn=learn, store=store,
+                   edit=edited_text if outcome == "edited" else None)

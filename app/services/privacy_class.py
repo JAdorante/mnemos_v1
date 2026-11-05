@@ -287,11 +287,21 @@ def gate_cloud(
 # the two surfaces that already read the stamp (peer slot fills and the
 # records claim builder); personal may leave, and each surface still applies
 # its own redaction on top.
+# That is the `connected` rung; a sealed or perimeter rung lowers it
+# (app/services/egress.py), and every caller here follows.
 EGRESS_CEILING = PERSONAL
 
 
+def egress_ceiling() -> str:
+    try:
+        from app.services import egress
+        return egress.ceiling()
+    except Exception:
+        return EGRESS_CEILING
+
+
 def egress_allowed(cls: str | None) -> bool:
-    return rank(cls) <= rank(EGRESS_CEILING)
+    return rank(cls) <= rank(egress_ceiling())
 
 
 def egress_refusal(text: str, *, source: str = "",

@@ -29,7 +29,7 @@ class IngestableTests(unittest.TestCase):
         self.assertIsNone(chat_ingest.ingestable("/plan"))
 
     def test_questions_are_not_skipped(self):
-        # a question can carry a fact — the extractor decides, not the filter
+        # Questions still pass the length filter; ingest tags them as queries.
         self.assertIsNotNone(
             chat_ingest.ingestable("can you note the demo moved to Friday?"))
 
@@ -37,10 +37,28 @@ class IngestableTests(unittest.TestCase):
         self.assertIsNone(chat_ingest.ingestable("   hi   "))
 
 
+class QuestionHeuristicTests(unittest.TestCase):
+    def test_trailing_question_mark(self):
+        self.assertTrue(chat_ingest.looks_like_question("is Dana leaving?"))
+
+    def test_leading_interrogative(self):
+        self.assertTrue(chat_ingest.looks_like_question(
+            "what did Hugh say about the demo"))
+
+    def test_statement_is_not_a_question(self):
+        self.assertFalse(chat_ingest.looks_like_question(
+            "Hugh and I decided to demo Sparrow Friday"))
+
+
 class IngestTests(unittest.TestCase):
     def test_disabled_env_skips(self):
         with patch.object(chat_ingest, "enabled", return_value=False):
             self.assertIsNone(chat_ingest.ingest("a perfectly good statement"))
+
+    def test_off_the_record_skips(self):
+        self.assertIsNone(chat_ingest.ingest(
+            "Hugh and I decided to demo Sparrow Friday",
+            off_the_record=True))
 
     def test_stores_text_event_and_enqueues_job(self):
         stored, queued = {}, {}
@@ -60,14 +78,46 @@ class IngestTests(unittest.TestCase):
         with patch.object(storage_mod, "get_store", return_value=_FakeStore()), \
              patch.object(worker_mod, "worker", _FakeWorker()), \
              patch("app.services.attachments._index_event", lambda *a: None):
-            eid = chat_ingest.ingest("Hugh and I decided to demo Sparrow Friday")
+            eid = chat_ingest.ingest(
+                "Hugh and I decided to demo Sparrow Friday",
+                answer="Noted — Friday demo with Hugh.")
         self.assertEqual(eid, 41)
         ev = stored["ev"]
         self.assertEqual(ev.modality.value, "text")
         self.assertEqual(ev.source, "chat.user")
+        self.assertEqual(ev.meta.get("kind"), "statement")
+        self.assertIn("Friday demo", ev.meta.get("answer") or "")
         self.assertIn("Hugh", ev.raw)
         self.assertEqual(queued["kind"], "chat_ingest")
         self.assertEqual(queued["payload"]["event_id"], 41)
+
+    def test_questions_are_queries_not_extracted(self):
+        stored, queued = {}, {}
+
+        class _FakeStore:
+            def insert(self, ev):
+                stored["ev"] = ev
+                return 7
+
+        class _FakeWorker:
+            def enqueue(self, kind, payload=None, *, unique=False):
+                queued.update(kind=kind, payload=payload)
+                return 1
+
+        import app.services.worker as worker_mod
+        import app.storage as storage_mod
+        with patch.object(storage_mod, "get_store", return_value=_FakeStore()), \
+             patch.object(worker_mod, "worker", _FakeWorker()), \
+             patch("app.services.attachments._index_event", lambda *a: None):
+            eid = chat_ingest.ingest(
+                "is Dana leaving the company next month?",
+                answer="I don't have a confirmed departure date.")
+        self.assertEqual(eid, 7)
+        ev = stored["ev"]
+        self.assertEqual(ev.source, "chat.query")
+        self.assertEqual(ev.meta.get("kind"), "query")
+        self.assertIn("don't have", ev.meta.get("answer") or "")
+        self.assertEqual(queued, {})
 
     def test_failure_never_raises(self):
         import app.storage as storage_mod

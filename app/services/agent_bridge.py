@@ -16,11 +16,19 @@ importing Sparrow — or running it purely for capture — never opens a browser
 """
 from __future__ import annotations
 
+import asyncio
+import contextvars
 import os
 import queue
 import re
 import threading
 import time
+import uuid
+
+# Set on the request thread by begin_turn, and on a worker thread for the
+# lifetime of one goal. Emits outside a scope land in the live session.
+_emit_scope: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "chat_emit_scope", default=None)
 
 # Mirror browser_agent.config.DRY_RUN_LEVELS without importing it at module load
 # (keeps the bridge importable even where the agent deps aren't installed).
@@ -277,8 +285,8 @@ def _make_memory_provider(limit: int = 5, min_score: float = 0.15, sink=None):
     drafting rule stays here: it's an agent-drafting concern, not retrieval.
 
     `sink` (a dict) receives {"sources": [...], "block": str} on every call —
-    the worker attaches sources to the goal's result event ("show sources")
-    and runs answer_check against the context block before compile.
+    the worker attaches sources to the goal's result event ("show sources").
+    Answer-check rewrite is opt-in via ``_emit(..., rewrite=True)``.
     """
     try:
         from app.services import grounding as _grounding
@@ -568,16 +576,21 @@ class AgentWorker:
     append-only `events` list that clients tail via `snapshot(since)`.
     """
 
-    def __init__(self):
+    def __init__(self, *, persist: bool = False):
+        # The process singleton persists to chat_log.db. Test workers stay
+        # in memory so they don't retire the user's live session.
         self.cmd_q: queue.Queue = queue.Queue()
         self.fast_q: queue.Queue = queue.Queue()  # desktop / phone_link lane
+        self.chat_q: queue.Queue = queue.Queue()  # route + direct answers
         self.lock = threading.Lock()
         self.events: list[dict] = []   # append-only [{id, kind, text}]
         self.next_id = 0
         self.busy = False
         self.busy_fast = False
+        self.busy_chat = False
         self.ready = False
         self.ready_fast = False
+        self.ready_chat = False
         self.awaiting = False          # browser-lane ask_human/approval
         self.awaiting_fast = False     # fast-lane ask_human/approval
         self.question: str | None = None
@@ -594,11 +607,24 @@ class AgentWorker:
         self._answer_ev_fast = threading.Event()
         self.agent = None
         self.fast_agent = None
+        self.chat_agent = None
         self._thread: threading.Thread | None = None
         self._fast_thread: threading.Thread | None = None
+        self._chat_thread: threading.Thread | None = None
         self._started = False
         self.pending_todo: dict | None = None  # the proactive offer awaiting yes/no
         self.offer_queue: list[dict] = []      # offers waiting behind the active one
+        # Bumped by new() so a lane blocked in ask_human observes the reset
+        # even if it clears its answer-event after the reset already fired.
+        self._gate_epoch = 0
+        # SSE waiters. The condition is created on the serving loop by the
+        # first /chat/stream; _emit notifies it. None until a client connects.
+        self._chat_loop: asyncio.AbstractEventLoop | None = None
+        self._chat_cond: asyncio.Condition | None = None
+        self._chat_epoch = 0
+        self.persist = bool(persist)
+        self._turn: dict | None = None
+        self._turn_token: contextvars.Token | None = None
 
     # --- lifecycle ---------------------------------------------------------
     def start(self) -> None:
@@ -613,28 +639,40 @@ class AgentWorker:
         self._fast_thread = threading.Thread(target=self._run_fast, daemon=True,
                                              name="quill-agent-fast")
         self._fast_thread.start()
+        self._chat_thread = threading.Thread(target=self._run_chat, daemon=True,
+                                             name="quill-agent-chat")
+        self._chat_thread.start()
 
     # --- emit / state ------------------------------------------------------
     def _emit(self, kind: str, text: str, *, distill_id: str | None = None,
               sources: list | None = None, packet: dict | None = None,
               context: str | None = None, question: str | None = None,
-              stream: dict | None = None) -> None:
-        # Deterministic answer-check (plan 3.2) before compile — may rewrite text.
+              stream: dict | None = None,
+              rewrite: bool = False) -> None:
+        # Deterministic answer-check only when the caller opts into rewrite.
+        # Passing context alone must not rewrite live hands / browser results.
         check_meta = None
-        if kind == "result" and (context or "").strip():
+        if kind == "result" and rewrite:
             try:
                 from app.services.answer_check import check_answer
                 checked = check_answer(
                     text, context or "",
                     question=question or "",
                     sources=sources,
+                    rewrite=True,
                 )
                 check_meta = checked.to_dict()
                 text = checked.text
             except Exception:
                 check_meta = None
+        if self.persist and kind == "progress":
+            self._note_progress(text)
+            with self.lock:
+                self._chat_epoch += 1
+            self._wake_chat_streams()
+            return
         with self.lock:
-            ev: dict = {"id": self.next_id, "kind": kind, "text": text}
+            ev: dict = {"kind": kind, "text": text}
             # Typed chat-stream message (task.completed, task.question,
             # slot.fill_offer, peer.null_options, connector.salient_item…):
             # carries task_id + the action set so the UI renders buttons
@@ -683,8 +721,11 @@ class AgentWorker:
                         ev["compiled"] = compiled
                 except Exception:
                     pass
+            if not self._persist_event(ev):
+                return
             self.events.append(ev)
-            self.next_id += 1
+            self._chat_epoch += 1
+        self._wake_chat_streams()
         # Speak the assistant's replies aloud (best-effort; the policy — which
         # kinds, on/off, truncation — lives in voice, so this stays a one-liner).
         try:
@@ -693,23 +734,185 @@ class AgentWorker:
         except Exception:
             pass
 
+    def _note_progress(self, text: str) -> None:
+        try:
+            from app.services.chat_log import get_log
+            scope = _emit_scope.get()
+            job_id = (scope or {}).get("job_id")
+            log = get_log()
+            if not job_id:
+                job_id, _lines = log.progress_state(log.live_id())
+            log.note_progress(job_id, text)
+        except Exception as exc:
+            print(f"[chat_log] progress skipped ({exc}).")
+
+    def _persist_event(self, ev: dict) -> bool:
+        """Assign ``ev['id']`` and write the durable row when this worker persists.
+
+        Returns False when the row was dropped (stale generation, or a user
+        line the request path already wrote). Caller holds ``self.lock``.
+        """
+        if not self.persist:
+            ev["id"] = self.next_id
+            self.next_id += 1
+            return True
+        try:
+            from app.services.chat_log import get_log
+            log = get_log()
+            scope = _emit_scope.get()
+            if scope and scope.get("session_id") and scope.get("gen") is not None:
+                sid = str(scope["session_id"])
+                gen = int(scope["gen"])
+                turn_id = scope.get("turn_id")
+            else:
+                info = log.live()
+                sid = str(info.get("id") or "")
+                gen = int(info.get("current_gen") or 1)
+                turn_id = None
+            payload = {
+                k: ev[k] for k in ("distill_id", "sources", "packet",
+                                   "compiled", "stream", "lane")
+                if ev.get(k) is not None
+            }
+            if scope and scope.get("lane") and "lane" not in payload:
+                payload["lane"] = scope.get("lane")
+            wrote = log.emit_event(
+                session_id=sid, gen=gen, kind=str(ev.get("kind") or ""),
+                text=str(ev.get("text") or ""), turn_id=turn_id,
+                payload=payload or None,
+            )
+        except Exception as exc:
+            print(f"[chat_log] emit skipped ({exc}).")
+            ev["id"] = self.next_id
+            self.next_id += 1
+            return True
+        if wrote.get("dropped") or wrote.get("duplicate"):
+            return False
+        seq = int(wrote["seq"])
+        ev["id"] = seq
+        self.next_id = max(self.next_id, seq + 1)
+        return True
+
+    def begin_turn(self, *, text: str, session_id: str | None,
+                   client_msg_id: str | None) -> dict:
+        """Write the user event before the route returns. No-op duplicate on retry."""
+        if not self.persist:
+            self._emit("user", text)
+            ev = self.events[-1] if self.events else {"id": 0}
+            return {
+                "seq": ev.get("id"),
+                "session_id": None,
+                "turn_id": None,
+                "job_id": None,
+                "gen": None,
+                "duplicate": False,
+            }
+        from app.services.chat_log import get_log
+        accepted = get_log().accept_turn(
+            text=text, session_id=session_id, client_msg_id=client_msg_id)
+        if accepted.get("switched") or accepted.get("duplicate") or accepted.get("dropped"):
+            return accepted
+        event = accepted.get("event")
+        if event:
+            with self.lock:
+                event = dict(event)
+                event["id"] = int(accepted["seq"])
+                self.events.append(event)
+                self.next_id = max(self.next_id, int(accepted["seq"]) + 1)
+                self._chat_epoch += 1
+            self._wake_chat_streams()
+        self.note_turn(accepted)
+        return accepted
+
+    def note_turn(self, accepted: dict) -> None:
+        scope = {
+            "session_id": accepted.get("session_id"),
+            "gen": accepted.get("gen"),
+            "turn_id": accepted.get("turn_id"),
+            "job_id": accepted.get("job_id"),
+            "enqueued": False,
+        }
+        self._turn = accepted
+        self._turn_token = _emit_scope.set(scope)
+
+    def clear_turn(self) -> None:
+        token = self._turn_token
+        self._turn_token = None
+        self._turn = None
+        if token is not None:
+            try:
+                _emit_scope.reset(token)
+            except ValueError:
+                _emit_scope.set(None)
+
+    def bind_chat_stream(self) -> asyncio.Condition:
+        """Condition /chat/stream waits on. Must be called on the serving loop."""
+        loop = asyncio.get_running_loop()
+        with self.lock:
+            cond = self._chat_cond
+            if cond is not None and self._chat_loop is loop:
+                return cond
+        cond = asyncio.Condition()
+        with self.lock:
+            if self._chat_cond is not None and self._chat_loop is loop:
+                return self._chat_cond
+            self._chat_loop = loop
+            self._chat_cond = cond
+            return cond
+
+    def chat_epoch(self) -> int:
+        with self.lock:
+            return self._chat_epoch
+
+    def _wake_chat_streams(self) -> None:
+        """Wake SSE loops. Safe from worker threads; a no-op before any client."""
+        loop = self._chat_loop
+        cond = self._chat_cond
+        if loop is None or cond is None:
+            return
+
+        def _notify() -> None:
+            async def _ping() -> None:
+                async with cond:
+                    cond.notify_all()
+            try:
+                asyncio.get_running_loop().create_task(_ping())
+            except RuntimeError:
+                pass
+
+        try:
+            loop.call_soon_threadsafe(_notify)
+        except RuntimeError:
+            pass
+
     def _on_log(self, s: str) -> None:
         self._emit("progress", s)
 
     def _on_ask(self, q: str) -> str:  # runs on the worker thread; blocks until answered
         q = _signin_handoff_hint(q)
         with self.lock:
+            epoch = self._gate_epoch
             self.awaiting, self.question = True, q
         self._emit("ask", q)
         self._answer_ev.clear()
         # The wait is where a sign-in handoff happens on a headless install:
         # this thread owns Playwright, so the pane's relayed clicks/typing
         # can only reach the page from here. Service them while blocked.
+        # new() bumps _gate_epoch and may race the clear() above; the epoch
+        # check is what makes that reset stick.
         while not self._answer_ev.wait(0.2):
+            with self.lock:
+                if self._gate_epoch != epoch:
+                    self._answer = "cancel"
+                    break
             self._drain_ghost_input()
         with self.lock:
+            if self._gate_epoch != epoch:
+                self._answer = "cancel"
             self.awaiting, self.question = False, None
-            return self._answer
+            answer = self._answer
+        self._wake_chat_streams()
+        return answer
 
     # --- ghost pane input relay (sign-in handoff without a window) ---------
     def browser_open(self) -> bool:
@@ -761,13 +964,22 @@ class AgentWorker:
 
     def _on_ask_fast(self, q: str) -> str:
         with self.lock:
+            epoch = self._gate_epoch
             self.awaiting_fast, self.question_fast = True, q
         self._emit("ask", q)
         self._answer_ev_fast.clear()
-        self._answer_ev_fast.wait()
+        while not self._answer_ev_fast.wait(0.2):
+            with self.lock:
+                if self._gate_epoch != epoch:
+                    self._answer_fast = "cancel"
+                    break
         with self.lock:
+            if self._gate_epoch != epoch:
+                self._answer_fast = "cancel"
             self.awaiting_fast, self.question_fast = False, None
-            return self._answer_fast
+            answer = self._answer_fast
+        self._wake_chat_streams()
+        return answer
 
     def submit_answer(self, text: str) -> None:
         with self.lock:
@@ -940,16 +1152,20 @@ class AgentWorker:
                     if age > _OFFER_TTL_S:
                         self.pending_todo = None
         with self.lock:
-            if (self.busy or self.busy_fast or self.awaiting or self.awaiting_fast
+            if (self.busy or self.busy_fast or self.busy_chat
+                    or self.awaiting or self.awaiting_fast
                     or self.pending_todo is not None
-                    or not self.cmd_q.empty() or not self.fast_q.empty()):
+                    or not self.cmd_q.empty() or not self.fast_q.empty()
+                    or not self.chat_q.empty()):
                 return False
             # Drop expired queue heads.
             now = time.time()
             while self.offer_queue:
                 head = self.offer_queue[0]
+                exp = head.get("expires_at")
                 age = now - float(head.get("created_at") or now)
-                if _OFFER_TTL_S > 0 and age > _OFFER_TTL_S:
+                if ((exp is not None and float(exp) <= now)
+                        or (_OFFER_TTL_S > 0 and age > _OFFER_TTL_S)):
                     self.offer_queue.pop(0)
                     continue
                 break
@@ -957,20 +1173,85 @@ class AgentWorker:
             if nxt is None:
                 return False
             self.pending_todo = nxt
-        self._emit("ask", nxt["message"], stream=nxt.get("stream"))
+        self._emit_offer_ask(nxt)
         return True
+
+    def _stamp_offer(self, offer: dict) -> dict:
+        """Attach offer_id + payload_hash (+ durable row when this worker persists)."""
+        offer = dict(offer)
+        now = time.time()
+        offer.setdefault("created_at", now)
+        if self.persist:
+            try:
+                from app.services.chat_log import get_log
+                minted = get_log().mint_offer(offer, ttl_s=_OFFER_TTL_S or 90.0)
+                return dict(minted.get("payload") or offer)
+            except Exception as exc:
+                print(f"[chat_log] mint offer skipped ({exc}).")
+        from app.services.chat_log import offer_payload_hash
+        oid = offer.get("offer_id") or uuid.uuid4().hex
+        offer["offer_id"] = oid
+        offer["payload_hash"] = offer_payload_hash(offer)
+        ttl = _OFFER_TTL_S if _OFFER_TTL_S > 0 else 90.0
+        offer["expires_at"] = float(offer.get("created_at") or now) + ttl
+        return offer
+
+    def _offer_stream(self, offer: dict) -> dict:
+        stream = dict(offer.get("stream") or {})
+        stream.setdefault("type", "offer.pending")
+        stream["offer_id"] = offer.get("offer_id")
+        stream["payload_hash"] = offer.get("payload_hash")
+        stream["expires_at"] = offer.get("expires_at")
+        stream["kind"] = offer.get("kind")
+        return stream
+
+    def _emit_offer_ask(self, offer: dict) -> None:
+        self._emit("ask", offer["message"], stream=self._offer_stream(offer))
+
+    def _emit_offer_expired(self, offer: dict) -> None:
+        """Durable expiry event. The page greys the card; it is not filtered away."""
+        stream = {
+            "type": "offer.expired",
+            "offer_id": offer.get("offer_id"),
+            "payload_hash": offer.get("payload_hash"),
+            "kind": offer.get("kind"),
+        }
+        self._emit("system", "That offer expired.", stream=stream)
+
+    def _open_offers(self) -> list[dict]:
+        """Open, unexpired offers in this session (durable when persist)."""
+        self.expire_stale_offers()
+        if self.persist:
+            try:
+                from app.services.chat_log import get_log
+                return get_log().open_offers()
+            except Exception as exc:
+                print(f"[chat_log] open offers skipped ({exc}).")
+        now = time.time()
+        out = []
+        with self.lock:
+            if self.pending_todo is not None:
+                out.append(dict(self.pending_todo))
+            out.extend(dict(o) for o in self.offer_queue)
+        keep = []
+        for o in out:
+            exp = o.get("expires_at")
+            if exp is not None and float(exp) <= now:
+                continue
+            keep.append(o)
+        return keep
 
     def _add_offer(self, offer: dict) -> bool:
         """Queue a yes/no offer. If one is already outstanding — or the agent is
         mid-goal — this waits its turn. Returns True when shown now."""
         self.expire_stale_offers()
-        offer = dict(offer)
-        offer.setdefault("created_at", time.time())
+        offer = self._stamp_offer(offer)
         with self.lock:
             blocked = (self.pending_todo is not None
-                       or self.busy or self.busy_fast
+                       or self.busy or self.busy_fast or self.busy_chat
                        or self.awaiting or self.awaiting_fast
-                       or not self.cmd_q.empty() or not self.fast_q.empty())
+                       or not self.cmd_q.empty() or not self.fast_q.empty()
+                       or not self.chat_q.empty())
             if blocked:
                 self.offer_queue.append(offer)
                 shown = False
@@ -978,7 +1259,7 @@ class AgentWorker:
                 self.pending_todo = offer
                 shown = True
         if shown:
-            self._emit("ask", offer["message"], stream=offer.get("stream"))
+            self._emit_offer_ask(offer)
         # Attention ledger (P0 exit: field/grounding/offers): every surfaced or
         # queued interruption is an impression — accept/dismiss closes it later.
         try:
@@ -1073,6 +1354,9 @@ class AgentWorker:
                 "queued_behind": len(self.offer_queue),
                 "choices": list(pend.get("choices") or []),
                 "meeting_session_id": pend.get("meeting_session_id"),
+                "offer_id": pend.get("offer_id"),
+                "payload_hash": pend.get("payload_hash"),
+                "expires_at": pend.get("expires_at"),
             }
 
     def offer_queue_len(self) -> int:
@@ -1084,46 +1368,64 @@ class AgentWorker:
 
         A surfaced offer that times out without yes/no is treated as a soft
         ignore (same cooldown path as Not now for reasoners) so reload/ticks
-        do not keep recycling the same card.
+        do not keep recycling the same card. Expiry is a real event that the
+        page uses to grey out the card.
         """
         if _OFFER_TTL_S <= 0:
             return 0
         now = time.time()
         dropped = 0
-        expired_pending: dict | None = None
+        expired: list[dict] = []
         with self.lock:
             pend = self.pending_todo
             if pend is not None:
+                exp = pend.get("expires_at")
                 age = now - float(pend.get("created_at") or now)
-                if age > _OFFER_TTL_S:
-                    expired_pending = pend
+                if (exp is not None and float(exp) <= now) or age > _OFFER_TTL_S:
+                    expired.append(pend)
                     self.pending_todo = None
                     dropped += 1
             keep: list[dict] = []
             for offer in self.offer_queue:
+                exp = offer.get("expires_at")
                 age = now - float(offer.get("created_at") or now)
-                if age > _OFFER_TTL_S:
+                if (exp is not None and float(exp) <= now) or age > _OFFER_TTL_S:
+                    expired.append(offer)
                     dropped += 1
                 else:
                     keep.append(offer)
             self.offer_queue = keep
             nxt = None
             # Only promote when idle — never interrupt an in-flight goal.
-            idle = not (self.busy or self.busy_fast
+            idle = not (self.busy or self.busy_fast or self.busy_chat
                         or self.awaiting or self.awaiting_fast)
             if (idle and self.pending_todo is None and self.offer_queue
-                    and self.cmd_q.empty() and self.fast_q.empty()):
+                    and self.cmd_q.empty() and self.fast_q.empty()
+                    and self.chat_q.empty()):
                 self.pending_todo = self.offer_queue.pop(0)
                 nxt = self.pending_todo
-        if expired_pending is not None:
-            self._record_offer_timeout(expired_pending)
-        if dropped:
-            self._emit(
-                "system",
-                f"Offer expired after {_OFFER_TTL_S:.0f}s — type a new request anytime.",
-            )
+        if self.persist:
+            try:
+                from app.services.chat_log import get_log
+                log = get_log()
+                # Memory may have decided an offer is stale before the DB
+                # clock — CAS-expire those rows so a typed yes cannot revive them.
+                for offer in expired:
+                    oid, phash = offer.get("offer_id"), offer.get("payload_hash")
+                    if oid and phash:
+                        log.resolve_offer(str(oid), str(phash), "expired")
+                for payload in log.expire_due(now=now):
+                    if not any(e.get("offer_id") == payload.get("offer_id")
+                               for e in expired):
+                        expired.append(payload)
+                        dropped += 1
+            except Exception as exc:
+                print(f"[chat_log] expire offers skipped ({exc}).")
+        for offer in expired:
+            self._record_offer_timeout(offer)
+            self._emit_offer_expired(offer)
         if nxt is not None:
-            self._emit("ask", nxt["message"], stream=nxt.get("stream"))
+            self._emit_offer_ask(nxt)
         return dropped
 
     def _record_offer_timeout(self, pend: dict) -> None:
@@ -1154,6 +1456,13 @@ class AgentWorker:
             self.pending_todo = None
         if not pend:
             return None
+        oid, phash = pend.get("offer_id"), pend.get("payload_hash")
+        if self.persist and oid and phash:
+            try:
+                from app.services.chat_log import get_log
+                get_log().resolve_offer(str(oid), str(phash), "cancelled")
+            except Exception:
+                pass
         kind = str(pend.get("kind") or "")
         if kind.startswith("reasoner_"):
             try:
@@ -1903,12 +2212,74 @@ class AgentWorker:
         self._advance_offers()
         return out
 
+    def resolve_offer(self, offer_id: str, payload_hash: str, accept: bool,
+                      choice: str | None = None) -> dict:
+        """Resolve one offer by id + hash. Compare-and-set; only once."""
+        oid = str(offer_id or "").strip()
+        phash = str(payload_hash or "").strip()
+        if not oid or not phash:
+            return {"ok": False, "error": "offer_id and payload_hash required"}
+        if self.persist:
+            try:
+                from app.services.chat_log import get_log
+                cas = get_log().resolve_offer(
+                    oid, phash, "accepted" if accept else "declined")
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
+            if not cas.get("ok"):
+                return cas
+            pend = cas.get("offer") or {}
+            with self.lock:
+                if (self.pending_todo
+                        and self.pending_todo.get("offer_id") == oid):
+                    self.pending_todo = None
+                self.offer_queue = [
+                    o for o in self.offer_queue if o.get("offer_id") != oid]
+            out = self._apply_offer_resolution(pend, accept, choice)
+            out.setdefault("offer_id", oid)
+            out.setdefault("payload_hash", phash)
+            return out
+        with self.lock:
+            pend = None
+            if (self.pending_todo
+                    and self.pending_todo.get("offer_id") == oid):
+                pend = self.pending_todo
+                self.pending_todo = None
+            else:
+                keep = []
+                for o in self.offer_queue:
+                    if pend is None and o.get("offer_id") == oid:
+                        pend = o
+                    else:
+                        keep.append(o)
+                self.offer_queue = keep
+        if not pend:
+            return {"ok": False, "error": "not_found"}
+        if str(pend.get("payload_hash") or "") != phash:
+            return {"ok": False, "error": "payload_hash_mismatch"}
+        exp = pend.get("expires_at")
+        if exp is not None and float(exp) <= time.time():
+            return {"ok": False, "error": "expired"}
+        out = self._apply_offer_resolution(pend, accept, choice)
+        out.setdefault("offer_id", oid)
+        out.setdefault("payload_hash", phash)
+        return out
+
     def resolve_todo(self, accept: bool, choice: str | None = None) -> dict:
         with self.lock:
             pend = self.pending_todo
-            self.pending_todo = None
         if not pend:
             return {"ok": False, "error": "no pending offer"}
+        oid, phash = pend.get("offer_id"), pend.get("payload_hash")
+        if oid and phash:
+            return self.resolve_offer(str(oid), str(phash), accept, choice=choice)
+        with self.lock:
+            if self.pending_todo is pend:
+                self.pending_todo = None
+        return self._apply_offer_resolution(pend, accept, choice)
+
+    def _apply_offer_resolution(self, pend: dict, accept: bool,
+                                choice: str | None = None) -> dict:
         if pend.get("kind") == "calendar":
             return self._resolve_calendar(pend, accept)
         if pend.get("kind") == "peer_tell":
@@ -2122,14 +2493,34 @@ class AgentWorker:
 
         Routing it as a goal makes the router re-answer the previous result
         (observed live: four identical echoes of "Typed ... and pressed
-        Enter"). Instead: if the last reply ended by offering something
-        ("Want me to ...?"), a yes accepts that offer and a no declines it;
-        otherwise say plainly that nothing is waiting. Returns None when
-        `text` isn't a bare verdict — the caller routes it normally.
+        Enter"). A typed yes resolves a durable offer only when exactly one
+        is open; otherwise the assistant asks which. If the last reply ended
+        by offering something ("Want me to ...?"), a yes accepts that prose
+        offer when no structured card is open.
         """
         verdict = _is_plain_verdict(text)
         if verdict is None:
             return None
+        opens = self._open_offers()
+        if len(opens) == 1:
+            o = opens[0]
+            return {"routed": "todo", **self.resolve_offer(
+                str(o.get("offer_id") or ""),
+                str(o.get("payload_hash") or ""),
+                bool(verdict))}
+        if len(opens) > 1:
+            titles = []
+            for i, o in enumerate(opens[:6], 1):
+                label = (o.get("title") or o.get("kind")
+                         or (o.get("items") or ["offer"])[0])
+                titles.append(f"{i}. {str(label)[:80]}")
+            self._emit(
+                "result",
+                "Several offers are open — click Yes or No on the one you "
+                "mean"
+                + (":\n" + "\n".join(titles) if titles else "."))
+            return {"ok": True, "routed": "offer_ambiguous",
+                    "open_count": len(opens)}
         with self.lock:
             last = next((str(e.get("text") or "") for e in reversed(self.events)
                          if e.get("kind") == "result"), "")
@@ -2216,9 +2607,11 @@ class AgentWorker:
             return {"ok": True, "routed": "agent_answer"}
 
         if has_todo:
+            opens = self._open_offers()
             with self.lock:
                 pkind = (self.pending_todo or {}).get("kind") or ""
                 pchoices = list((self.pending_todo or {}).get("choices") or [])
+                pend = dict(self.pending_todo or {})
             if pkind in ("task_question", "slot_fill", "slot_undo",
                          "slot_create", "peer_null_options"):
                 ch = _fulfillment_choice(text, pkind, pchoices)
@@ -2226,9 +2619,28 @@ class AgentWorker:
                     accept = ch not in ("not it", "not yet", "no", "undo")
                     return {"routed": "todo",
                             **self.resolve_todo(accept, choice=ch)}
+            if verdict is not None and len(opens) > 1:
+                titles = []
+                for i, o in enumerate(opens[:6], 1):
+                    label = (o.get("title") or o.get("kind")
+                             or (o.get("items") or ["offer"])[0])
+                    titles.append(f"{i}. {str(label)[:80]}")
+                self._emit(
+                    "result",
+                    "Several offers are open — click Yes or No on the one "
+                    "you mean"
+                    + (":\n" + "\n".join(titles) if titles else "."))
+                return {"ok": True, "routed": "offer_ambiguous",
+                        "open_count": len(opens)}
             if verdict is True:
+                if pend.get("offer_id") and pend.get("payload_hash"):
+                    return {"routed": "todo", **self.resolve_offer(
+                        str(pend["offer_id"]), str(pend["payload_hash"]), True)}
                 return {"routed": "todo", **self.resolve_todo(True)}
             if verdict is False:
+                if pend.get("offer_id") and pend.get("payload_hash"):
+                    return {"routed": "todo", **self.resolve_offer(
+                        str(pend["offer_id"]), str(pend["payload_hash"]), False)}
                 return {"routed": "todo", **self.resolve_todo(False)}
             try:
                 from app.services import meeting_session as _ms
@@ -2297,10 +2709,11 @@ class AgentWorker:
                     "expires_at": pending.get("expires_at"),
                 }
             state = {
-                "busy": self.busy or self.busy_fast,
+                "busy": self.busy_chat or self.busy_fast,
                 "busy_browser": self.busy,
                 "busy_fast": self.busy_fast,
-                "ready": self.ready or self.ready_fast,
+                "busy_chat": self.busy_chat,
+                "ready": self.ready or self.ready_fast or self.ready_chat,
                 "awaiting": awaiting,
                 "question": question,
                 "packet": pkt,
@@ -2313,7 +2726,10 @@ class AgentWorker:
                            "fact_id": self.pending_todo.get("fact_id"),
                            "choices": list(self.pending_todo.get("choices") or []),
                            "actions": list((self.pending_todo.get("stream") or {})
-                                           .get("actions") or [])}
+                                           .get("actions") or []),
+                           "offer_id": self.pending_todo.get("offer_id"),
+                           "payload_hash": self.pending_todo.get("payload_hash"),
+                           "expires_at": self.pending_todo.get("expires_at")}
                           if self.pending_todo is not None else None),
                 "waiting_on": waiting_on,
                 "mode": (mode.label if mode else None),
@@ -2331,13 +2747,16 @@ class AgentWorker:
              display: str | None = None,
              study_mode: str | None = None,
              source_fact_ids: list[int] | None = None,
-             fetch: dict | None = None) -> None:
+             fetch: dict | None = None,
+             suggestions: list | None = None,
+             off_the_record: bool = False) -> None:
         """Enqueue a goal. `text` is what the agent runs; `display` (optional)
         is what the chat UI shows as the user bubble — used when Add context
         merged notes into `text` but the bubble should stay short.
         `study_mode` is the sticky student persona id (lecture_notes, homework…).
         `source_fact_ids` (Meeting P4) cites commitments/decisions so a verified
-        send can complete every id on the packet — not only `fact_id`."""
+        send can complete every id on the packet — not only `fact_id`.
+        `off_the_record` skips chat→memory ingest for this turn."""
         self.start()
         # An explicit level wins; otherwise honor an inline /level directive.
         if dry_run is None:
@@ -2411,11 +2830,57 @@ class AgentWorker:
                "display": (display if display is not None else text),
                "study_mode": study_mode,
                "source_fact_ids": fids,
-               "fetch": (dict(fetch) if fetch else None)}
+               "fetch": (dict(fetch) if fetch else None),
+               "suggestions": list(suggestions or []),
+               "off_the_record": bool(off_the_record)}
+        scope = _emit_scope.get()
+        if scope and scope.get("session_id"):
+            scope["enqueued"] = True
+            if isinstance(self._turn, dict):
+                self._turn["enqueued"] = True
+            cmd["session_id"] = scope.get("session_id")
+            cmd["gen"] = scope.get("gen")
+            cmd["turn_id"] = scope.get("turn_id")
+            cmd["job_id"] = scope.get("job_id")
+            cmd["user_written"] = True
+        # Desktop and phone never wait on the router. An explicit browser
+        # fetch, or a multi-task fan-out, goes straight to Playwright.
+        # Everything else, including a planned goal, is classified on the
+        # chat lane. Only a browser route is handed across.
         if resolved in ("desktop", "phone_link"):
+            cmd["lane"] = "fast"
+            self._set_job_lane(cmd.get("job_id"), "fast")
             self.fast_q.put(cmd)
-        else:
+        elif fetch or multi:
+            cmd["lane"] = "browser"
+            self._set_job_lane(cmd.get("job_id"), "browser")
             self.cmd_q.put(cmd)
+        else:
+            cmd["lane"] = "chat"
+            self._set_job_lane(cmd.get("job_id"), "chat")
+            self.chat_q.put(cmd)
+
+    def _release_gates(self) -> None:
+        """Drop asks and offers on the caller thread, and wake blocked lanes.
+
+        new() used to leave awaiting/pending_todo set until a queued
+        ``{type: new}`` item reached the worker. The next message was then
+        swallowed as the answer to that old gate. The cancel is written into
+        the answer slot without an event, so it does not appear as a bubble.
+        """
+        with self.lock:
+            self._gate_epoch += 1
+            self.awaiting = False
+            self.awaiting_fast = False
+            self.question = None
+            self.question_fast = None
+            self.pending_todo = None
+            self.offer_queue.clear()
+            self._answer = "cancel"
+            self._answer_fast = "cancel"
+            self._answer_ev.set()
+            self._answer_ev_fast.set()
+        self._wake_chat_streams()
 
     def new(self) -> dict:
         """Start a fresh chat: archive the live event log (if it has turns),
@@ -2423,10 +2888,25 @@ class AgentWorker:
 
         Returns archive meta (`id`, `title`, …) or `{}` when there was nothing
         worth saving. Always clears the live log so the next poll is a clean slate.
+        Gates (ask, offer) clear before the archive, on this thread.
         """
-        archived = self._archive_and_reset_events()
+        self._release_gates()
+        self.clear_turn()
+        if self.persist:
+            try:
+                from app.services.chat_log import get_log
+                archived = get_log().retire()
+            except Exception as exc:
+                print(f"[chat] retire skipped: {type(exc).__name__}: {exc}")
+                archived = self._archive_and_reset_events()
+            else:
+                with self.lock:
+                    self.events.clear()
+        else:
+            archived = self._archive_and_reset_events()
         self.cmd_q.put({"type": "new"})
         self.fast_q.put({"type": "new"})
+        self.chat_q.put({"type": "new"})
         if archived:
             self._emit("system",
                        f"New conversation started — previous chat saved "
@@ -2453,38 +2933,17 @@ class AgentWorker:
         it's a core workflow, else the raw router->plan->execute path) and surface
         its result. Returns (result, status) so the multi-task orchestrator can pass
         a task's result into the tasks that depend on it."""
-        if cmd.get("plan"):
+        if cmd.get("plan") and not cmd.get("handoff"):
             return self._run_planned(cmd)
         result, status = self.agent.run_goal(
             cmd["text"], dry_run=cmd.get("dry_run"), surface=cmd.get("surface"),
             packet=cmd.get("packet"), source_fact_id=cmd.get("fact_id"),
             source_fact_ids=cmd.get("source_fact_ids"),
-            study_mode=cmd.get("study_mode"))
-        distill_id = getattr(self.agent, "last_distill_id", None)
-        sources, _block, question = self._pop_grounding(self.agent)
-        # Live hands results (browser/desktop/phone) are evidence from the
-        # world the agent just observed. Do NOT pass the memory retrieval
-        # block as answer_check context: that gate is for claims grounded in
-        # Sparrow memory, and would mark every live proper noun as "missing"
-        # then rewrite the answer into an unrelated memory dump. Memories
-        # still ground the *task* via memory_provider during the run; only
-        # the post-hoc token check is skipped. Sources stay attached for the
-        # optional grounding footer.
-        self._emit("result", result or f"(no answer — {status})",
-                   distill_id=distill_id,
-                   sources=sources, context=None, question=question)
-        if cmd.get("fetch"):
-            try:
-                from app.services import slots as _slots
-                eid = _slots.land_fetch_result(cmd["fetch"], result or "", status)
-                if eid:
-                    self._emit("progress", f"[fetch] landed as event {eid}")
-            except Exception as exc:
-                print(f"[slots] fetch landing skipped ({exc}).")
-            return result or "", status
-        self._maybe_research_ingest(
-            result or "", status, agent=self.agent,
-            question=cmd.get("display") or cmd.get("text"))
+            study_mode=cmd.get("study_mode"),
+            handoff=cmd.get("handoff"))
+        # Live hands results are evidence from the world the agent just
+        # observed, so the result is stored without a memory rewrite.
+        self._emit_run_result(cmd, self.agent, result, status)
         return result or "", status
 
     def _maybe_research_ingest(
@@ -2503,6 +2962,32 @@ class AgentWorker:
                 text, status=status, route=route, question=question)
         except Exception as exc:
             print(f"[research_ingest] hook skipped ({exc}).")
+
+    def _maybe_chat_ingest(
+            self, cmd: dict, result: str, status: str | None = None) -> None:
+        """Remember the typed user turn after the answer lands (Phase 5).
+
+        Skips cancelled / handoff statuses, fetch landings, and off-the-record.
+        Once per goal via ``_chat_ingested``.
+        """
+        if not isinstance(cmd, dict) or cmd.get("_chat_ingested"):
+            return
+        if cmd.get("fetch"):
+            return
+        if status in ("cancelled", "needs_browser", "needs_desktop",
+                      "needs_phone"):
+            return
+        message = cmd.get("display") or cmd.get("text") or ""
+        try:
+            from app.services import chat_ingest
+            chat_ingest.ingest(
+                message,
+                answer=result or "",
+                off_the_record=bool(cmd.get("off_the_record")),
+            )
+            cmd["_chat_ingested"] = True
+        except Exception as exc:
+            print(f"[chat_ingest] hook skipped ({exc}).")
 
     def recent_results(self, limit: int = 12) -> list[str]:
         """Result texts across BOTH agent lanes, oldest first. Injected into
@@ -2655,7 +3140,9 @@ class AgentWorker:
             sources, block, question = self._pop_grounding(self.agent)
             self._emit("result", result or f"(no answer — {status})",
                        distill_id=getattr(self.agent, "last_distill_id", None),
-                       sources=sources, context=block, question=question)
+                       sources=sources, context=block, question=question,
+                       rewrite=True)
+            self._maybe_chat_ingest(cmd, result or "", status)
             self._maybe_research_ingest(
                 result or "", status, agent=self.agent, question=text)
             return result or "", status
@@ -2702,6 +3189,7 @@ class AgentWorker:
                     result or "", status, agent=self.agent,
                     question=step.goal or text)
                 last = (result or "", status)
+        self._maybe_chat_ingest(cmd, last[0], last[1])
         return last
 
     # --- the threads -------------------------------------------------------
@@ -2732,6 +3220,190 @@ class AgentWorker:
         agent.grounding_sink = sink
         return agent
 
+    def _bind_goal(self, cmd: dict):
+        """Pin this worker thread's emits to the job's session generation."""
+        if not cmd.get("session_id"):
+            return None
+        return _emit_scope.set({
+            "session_id": cmd.get("session_id"),
+            "gen": cmd.get("gen"),
+            "turn_id": cmd.get("turn_id"),
+            "job_id": cmd.get("job_id"),
+            "lane": cmd.get("lane"),
+        })
+
+    def _unbind_goal(self, token) -> None:
+        if token is None:
+            return
+        try:
+            _emit_scope.reset(token)
+        except ValueError:
+            _emit_scope.set(None)
+
+    def _install_cancel(self, job_id: str | None, agent) -> None:
+        if agent is None or not job_id or not self.persist:
+            return
+        from app.services.chat_log import get_log
+        log = get_log()
+        agent.cancel_check = lambda: log.cancel_requested(job_id)
+
+    def _clear_cancel(self, agent) -> None:
+        if agent is not None:
+            agent.cancel_check = None
+
+    def _finish_goal(self, job_id: str | None, status: str = "done") -> None:
+        if not self.persist or not job_id:
+            return
+        try:
+            from app.services.chat_log import get_log
+            get_log().finish_job(job_id, status=status)
+        except Exception as exc:
+            print(f"[chat_log] finish skipped ({exc}).")
+
+    def _set_job_lane(self, job_id: str | None, lane: str) -> None:
+        if not self.persist or not job_id:
+            return
+        try:
+            from app.services.chat_log import get_log
+            get_log().set_lane(job_id, lane)
+        except Exception as exc:
+            print(f"[chat_log] lane skipped ({exc}).")
+
+    def _handoff_chat_goal(self, cmd: dict) -> bool:
+        """Classify on this thread. True when the goal moved to another lane.
+
+        A browser route is the only thing placed on the Playwright queue.
+        Desktop and phone routes move to the fast lane. A direct answer stays
+        here, on ``cmd['_result']``.
+        """
+        agent = self.chat_agent
+        result, status = agent.run_goal(
+            cmd["text"], dry_run=cmd.get("dry_run"), surface=cmd.get("surface"),
+            packet=cmd.get("packet"), source_fact_id=cmd.get("fact_id"),
+            source_fact_ids=cmd.get("source_fact_ids"),
+            study_mode=cmd.get("study_mode"))
+        if status == "needs_browser":
+            hand = dict(cmd)
+            hand["handoff"] = dict(getattr(agent, "_browser_handoff", None) or {})
+            hand["lane"] = "browser"
+            self._set_job_lane(cmd.get("job_id"), "browser")
+            self.cmd_q.put(hand)
+            cmd["handed_off"] = True
+            return True
+        if status in ("needs_desktop", "needs_phone"):
+            hand = dict(cmd)
+            hand["surface"] = "desktop" if status == "needs_desktop" else "phone_link"
+            hand["lane"] = "fast"
+            hand.pop("handoff", None)
+            self._set_job_lane(cmd.get("job_id"), "fast")
+            self.fast_q.put(hand)
+            cmd["handed_off"] = True
+            return True
+        cmd["_result"] = result
+        cmd["_status"] = status
+        return False
+
+    def _plan_on_chat_lane(self, cmd: dict) -> bool:
+        """Compile on this thread. True when the goal is answered or handed off.
+
+        A surface of ``none`` is delivered here. Browser and desktop steps
+        move to those lanes. A compile failure returns False so the caller
+        classifies the raw goal instead.
+        """
+        text = cmd["text"]
+        try:
+            from app.services.agent_planner import planner
+            steps = planner.compile(text, surface=cmd.get("surface")).steps
+        except Exception as exc:
+            self._emit("progress", f"[planner] compile failed ({exc}); running as-is.")
+            return False
+        if not steps:
+            return False
+        seeded = [
+            int(x) for x in (cmd.get("source_fact_ids") or []) if x is not None
+        ]
+        last_briefing = None
+        for step in steps:
+            try:
+                from app.services.agent_planner import (
+                    execution_allowed, policy_block_reason,
+                )
+                risk = getattr(step.packet, "risk_level", None)
+                if not execution_allowed(risk):
+                    reason = policy_block_reason(
+                        kind=getattr(step, "intent", "") or "",
+                        goal=step.goal or "")
+                    self._emit("result", f"Refused: {reason or risk}")
+                    continue
+            except Exception:
+                pass
+            if seeded and step.packet is not None:
+                existing = list(getattr(step.packet, "source_fact_ids", None) or [])
+                for fid in seeded:
+                    if fid not in existing:
+                        existing.append(fid)
+                step.packet.source_fact_ids = existing
+            if step.surface == "none":
+                last_briefing = self._deliver_briefing(step)
+                continue
+            if step.surface in ("desktop", "phone_link"):
+                hand = dict(cmd)
+                hand["plan"] = False
+                hand["text"] = step.to_goal_text()
+                hand["surface"] = step.surface
+                hand["packet"] = step.packet
+                hand["lane"] = "fast"
+                self._set_job_lane(cmd.get("job_id"), "fast")
+                self.fast_q.put(hand)
+                cmd["handed_off"] = True
+                continue
+            sub = dict(cmd)
+            sub["plan"] = False
+            sub["text"] = step.to_goal_text()
+            sub["packet"] = step.packet
+            sub["surface"] = None
+            if self._handoff_chat_goal(sub):
+                cmd["handed_off"] = True
+            else:
+                self._emit_run_result(
+                    cmd, self.chat_agent, sub.get("_result"), sub.get("_status"))
+        if (last_briefing is not None and not cmd.get("handed_off")
+                and not cmd.get("_chat_ingested")):
+            self._maybe_chat_ingest(cmd, last_briefing, "success")
+        return True
+
+    def _emit_run_result(self, cmd: dict, agent, result, status) -> None:
+        distill_id = getattr(agent, "last_distill_id", None)
+        sources, _block, question = self._pop_grounding(agent)
+        stream = None
+        suggestions = cmd.get("suggestions") or []
+        if suggestions and status not in ("cancelled", "needs_browser",
+                                          "needs_desktop", "needs_phone"):
+            try:
+                from app.services.chat_suggestions import stream_actions
+                actions = stream_actions(suggestions)
+                if actions:
+                    stream = {"type": "chat.suggestions", "actions": actions}
+            except Exception as exc:
+                print(f"[chat_suggestions] stream skipped ({exc}).")
+        self._emit("result", result or f"(no answer — {status})",
+                   distill_id=distill_id,
+                   sources=sources, context=None, question=question,
+                   stream=stream)
+        if cmd.get("fetch"):
+            try:
+                from app.services import slots as _slots
+                eid = _slots.land_fetch_result(cmd["fetch"], result or "", status)
+                if eid:
+                    self._emit("progress", f"[fetch] landed as event {eid}")
+            except Exception as exc:
+                print(f"[slots] fetch landing skipped ({exc}).")
+            return
+        self._maybe_chat_ingest(cmd, result or "", status)
+        self._maybe_research_ingest(
+            result or "", status, agent=agent,
+            question=cmd.get("display") or cmd.get("text"))
+
     def _reject_loop(self, q: queue.Queue, msg: str) -> None:
         """A lane that cannot start keeps consuming its queue and answers every
         goal with the startup error — a message sent here must be visibly
@@ -2740,8 +3412,14 @@ class AgentWorker:
             cmd = q.get()
             if cmd.get("type") != "goal":
                 continue
-            self._emit("user", cmd.get("display") or cmd["text"])
-            self._emit("error", msg)
+            token = self._bind_goal(cmd)
+            try:
+                if not cmd.get("user_written"):
+                    self._emit("user", cmd.get("display") or cmd["text"])
+                self._emit("error", msg)
+            finally:
+                self._unbind_goal(token)
+                self._finish_goal(cmd.get("job_id"), status="error")
 
     def _run(self) -> None:
         # No cloud credentials is fine as long as the local text tier can carry
@@ -2790,13 +3468,23 @@ class AgentWorker:
                 if typ == "goal":
                     with self.lock:
                         self.busy = True
-                    self._emit("user", cmd.get("display") or cmd["text"])
-                    # A multi-task message fans out (decompose -> route each ->
-                    # dep-ordered execute); everything else takes the single path.
-                    if cmd.get("multi"):
-                        self._run_multitask(cmd)
-                    else:
-                        self._dispatch_single(cmd)
+                    token = self._bind_goal(cmd)
+                    try:
+                        self._install_cancel(cmd.get("job_id"), self.agent)
+                        if not cmd.get("user_written"):
+                            self._emit("user", cmd.get("display") or cmd["text"])
+                        # A multi-task message fans out (decompose -> route each ->
+                        # dep-ordered execute); everything else takes the single path.
+                        if cmd.get("multi"):
+                            self._run_multitask(cmd)
+                        else:
+                            self._dispatch_single(cmd)
+                    except Exception as e:
+                        self._emit("error", _friendly_error(e) or f"{type(e).__name__}: {e}")
+                    finally:
+                        self._clear_cancel(self.agent)
+                        self._unbind_goal(token)
+                        self._finish_goal(cmd.get("job_id"))
                 elif typ == "new":
                     # Transcript reset only — archive + UI system line happen in new().
                     if self.agent is not None:
@@ -2814,6 +3502,7 @@ class AgentWorker:
                         self.cost = browser_cost + fast_cost
                     except Exception:
                         pass
+                self._wake_chat_streams()
                 self._try_surface_queued_offer()
 
     def _run_fast(self) -> None:
@@ -2847,22 +3536,33 @@ class AgentWorker:
                 if typ == "goal":
                     with self.lock:
                         self.busy_fast = True
-                    self._emit("user", cmd.get("display") or cmd["text"])
-                    # Fast lane is always a single forced-surface goal.
-                    agent = self.fast_agent
-                    result, status = agent.run_goal(
-                        cmd["text"], dry_run=cmd.get("dry_run"),
-                        surface=cmd.get("surface"),
-                        source_fact_id=cmd.get("fact_id"),
-                        source_fact_ids=cmd.get("source_fact_ids"),
-                        study_mode=cmd.get("study_mode"))
-                    sources, _block, question = self._pop_grounding(agent)
-                    self._emit("result", result or f"(no answer — {status})",
-                               distill_id=getattr(agent, "last_distill_id", None),
-                               sources=sources, context=None, question=question)
-                    self._maybe_research_ingest(
-                        result or "", status, agent=agent,
-                        question=cmd.get("display") or cmd.get("text"))
+                    token = self._bind_goal(cmd)
+                    try:
+                        self._install_cancel(cmd.get("job_id"), self.fast_agent)
+                        if not cmd.get("user_written"):
+                            self._emit("user", cmd.get("display") or cmd["text"])
+                        # Fast lane is always a single forced-surface goal.
+                        agent = self.fast_agent
+                        result, status = agent.run_goal(
+                            cmd["text"], dry_run=cmd.get("dry_run"),
+                            surface=cmd.get("surface"),
+                            source_fact_id=cmd.get("fact_id"),
+                            source_fact_ids=cmd.get("source_fact_ids"),
+                            study_mode=cmd.get("study_mode"))
+                        sources, _block, question = self._pop_grounding(agent)
+                        self._emit("result", result or f"(no answer — {status})",
+                                   distill_id=getattr(agent, "last_distill_id", None),
+                                   sources=sources, context=None, question=question)
+                        self._maybe_chat_ingest(cmd, result or "", status)
+                        self._maybe_research_ingest(
+                            result or "", status, agent=agent,
+                            question=cmd.get("display") or cmd.get("text"))
+                    except Exception as e:
+                        self._emit("error", _friendly_error(e) or f"{type(e).__name__}: {e}")
+                    finally:
+                        self._clear_cancel(self.fast_agent)
+                        self._unbind_goal(token)
+                        self._finish_goal(cmd.get("job_id"))
                 elif typ == "new":
                     if self.fast_agent is not None:
                         self.fast_agent.transcript.clear()
@@ -2879,8 +3579,65 @@ class AgentWorker:
                         self.cost = browser_cost + fast_cost
                     except Exception:
                         pass
+                self._wake_chat_streams()
                 self._try_surface_queued_offer()
+
+    def _run_chat(self) -> None:
+        """Route and answer here. Playwright work is handed to the browser lane."""
+        if not _cloud_auth_ok() and not _local_chat_ready():
+            self._reject_loop(
+                self.chat_q,
+                "No model is available for chat — connect one in Setup, "
+                "or start the local model.")
+            return
+        try:
+            self.chat_agent = self._build_agent(self._on_ask)
+            self.chat_agent.defer_browser = True
+            self.chat_agent.defer_hands = True
+        except Exception as exc:
+            self._emit("error",
+                       f"chat lane unavailable: {type(exc).__name__}: {exc}")
+            self._reject_loop(
+                self.chat_q, "The chat lane failed to start — "
+                f"{type(exc).__name__}: {exc}")
+            return
+        with self.lock:
+            self.ready_chat = True
+        while True:
+            cmd = self.chat_q.get()
+            typ = cmd.get("type")
+            try:
+                if typ == "goal":
+                    with self.lock:
+                        self.busy_chat = True
+                    token = self._bind_goal(cmd)
+                    try:
+                        self._install_cancel(cmd.get("job_id"), self.chat_agent)
+                        if not cmd.get("user_written"):
+                            self._emit("user", cmd.get("display") or cmd["text"])
+                        planned = bool(cmd.get("plan")) and self._plan_on_chat_lane(cmd)
+                        if not planned and not self._handoff_chat_goal(cmd):
+                            self._emit_run_result(
+                                cmd, self.chat_agent,
+                                cmd.get("_result"), cmd.get("_status"))
+                    except Exception as e:
+                        self._emit("error", _friendly_error(e) or f"{type(e).__name__}: {e}")
+                        cmd["handed_off"] = False
+                    finally:
+                        self._clear_cancel(self.chat_agent)
+                        self._unbind_goal(token)
+                        if not cmd.get("handed_off"):
+                            self._finish_goal(cmd.get("job_id"))
+                elif typ == "new":
+                    if self.chat_agent is not None:
+                        self.chat_agent.transcript.clear()
+            except Exception as e:
+                self._emit("error", _friendly_error(e) or f"{type(e).__name__}: {e}")
+            finally:
+                with self.lock:
+                    self.busy_chat = False
+                self._wake_chat_streams()
 
 
 # One shared worker for the server process; the browser starts on first /chat.
-worker = AgentWorker()
+worker = AgentWorker(persist=True)

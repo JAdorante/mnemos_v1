@@ -121,6 +121,29 @@ body{
   letter-spacing:var(--track-snug);box-shadow:none;flex:0 0 auto;
 }
 #archiveBanner button:hover{background:var(--ink-04);transform:none;box-shadow:none}
+#webTask{
+  display:none;width:min(800px,94%);margin:var(--sp-2) auto 0;padding:var(--sp-2) var(--sp-4);
+  background:var(--ink-04);border:1px solid var(--line);border-radius:var(--radius-sm);
+  font:var(--fs-footnote)/var(--lh-snug) var(--font);color:var(--navy);
+}
+#webTask.show{display:block}
+#webTask .wt-h{font:600 var(--fs-caption)/1.2 var(--font);letter-spacing:var(--track-snug);color:var(--mut)}
+#webTask .wt-line{margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.msg.offer-expired{opacity:.45;filter:grayscale(.35)}
+.msg.offer-expired .msg-body{text-decoration:line-through;text-decoration-color:var(--mut)}
+.msg.offer-expired::after{
+  content:'Expired';display:block;margin-top:4px;
+  font:500 var(--fs-caption2)/1.2 var(--mono);color:var(--mut);letter-spacing:var(--track-snug);
+}
+.corrected-badge{
+  display:inline-block;margin-left:8px;padding:1px 6px;
+  border:1px solid var(--line);border-radius:var(--radius-xs);
+  font:500 9px/1.2 var(--mono);color:var(--mut);letter-spacing:var(--track-snug);
+  vertical-align:middle;text-transform:uppercase;
+}
+#otrBtn.on{
+  background:var(--ink-08);color:var(--navy);border-color:var(--navy);
+}
 #log{
   flex:1;overflow:auto;padding:var(--sp-7) var(--sp-5) calc(var(--sp-12) + var(--dock-clear, 0px));
   display:flex;flex-direction:column;gap:4px;align-items:center;min-width:0;min-height:0;
@@ -628,6 +651,10 @@ body{
   <span id="archiveBannerText">Viewing a saved conversation (read-only).</span>
   <button type="button" id="backLiveBtn">Back to live</button>
 </div>
+<div id="webTask">
+  <div class="wt-h">Web task</div>
+  <div class="wt-line" id="webTaskLine">Running in the browser…</div>
+</div>
 <div id="log">
   <div id="emptyState">
     <h1 class="empty-greeting" id="emptyGreeting">Good day.</h1>
@@ -679,16 +706,8 @@ body{
         <div class="payload" id="dockPayload" hidden></div>
       </div>
     </details>
-    <form method="post" action="/approvals/resolve" class="approval-form" style="display:inline">
-      <input type="hidden" name="accept" value="1">
-      <input type="hidden" name="next" value="/chat">
-      <button type="submit" class="yes">✓ Yes</button>
-    </form>
-    <form method="post" action="/approvals/resolve" class="approval-form" style="display:inline">
-      <input type="hidden" name="accept" value="0">
-      <input type="hidden" name="next" value="/chat">
-      <button type="submit" class="no">✕ No</button>
-    </form>
+    <button type="button" class="yes" id="offerYes">✓ Yes</button>
+    <button type="button" class="no" id="offerNo">✕ No</button>
   </div>
   <div class="composer-wrap">
     <div class="composer-toolbar">
@@ -738,6 +757,7 @@ body{
           <option value="full">Full (autonomous)</option>
           <option value="autonomous">Autonomous</option>
         </select>
+        <button type="button" id="otrBtn" title="Off the record — don't remember this message" aria-pressed="false">OTR</button>
         <span class="grow"></span>
         <button id="send" onclick="send()" title="Send" aria-label="Send">↑</button>
       </div>
@@ -746,6 +766,10 @@ body{
 </div>
 <script>
 let since=0, awaiting=false, todo=false, polling=false, approvalMode=false;
+let sessionId='';
+try { sessionId=MnemosMemory.get('chat.sessionId')||''; } catch(e) { sessionId=''; }
+let progressJob=null, progressSeen=0;
+let activeOfferId='', activeOfferHash='';
 let lastErrShown=null;
 let liveMode=true;
 let userName='there';
@@ -979,7 +1003,7 @@ async function openPast(id, title){
     thinkEl=null; thinkStartedAt=0; pendingThink=false; wasBusy=false;
     [...log.querySelectorAll('.msg')].forEach(n=>n.remove());
     for(const e of (j.session.events||[])){
-      add(e.kind, e.text, e.distill_id, e.sources, e.packet, null);
+      add(e.kind, e.text, e.distill_id, e.sources, e.packet, e.compiled, e.stream, e.id);
     }
     if(!(j.session.events||[]).length){
       add('system','(empty saved chat)');
@@ -1009,6 +1033,11 @@ async function newChat(){
     thinkEl=null; thinkStartedAt=0; pendingThink=false; wasBusy=false;
     [...log.querySelectorAll('.msg')].forEach(n=>n.remove());
     since=0;
+    progressJob=null; progressSeen=0;
+    if(j.session_id){
+      sessionId=j.session_id;
+      try { MnemosMemory.set('chat.sessionId', sessionId); } catch(e) {}
+    }
     syncEmptyState();
     await poll();
     refreshPast();
@@ -1286,12 +1315,77 @@ function syncThinking(busy){
     wasBusy=false;
   }
 }
-function add(kind,text,distillId,sources,packet,compiled,stream){
+function markOfferExpired(id){
+  if(!id) return;
+  log.querySelectorAll('.msg[data-offer-id="'+String(id)+'"]').forEach(n=>{
+    n.classList.add('offer-expired');
+  });
+  if(activeOfferId===String(id)){ activeOfferId=''; activeOfferHash=''; }
+}
+async function applySuggestion(action, payload, btn){
+  if(!action) return;
+  if(btn){ btn.disabled=true; }
+  try{
+    const r=await fetch('/chat/suggestions/apply',{
+      method:'POST',
+      headers:{'Content-Type':'application/json','Accept':'application/json'},
+      body:JSON.stringify({action:action, payload:payload||{}}),
+    });
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok||j.ok===false){
+      add('system', (j&&j.error)||('Suggestion failed ('+r.status+')'));
+      if(btn) btn.disabled=false;
+      return;
+    }
+    if(btn){
+      btn.classList.add('on');
+      const sib=btn.parentElement&&btn.parentElement.querySelectorAll('button');
+      if(sib) [...sib].forEach(x=>{ if(x!==btn) x.disabled=true; });
+    }
+    poll();
+  }catch(e){
+    add('system','Could not run that suggestion — try again.');
+    if(btn) btn.disabled=false;
+  }
+}
+async function resolveOffer(id, hash, verdict){
+  if(!id||!hash){
+    reply(verdict==='yes'||verdict===true?'yes':'no');
+    return;
+  }
+  try{
+    const r=await fetch('/chat/offers/'+encodeURIComponent(id)+'/resolve',{
+      method:'POST',
+      headers:{'Content-Type':'application/json','Accept':'application/json'},
+      body:JSON.stringify({payload_hash:hash, verdict:verdict?'yes':'no'}),
+    });
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok||j.ok===false){
+      const err=j.error||('Offer refused ('+r.status+')');
+      if(err==='expired') markOfferExpired(id);
+      add('system', err==='already_resolved'?'That offer was already answered.'
+        :(err==='payload_hash_mismatch'?'That offer changed — refresh and try again.'
+        :(err==='expired'?'That offer expired.':String(err))));
+      return;
+    }
+    activeOfferId=''; activeOfferHash='';
+    try{ window.dispatchEvent(new CustomEvent('mnemos:approval-resolved',{detail:j})); }catch(e){}
+    poll();
+  }catch(e){
+    add('system','Could not resolve that offer — try again.');
+  }
+}
+function add(kind,text,distillId,sources,packet,compiled,stream,seq){
   // Progress feeds the thinking block (frontier-style), not the transcript.
   if(kind==='progress'){
     if(liveMode) appendThinkLine(text);
     return;
   }
+  if(stream && stream.type==='offer.expired'){
+    markOfferExpired(stream.offer_id);
+    return;
+  }
+  if(seq!=null && log.querySelector('.msg[data-seq="'+String(seq)+'"]')) return;
   if(kind==='system' && /^(Agent ready|Fast lane ready|Offer expired)\b/.test(String(text||''))) return;
   if(kind==='result' || kind==='ask' || kind==='error'){
     finalizeThinking();
@@ -1302,6 +1396,8 @@ function add(kind,text,distillId,sources,packet,compiled,stream){
     d.className='msg ask folio-wrap';
     d.innerHTML=MnemosRenderFolio(pkt,{editable:true,meta:'Hold to seal · release early to abort'});
     bindFolioSeal(d);
+    if(seq!=null) d.dataset.seq=String(seq);
+    if(stream&&stream.offer_id) d.dataset.offerId=String(stream.offer_id);
     log.appendChild(d);log.scrollTop=log.scrollHeight;
     syncEmptyState();
     return;
@@ -1311,7 +1407,16 @@ function add(kind,text,distillId,sources,packet,compiled,stream){
   const label=labels[kind];
   if(label){
     const lab=document.createElement('div');lab.className='msg-label';
-    lab.textContent=label;d.appendChild(lab);
+    lab.textContent=label;
+    const ac=compiled&&compiled.answer_check;
+    if(kind==='result' && ac && ac.corrected){
+      const badge=document.createElement('span');
+      badge.className='corrected-badge';
+      badge.textContent='Corrected';
+      badge.title='Answer rewritten to match retrieved evidence';
+      lab.appendChild(badge);
+    }
+    d.appendChild(lab);
   }
   const shellNeeded=kind==='result'||kind==='ask'||kind==='error';
   const host=shellNeeded?document.createElement('div'):d;
@@ -1353,13 +1458,22 @@ function add(kind,text,distillId,sources,packet,compiled,stream){
   // Typed chat-stream messages (task.completed, task.question,
   // slot.fill_offer, peer.null_options, connector.salient_item) carry their
   // action set: one button per action, each a plain reply.
+  if(stream && stream.offer_id) d.dataset.offerId=String(stream.offer_id);
   if(stream && Array.isArray(stream.actions) && stream.actions.length){
     const acts=document.createElement('div');acts.className='verdict stream-actions';
     acts.dataset.streamType=stream.type||'';
     for(const a of stream.actions){
       const b=document.createElement('button');b.type='button';
       b.textContent=a.label||a.reply||'';
-      b.onclick=()=>{ if(a.reply) reply(a.reply); };
+      b.onclick=()=>{
+        if(a.action){ applySuggestion(a.action, a.payload||{}, b); return; }
+        if(stream.offer_id && stream.payload_hash && a.reply){
+          const v=/^(yes|y|true|1|accept|approve)$/i.test(String(a.reply).trim());
+          const n=/^(no|n|false|0|skip|cancel|decline)$/i.test(String(a.reply).trim());
+          if(v||n){ resolveOffer(stream.offer_id, stream.payload_hash, v); return; }
+        }
+        if(a.reply) reply(a.reply);
+      };
       acts.appendChild(b);
     }
     host.appendChild(acts);
@@ -1377,6 +1491,7 @@ function add(kind,text,distillId,sources,packet,compiled,stream){
     acts.appendChild(mk('Edit','edited'));
     host.appendChild(acts);
   }
+  if(seq!=null) d.dataset.seq=String(seq);
   log.appendChild(d);log.scrollTop=log.scrollHeight;
   syncEmptyState();
 }
@@ -1402,22 +1517,74 @@ async function verdict(acts,distillId,outcome,btn){
     }
   }catch(e){alert('label failed: '+e);}
 }
+let pollDirty=false;
+function rememberSession(id){
+  if(!id) return;
+  sessionId=id;
+  try { MnemosMemory.set('chat.sessionId', id); } catch(e) {}
+}
+function adoptSession(id){
+  rememberSession(id);
+  [...log.querySelectorAll('.msg')].forEach(n=>n.remove());
+  since=0;
+  progressJob=null;
+  progressSeen=0;
+  thinkEl=null;
+  pollDirty=true;
+}
+function applyWeb(s){
+  const el=document.getElementById('webTask');
+  const line=document.getElementById('webTaskLine');
+  if(!el) return;
+  const web=s&&s.web;
+  if(!liveMode || !web || !web.busy){
+    el.classList.remove('show');
+    return;
+  }
+  el.classList.add('show');
+  const lines=Array.isArray(web.progress)?web.progress:[];
+  if(line) line.textContent=lines.length?lines[lines.length-1]:'Running in the browser…';
+}
+function applyProgress(s){
+  const lines=Array.isArray(s.progress)?s.progress:[];
+  const job=s.job_id||null;
+  if(job!==progressJob){
+    progressJob=job;
+    progressSeen=0;
+  }
+  if(!liveMode) return;
+  for(let i=progressSeen;i<lines.length;i++) appendThinkLine(lines[i]);
+  progressSeen=lines.length;
+}
 async function poll(){
  if(document.hidden) return;
- if(polling) return; polling=true;
+ if(polling){ pollDirty=true; return; }
+ polling=true;
  try{
-  const r=await fetch('/chat/poll?since='+since); const j=await r.json();
+  let url='/chat/poll?since='+since;
+  if(sessionId) url+='&session_id='+encodeURIComponent(sessionId);
+  const r=await fetch(url); const j=await r.json();
+  const s=j.state||{};
+  if(s.switched || (sessionId && s.session_id && s.session_id!==sessionId)){
+    adoptSession(s.session_id);
+    return;
+  }
+  if(s.session_id && !sessionId) rememberSession(s.session_id);
   let gotTerminal=false;
   for(const e of (j.events||[])){
     since=e.id+1;
     if(e.kind==='error') lastErrShown=e.text;
-    if(liveMode) add(e.kind, e.text, e.distill_id, e.sources, e.packet, e.compiled, e.stream);
+    if(liveMode) add(e.kind, e.text, e.distill_id, e.sources, e.packet, e.compiled, e.stream, e.id);
     if(e.kind==='result'||e.kind==='ask'||e.kind==='error') gotTerminal=true;
   }
-  const s=j.state||{};
+  applyProgress(s);
+  applyWeb(s);
   awaiting=!!s.awaiting; todo=!!s.todo_pending;
   approvalMode=!!(s.packet && s.packet.kind==='approval')
     || !!(s.question && /APPROVAL NEEDED/.test(s.question));
+  const off=s.offer||{};
+  activeOfferId=off.offer_id||'';
+  activeOfferHash=off.payload_hash||'';
   document.getElementById('url').textContent=s.url?('URL · '+s.url):'URL · —';
   const pol=[]; if(s.study_mode)pol.push(s.study_mode); if(s.mode)pol.push(s.mode); if(s.dry_run&&s.dry_run!=='approval')pol.push(s.dry_run==='full'||s.dry_run==='autonomous'?'autonomous':s.dry_run);
   document.getElementById('policy').textContent=pol.length?('Mode · '+pol.join(' · ')):'Mode · —';
@@ -1445,7 +1612,23 @@ async function poll(){
   }
   syncEmptyState();
  }catch(e){}
- finally{ polling=false; }
+ finally{
+   polling=false;
+   if(pollDirty && !document.hidden){
+     pollDirty=false;
+     poll();
+   }
+ }
+}
+document.addEventListener('visibilitychange',()=>{ if(!document.hidden) poll(); });
+let otrOn=false;
+const otrBtn=document.getElementById('otrBtn');
+if(otrBtn){
+  otrBtn.onclick=()=>{
+    otrOn=!otrOn;
+    otrBtn.classList.toggle('on', otrOn);
+    otrBtn.setAttribute('aria-pressed', otrOn?'true':'false');
+  };
 }
 async function send(){
  if(!liveMode){ alert('You are viewing a saved chat. Click Back to live first.'); return; }
@@ -1454,39 +1637,93 @@ async function send(){
    alert('Still uploading attachments — wait a moment, then send.');
    return;
  }
+ const draft=t;
+ const draftCtx=ctxBox.value;
+ const draftAttach=pendingAttach.slice();
+ const draftCtxOpen=ctxPanel.classList.contains('open');
+ const draftOtr=otrOn;
+ function restoreDraft(){
+   box.value=draft;
+   ctxBox.value=draftCtx;
+   pendingAttach=draftAttach;
+   renderAttach();
+   if(draftCtxOpen){ ctxPanel.classList.add('open'); ctxBtn.classList.add('on'); }
+   else { ctxPanel.classList.remove('open'); ctxBtn.classList.remove('on'); }
+   otrOn=draftOtr;
+   if(otrBtn){ otrBtn.classList.toggle('on', otrOn); otrBtn.setAttribute('aria-pressed', otrOn?'true':'false'); }
+   syncCtxBtn();
+   resizeBox();
+   persistChat();
+ }
  box.value=''; resizeBox(); persistChat();
  const dry=document.getElementById('dry').value||null;
  const mode=document.getElementById('studyMode').value||'general';
- const note=(ctxBox.value||'').trim();
- const attachCtx=pendingAttach.filter(a=>a.status==='ok'&&a.context)
+ const note=(draftCtx||'').trim();
+ const attachCtx=draftAttach.filter(a=>a.status==='ok'&&a.context)
    .map(a=>a.context).join('\n\n');
  const ctxParts=[note,attachCtx].filter(Boolean);
  const ctx=ctxParts.length?ctxParts.join('\n\n'):null;
- if(note||pendingAttach.length){
+ if(note||draftAttach.length){
    ctxBox.value=''; pendingAttach=[]; renderAttach();
    ctxPanel.classList.remove('open'); ctxBtn.classList.remove('on'); syncCtxBtn();
  }
- const payload={message:t,dry_run:dry,mode}; if(ctx) payload.context=ctx;
+ const sendOtr=otrOn;
+ otrOn=false;
+ if(otrBtn){ otrBtn.classList.remove('on'); otrBtn.setAttribute('aria-pressed','false'); }
+ const msgId=(window.crypto&&crypto.randomUUID)?crypto.randomUUID():(Date.now()+'-'+Math.random());
+ const payload={message:t,dry_run:dry,mode,client_msg_id:msgId};
+ if(sessionId) payload.session_id=sessionId;
+ if(ctx) payload.context=ctx;
+ if(sendOtr) payload.off_the_record=true;
  pendingThink=true;
  ensureThinking(true);
  try{
    const r=await fetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+   const j=await r.json().catch(()=>({}));
    if(!r.ok){
      pendingThink=false;
      finalizeThinking();
-     const j=await r.json().catch(()=>({}));
+     restoreDraft();
      add('error', (j&&(j.detail||j.error))||('Send failed ('+r.status+')'));
      return;
+   }
+   if(j.switched){
+     pendingThink=false;
+     finalizeThinking();
+     restoreDraft();
+     adoptSession(j.session_id);
+     pollDirty=false;
+     poll();
+     return;
+   }
+   if(j.session_id) rememberSession(j.session_id);
+   const seq=(j.seq!=null)?j.seq:j.since;
+   if(seq!=null && !j.duplicate){
+     add('user', t, null, null, null, null, null, seq);
+     since=seq+1;
+   } else if(j.duplicate && seq!=null){
+     since=Math.max(since, seq+1);
    }
  }catch(e){
    pendingThink=false;
    finalizeThinking();
+   restoreDraft();
    add('error', 'Could not reach the server — try again.');
    return;
  }
  poll();
 }
 function reply(t){ box.value=t; send(); }
+const offerYes=document.getElementById('offerYes');
+const offerNo=document.getElementById('offerNo');
+if(offerYes) offerYes.onclick=()=>{
+  if(activeOfferId&&activeOfferHash) resolveOffer(activeOfferId, activeOfferHash, true);
+  else reply('yes');
+};
+if(offerNo) offerNo.onclick=()=>{
+  if(activeOfferId&&activeOfferHash) resolveOffer(activeOfferId, activeOfferHash, false);
+  else reply('no');
+};
 box.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}});
 let chatStreamOn=false;
 let chatPollTimer=null;

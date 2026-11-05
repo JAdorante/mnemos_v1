@@ -1124,16 +1124,23 @@ def deliver_fill(peer_id: str, slot_row: dict, event_row: dict) -> dict:
     except Exception:
         meta = {}
     privacy = str(meta.get("privacy_class") or "internal")
-    from app.services import privacy_class as _pc
+    from app.services import egress
     denied_reason = None
-    if _pc.rank(privacy) >= _pc.rank(_pc.SENSITIVE):
-        denied_reason = f"privacy_class={privacy}"
-    else:
-        policy = get_policy(peer_id)
-        topic = classify_question(need) if not all(
-            a == "offer" for a in policy.values()) else None
-        if topic and policy.get(topic) == "deny":
-            denied_reason = f"policy denies {topic}"
+    policy = get_policy(peer_id)
+    topic = classify_question(need) if not all(
+        a == "offer" for a in policy.values()) else None
+    # The human already tapped yes on this slot, so offer becomes allow;
+    # the privacy ceiling and a deny policy still hold.
+    verdict = egress.decide(
+        path="peer", destination=peer_rec.get("name") or peer_id,
+        policy=policy.get(topic, "offer") if topic else "offer",
+        data_class=topic or "other", privacy_class=privacy,
+        approved=True, log=False,
+        meta={"slot_id": int(slot_row["fact_id"])})
+    if not verdict.allowed:
+        denied_reason = (f"policy denies {topic}"
+                         if verdict.reason == "policy deny" and topic
+                         else verdict.reason)
     if denied_reason:
         outbound = {"ask_id": ask_id, "origin_id": slot.get("origin_id"),
                     "slot_id": int(slot_row["fact_id"]),
@@ -1142,10 +1149,11 @@ def deliver_fill(peer_id: str, slot_row: dict, event_row: dict) -> dict:
         delivered = _deliver_update(peer_rec, outbound)
         audit("fill_withheld", peer_ids=[peer_id], ask_id=ask_id,
               reason=denied_reason, slot_id=int(slot_row["fact_id"]))
-        _egress("peer", peer_rec.get("name") or peer_id, privacy,
-                approving_action="user_tap", ok=False,
-                meta={"slot_id": int(slot_row["fact_id"]),
-                      "reason": denied_reason})
+        egress.record_send(
+            verdict, path="peer", destination=peer_rec.get("name") or peer_id,
+            ok=False, approved=True, approving_action="user_tap",
+            meta={"slot_id": int(slot_row["fact_id"]),
+                  "reason": denied_reason})
         return {"ok": True, "status": "policy_denied", "delivered": delivered,
                 "reason": denied_reason}
     text = " ".join(str(x) for x in (
@@ -1162,10 +1170,11 @@ def deliver_fill(peer_id: str, slot_row: dict, event_row: dict) -> dict:
     delivered = _deliver_update(peer_rec, outbound)
     audit("fill_delivered", peer_ids=[peer_id], ask_id=ask_id,
           slot_id=int(slot_row["fact_id"]), delivered=delivered)
-    _egress("peer", peer_rec.get("name") or peer_id, privacy,
-            approving_action="user_tap", ok=delivered,
-            meta={"slot_id": int(slot_row["fact_id"]),
-                  "event_id": event_row.get("id")})
+    egress.record_send(
+        verdict, path="peer", destination=peer_rec.get("name") or peer_id,
+        ok=delivered, approved=True, approving_action="user_tap",
+        meta={"slot_id": int(slot_row["fact_id"]),
+              "event_id": event_row.get("id")})
     if not delivered:
         return {"ok": False, "error": f"{peer_rec.get('name', 'peer')} unreachable",
                 "status": "undelivered"}
@@ -1180,18 +1189,6 @@ def _deliver_update(peer_rec: dict, payload: dict) -> bool:
     except Exception as exc:
         print(f"[peer] update delivery failed ({exc}).")
         return False
-
-
-def _egress(kind: str, destination: str, privacy: str, *,
-            approving_action: str, ok: bool, meta: dict | None = None) -> None:
-    try:
-        from app.services.model_log import model_log
-        model_log.log_egress(kind=kind, destination=destination,
-                             privacy_class=privacy,
-                             approving_action=approving_action, ok=ok,
-                             meta=meta)
-    except Exception:
-        pass
 
 
 def handle_update(peer: dict, payload: dict) -> dict:
@@ -1872,15 +1869,29 @@ def handle_ask(peer: dict, payload: dict) -> dict:
                     "redacted": [], "response_kind": "null_result",
                     "null_result": null_result("no_memory",
                                                slot_offered=offered)}
-        print(f"[peer] auto-answered {peer.get('name', '?')} "
-              f"({topic or 'dev flag'}): {question[:80]}")
-        return {"ok": True, "status": "answered", "ask_id": ask_id,
-                "topic": topic, "answer": composed["text"],
-                "claims": composed.get("claims") or [],
-                "as_of": composed.get("as_of"),
-                "near_miss": composed.get("near_miss"),
-                "redacted": composed["redacted"],
-                "response_kind": "answer"}
+        from app.services import egress
+        verdict = egress.decide(
+            path="peer", destination=peer.get("name") or peer_id,
+            policy="allow", data_class=topic or "other",
+            text=composed["text"], meta={"ask_id": ask_id})
+        if verdict.allowed:
+            print(f"[peer] auto-answered {peer.get('name', '?')} "
+                  f"({topic or 'dev flag'}): {question[:80]}")
+            return {"ok": True, "status": "answered", "ask_id": ask_id,
+                    "topic": topic, "answer": composed["text"],
+                    "claims": composed.get("claims") or [],
+                    "as_of": composed.get("as_of"),
+                    "near_miss": composed.get("near_miss"),
+                    "redacted": composed["redacted"],
+                    "response_kind": "answer"}
+        if verdict.denied:
+            audit("null_result", peer_ids=[peer_id], ask_id=ask_id,
+                  reason="policy_denied", egress=verdict.reason)
+            return {"ok": True, "status": "declined", "ask_id": ask_id,
+                    "topic": topic, "response_kind": "null_result",
+                    "null_result": null_result("policy_denied")}
+        # The egress rung wants a human: queue it like an offer-class ask.
+        print(f"[peer] holding auto-answer for a human ({verdict.reason}).")
     if action == "deny":
         print(f"[peer] auto-declined {peer.get('name', '?')} "
               f"({topic}): {question[:80]}")
@@ -2098,6 +2109,31 @@ def _mint_clip_grant(peer_id: str, ask_id: str, claims: list) -> dict | None:
         return None
 
 
+def _record_disclosure_decision(item: dict, peer_rec: dict,
+                                approve: bool) -> None:
+    """Shared decisions trail + a peer.disclosure learning pair: what this
+    human lets out, per topic and asker, is the signal a disclosure policy
+    could learn from. The answer is composed after approval, so the pair's
+    target is the share/withhold call, never answer text."""
+    from app.services import decisions
+    topic = item.get("topic") or "other"
+    decisions.record(
+        surface="peer.ask", subject=f"peer_ask:{item.get('id')}",
+        verdict="approved" if approve else "rejected",
+        shown={"peer": peer_rec.get("name"), "kind": item.get("kind"),
+               "topic": topic},
+        options=["approve", "deny"], via="button",
+        meta={"peer_id": item.get("peer_id"), "ask_id": item.get("ask_id")},
+        learn=dict(
+            task_type="peer.disclosure",
+            input_text=(f"kind: {item.get('kind') or 'ask'}\n"
+                        f"topic: {topic}\n"
+                        f"question: {item.get('question') or ''}"),
+            final_target=f"share {topic}" if approve else "",
+            source_refs={"peer_id": item.get("peer_id"),
+                         "ask_id": item.get("ask_id")}))
+
+
 def decide_ask(local_id: str, approve: bool) -> dict:
     """The human's disclosure verdict on one queued ask. Approve composes the
     answer NOW (so the human's yes is to the question, and composition uses
@@ -2127,6 +2163,7 @@ def decide_ask(local_id: str, approve: bool) -> dict:
             waited_s=round(time.time() - float(item.get("created_at") or 0), 3))
     except Exception as exc:
         print(f"[peer] telemetry skipped ({exc}).")
+    _record_disclosure_decision(item, peer_rec, approve)
 
     if not approve:
         # The wire shape stays {ask_id, declined}: `declined` already means
@@ -2201,6 +2238,23 @@ def decide_ask(local_id: str, approve: bool) -> dict:
             local_id, delivered, composed["text"], outbound, "null")
         out["response_kind"] = "null_result"
         return out
+    from app.services import egress
+    verdict = egress.decide(
+        path="peer", destination=peer_rec.get("name") or item.get("peer_id"),
+        policy="offer", approved=True, data_class=item.get("topic") or "other",
+        text=composed["text"], log=False, meta={"ask_id": item["ask_id"]})
+    if verdict.denied:
+        # The human said yes to the question, but what composition found
+        # cannot leave (privacy ceiling or rung); the asker gets the same
+        # typed null a policy denial produces.
+        outbound = {"ask_id": item["ask_id"], "declined": True}
+        delivered = _deliver(peer_rec, outbound)
+        egress.record_send(verdict, path="peer",
+                           destination=peer_rec.get("name") or "?",
+                           ok=False, approved=True,
+                           meta={"ask_id": item["ask_id"]})
+        return _complete_or_retry_delivery(
+            local_id, delivered, None, outbound, "denied")
     outbound = {"ask_id": item["ask_id"],
                 "answer": composed["text"],
                 "claims": composed.get("claims") or [],
@@ -2217,6 +2271,11 @@ def decide_ask(local_id: str, approve: bool) -> dict:
     if grant:
         outbound["clip_grant"] = grant
     delivered = _deliver(peer_rec, outbound)
+    egress.record_send(verdict, path="peer",
+                       destination=peer_rec.get("name") or "?",
+                       ok=delivered, approved=True,
+                       data_class=item.get("topic") or "other",
+                       meta={"ask_id": item["ask_id"]})
     out = _complete_or_retry_delivery(
         local_id, delivered, composed["text"], outbound, "answered")
     out["redacted"] = composed["redacted"]
@@ -2352,6 +2411,21 @@ def ask(peer_id: str, question: str, kind: str = "question",
         peer_rec = registry.get(peer_id)
     if peer_rec is None:
         return {"ok": False, "error": "unknown peer"}
+    # The question (with the brief enrichment added from OUR memory) is
+    # egress like any answer. A person typed questions, handoffs and
+    # notifies; org packets are machine-sent and wait for a human under a
+    # sealed rung.
+    from app.services import egress
+    verdict = egress.decide(
+        path=("org_digest" if kind.startswith("org_") else
+              "team" if (team_slug or team_ask_id) else "peer"),
+        destination=peer_rec.get("name") or peer_id, policy="allow",
+        approved=not kind.startswith("org_"), text=question,
+        scope=f"team:{team_slug}" if team_slug else "personal",
+        meta={"kind": kind})
+    if not verdict.allowed:
+        return {"ok": False, "error": f"not sent: {verdict.reason}",
+                "egress": verdict.action}
     ask_id = uuid.uuid4().hex[:12]
     if kind == "handoff" and not loop_id:
         loop_id = uuid.uuid4().hex[:12]

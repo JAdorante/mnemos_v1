@@ -203,3 +203,12 @@ def record_offer_outcome(text: str, accepted: bool, *, kind: str = "task",
             fact_id=fact_id, text=text, accepted=accepted, kind=kind)
     except Exception:
         pass
+    # The readiness signal already lives in the attention ledger; the shared
+    # trail records the verdict itself, without a learning pair.
+    from app.services import decisions
+    decisions.record(
+        surface="task.offer",
+        subject=f"fact:{fact_id}" if fact_id is not None else f"offer:{kind}",
+        verdict="approved" if accepted else "rejected",
+        shown={"kind": kind, "text": (text or "")[:200]},
+        options=["yes", "no"])

@@ -172,6 +172,7 @@ def heartbeat(store=None) -> dict[str, Any]:
         {"peer_url": _my_peer_url()}))
     m = membership()
     m.update(scopes=out.get("scopes") or [], policy=out.get("policy") or {},
+             rung=out.get("rung") or m.get("rung"),
              heartbeat_at=time.time(), org_id=out.get("org_id", m.get("org_id")),
              roster=out.get("roster") or [])
     _save(m)

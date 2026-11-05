@@ -234,7 +234,8 @@ def ask(
         answer = f"(Could not generate: {exc})\n\nWhat I found:\n{context[:1200]}"
 
     try:
-        checked = check_answer(answer, context, question=q, sources=sources)
+        checked = check_answer(
+            answer, context, question=q, sources=sources, rewrite=True)
         answer = checked.text
         check = checked.to_dict()
     except Exception:

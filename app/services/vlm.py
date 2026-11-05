@@ -181,68 +181,40 @@ class ClaudeVLM:
     (settings.vision.fallback_model) for frames that just need *a* read."""
 
     def __init__(self, model: str | None = None) -> None:
-        self._client = None
         self.model = model or settings.vision.model
 
-    def _ensure(self):
-        if self._client is None:
-            import anthropic
-
-            self._client = anthropic.Anthropic()
-        return self._client
-
-    def describe(self, jpeg_bytes: bytes) -> dict[str, Any]:
-        client = self._ensure()
+    def _parent(self, system: str, text: str, jpeg_bytes: bytes,
+                schema: dict | None = None) -> str:
+        """One paid vision read through the router's parent seam: spend cap,
+        privacy gate and cost log like every other paid call. VLMRouter writes
+        the vision distill row itself (it knows the local answer), so the
+        router's parent-only row is skipped here."""
+        from app.services.model_router import router
         b64 = base64.standard_b64encode(jpeg_bytes).decode("utf-8")
-        t0 = time.time()
-        resp = client.messages.create(
-            model=self.model,
-            max_tokens=1024,
-            system=_SYSTEM,
+        res = router.complete_parent(
+            "vision", system=system, model=self.model, max_tokens=1024,
+            schema=schema, input_bytes=len(jpeg_bytes), distill=False,
             messages=[{
                 "role": "user",
                 "content": [
                     {"type": "image", "source": {
                         "type": "base64", "media_type": "image/jpeg", "data": b64,
                     }},
-                    {"type": "text", "text": _USER},
+                    {"type": "text", "text": text},
                 ],
-            }],
-            output_config={"format": {"type": "json_schema", "schema": _SCHEMA}},
-        )
-        u = getattr(resp, "usage", None)
-        _log("vision", "claude", self.model, time.time() - t0, ok=True,
-             input_tokens=getattr(u, "input_tokens", 0) or 0,
-             output_tokens=getattr(u, "output_tokens", 0) or 0,
-             input_bytes=len(jpeg_bytes))
-        text = next((b.text for b in resp.content if b.type == "text"), "{}")
-        return _parse_json(text)
+            }])
+        return res["text"]
+
+    def describe(self, jpeg_bytes: bytes) -> dict[str, Any]:
+        return _parse_json(self._parent(_SYSTEM, _USER, jpeg_bytes,
+                                        schema=_SCHEMA) or "{}")
 
     def transcribe(self, jpeg_bytes: bytes) -> str:
         """Verbatim OCR of the image's text (handwriting). Returns raw text."""
-        client = self._ensure()
-        b64 = base64.standard_b64encode(jpeg_bytes).decode("utf-8")
-        t0 = time.time()
-        resp = client.messages.create(
-            model=self.model,
-            max_tokens=1024,
-            system=_TRANSCRIBE_SYSTEM,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "image", "source": {
-                        "type": "base64", "media_type": "image/jpeg", "data": b64,
-                    }},
-                    {"type": "text", "text": "Transcribe all text in this image, verbatim."},
-                ],
-            }],
-        )
-        u = getattr(resp, "usage", None)
-        _log("vision", "claude", self.model, time.time() - t0, ok=True,
-             input_tokens=getattr(u, "input_tokens", 0) or 0,
-             output_tokens=getattr(u, "output_tokens", 0) or 0,
-             input_bytes=len(jpeg_bytes))
-        return next((b.text for b in resp.content if b.type == "text"), "").strip()
+        return self._parent(
+            _TRANSCRIBE_SYSTEM,
+            "Transcribe all text in this image, verbatim.",
+            jpeg_bytes).strip()
 
 
 class OllamaVLM:

@@ -41,7 +41,7 @@ _OUTCOMES = frozenset({"accepted", "rejected", "edited"})
 # histogram, so /console/escalate's "escalation reasons" was ~26% non-
 # escalations — stats() now reports the filtered view alongside.
 _KEEP_REASONS = frozenset({"local_kept", "speculative_local_only",
-                           "parent_failed"})
+                           "parent_failed", "parent_only"})
 
 # parent_sim at or above this counts as "the parent agreed with the local
 # answer" — i.e. the escalation likely bought nothing.

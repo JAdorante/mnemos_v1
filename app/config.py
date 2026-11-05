@@ -28,30 +28,22 @@ def _ollama_reachable() -> bool:
 
 
 def apply_tester_profile() -> None:
-    """QUILL_PROFILE=tester pins the reliable 20% for the September cohort.
+    """QUILL_PROFILE=<name> fills in a deployment profile's defaults
+    (app/profiles.py) before settings is built. setdefault semantics, so a
+    single flag in .env still overrides it.
 
-    setdefault so a tester (or CI) can still override a single flag in .env.
-    Ollama stays optional: local vision is skipped unless a daemon is up.
-    """
-    if os.environ.get("QUILL_PROFILE", "").strip().lower() != "tester":
+    The tester profile also skips local vision unless an Ollama daemon is up
+    (Ollama stays optional for the September cohort)."""
+    from app import profiles
+    name = profiles.current()
+    if not name:
+        if os.environ.get("QUILL_PROFILE", "").strip():
+            profiles.apply(os.environ["QUILL_PROFILE"])   # warns: unknown
         return
-    pins = {
-        "QUILL_FIRST_RUN_MODE": "meeting",
-        "QUILL_PHONE_LINK": "0",
-        "QUILL_ANTICIPATE": "0",
-        "QUILL_DESKTOP_CAPTURE": "0",
-        "QUILL_PHONE_WATCH": "0",
-        "QUILL_AUTOSTART_NOTIFICATIONS": "0",
-        "QUILL_TEXT_LOCAL": "0",
-        # Research → memory writeback (sync) so memory-only follow-ups work
-        # in the same test loop without a Helpful click.
-        "QUILL_RESEARCH_INGEST": "1",
-        "QUILL_RESEARCH_INGEST_SYNC": "1",
-    }
-    if not _ollama_reachable():
-        pins["QUILL_VISION_LOCAL"] = "0"
-    for key, val in pins.items():
-        os.environ.setdefault(key, val)
+    extra = {}
+    if name == "tester" and not _ollama_reachable():
+        extra["QUILL_VISION_LOCAL"] = "0"
+    profiles.apply(name, extra=extra)
 
 
 apply_tester_profile()

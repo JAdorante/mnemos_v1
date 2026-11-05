@@ -134,6 +134,8 @@ class AttachedContextDoesNotPickTheSurfaceTests(unittest.TestCase):
             w.send(goal, display=message)
         if not w.fast_q.empty():
             return w.fast_q.get_nowait()
+        if not w.chat_q.empty():
+            return w.chat_q.get_nowait()
         return w.cmd_q.get_nowait()
 
     def test_document_words_cannot_hijack_the_surface(self) -> None:

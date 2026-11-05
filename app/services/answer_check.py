@@ -214,6 +214,17 @@ class AnswerCheck:
     buckets: dict[str, list[str]] = field(default_factory=dict)
     text: str = ""
     entailment: bool | None = None
+    original: str = ""
+    rewritten: str | None = None
+
+    @property
+    def corrected(self) -> bool:
+        """True when the returned text is the rewritten evidence dump."""
+        return bool(
+            self.rewritten
+            and self.text == self.rewritten
+            and self.text != (self.original or "")
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -223,6 +234,9 @@ class AnswerCheck:
             "buckets": {k: list(v) for k, v in self.buckets.items()},
             "text": self.text,
             "entailment": self.entailment,
+            "original": self.original,
+            "rewritten": self.rewritten,
+            "corrected": self.corrected,
         }
 
 
@@ -281,29 +295,35 @@ def check_answer(
     question: str = "",
     sources: list | None = None,
     entail: Callable[..., bool | None] | None = None,
+    rewrite: bool = True,
 ) -> AnswerCheck:
-    """Gate answer tokens against context; downgrade on fabricated tokens.
+    """Gate answer tokens against context; optionally rewrite on failure.
 
     When context is empty, or the answer has no name/date/price tokens, the
     check is skipped (general-knowledge / non-personal replies).
+
+    ``rewrite`` controls whether a failed check replaces ``text`` with the
+    evidence dump. Callers that only want the buckets/status keep rewrite=False;
+    ``original`` and ``rewritten`` are always populated when a downgrade would
+    apply so the UI can show a Corrected badge when the dump was applied.
     """
     text = (answer or "").strip()
+    original = text
     ctx = (context or "").strip()
+    empty_buckets = {"confirmed": [], "likely": [],
+                     "conflicting": [], "missing": []}
     if not text:
         return AnswerCheck(ok=True, status="skipped", text=text,
-                           buckets={"confirmed": [], "likely": [],
-                                    "conflicting": [], "missing": []})
+                           buckets=empty_buckets, original=original)
     if not ctx:
         return AnswerCheck(ok=True, status="skipped", text=text,
-                           buckets={"confirmed": [], "likely": [],
-                                    "conflicting": [], "missing": []})
+                           buckets=empty_buckets, original=original)
 
     tokens = extract_check_tokens(text)
     flat = tokens["names"] + tokens["dates"] + tokens["prices"]
     if not flat:
         return AnswerCheck(ok=True, status="skipped", text=text,
-                           buckets={"confirmed": [], "likely": [],
-                                    "conflicting": [], "missing": []})
+                           buckets=empty_buckets, original=original)
 
     ctx_norm = _norm(ctx)
     confirmed: list[str] = []
@@ -336,7 +356,9 @@ def check_answer(
             status="downgraded",
             fabricated=fabricated,
             buckets=buckets,
-            text=downgraded,
+            text=downgraded if rewrite else original,
+            original=original,
+            rewritten=downgraded,
             entailment=None,
         )
 
@@ -362,7 +384,9 @@ def check_answer(
                 status="downgraded",
                 fabricated=[],
                 buckets=buckets,
-                text=downgraded,
+                text=downgraded if rewrite else original,
+                original=original,
+                rewritten=downgraded,
                 entailment=False,
             )
 
@@ -372,5 +396,6 @@ def check_answer(
         fabricated=[],
         buckets=buckets,
         text=text,
+        original=original,
         entailment=entailment,
     )

@@ -64,9 +64,13 @@ class OfferReplyTests(unittest.TestCase):
         })
         self.assertIsNotNone(w.pending_todo)
         w.pending_todo["created_at"] = time.time() - (ab._OFFER_TTL_S + 5)
+        w.pending_todo["expires_at"] = time.time() - 1
         n = w.expire_stale_offers()
         self.assertGreaterEqual(n, 1)
         self.assertIsNone(w.pending_todo)
+        self.assertTrue(any(
+            (e.get("stream") or {}).get("type") == "offer.expired"
+            for e in w.events))
 
     def test_reasoner_timeout_marks_dismissed(self) -> None:
         w = AgentWorker()
@@ -87,6 +91,7 @@ class OfferReplyTests(unittest.TestCase):
             w.propose_reasoner(prop)
             self.assertIsNotNone(w.pending_todo)
             w.pending_todo["created_at"] = time.time() - (ab._OFFER_TTL_S + 5)
+            w.pending_todo["expires_at"] = time.time() - 1
             w.expire_stale_offers()
         self.assertIsNone(w.pending_todo)
         md.assert_called_once()

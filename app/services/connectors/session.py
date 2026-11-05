@@ -29,6 +29,18 @@ def reset() -> None:
         _disabled.clear()
 
 
+def load_overrides(overrides: dict | None) -> None:
+    """Replace the in-memory toggles from a session row."""
+    raw = overrides or {}
+    enabled = raw.get("enabled") or []
+    disabled = raw.get("disabled") or []
+    with _lock:
+        _enabled.clear()
+        _disabled.clear()
+        _enabled.update(str(x).strip().lower() for x in enabled if str(x).strip())
+        _disabled.update(str(x).strip().lower() for x in disabled if str(x).strip())
+
+
 def snapshot() -> dict[str, Any]:
     with _lock:
         return {

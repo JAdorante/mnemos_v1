@@ -233,7 +233,8 @@ def decide(store, packet_id: str, decision: str, payload_hash: str, *,
                                  approved_by=member, approved_at=now)
         node_store.transition(store, claim["id"], "rejected",
                               reason=reason or "rejected by reviewer")
-        _learn(store, claim, "rejected", reason=reason)
+        _learn(store, claim, "rejected", reason=reason,
+               decided=_decided(packet, member=member, via=approved_via))
         _audit(store, member or "owner", "packet.reject", packet_id,
                payload_hash=packet["payload_hash"])
         return {"ok": True, "decision": "reject", "claim_status": "rejected"}
@@ -257,6 +258,13 @@ def decide(store, packet_id: str, decision: str, payload_hash: str, *,
                               proposed_scope=scope_id or packet["scope_id"],
                               target_hint=target_ref or packet["target_ref"])
         claim = node_store.get_claim(store, claim["id"])
+        # The edit itself is a verdict; its pair comes when the re-minted
+        # packet is approved (as `edited`).
+        from app.services import decisions
+        decisions.record(surface="records.review", verdict="edited",
+                         edit={"value": new_value}, store=store,
+                         options=["approve", "edit", "reject"],
+                         **_decided(packet, member=member, via=approved_via))
         minted = _mint(store, claim, scope_id=scope_id or packet["scope_id"],
                        target_ref=target_ref or packet["target_ref"],
                        include_quote=quote, now=now)
@@ -276,7 +284,8 @@ def decide(store, packet_id: str, decision: str, payload_hash: str, *,
                              approved_by=member, approved_at=now)
     edited = claim["status"] == "edited"
     node_store.transition(store, claim["id"], "approved", reason=None)
-    _learn(store, claim, "edited" if edited else "accepted")
+    _learn(store, claim, "edited" if edited else "accepted",
+           decided=_decided(packet, member=member, via=approved_via))
     _audit(store, member or "owner", "packet.approve", packet_id,
            payload_hash=packet["payload_hash"], approved_via=approved_via)
     node_store.enqueue(store, "packet_submit", packet_id,
@@ -320,6 +329,24 @@ def deliver(store, packet_id: str, *, now: float | None = None) -> dict[str, Any
         node_store.transition(store, claim["id"], "failed",
                               reason="packet_expired before delivery")
         raise org_client.OrgRefused(410, "packet_expired", "TTL passed in outbox")
+    # The human approved this packet; the shared egress rule still holds
+    # (privacy ceiling, rung) and logs the send.
+    from app.services import egress
+    verdict = egress.decide(
+        path="records", destination="org record service", policy="offer",
+        approved=packet.get("decision") == "approve" or
+        packet["state"] == "submitted",
+        scope=str(packet.get("scope_id") or "org"), data_class="work",
+        text=json.dumps(packet.get("payload") or {}, ensure_ascii=False,
+                        sort_keys=True, default=str),
+        meta={"packet_id": packet_id})
+    if not verdict.allowed:
+        node_store.update_packet(store, packet_id, state="failed",
+                                 last_error=f"egress: {verdict.reason}"[:500])
+        node_store.transition(store, claim["id"], "failed",
+                              reason=f"egress {verdict.action}: "
+                                     f"{verdict.reason}")
+        raise org_client.OrgRefused(403, "egress_denied", verdict.reason)
     node_store.update_packet(store, packet_id, state="submitted",
                              submitted_at=now,
                              submitted_hash=packet["payload_hash"],
@@ -399,7 +426,10 @@ def discard(store, claim_id: str, *, reason: str = "",
     for p in node_store.packets_for_claim(store, claim_id):
         if p["state"] == "open":
             node_store.update_packet(store, p["id"], state="superseded")
-    _learn(store, claim, "dismissed", reason=reason)
+    _learn(store, claim, "dismissed", reason=reason,
+           decided=_decided(None, member=None, via=None,
+                            subject=f"claim:{claim_id}")
+           | {"actor": actor})
     _audit(store, actor, "claim.discard", claim_id)
     return {"ok": True, "claim_status": "discarded"}
 
@@ -423,27 +453,49 @@ def retry(store, claim_id: str, *, now: float | None = None) -> dict[str, Any]:
 
 
 def _learn(store, claim: dict[str, Any] | None, verdict: str, *,
-           reason: str | None = None) -> None:
+           reason: str | None = None,
+           decided: dict[str, Any] | None = None) -> None:
     """Terminal verdicts -> learning_store, so extraction learns what gets
-    accepted. Input is the evidence span (the extractor's input slice)."""
+    accepted. Input is the evidence span (the extractor's input slice).
+
+    `decided` marks a human verdict ({subject, shown_hash, actor, via}): it
+    goes into the shared decisions trail and the pair is derived from it.
+    Without it (a conflict loser the system retired) the pair is written
+    directly, since nobody decided anything."""
     if not claim:
         return
     try:
-        from app.services import learning_store
         spans = " | ".join(e.get("span") or "" for e in claim.get("evidence") or [])
         target = json.dumps(claim.get("value") or {}, sort_keys=True,
                             ensure_ascii=False)
-        learning_store.record(
+        learn = dict(
             task_type=f"records.claim.{claim['kind']}",
             input_text=spans, local_output=target,
             final_target=target if verdict in ("accepted", "edited") else "",
-            verdict=verdict, verdict_source="records.review",
+            verdict_source="records.review",
             source_refs={"claim_id": claim["id"],
                          "candidate_id": claim.get("candidate_id"),
-                         "reason": reason},
-            store=store)
+                         "reason": reason})
+        if decided is None:
+            from app.services import learning_store
+            learning_store.record(verdict=verdict, store=store, **learn)
+            return
+        from app.services import decisions
+        decisions.record(
+            surface="records.review", verdict=verdict, learn=learn,
+            shown={"kind": claim["kind"], "value": claim.get("value")},
+            options=["approve", "edit", "reject"], store=store,
+            meta={"reason": reason} if reason else None, **decided)
     except Exception as exc:
         print(f"[promotion] learning record skipped ({exc}).")
+
+
+def _decided(packet: dict[str, Any] | None, *, member: str | None,
+             via: str | None, subject: str | None = None) -> dict[str, Any]:
+    return {"subject": subject or f"promotion_packet:{(packet or {}).get('id')}",
+            "shown_hash": (packet or {}).get("payload_hash"),
+            "actor": f"member:{member}" if member else "owner",
+            "via": via}
 
 
 def precision(store) -> dict[str, Any]:

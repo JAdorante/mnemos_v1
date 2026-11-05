@@ -24,8 +24,33 @@ class AnswerCheckTests(unittest.TestCase):
         self.assertTrue(
             checked.text.startswith("Here's what I found, with the evidence:")
         )
+        self.assertEqual(checked.original, answer)
+        self.assertEqual(checked.rewritten, checked.text)
+        self.assertTrue(checked.corrected)
+        self.assertTrue(checked.to_dict()["corrected"])
         self.assertIn("$55", checked.buckets["missing"])
         self.assertIn("David", checked.buckets["confirmed"])
+
+    def test_rewrite_false_keeps_original_text(self):
+        from app.services.answer_check import check_answer
+
+        context = "David said the subscription costs $49 per month."
+        answer = "David said it costs $55 per month."
+        checked = check_answer(
+            answer, context,
+            question="What did David say the price was?",
+            entail=lambda *a, **k: True,
+            rewrite=False,
+        )
+        self.assertFalse(checked.ok)
+        self.assertEqual(checked.status, "downgraded")
+        self.assertEqual(checked.text, answer)
+        self.assertEqual(checked.original, answer)
+        self.assertTrue(
+            (checked.rewritten or "").startswith(
+                "Here's what I found, with the evidence:")
+        )
+        self.assertFalse(checked.corrected)
 
     def test_fabricated_name_downgrades(self):
         from app.services.answer_check import check_answer

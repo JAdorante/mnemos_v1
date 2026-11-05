@@ -147,10 +147,12 @@ class Recorder:
 
     def record_decision(self, packet_id: int | None, decision: str, *,
                         user_edit: str | None = None,
-                        approved_via: str | None = None) -> None:
+                        approved_via: str | None = None,
+                        surface: str = "agent.packet") -> None:
         """Stamp the packet's decision and log the matching feedback row. On an
         `edit`, user_edit is the revision instruction — the signal we keep.
-        `approved_via` is `button` or `typed` (plan 0.6)."""
+        `approved_via` is `button` or `typed` (plan 0.6). Every verdict also
+        lands in the shared decisions trail under `surface`."""
         try:
             s = self._s()
             if packet_id is not None:
@@ -161,6 +163,43 @@ class Recorder:
                 packet_id=packet_id, user_edit=(user_edit or None))
         except Exception as exc:
             print(f"[agent-log] record_decision skipped ({exc}).")
+            return
+        self._record_shared_decision(packet_id, decision, user_edit=user_edit,
+                                     approved_via=approved_via,
+                                     surface=surface)
+
+    def _record_shared_decision(self, packet_id, decision, *, user_edit,
+                                approved_via, surface) -> None:
+        from app.services import decisions
+        try:
+            pkt = self._s().get_action_packet(packet_id) or {}
+        except Exception:
+            pkt = {}
+        fields = pkt.get("fields") or {}
+        draft = "\n".join(f"{k}: {v}" for k, v in fields.items()
+                          if isinstance(v, (str, int, float)) and str(v))
+        learn = None
+        if surface == "agent.packet" and draft:
+            # An outbound draft the human approved, cancelled or asked to
+            # change. On an edit the target is their revision instruction,
+            # not a finished draft, which is why agent.* stays out of LoRA
+            # curation and exemplar retrieval.
+            learn = dict(
+                task_type="agent.draft",
+                input_text=str(pkt.get("goal") or pkt.get("summary") or ""),
+                local_output=draft,
+                final_target=(user_edit or "") if decision == "edit"
+                else draft if decision == "approve" else "",
+                source_refs={"packet_id": packet_id,
+                             "source_fact_ids": pkt.get("source_fact_ids")})
+        decisions.record(
+            surface=surface, subject=f"packet:{packet_id}", verdict=decision,
+            shown_hash=pkt.get("payload_hash"),
+            shown={"summary": pkt.get("summary"), "fields": fields} if pkt
+            else None,
+            options=["approve", "edit", "cancel"],
+            edit=user_edit if decision == "edit" else None,
+            via=approved_via, learn=learn, store=self._s())
 
     def set_executed_hash(self, packet_id: int | None, executed_hash: str) -> None:
         """Stamp verified commit hash for duplicate-send refusal (plan 0.8)."""

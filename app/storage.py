@@ -164,6 +164,11 @@ def _run_delete_hooks(store, *, deleted_events=(), deleted_facts=(),
                   f"skipped ({exc}).")
 
 
+def _json_or_none(v) -> str | None:
+    return None if v is None else json.dumps(v, ensure_ascii=False,
+                                              default=str)
+
+
 class Store:
     def __init__(self, db_path: Path | None = None, audio_dir: Path | None = None,
                  *, readonly: bool = False) -> None:
@@ -1400,6 +1405,7 @@ class Store:
         self._migrate()
         self._migrate_audio_tele()
         self._migrate_records()
+        self._migrate_decisions()
 
     # Stage timers added after the table shipped. Additive only, and the type is
     # part of the tuple so a new column never needs a second lookup elsewhere.
@@ -2609,6 +2615,118 @@ class Store:
             "CREATE INDEX IF NOT EXISTS idx_commitments_status "
             "ON commitments(status)")
         self._conn.commit()
+
+    # ------------------------------ decisions ------------------------------
+    def _migrate_decisions(self) -> None:
+        """One row per human verdict, whatever surface asked for it
+        (app/services/decisions.py). Additive and idempotent."""
+        with self._lock:
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS decisions (
+                    id               TEXT PRIMARY KEY,
+                    decided_at       REAL NOT NULL,
+                    surface          TEXT NOT NULL,   -- facts.review, agent.packet, ...
+                    subject          TEXT NOT NULL,   -- "fact:12", "packet:7", ...
+                    verdict          TEXT NOT NULL,   -- decisions.VERDICTS
+                    shown_hash       TEXT,            -- hash of what the human saw
+                    shown_json       TEXT,            -- short summary of it
+                    options_json     TEXT,            -- what they could have chosen
+                    edit_json        TEXT,            -- their edit, when they made one
+                    actor            TEXT NOT NULL,   -- user | member:<id> | ...
+                    via              TEXT,            -- button | typed | route | ...
+                    learning_pair_id TEXT,            -- the pair derived from it
+                    meta_json        TEXT
+                )
+                """)
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_decisions_time "
+                "ON decisions(decided_at)")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_decisions_surface "
+                "ON decisions(surface, decided_at)")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_decisions_subject "
+                "ON decisions(subject)")
+            self._conn.commit()
+
+    def add_decision(self, row: dict) -> str:
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO decisions
+                    (id, decided_at, surface, subject, verdict, shown_hash,
+                     shown_json, options_json, edit_json, actor, via,
+                     learning_pair_id, meta_json)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (row["id"], row["decided_at"], row["surface"], row["subject"],
+                 row["verdict"], row.get("shown_hash"),
+                 _json_or_none(row.get("shown")),
+                 _json_or_none(row.get("options")),
+                 _json_or_none(row.get("edit")),
+                 row["actor"], row.get("via"), row.get("learning_pair_id"),
+                 _json_or_none(row.get("meta"))))
+            self._conn.commit()
+        return str(row["id"])
+
+    def set_decision_pair(self, decision_id: str, pair_id: str | None) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE decisions SET learning_pair_id = ? WHERE id = ?",
+                (pair_id, str(decision_id)))
+            self._conn.commit()
+
+    @staticmethod
+    def _decision_row(r) -> dict:
+        d = dict(r)
+        for col, key in (("shown_json", "shown"), ("options_json", "options"),
+                         ("edit_json", "edit"), ("meta_json", "meta")):
+            raw = d.pop(col, None)
+            try:
+                d[key] = json.loads(raw) if raw else None
+            except Exception:
+                d[key] = None
+        return d
+
+    def get_decision(self, decision_id: str) -> dict | None:
+        with self._lock:
+            r = self._conn.execute("SELECT * FROM decisions WHERE id = ?",
+                                   (str(decision_id),)).fetchone()
+        return self._decision_row(r) if r else None
+
+    def list_decisions(self, *, surface: str | None = None,
+                       subject: str | None = None,
+                       since: float | None = None,
+                       limit: int = 200) -> list[dict]:
+        sql, args = "SELECT * FROM decisions WHERE 1=1", []
+        if surface:
+            sql += " AND surface = ?"
+            args.append(surface)
+        if subject:
+            sql += " AND subject = ?"
+            args.append(subject)
+        if since is not None:
+            sql += " AND decided_at >= ?"
+            args.append(float(since))
+        sql += " ORDER BY decided_at DESC, rowid DESC LIMIT ?"
+        args.append(int(limit))
+        with self._lock:
+            rows = self._conn.execute(sql, args).fetchall()
+        return [self._decision_row(r) for r in rows]
+
+    def decision_counts(self, *, since: float | None = None) -> list[dict]:
+        sql = ("SELECT surface, verdict, COUNT(*) AS n, "
+               "SUM(learning_pair_id IS NOT NULL) AS learned "
+               "FROM decisions")
+        args: list = []
+        if since is not None:
+            sql += " WHERE decided_at >= ?"
+            args.append(float(since))
+        sql += " GROUP BY surface, verdict"
+        with self._lock:
+            rows = self._conn.execute(sql, args).fetchall()
+        return [dict(r) for r in rows]
 
     # --------------------------- learning pairs ---------------------------
     def add_learning_pair(self, row: dict) -> str | None:

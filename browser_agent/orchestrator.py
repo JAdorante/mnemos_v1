@@ -550,6 +550,11 @@ class Agent:
         # (the shared profile is often already held by Exec.AI → "Opening in
         # existing browser session"). Browser starts on first web goal.
         self._browser_started = False
+        self.cancel_check = None
+        # Chat lane: classify here, and let the browser thread start Playwright.
+        self.defer_browser = False
+        self.defer_hands = False
+        self._browser_handoff = None
         # Hosts already given the sign-in-wall reveal hint (once per session —
         # login flows revisit their wall on every step).
         self._signin_hint_hosts: set[str] = set()
@@ -1738,7 +1743,8 @@ class Agent:
 
     # --- the loop ----------------------------------------------------------
     def run_goal(self, goal, dry_run=None, surface=None, packet=None,
-                 source_fact_id=None, study_mode=None, source_fact_ids=None):
+                 source_fact_id=None, study_mode=None, source_fact_ids=None,
+                 handoff=None):
         """Bracket the run with Sparrow's agent-run log (Phase 5), then delegate.
 
         The heavy lifting is in _run_goal_inner; this thin wrapper opens a run
@@ -1799,7 +1805,8 @@ class Agent:
             self._log("→ autonomous mode (no approval prompts until done)")
         try:
             result, status = self._run_goal_inner(
-                goal, dry_run=dry_run, surface=surface, study_mode=study_mode)
+                goal, dry_run=dry_run, surface=surface, study_mode=study_mode,
+                handoff=handoff)
             return result, status
         finally:
             self._autonomous_run = False
@@ -1839,111 +1846,169 @@ class Agent:
             self._log(f"Study mode: {info.get('label')} — {info.get('posture')}")
         return block
 
-    def _run_goal_inner(self, goal, dry_run=None, surface=None, study_mode=None):
+    def _cancelled(self) -> bool:
+        fn = getattr(self, "cancel_check", None)
+        if not callable(fn):
+            return False
+        try:
+            return bool(fn())
+        except Exception:
+            return False
+
+    def _abandon_browser(self) -> None:
+        """Close Playwright without ending the memory session. A later goal starts it again."""
+        if not getattr(self, "_browser_started", False):
+            return
+        try:
+            self.driver.close()
+        except Exception:
+            pass
+        self._browser_started = False
+        try:
+            from app.services import agent_activity
+            agent_activity.set_browser_run(False)
+        except Exception:
+            pass
+
+    def _remember_handoff(self, route, ctx, level, study_guidance, surface) -> None:
+        """Stash the classification so another lane can run the hands."""
+        self._browser_handoff = {
+            "route": dict(route or {}),
+            "ctx": ctx or "",
+            "level": level,
+            "study_guidance": study_guidance or "",
+            "surface": surface,
+        }
+        self.last_steps, self.last_replans = 0, 0
+
+    def _run_goal_inner(self, goal, dry_run=None, surface=None, study_mode=None,
+                        handoff=None):
+        if self._cancelled():
+            self._abandon_browser()
+            return "(stopped — that chat was closed.)", "cancelled"
         # `dry_run` overrides this session's default posture for one run.
         level = dry_run if dry_run in cfg.DRY_RUN_LEVELS else self.dry_run
         self.last_dry_run = level
 
-        study_ctx = self._study_block(study_mode)
-        study_guidance = study_ctx.strip()
+        if handoff:
+            route = dict(handoff.get("route") or {})
+            ctx = handoff.get("ctx") or ""
+            study_guidance = (handoff.get("study_guidance") or "").strip()
+            if handoff.get("level") in cfg.DRY_RUN_LEVELS:
+                level = handoff["level"]
+                self.last_dry_run = level
+            self.last_route = route
+        else:
+            study_ctx = self._study_block(study_mode)
+            study_guidance = study_ctx.strip()
 
-        # Ground in memories + session transcript (session first on follow-ups).
-        # Both flow to the router, planner, executor, and direct-answer path.
-        ctx = study_ctx + self._build_ctx(goal)
+            # Ground in memories + session transcript (session first on follow-ups).
+            # Both flow to the router, planner, executor, and direct-answer path.
+            ctx = study_ctx + self._build_ctx(goal)
 
-        # Forced surface (e.g. the /desktop route): skip the router entirely and
-        # hand straight to that loop. Lets a caller who already knows the task is
-        # a desktop/OS action bypass the LLM's web-vs-desktop guess.
-        if surface == "desktop":
-            self._log("→ desktop (forced route)")
-            forced = {"surface": "desktop", "intent": "desktop_task", "forced": True}
-            self.last_route = forced
-            self._recorder.annotate_run(surface="desktop", intent="desktop_task",
-                                        agent_type="desktop", risk_level="medium")
+            # Forced surface (e.g. the /desktop route): skip the router entirely and
+            # hand straight to that loop. Lets a caller who already knows the task is
+            # a desktop/OS action bypass the LLM's web-vs-desktop guess.
+            if surface == "desktop":
+                self._log("→ desktop (forced route)")
+                forced = {"surface": "desktop", "intent": "desktop_task", "forced": True}
+                self.last_route = forced
+                self._recorder.annotate_run(surface="desktop", intent="desktop_task",
+                                            agent_type="desktop", risk_level="medium")
+                try:
+                    self.mem.log_event(self.session_id, goal, forced)
+                except Exception:
+                    pass
+                return self._run_desktop_goal(goal, ctx, level=level)
+
+            if surface == "phone_link":
+                self._log("→ phone_link (forced route)")
+                forced = {"surface": "phone_link", "intent": "phone_task", "forced": True}
+                self.last_route = forced
+                self._recorder.annotate_run(surface="phone_link", intent="phone_task",
+                                            agent_type="phone_link", risk_level="medium")
+                try:
+                    self.mem.log_event(self.session_id, goal, forced)
+                except Exception:
+                    pass
+                return self._run_phone_link_goal(goal, ctx)
+
+            # Route first (no Playwright yet): decide web vs desktop vs answer-only.
+            route = self.llm.route(goal, ctx)
+            self.last_route = route
+            self._log(_route_text(route))
+            self._recorder.annotate_run(
+                surface=route.get("surface"), intent=route.get("intent"),
+                risk_level=_risk_from_route(route))
             try:
-                self.mem.log_event(self.session_id, goal, forced)
+                self.mem.log_event(self.session_id, goal, route)
             except Exception:
                 pass
-            return self._run_desktop_goal(goal, ctx, level=level)
 
-        if surface == "phone_link":
-            self._log("→ phone_link (forced route)")
-            forced = {"surface": "phone_link", "intent": "phone_task", "forced": True}
-            self.last_route = forced
-            self._recorder.annotate_run(surface="phone_link", intent="phone_task",
-                                        agent_type="phone_link", risk_level="medium")
-            try:
-                self.mem.log_event(self.session_id, goal, forced)
-            except Exception:
-                pass
-            return self._run_phone_link_goal(goal, ctx)
+            # Desktop/OS task (open an app, make a project, run a build command):
+            # hand off to the guarded desktop loop. Checked before the no-browser
+            # branch because desktop tasks also have requires_browser=False.
+            if route.get("surface") == "desktop":
+                # The router reads "open Chrome / a browser" as a desktop app launch.
+                # Where there is no desktop agent (every hosted seat), that answer
+                # was a dead end — the ghost browser IS this install's browser.
+                if _wants_a_browser(goal, route) and self._desktop() is None:
+                    self._log("→ no desktop control here; using the agent browser")
+                    route = {**route, "surface": "browser", "requires_browser": True,
+                             "tool": "browser_agent"}
+                    self.last_route = route
+                elif getattr(self, "defer_hands", False):
+                    self._remember_handoff(route, ctx, level, study_guidance, "desktop")
+                    return "", "needs_desktop"
+                else:
+                    return self._run_desktop_goal(goal, ctx, level=level)
 
-        # Route first (no Playwright yet): decide web vs desktop vs answer-only.
-        route = self.llm.route(goal, ctx)
-        self.last_route = route
-        self._log(_route_text(route))
-        self._recorder.annotate_run(
-            surface=route.get("surface"), intent=route.get("intent"),
-            risk_level=_risk_from_route(route))
-        try:
-            self.mem.log_event(self.session_id, goal, route)
-        except Exception:
-            pass
+            if route.get("surface") == "phone_link":
+                if getattr(self, "defer_hands", False):
+                    self._remember_handoff(route, ctx, level, study_guidance, "phone_link")
+                    return "", "needs_phone"
+                return self._run_phone_link_goal(goal, ctx)
 
-        # Desktop/OS task (open an app, make a project, run a build command):
-        # hand off to the guarded desktop loop. Checked before the no-browser
-        # branch because desktop tasks also have requires_browser=False.
-        if route.get("surface") == "desktop":
-            # The router reads "open Chrome / a browser" as a desktop app launch.
-            # Where there is no desktop agent (every hosted seat), that answer
-            # was a dead end — the ghost browser IS this install's browser.
-            if _wants_a_browser(goal, route) and self._desktop() is None:
-                self._log("→ no desktop control here; using the agent browser")
+            # Live failure (2026-09-25): "what's on my X feed" routed to 'none'
+            # because X has no connector, and the answer said it couldn't browse.
+            if route.get("surface") == "none" and _wants_a_live_feed(goal):
+                self._log("→ a live feed is web content; using the agent browser")
                 route = {**route, "surface": "browser", "requires_browser": True,
                          "tool": "browser_agent"}
                 self.last_route = route
-            else:
-                return self._run_desktop_goal(goal, ctx, level=level)
 
-        if route.get("surface") == "phone_link":
-            return self._run_phone_link_goal(goal, ctx)
+            # No web action needed (a memory/conversational question): answer directly.
+            if not route.get("requires_browser", True):
+                ans = self.llm.direct_answer(goal, ctx, mode_guidance=study_guidance)
+                # Escalate distill id (if any) for chat 👍/👎/✏️ → set_user_outcome.
+                self.last_distill_id = getattr(self.llm, "last_distill_id", None)
+                self.transcript.append({"goal": goal, "result": ans})
+                self.last_steps, self.last_replans = 0, 0
+                return ans, "answered_no_browser"
 
-        # Live failure (2026-09-25): "what's on my X feed" routed to 'none'
-        # because X has no connector, and the answer said it couldn't browse.
-        if route.get("surface") == "none" and _wants_a_live_feed(goal):
-            self._log("→ a live feed is web content; using the agent browser")
-            route = {**route, "surface": "browser", "requires_browser": True,
-                     "tool": "browser_agent"}
-            self.last_route = route
+            # Connector lane: a mail/calendar READ for a provider the user has
+            # connected is answered from the connector's own data (headers and
+            # titles, same scopes as background capture) — not by driving the
+            # provider's web UI into a sign-in wall. Writes (send/draft/schedule)
+            # never take this lane; the browser path keeps its approval gate.
+            lane = _connector_lane(route)
+            if lane is not None:
+                block, meta = lane
+                self._log(f"→ connector lane: {', '.join(meta['labels'])} — "
+                          f"{meta['mail']} messages, {meta['calendar']} events "
+                          f"(last {meta['days']:g} days); no browser needed")
+                self.last_route = {**route, "tool": "connector", "surface": "none",
+                                   "requires_browser": False,
+                                   "connector": meta["ids"]}
+                ans = self.llm.direct_answer(goal, ctx + block, mode_guidance=study_guidance)
+                self.last_distill_id = getattr(self.llm, "last_distill_id", None)
+                self.transcript.append({"goal": goal, "result": ans})
+                self.last_steps, self.last_replans = 0, 0
+                return ans, "answered_no_browser"
 
-        # No web action needed (a memory/conversational question): answer directly.
-        if not route.get("requires_browser", True):
-            ans = self.llm.direct_answer(goal, ctx, mode_guidance=study_guidance)
-            # Escalate distill id (if any) for chat 👍/👎/✏️ → set_user_outcome.
-            self.last_distill_id = getattr(self.llm, "last_distill_id", None)
-            self.transcript.append({"goal": goal, "result": ans})
-            self.last_steps, self.last_replans = 0, 0
-            return ans, "answered_no_browser"
-
-        # Connector lane: a mail/calendar READ for a provider the user has
-        # connected is answered from the connector's own data (headers and
-        # titles, same scopes as background capture) — not by driving the
-        # provider's web UI into a sign-in wall. Writes (send/draft/schedule)
-        # never take this lane; the browser path keeps its approval gate.
-        lane = _connector_lane(route)
-        if lane is not None:
-            block, meta = lane
-            self._log(f"→ connector lane: {', '.join(meta['labels'])} — "
-                      f"{meta['mail']} messages, {meta['calendar']} events "
-                      f"(last {meta['days']:g} days); no browser needed")
-            self.last_route = {**route, "tool": "connector", "surface": "none",
-                               "requires_browser": False,
-                               "connector": meta["ids"]}
-            ans = self.llm.direct_answer(goal, ctx + block, mode_guidance=study_guidance)
-            self.last_distill_id = getattr(self.llm, "last_distill_id", None)
-            self.transcript.append({"goal": goal, "result": ans})
-            self.last_steps, self.last_replans = 0, 0
-            return ans, "answered_no_browser"
+            if getattr(self, "defer_browser", False):
+                self._remember_handoff(route, ctx, level, study_guidance, "browser")
+                return "", "needs_browser"
 
         # Web path only from here — start Playwright now.
         self._ensure_browser()
@@ -2031,6 +2096,10 @@ class Agent:
         approved_commit = False   # a fresh request_approval covers the next commit click
 
         while goal_steps < cfg.MAX_STEPS:
+            if self._cancelled():
+                self._abandon_browser()
+                result, status = "(stopped — that chat was closed.)", "cancelled"
+                break
             goal_steps += 1
             self.step += 1
             scan = self.driver.scan()

@@ -5,32 +5,21 @@ import json
 import os
 from typing import Any
 
-from org_coordinator import store
+from org_coordinator import parent, store
 
 
 def _claude_json(system: str, user: str) -> dict:
-    try:
-        import anthropic
-    except ImportError:
+    why = parent.unavailable()
+    if why == parent.NO_ROUTER:
         return {"guidance": user[:600], "items": [], "fallback": True}
-    key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not key:
+    if why:
         return {"guidance": "Align work with active company goals.",
                 "items": [], "fallback": True}
-    model = os.environ.get("QUILL_ORG_CASCADE_MODEL", "claude-sonnet-4-6")
-    client = anthropic.Anthropic(api_key=key)
-    msg = client.messages.create(
-        model=model, max_tokens=1000, system=system,
-        messages=[{"role": "user", "content": user}],
-    )
-    text = "".join(getattr(b, "text", "") for b in msg.content
-                   if getattr(b, "type", None) == "text").strip()
-    if text.startswith("```"):
-        text = text.strip("`")
-        if text.startswith("json"):
-            text = text[4:].strip()
+    text = parent.complete_text(
+        "org_cascade", system, user, max_tokens=1000,
+        model=os.environ.get("QUILL_ORG_CASCADE_MODEL", "claude-sonnet-4-6"))
     try:
-        return json.loads(text)
+        return parent.parse_json(text)
     except Exception:
         return {"guidance": text[:800], "items": []}
 

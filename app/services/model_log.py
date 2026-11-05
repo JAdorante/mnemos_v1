@@ -28,6 +28,8 @@ _CLOUD_PROVIDERS = frozenset({
     # Non-model egress that still leaves the machine: a peer delivery and a
     # browser fetch of a source app (Option B). Zero cost, same inventory.
     "peer", "agent_fetch",
+    # The rest of egress.PATHS: every way data leaves through one policy.
+    "team", "org_digest", "fleet_relay", "records",
 })
 
 # USD per 1M tokens, (input, output). Source: Claude pricing, 2026-07.
@@ -224,13 +226,16 @@ class ModelLog:
 
     def log_egress(self, *, kind: str, destination: str,
                    privacy_class: str | None, approving_action: str,
-                   ok: bool = True, meta: dict | None = None) -> dict:
+                   ok: bool = True, action: str | None = None,
+                   meta: dict | None = None) -> dict:
         """One row for something that left the machine WITHOUT a model call:
-        a peer delivery (`kind="peer"`) or an Option B fetch (`agent_fetch`).
-        Appears in egress_inventory next to cloud model calls with the
-        destination, privacy_class, and the approving action."""
+        one of the egress.PATHS (peer, team, org_digest, fleet_relay,
+        records) or an Option B fetch (`agent_fetch`). Appears in
+        egress_inventory next to cloud model calls with the destination,
+        privacy_class, and the approving action. `action` is the egress
+        verdict (allow / offer / deny) when one was taken."""
         m = {"destination": destination, "approving_action": approving_action,
-             "privacy_action": "allow" if ok else "refuse"}
+             "privacy_action": action or ("allow" if ok else "refuse")}
         if meta:
             m.update(meta)
         return self.log_call(

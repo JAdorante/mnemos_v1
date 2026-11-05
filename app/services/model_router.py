@@ -308,6 +308,17 @@ class ModelRouter:
                          max_tokens: int = 1024, schema: dict | None = None,
                          model: str | None = None) -> str:
         """Run one Claude text completion, logged. Returns the first text block.
+        See `_call_parent` for the gates every paid call passes."""
+        return self._call_parent(task, system=system, messages=messages,
+                                 max_tokens=max_tokens, schema=schema,
+                                 model=model)["text"]
+
+    def _call_parent(self, task: str, *, system: str, messages: list,
+                     max_tokens: int = 1024, schema: dict | None = None,
+                     model: str | None = None,
+                     input_bytes: int = 0) -> dict[str, Any]:
+        """The one paid seam. Returns {text, model, provider, input_tokens,
+        output_tokens}.
 
         `schema` (a JSON Schema) enforces structured output. `model` overrides
         the task default. Raises on API error (after logging the failure).
@@ -376,7 +387,10 @@ class ModelRouter:
         # client, byte-for-byte.
         from app.services import parent_model
         pid = parent_model.provider()
-        if pid != "anthropic":
+        # The OpenAI-compatible dialect flattens content to text, so an image
+        # sent that way would arrive as an empty prompt. Media calls stay on
+        # the Anthropic client, as they did before vision used this seam.
+        if pid != "anthropic" and not _has_media(messages):
             t0 = time.time()
             try:
                 resp_p = parent_model.complete(
@@ -385,6 +399,7 @@ class ModelRouter:
             except Exception:
                 model_log.log_call(task=task, provider=pid, model=model,
                                    latency_s=time.time() - t0, ok=False,
+                                   input_bytes=input_bytes,
                                    privacy_max=privacy_cls,
                                    meta={"privacy_class": privacy_cls,
                                          "privacy_action": privacy_action})
@@ -394,11 +409,15 @@ class ModelRouter:
                 latency_s=time.time() - t0, ok=True,
                 input_tokens=resp_p["input_tokens"],
                 output_tokens=resp_p["output_tokens"],
+                input_bytes=input_bytes,
                 privacy_max=privacy_cls,
                 meta={"privacy_class": privacy_cls,
                       "privacy_action": privacy_action},
             )
-            return resp_p["text"]
+            return {"text": resp_p["text"], "model": resp_p["model"],
+                    "provider": pid,
+                    "input_tokens": resp_p["input_tokens"],
+                    "output_tokens": resp_p["output_tokens"]}
         kwargs: dict[str, Any] = {"model": model, "max_tokens": max_tokens,
                                   "system": system, "messages": messages}
         if schema is not None:
@@ -410,21 +429,27 @@ class ModelRouter:
         except Exception:
             model_log.log_call(task=task, provider="claude", model=model,
                                latency_s=time.time() - t0, ok=False,
+                               input_bytes=input_bytes,
                                privacy_max=privacy_cls,
                                meta={"privacy_class": privacy_cls,
                                      "privacy_action": privacy_action})
             raise
         u = getattr(resp, "usage", None)
+        in_tok = getattr(u, "input_tokens", 0) or 0
+        out_tok = getattr(u, "output_tokens", 0) or 0
         model_log.log_call(
             task=task, provider="claude", model=model,
             latency_s=time.time() - t0, ok=True,
-            input_tokens=getattr(u, "input_tokens", 0) or 0,
-            output_tokens=getattr(u, "output_tokens", 0) or 0,
+            input_tokens=in_tok, output_tokens=out_tok,
+            input_bytes=input_bytes,
             privacy_max=privacy_cls,
             meta={"privacy_class": privacy_cls,
                   "privacy_action": privacy_action},
         )
-        return next((b.text for b in resp.content if b.type == "text"), "")
+        return {"text": next((b.text for b in resp.content
+                              if b.type == "text"), ""),
+                "model": model, "provider": "claude",
+                "input_tokens": in_tok, "output_tokens": out_tok}
 
     def local_available(self) -> bool:
         """Availability of the local text tier (probe cached per process) —
@@ -883,6 +908,47 @@ class ModelRouter:
                 speculative=speculative, retrieval=retrieval)
             _tls.distill_id = distill_id
             return parsed or {}
+
+    def complete_parent(self, task: str, *, system: str, messages: list,
+                        max_tokens: int = 1024, schema: dict | None = None,
+                        model: str | None = None, input_bytes: int = 0,
+                        distill: bool = True) -> dict[str, Any]:
+        """One call to the paid parent, never the local tier. For callers
+        whose job IS the parent: the vision fallback, the shadow-eval grader,
+        the org coordinator. Same gates as every escalation (speculative
+        guard, spend cap, privacy gate, provider choice, cost log).
+
+        Returns {text, model, provider, input_tokens, output_tokens,
+        distill_id}. Messages may carry image blocks; pass `input_bytes` so
+        the cost log records the payload size. `distill=False` is for a
+        caller that writes its own richer distill row (VLMRouter does)."""
+        res = self._call_parent(task, system=system, messages=messages,
+                                max_tokens=max_tokens, schema=schema,
+                                model=model, input_bytes=input_bytes)
+        res["distill_id"] = None
+        if distill:
+            parent: dict[str, Any] = {"text": res["text"]}
+            if schema is not None:
+                try:
+                    parent = json.loads(res["text"] or "{}")
+                except Exception:
+                    pass
+            res["distill_id"] = self._distill(
+                task=task, reason="parent_only", parent=parent,
+                parent_model=res["model"], messages=messages, system=system,
+                schema=schema)
+        return res
+
+
+def _has_media(messages: list | None) -> bool:
+    """True when any message carries a non-text content block."""
+    for m in messages or []:
+        c = m.get("content") if isinstance(m, dict) else None
+        if isinstance(c, list) and any(
+                isinstance(b, dict) and b.get("type") not in (None, "text")
+                for b in c):
+            return True
+    return False
 
 
 router = ModelRouter()

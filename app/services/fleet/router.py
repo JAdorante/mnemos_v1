@@ -210,16 +210,30 @@ def content_refusal(signal: dict) -> str | None:
     agent wrote (subject, summary, body) are classified, and sensitive or
     never-send content stays home. Ingress stamps the persisted copy, but the
     relay is sent the signal dict, so the check has to run on the dict."""
-    from app.services import privacy_class as pc
+    from app.services import egress
+    reason = egress.content_refusal(_signal_text(signal), source="fleet.signal")
+    return f"content_{reason}" if reason else None
+
+
+def _signal_text(signal: dict) -> str:
     try:
         body = json.dumps(signal.get("body") or {}, ensure_ascii=False,
                           sort_keys=True)
     except (TypeError, ValueError):
         body = str(signal.get("body") or "")
-    blob = " ".join(str(x) for x in (signal.get("subject"), signal.get("summary"),
-                                     body) if x)
-    reason = pc.egress_refusal(blob, source="fleet.signal")
-    return f"content_{reason}" if reason else None
+    return " ".join(str(x) for x in (signal.get("subject"),
+                                     signal.get("summary"), body) if x)
+
+
+def _egress_verdict(signal: dict, action: str, *, approved: bool):
+    """The shared egress decision for one relay send (logged)."""
+    from app.services import egress
+    return egress.decide(
+        path="fleet_relay", destination="firm relay", policy=action,
+        approved=approved, scope=f"topic:{signal.get('topic', '')}",
+        data_class="work", text=_signal_text(signal), source="fleet.signal",
+        meta={"topic": signal.get("topic"), "kind": signal.get("kind"),
+              "signal_id": signal.get("signal_id")})
 
 
 def route(signal: dict) -> Decision:
@@ -248,9 +262,16 @@ def apply(signal: dict) -> Decision:
     """Route and act: share sends now, offer queues a packet."""
     d = route(signal)
     if d.action == "share":
-        from app.services.fleet import relay_client
-        relay_client.send_async(signal)
-    elif d.action == "offer":
+        v = _egress_verdict(signal, "share", approved=False)
+        if v.action == "offer":
+            # The rung wants a human for every send: share becomes offer.
+            d = Decision("offer", v.reason, d.rule)
+        elif v.denied:
+            return Decision("refused", v.reason, d.rule)
+        else:
+            from app.services.fleet import relay_client
+            relay_client.send_async(signal)
+    if d.action == "offer":
         create_offer(signal, rule=d.rule)
     return d
 
@@ -357,7 +378,7 @@ def decide_offer(offer_id: str, approve: bool, *, sha256: str = "") -> dict:
     if rec is not None and row.get("packet_id"):
         rec.record_decision(row["packet_id"],
                             "approve" if approve else "cancel",
-                            approved_via="button")
+                            approved_via="button", surface="fleet.offer")
     if not approve:
         return row
     # Re-run every egress gate at send time: the blocked list may have
@@ -365,6 +386,9 @@ def decide_offer(offer_id: str, approve: bool, *, sha256: str = "") -> dict:
     refusal = egress_check(row["signal"])
     if refusal:
         return _set_offer(offer_id, status="refused", reason=refusal)
+    v = _egress_verdict(row["signal"], "offer", approved=True)
+    if not v.allowed:
+        return _set_offer(offer_id, status="refused", reason=v.reason)
     from app.services.fleet import relay_client
     res = relay_client.send(row["signal"])
     return _set_offer(offer_id, status="sent" if res.get("ok") else

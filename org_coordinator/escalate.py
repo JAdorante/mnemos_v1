@@ -5,35 +5,21 @@ import json
 import os
 from typing import Any
 
-from org_coordinator import store
+from org_coordinator import parent, store
 
 
 def _claude_json(system: str, user: str) -> dict:
-    try:
-        import anthropic
-    except ImportError:
-        return {"escalate": False, "score": 0.0, "reason": "no anthropic",
+    why = parent.unavailable()
+    if why:
+        return {"escalate": False, "score": 0.0, "reason": why,
                 "target_role": "manager"}
-    key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not key:
-        return {"escalate": False, "score": 0.0, "reason": "no_api_key",
-                "target_role": "manager"}
-    model = os.environ.get("QUILL_ORG_ESCALATE_MODEL", "claude-opus-4-8")
-    client = anthropic.Anthropic(api_key=key)
-    msg = client.messages.create(
-        model=model, max_tokens=600, system=system,
-        messages=[{"role": "user", "content": user}],
-    )
-    text = "".join(getattr(b, "text", "") for b in msg.content
-                   if getattr(b, "type", None) == "text").strip()
-    if text.startswith("```"):
-        text = text.strip("`")
-        if text.startswith("json"):
-            text = text[4:].strip()
+    text = parent.complete_text(
+        "org_escalate", system, user, max_tokens=600,
+        model=os.environ.get("QUILL_ORG_ESCALATE_MODEL", "claude-opus-4-8"))
     try:
-        return json.loads(text)
+        return parent.parse_json(text)
     except Exception:
-        return {"escalate": False, "score": 0.0, "reason": text[:400],
+        return {"escalate": False, "score": 0.0, "reason": text.strip()[:400],
                 "target_role": "manager"}
 
 

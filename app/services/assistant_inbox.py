@@ -118,6 +118,7 @@ def accept(inbox_id: int, *, text: str | None = None,
         if not row:
             return {"ok": False, "error": "no such pending item"}
         item = _row(row)
+        proposed = item["text"]
         if text is not None and text.strip():
             item["text"] = text.strip()[:MAX_TEXT]
         if project is not None:
@@ -139,6 +140,20 @@ def accept(inbox_id: int, *, text: str | None = None,
     with connect() as c:
         c.execute("UPDATE captures SET status='accepted', decided_at=?, "
                   "event_id=? WHERE id=?", (time.time(), event_id, item["id"]))
+    edited = item["text"] != redact.redact_text(proposed)
+    from app.services import decisions
+    decisions.record(
+        surface="assistant.inbox", subject=f"inbox:{item['id']}",
+        verdict="edited" if edited else "approved",
+        shown={"assistant": item.get("assistant"), "kind": item.get("kind"),
+               "project": item.get("project")},
+        options=["accept", "edit", "reject"],
+        edit={"text": item["text"]} if edited else None,
+        meta={"event_id": event_id},
+        learn=dict(task_type="assistant.save", input_text=proposed,
+                   local_output=proposed, final_target=item["text"],
+                   source_refs={"inbox_id": item["id"],
+                                "event_id": event_id}))
     return {"ok": True, "event_id": event_id}
 
 
@@ -179,6 +194,11 @@ def reject(inbox_id: int) -> dict[str, Any]:
             "status='pending'", (time.time(), int(inbox_id)))
         if not cur.rowcount:
             return {"ok": False, "error": "no such pending item"}
+    # The text was just wiped on purpose, so neither the decision nor a
+    # learning pair keeps it.
+    from app.services import decisions
+    decisions.record(surface="assistant.inbox", subject=f"inbox:{inbox_id}",
+                     verdict="rejected", options=["accept", "edit", "reject"])
     return {"ok": True}
 
 
@@ -205,4 +225,9 @@ def remove(inbox_id: int) -> dict[str, Any]:
         c.execute("UPDATE captures SET status='removed', decided_at=?, "
                   "text='', title='', source_url='', conversation='' "
                   "WHERE id=?", (time.time(), int(inbox_id)))
+    # The accepted text is gone from memory; the pair learned from it goes
+    # too.
+    from app.services import decisions
+    decisions.undo(surface="assistant.inbox", subject=f"inbox:{inbox_id}",
+                   meta={"event_id": event_id})
     return {"ok": True, "event_id": event_id}

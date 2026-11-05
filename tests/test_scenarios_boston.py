@@ -378,9 +378,12 @@ class Scenario1Tests(BostonBase):
         from app.services.model_log import model_log
         inv = model_log.egress_inventory(recent=10)
         peer_rows = [r for r in inv["recent"] if r["provider"] == "peer"]
-        self.assertEqual(len(peer_rows), 1)
-        self.assertEqual(peer_rows[0]["destination"], "User 1")
-        self.assertEqual(peer_rows[0]["approving_action"], "user_tap")
+        # Two things left a machine: User 1's question (it carries a brief
+        # from User 1's memory) and User 2's fill.
+        self.assertEqual(sorted(r["destination"] for r in peer_rows),
+                         ["User 1", "User 2"])
+        fill = next(r for r in peer_rows if r["destination"] == "User 1")
+        self.assertEqual(fill["approving_action"], "user_tap")
         # Audit: every ask / null / delivery wrote to agent_log with peer ids.
         with self.h.use(self.u2):
             goals = [r["goal"] for r in self.u2.store._conn.execute(

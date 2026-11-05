@@ -1,40 +1,60 @@
 """Typed chat → memory. Tell mnemos something in the chat box and it lands in
 the same memory the ears feed.
 
-Until now only *spoken* words (and ingested documents) became facts — a typed
-"I met Sarah Chen, she runs platform at Foundry" vanished after the reply. Now
-every substantive typed turn is:
+Every substantive typed turn is remembered *after the turn resolves* (so a
+failed send never becomes a claim), with the assistant answer stored as
+context:
 
-  1. stored as a Modality.TEXT event (source=chat.user) — provenance, timeline
-  2. queued for the SAME extractor the audio pipeline uses (durable jobs
-     table, so a crash mid-extract just re-runs) — tasks / commitments /
-     claims / people / entities / relations
-  3. persisted through the write-time hygiene gate (dedup / supersede /
-     confidence floor), then chained into graph.rebuild — so the constellation
-     picks the new node up on its next live poll
+  1. stored as a Modality.TEXT event — provenance, timeline
+  2. statements (source=chat.user) are queued for the SAME extractor the
+     audio pipeline uses — tasks / commitments / claims / people / entities /
+     relations
+  3. questions are tagged as queries (source=chat.query) and are NOT mined
+     for facts, so "is Dana leaving?" cannot become a claim
+  4. persisted through the write-time hygiene gate, then chained into
+     graph.rebuild
 
 Typed statements carry the ACCEPTED confidence tier: the human said it
 directly, no capture noise, no extraction guesswork about who spoke.
 
-Skips: empty/short messages (approvals, "yes", "go"), slash-command prefixes.
-Questions are NOT skipped — "can you note that I moved the demo to Friday?"
-is a question that carries a fact; the extractor's precision-first prompt
-returns nothing for pure questions anyway. Off switch: QUILL_CHAT_INGEST=0.
+Skips: empty/short messages (approvals, "yes", "go"), slash-command prefixes,
+per-message off-the-record. Off switch: QUILL_CHAT_INGEST=0.
 
 Generic code: what gets remembered comes from what THIS user types.
 """
 from __future__ import annotations
 
 import os
+import re
 import time
 
 # Substantive-statement floor: below this it's an approval / verdict / nudge
 # ("yes", "go", "cancel"), which teaches nothing and would waste an LLM call.
 MIN_CHARS = int(os.getenv("QUILL_CHAT_INGEST_MIN_CHARS", "15"))
 
+_QUESTION_START = re.compile(
+    r"^(?:"
+    r"who|what|when|where|why|how|which|whose|"
+    r"is|are|was|were|am|do|does|did|"
+    r"can|could|would|will|should|may|might|"
+    r"tell me|do you know|have you|did you|are you|is there|are there"
+    r")\b",
+    re.I,
+)
+
 
 def enabled() -> bool:
     return os.getenv("QUILL_CHAT_INGEST", "1") not in ("0", "false", "False")
+
+
+def looks_like_question(text: str) -> bool:
+    """Heuristic: trailing '?' or a leading interrogative / request-to-answer."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if t.endswith("?"):
+        return True
+    return bool(_QUESTION_START.match(t))
 
 
 def ingestable(message: str) -> str | None:
@@ -49,11 +69,20 @@ def ingestable(message: str) -> str | None:
     return text
 
 
-def ingest(message: str) -> int | None:
-    """Store one typed chat turn as a TEXT event and queue extraction.
-    Returns the event id, or None when skipped. Best-effort: any failure
-    is logged, never raised into the chat path."""
-    if not enabled():
+def ingest(
+    message: str,
+    *,
+    answer: str | None = None,
+    off_the_record: bool = False,
+) -> int | None:
+    """Store one typed chat turn as a TEXT event after the turn resolves.
+
+    ``answer`` is optional assistant text kept as meta context (not extracted).
+    Questions are tagged as queries and skip fact extraction. Off-the-record
+    turns are skipped entirely. Returns the event id, or None when skipped.
+    Best-effort: any failure is logged, never raised into the chat path.
+    """
+    if off_the_record or not enabled():
         return None
     text = ingestable(message)
     if text is None:
@@ -64,19 +93,28 @@ def ingest(message: str) -> int | None:
         from app.services.attachments import _index_event
         from app.storage import get_store
 
+        is_query = looks_like_question(text)
+        kind = "query" if is_query else "statement"
+        source = "chat.query" if is_query else "chat.user"
+        meta: dict = {"section": "chat", "kind": kind}
+        ans = (answer or "").strip()
+        if ans:
+            meta["answer"] = ans[:4000]
+
         now = time.time()
         ev = Event(
             time=now, modality=Modality.TEXT, raw=text,
-            summary=f"[chat] {text[:120]}", source="chat.user",
-            meta={"section": "chat"},
+            summary=f"[chat] {text[:120]}", source=source,
+            meta=meta,
         )
         _conf.attach(ev, _conf.ACCEPTED, capture=1.0)
         anchor = get_store().insert(ev)
         _index_event(anchor, ev)
 
-        from app.services.worker import worker
-        worker.enqueue("chat_ingest", payload={"event_id": anchor,
-                                               "text": text})
+        if not is_query:
+            from app.services.worker import worker
+            worker.enqueue("chat_ingest", payload={"event_id": anchor,
+                                                   "text": text})
         return anchor
     except Exception as exc:
         print(f"[chat_ingest] skipped ({exc}).")
@@ -139,13 +177,23 @@ def run_job(payload: dict) -> None:
     # this as direct_message (create_person_candidates=True). Defaulting to
     # "document" wrongly treated chat like a doc and rejected new people.
     event_source = "chat.user"
+    raw_ev = None
     if anchor is not None:
         try:
-            ev = store.get_event(int(anchor))
-            if ev and (ev.get("source") or "").strip():
-                event_source = str(ev["source"]).strip()
+            raw_ev = store.get_event(int(anchor))
+            if raw_ev and (raw_ev.get("source") or "").strip():
+                event_source = str(raw_ev["source"]).strip()
         except Exception:
             pass
+    # Queries must never be mined — defensive if an old job is still queued.
+    if event_source == "chat.query":
+        return
+    try:
+        meta = (raw_ev or {}).get("meta") or {}
+        if isinstance(meta, dict) and meta.get("kind") == "query":
+            return
+    except Exception:
+        pass
     if event_source.startswith("assistant."):
         # A cloud assistant wrote this note, not the user: label it as the
         # assistant so its first person ("I'll draft it") is not read as the

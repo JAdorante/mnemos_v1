@@ -239,16 +239,17 @@ def sample(rows: list[dict], batch: int, *,
 def _anthropic_call(system: str, user: str, *, model: str,
                     max_tokens: int) -> tuple[str, int, int]:
     """One grading call. Returns (text, input_tokens, output_tokens). The
-    indirection lets tests inject a fake without touching the network."""
-    import anthropic
-    client = anthropic.Anthropic()
-    resp = client.messages.create(
-        model=model, max_tokens=max_tokens, system=system,
-        messages=[{"role": "user", "content": user}])
-    u = getattr(resp, "usage", None)
-    text = next((b.text for b in resp.content if b.type == "text"), "")
-    return (text, int(getattr(u, "input_tokens", 0) or 0),
-            int(getattr(u, "output_tokens", 0) or 0))
+    indirection lets tests inject a fake without touching the network.
+
+    Goes through the router's parent seam, so the grade is cost-logged,
+    privacy-gated and distilled like every other paid call."""
+    from app.services.model_router import router
+    res = router.complete_parent(
+        "shadow_eval", system=system,
+        messages=[{"role": "user", "content": user}],
+        model=model, max_tokens=max_tokens)
+    return (res["text"], int(res["input_tokens"] or 0),
+            int(res["output_tokens"] or 0))
 
 
 def _parse_verdict(text: str) -> dict | None:
@@ -330,6 +331,9 @@ def run_nightly(now: float | None = None, *, call: Callable | None = None,
 
     cfg = _cfg()
     budget = _budget_tokens()
+    # The default call logs itself through the router; only an injected
+    # call (tests, scripts) still needs the row written here.
+    log_here = call is not None
     call = call or _anthropic_call
     graded_ids = frozenset(state.get("graded_ids") or [])
     rows = _read_rows(since=now - _lookback_s())
@@ -353,17 +357,20 @@ def run_nightly(now: float | None = None, *, call: Callable | None = None,
         verdict, tok_in, tok_out = grade_one(
             row, call, model=cfg.model, max_tokens=cfg.max_grade_tokens)
         spent += tok_in + tok_out
-        try:
-            from app.services.model_log import model_log
-            # Measured wall time — these grading calls used to log 0.0s and
-            # were the single largest zero-latency Claude population in the
-            # trail, which made /console/models' latency average meaningless.
-            model_log.log_call(task="shadow_eval", provider="claude",
-                               model=cfg.model, latency_s=time.time() - t0,
-                               ok=verdict is not None,
-                               input_tokens=tok_in, output_tokens=tok_out)
-        except Exception:
-            pass
+        if log_here:
+            try:
+                from app.services.model_log import model_log
+                # Measured wall time — these grading calls used to log 0.0s
+                # and were the single largest zero-latency Claude population
+                # in the trail, which made /console/models' latency average
+                # meaningless.
+                model_log.log_call(task="shadow_eval", provider="claude",
+                                   model=cfg.model,
+                                   latency_s=time.time() - t0,
+                                   ok=verdict is not None,
+                                   input_tokens=tok_in, output_tokens=tok_out)
+            except Exception:
+                pass
         newly_graded.append(str(row.get("id")))
         if verdict is None:
             counts["unparseable"] += 1

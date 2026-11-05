@@ -504,19 +504,11 @@ def _schema() -> dict:
 class Extractor:
     def __init__(self, store: Store | None = None) -> None:
         self._store = store
-        self._client = None
 
     def _ensure_store(self) -> Store:
         if self._store is None:
             self._store = get_store()
         return self._store
-
-    def _ensure_client(self):
-        if self._client is None:
-            import anthropic
-
-            self._client = anthropic.Anthropic()
-        return self._client
 
     def _extract_text(self, turn_or_text, *, speaker: str | None = None
                       ) -> dict[str, Any]:

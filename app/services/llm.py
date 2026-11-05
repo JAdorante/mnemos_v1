@@ -100,6 +100,7 @@ def answer(question: str) -> dict:
             context or "",
             question=question,
             sources=sources,
+            rewrite=True,
         )
         out["answer"] = checked.text
         out["answer_check"] = checked.to_dict()
