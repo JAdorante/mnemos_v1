@@ -71,11 +71,19 @@ _SYNTH_SYSTEM = {
     "audit.forget": ("You judge whether a remembered fact should be "
                      "retired, given the evidence."),
     "escalation.text": "You are a helpful personal-memory assistant.",
+    "imessage.reply": ("You write the user's next text message, in their own "
+                       "voice. Reply with the message only."),
 }
+
+REPLY_TASK = "imessage.reply"
+# Most text replies that join one training run. Fixed, not a ratio of rated
+# pairs: a person's texts are real data about them, unlike synthetic rows.
+REPLY_CAP = 500
 
 
 def pair_to_distill_row(pair: dict, *, distill_index: dict | None = None,
-                        include_unconfirmed_shadow: bool = False) -> dict | None:
+                        include_unconfirmed_shadow: bool = False,
+                        allow_replies: bool = False) -> dict | None:
     """One confirmed LearningPair → the distill-row shape curate() speaks.
 
     Escalation pairs re-join their full-fidelity distill row (real system +
@@ -94,7 +102,10 @@ def pair_to_distill_row(pair: dict, *, distill_index: dict | None = None,
     if v == "shadow_disagree" and not (pair.get("human_confirmed")
                                        or include_unconfirmed_shadow):
         return None
-    if not pair.get("human_confirmed") and v != "shadow_disagree":
+    is_reply = pair.get("task_type") == REPLY_TASK
+    if is_reply and not allow_replies:
+        return None
+    if not pair.get("human_confirmed") and v != "shadow_disagree" and not is_reply:
         return None
     target = str(pair.get("final_target") or "").strip()
     input_text = str(pair.get("input_text") or "").strip()
@@ -165,6 +176,24 @@ def load_from_learning_pairs(store=None, *, distill_path: Path | None = None,
         if row is not None:
             out.append(row)
     return out
+
+
+def load_text_replies(store=None) -> list[dict]:
+    """A user's text replies (connectors/imessage_learning.py) as training rows,
+    newest first. Train only: no human judged them as model answers, so they
+    can't sit in the holdout the promotion gate judges on. They live in this
+    seat's own store, so they reach this user's adapter and no other."""
+    try:
+        if store is None:
+            from app.storage import get_store
+            store = get_store()
+        pairs = store.list_learning_pairs(task_type=REPLY_TASK, verdict="accepted",
+                                          limit=REPLY_CAP)
+    except Exception as exc:
+        print(f"[curate] text replies unavailable ({exc}).", file=sys.stderr)
+        return []
+    rows = (pair_to_distill_row(p, allow_replies=True) for p in pairs)
+    return [r for r in rows if r is not None]
 
 
 def load_training_rows(settings, store=None) -> tuple[list[dict], str]:
@@ -350,7 +379,8 @@ def merge_synthetic(synthetic_rows: list[dict], train_examples: list[dict],
 def curate(rows: list[dict], *, holdout_pct: int, dedupe_sim: float,
            upweight_edited: int = 1, embed_fn=None,
            synthetic_rows: list[dict] | None = None,
-           synthetic_cap: float = 3.0) -> dict:
+           synthetic_cap: float = 3.0,
+           reply_rows: list[dict] | None = None) -> dict:
     """Run the full funnel. Returns stats + train/holdout example lists."""
     text_n = len(rows)
     by_outcome = Counter(str(r.get("user_outcome") or "unknown") for r in rows)
@@ -387,6 +417,13 @@ def curate(rows: list[dict], *, holdout_pct: int, dedupe_sim: float,
             cap_ratio=synthetic_cap)
         weighted = weighted + synth_examples   # train only, never holdout
 
+    reply_examples: list[dict] = []
+    if reply_rows:
+        reply_examples, _ = merge_synthetic(
+            reply_rows, train_examples, holdout_rows,
+            cap_ratio=REPLY_CAP / max(1, len(train_examples)))
+        weighted = weighted + reply_examples   # train only, never holdout
+
     n_pairs = len(train_examples)
     if n_pairs >= CRITICAL_READY:
         readiness = "ready"
@@ -419,6 +456,7 @@ def curate(rows: list[dict], *, holdout_pct: int, dedupe_sim: float,
         "train": train_examples,
         "holdout": holdout_examples,
         "weighted": weighted,
+        "reply_pairs": len(reply_examples),
         **synth_stats,
     }
 

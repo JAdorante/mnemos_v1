@@ -68,6 +68,7 @@ _POSITIVE = frozenset({"accepted", "edited"})
 _MIN_TARGET_CHARS: dict[str, int] = {
     "escalation.text": 10,
     "escalation.vision": 10,
+    "imessage.reply": 12,  # "ok", "lol", "on my way" teach nothing about a voice
     "brief.section": 10,
     "extraction.task": 6,
     "extraction.commitment": 6,
@@ -138,7 +139,7 @@ def record(*, task_type: str, input_text: str, verdict: str,
            local_output: str | None = None, parent_output: str | None = None,
            source_refs: dict | None = None, model_tag: str | None = None,
            human_confirmed: bool = True, created_at: float | None = None,
-           store=None) -> str | None:
+           privacy_floor: str | None = None, store=None) -> str | None:
     """Persist one canonical LearningPair. Returns the pair id, or None when
     disabled / dropped by hygiene / deduped. NEVER raises."""
     try:
@@ -160,6 +161,10 @@ def record(*, task_type: str, input_text: str, verdict: str,
         # personal rows into shadow eligibility. Then redact at the write
         # boundary (secrets + PII never persist here).
         privacy_cls, shadow_ok = _privacy(input_text, target)
+        if privacy_floor:
+            from app.services.privacy_class import max_class
+            privacy_cls = max_class(privacy_cls, privacy_floor)
+            shadow_ok = shadow_ok and privacy_cls not in _SHADOW_BARRED
         input_clean = _redact(input_text)
         target_clean = _redact(target)
         row = {
@@ -195,6 +200,8 @@ def _notify_exemplars(row: dict, store=None) -> None:
     shadow disagreements are offered too and the exemplar store applies its
     own confirmed/autotrust gate (B.4). Best-effort and lazily imported —
     Workstream A works without C."""
+    if row.get("task_type") == "imessage.reply":
+        return  # train-only: never retrieved as an example, never shared
     try:
         if row.get("verdict") not in (*_POSITIVE, "shadow_disagree"):
             return
@@ -412,6 +419,12 @@ def record_kg_evidence_verdict(evidence: dict, predicate: dict, verdict: str,
         ))
 
 
+def _quotes_text(*parts) -> bool:
+    from app.services.privacy_class import quotes_private_source
+    return any(quotes_private_source(json.dumps(p, default=str) if p else "")
+               for p in parts)
+
+
 def _distill_input(row: dict) -> str:
     """Last user message from a distill row's full-fidelity meta, else the
     truncated prompt head older rows carry."""
@@ -442,6 +455,11 @@ def record_from_distill(row: dict, outcome: str, *,
         target = parent_text or local_text
     else:
         target = ""
+    # The memories a chat answer drew on sit in the system prompt, which the
+    # pair doesn't keep, so its input alone can't show a text was quoted.
+    meta = row.get("meta") or {}
+    quoted = _quotes_text(meta.get("system"), meta.get("messages"), parent_text,
+                          local_text)
     learn = dict(
         task_type=("escalation.vision" if modality == "vision"
                    else "escalation.text"),
@@ -456,9 +474,11 @@ def record_from_distill(row: dict, outcome: str, *,
                      # so router training reads the production values rather
                      # than re-deriving them against a since-grown store.
                      "retrieval": (row.get("meta") or {}).get("retrieval"),
-                     "frame_path": row.get("frame_path") or None},
+                     "frame_path": row.get("frame_path") or None,
+                     **({"quotes_imessage": True} if quoted else {})},
         model_tag=row.get("local_model"),
         created_at=row.get("time"),
+        privacy_floor="sensitive" if quoted else None,
     )
     if verdict_source != "chat.outcome":
         # Backfills replay old labels; no human is deciding anything now.

@@ -334,6 +334,9 @@ _MCP_OPEN = frozenset({
     "/.well-known/oauth-protected-resource/mcp",
     "/.well-known/oauth-authorization-server",
     "/.well-known/openid-configuration",
+    # The iMessage Mac helper (connectors/imessage_relay.py) is the same shape:
+    # a device with its own credential, no gateway session, seat in the URL.
+    "/imessage-relay/claim", "/imessage-relay/push", "/imessage-relay/helper.pyz",
 })
 _MCP_AUTHORIZE = "/oauth/mcp/authorize"
 # RFC 8414 / RFC 9728 path insertion: clients put the well-known segment

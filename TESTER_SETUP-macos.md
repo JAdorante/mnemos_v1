@@ -48,6 +48,12 @@ is used. All of them are optional except the first:
 | **Calendar** | If you connect iCloud calendar | Meetings are detected from window titles instead |
 | **Camera** | Only if you turn on the optional webcam source | Nothing else changes |
 
+**iMessage is the exception: macOS shows no prompt for it.** To connect it, open
+**System Settings → Privacy & Security → Full Disk Access**, turn on Terminal (or
+Sparrow, if you started it from the app bundle), restart Sparrow, then press
+Connect on iMessage. This grants access to more than Messages, so skip it if
+you're not comfortable with that; nothing else in Sparrow needs it.
+
 If you dismissed a prompt by accident: **System Settings → Privacy & Security →
 Microphone**, and enable the entry for Terminal (or Sparrow, if you started it
 from the app bundle).
@@ -91,6 +97,7 @@ with the reason, rather than as a switch that fails when you flip it.
 | Calendar (iCloud) | ✅ | |
 | Backup / export / restore | ✅ | |
 | Browser agent | ✅ | Playwright Chromium |
+| iMessage (read-only) | ✅ | Needs Full Disk Access, see above |
 | Microphone capture | ✅ | Allow the permission prompt |
 | Webcam capture | ✅ | Optional, off by default |
 | System audio (remote voices) | ⚠️ | Needs BlackHole — see above |

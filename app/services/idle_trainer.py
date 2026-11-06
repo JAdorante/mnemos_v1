@@ -252,6 +252,9 @@ def lora_saturated_probe() -> bool:
         counts = get_store().learning_pair_counts()
         if not counts:
             return True          # pre-Workstream-A install: legacy behavior
+        # Text replies are never exemplars, so they say nothing about whether
+        # retrieval has stopped improving.
+        counts.pop("imessage.reply", None)
         history = []
         try:
             p = Path("data/exemplar_ab_report.json")

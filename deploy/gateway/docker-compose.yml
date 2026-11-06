@@ -42,6 +42,7 @@ services:
       SEAT_OAUTH_REDIRECT_BASE: "https://sparrow.ravenry.us"
       # Seats created by the gateway get remote MCP on (provision.py).
       SEAT_MCP_REMOTE: "${SEAT_MCP_REMOTE:-1}"
+      SEAT_IMESSAGE_RELAY: "${SEAT_IMESSAGE_RELAY:-1}"
 
   # NOTE: the socat that republishes host Ollama on 11435 is NOT declared here,
   # because the gb10 stack already runs one (gb10-ollama-proxy-1) on the host

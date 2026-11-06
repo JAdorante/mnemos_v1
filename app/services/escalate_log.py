@@ -152,6 +152,30 @@ class EscalateLog:
             return None
         return row
 
+    def purge_containing(self, needle: str) -> int:
+        """Drop every row whose text holds `needle`, for a user deleting a
+        source. Returns how many went. The JSON has `needle` escaped the same
+        way on every row, so matching the raw line is enough."""
+        with self._lock:
+            if not self._path.is_file():
+                return 0
+            encoded = json.dumps(needle)[1:-1]
+            kept, dropped = [], 0
+            with self._path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    if encoded in line:
+                        dropped += 1
+                    else:
+                        kept.append(line)
+            if dropped:
+                tmp = self._path.with_suffix(self._path.suffix + ".tmp")
+                tmp.write_text("".join(kept), encoding="utf-8")
+                tmp.replace(self._path)
+                self._counts.clear()
+                self._total = 0
+                self._load_counts()
+            return dropped
+
     def row_by_id(self, row_id: str) -> dict | None:
         """Fetch one distill row by its stable id — the join key between a chat
         verdict and the attention impressions recorded when the answer was

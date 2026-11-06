@@ -77,6 +77,9 @@ def _seat_env(seat: str, token: str) -> dict[str, str]:
         # at /mcp/<seat>/mcp (gateway._mcp_route). Off until the operator
         # opts in; saves always wait in the seat's /assistants inbox.
         "QUILL_MCP_REMOTE": os.environ.get("SEAT_MCP_REMOTE", "0"),
+        # iMessage via a helper on the user's Mac. Texts are stored on the
+        # seat, and each user agrees to that when they connect.
+        "QUILL_IMESSAGE_RELAY": os.environ.get("SEAT_IMESSAGE_RELAY", "0"),
     }
     for optional in ("GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_SECRET",
                      "MS_OAUTH_CLIENT_ID", "MS_OAUTH_CLIENT_SECRET",

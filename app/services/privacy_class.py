@@ -51,6 +51,11 @@ _PERSONAL_PII = re.compile(
     r")"
 )
 
+# A text from Messages quoted into a prompt or answer carries this tag (the
+# event summary, connectors/scheduler.land_item). The stored row's stamp can't
+# follow it there, and its words alone often read as `internal`.
+PRIVATE_SOURCE_TAGS = ("[imessage.message]",)
+
 # Sources that are explicitly public / shared outward.
 _PUBLIC_SOURCES = frozenset({
     "web.public", "rss", "news", "calendar.public",
@@ -89,6 +94,11 @@ def max_class(*classes: str | None) -> str:
         if rank(n) > rank(best):
             best = n
     return best
+
+
+def quotes_private_source(text: str | None) -> bool:
+    t = text or ""
+    return any(tag in t for tag in PRIVATE_SOURCE_TAGS)
 
 
 def looks_like_secret(text: str) -> bool:
@@ -140,6 +150,8 @@ def classify_text(
         pass
 
     # --- sensitive ---------------------------------------------------------
+    if quotes_private_source(t):
+        return SENSITIVE
     if _HEALTH_FINANCE.search(t) or _HEALTH_FINANCE.search(title):
         return SENSITIVE
     try:

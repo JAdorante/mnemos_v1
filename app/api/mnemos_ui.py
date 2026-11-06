@@ -2756,7 +2756,7 @@ window.MnemosCapture = {
       detail = 'An owner must enable this connector for your team first.';
     } else if (!c.configured) {
       state = 'Unavailable';
-      detail = c.kind === 'custom'
+      detail = c.setup_hint ? String(c.setup_hint) : c.kind === 'custom'
         ? 'URL missing or invalid.'
         : ('No OAuth client is configured on this install — ask whoever '
            + 'runs this Sparrow to add one.');
@@ -2773,9 +2773,10 @@ window.MnemosCapture = {
           : (c.kind === 'custom'
              ? ('Reachable at ' + (c.url || 'MCP URL') + '.')
              : 'Nothing imported yet — Re-sync to pull them in.');
+      if (c.status_detail && !p.running) detail = String(c.status_detail);
       if (p.error) detail = String(p.error);
       if (c.error) detail = String(c.error);
-      acts = (c.kind === 'custom' ? '' :
+      acts = (c.kind === 'custom' || c.push_only ? '' :
         '<button type="button" class="pv-btn quiet" data-conn-act="sync"'
         + ' data-conn-id="' + E(id) + '"' + (p.running ? ' disabled' : '')
         + '>Re-sync</button>')
@@ -2847,7 +2848,7 @@ window.MnemosCapture = {
     say(act === 'connect' ? 'Opening the sign-in page…' : 'Working…');
     try {
       if (act === 'connect') {
-        const r = await MnemosJson(url + 'connect', {
+        let r = await MnemosJson(url + 'connect', {
           method: 'POST',
           headers: {
             'X-Public-Base': location.origin,
@@ -2858,7 +2859,24 @@ window.MnemosCapture = {
           window.location = r.auth_url;
           return;
         }
+        if (r.needs_consent) {
+          if (!window.confirm(r.notice)) {
+            say('Not connected.');
+            if (btn) btn.disabled = false;
+            return;
+          }
+          r = await MnemosJson(url + 'connect', {
+            method: 'POST',
+            headers: {'X-Public-Base': location.origin, 'X-Consent-Confirmed': '1'},
+          });
+        }
         if (!r.ok) throw new Error(r.error || 'Could not connect.');
+        if (r.mode === 'pair') {
+          say('Waiting for your Mac…');
+          this.showConnPair(id, r);
+          if (btn) btn.disabled = false;
+          return;
+        }
         say(r.mode === 'local' ? 'Custom connector reachable.' : 'Connected. Importing…');
         if (r.mode !== 'local') {
           await MnemosJson(url + 'sync', {method: 'POST'});
@@ -2869,6 +2887,15 @@ window.MnemosCapture = {
       } else if (act === 'disconnect') {
         await MnemosJson(url + 'disconnect', {method: 'POST'});
         say('Disconnected.');
+        const dc = [...((this._connCache || {}).connectors || []),
+                    ...((this._connDir || {}).connectors || [])].find((x) => x.id === id);
+        if (dc && dc.purgeable && window.confirm(
+            'Also delete the texts Sparrow kept and the training data made from '
+            + 'them? OK deletes them for good. Your model keeps what it already '
+            + 'learned until it next retrains. Cancel keeps them.')) {
+          const p = await MnemosJson(url + 'purge', {method: 'POST'});
+          say('Disconnected and deleted ' + (p.deleted || 0) + ' texts.');
+        }
       } else if (act === 'remove') {
         await MnemosJson('/connectors/custom/' + encodeURIComponent(id),
                          {method: 'DELETE'});
@@ -3091,10 +3118,64 @@ window.MnemosCapture = {
         + ' data-conn-id="' + id + '">Disconnect</button>';
     }
     if (!c.configured && c.kind !== 'custom') {
-      return '<span style="font-size:11px;color:var(--mut)">Not configured</span>';
+      return '<span style="font-size:11px;color:var(--mut)">'
+        + (c.setup_hint ? 'Mac only' : 'Not configured') + '</span>';
     }
     return '<button type="button" class="pv-btn" data-conn-act="connect"'
       + ' data-conn-id="' + id + '">Connect</button>';
+  },
+  /* A device connector with no sign-in page: show the command to run on the
+     Mac, and close by itself once the Mac has connected. */
+  showConnPair(id, r) {
+    const E = window.MnemosEsc;
+    const old = document.getElementById('connPairDlg');
+    if (old) old.remove();
+    const dlg = document.createElement('dialog');
+    dlg.id = 'connPairDlg';
+    dlg.style.cssText = 'max-width:560px;width:calc(100% - 32px);border:1px solid '
+      + 'var(--line);border-radius:10px;padding:18px;color:inherit;'
+      + 'background:var(--card,#fff)';
+    dlg.innerHTML = '<h3 style="margin:0 0 8px;font-size:16px;color:var(--navy)">'
+      + 'Connect iMessage from your Mac</h3>'
+      + '<ol style="margin:0 0 10px;padding-left:20px;font-size:13px;line-height:1.5">'
+      + '<li>On your Mac, open System Settings → Privacy &amp; Security → Full Disk '
+      + 'Access and turn on Terminal. This covers more than Messages.</li>'
+      + '<li>Open Terminal and run this. The code in it expires in '
+      + Math.round((r.expires_in || 900) / 60) + ' minutes.</li></ol>'
+      + '<textarea id="connPairCmd" readonly rows="4" style="width:100%;box-sizing:'
+      + 'border-box;font:12px ui-monospace,monospace;padding:8px">'
+      + E(r.command || '') + '</textarea>'
+      + '<p id="connPairState" style="font-size:12px;color:var(--mut);margin:8px 0">'
+      + 'Waiting for your Mac…</p>'
+      + '<div style="display:flex;gap:8px;justify-content:flex-end">'
+      + ['Copy', 'Close'].map((label) => '<button type="button" id="connPair' + label
+          + '" style="padding:6px 14px;border:1px solid var(--line);border-radius:999px;'
+          + 'background:transparent;color:inherit;font:inherit;font-size:13px;'
+          + 'cursor:pointer">' + label + '</button>').join('')
+      + '</div>';
+    document.body.appendChild(dlg);
+    const stop = () => { clearInterval(this._connPairTimer); dlg.close(); dlg.remove(); };
+    document.getElementById('connPairClose').onclick = stop;
+    document.getElementById('connPairCopy').onclick = async () => {
+      const box = document.getElementById('connPairCmd');
+      box.select();
+      try { await navigator.clipboard.writeText(box.value); } catch (e) {}
+    };
+    dlg.showModal();
+    clearInterval(this._connPairTimer);
+    this._connPairTimer = setInterval(async () => {
+      try {
+        const c = await MnemosJson('/connectors/' + encodeURIComponent(id));
+        if (c.connected) {
+          stop();
+          this.loadConnections();
+          const modal = document.getElementById('mnemosConnManage');
+          if (modal && modal.getAttribute('aria-hidden') === 'false') {
+            this.renderConnManage();
+          }
+        }
+      } catch (e) {}
+    }, 4000);
   },
   showConnDetail(id) {
     const c = ((this._connDir || {}).connectors || []).find((x) => x.id === id);

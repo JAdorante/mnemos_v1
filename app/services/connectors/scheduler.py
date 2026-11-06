@@ -71,6 +71,9 @@ def syncable(connector) -> bool:
             return False
         if not callable(getattr(connector, "fetch_items", None)):
             return False
+        # Texts arrive by push from the user's own device; nothing to poll.
+        if getattr(connector, "push_only", False):
+            return False
         if not connector.connected():
             return False
     except Exception:
@@ -84,6 +87,9 @@ def syncable(connector) -> bool:
 
 def consent_sentence(connector) -> str:
     """The plain sentence recorded at connect time (spec F1 trust §8)."""
+    notice = getattr(connector, "consent_notice", None)
+    if notice:
+        return notice
     what = getattr(connector, "sync_blurb", None) or (
         f"new items from {getattr(connector, 'label', connector.id)}")
     every = int(interval_for(connector))
@@ -155,6 +161,48 @@ def land_item(connector, item: dict, *, store=None) -> int | None:
     return eid
 
 
+def _land_new(connector, items, cursor: dict, store) -> tuple[int, list[str]]:
+    """Land the items the ledger hasn't seen. Returns (landed, updated ledger)."""
+    cid = str(getattr(connector, "id", "") or "").lower()
+    seen: list[str] = list(cursor.get("seen") or [])
+    seen_set = set(seen)
+    landed = 0
+    for item in list(items or [])[:MAX_ITEMS_PER_SYNC]:
+        fp = _fingerprint(cid, item)
+        if fp in seen_set:
+            continue
+        try:
+            eid = land_item(connector, item, store=store)
+        except Exception as exc:
+            print(f"[connectors] {cid} item landing skipped ({exc}).")
+            continue
+        if eid:
+            landed += 1
+            after = getattr(connector, "after_land", None)
+            if callable(after):
+                try:
+                    after(item, store=store)
+                except Exception as exc:
+                    print(f"[connectors] {cid} after-land skipped ({exc}).")
+        seen.append(fp)
+        seen_set.add(fp)
+    return landed, seen[-LEDGER_MAX:]
+
+
+def land_unseen(connector, items, *, store=None, now: float | None = None) -> int:
+    """Land items a device pushed: same ledger and stamps as a sync pass."""
+    if store is None:
+        from app.storage import get_store
+        store = get_store()
+    now = float(now if now is not None else time.time())
+    cid = str(getattr(connector, "id", "") or "").lower()
+    cursor = dict((store.connector_sync_get(cid) or {}).get("cursor") or {})
+    landed, seen = _land_new(connector, items, cursor, store)
+    store.connector_sync_set(cid, cursor={**cursor, "seen": seen}, last_sync=now,
+                             items_landed_add=landed, clear_error=True)
+    return landed
+
+
 # --- one connector, one pass ---------------------------------------------------------
 def sync_connector(connector, *, store=None, now: float | None = None,
                    force: bool = False) -> dict[str, Any]:
@@ -181,24 +229,7 @@ def sync_connector(connector, *, store=None, now: float | None = None,
             store.connector_sync_set(cid, last_sync=now, next_sync=now + interval,
                                      last_error=str(exc)[:300])
             return {"ok": False, "connector_id": cid, "error": str(exc)}
-        seen: list[str] = list(cursor.get("seen") or [])
-        seen_set = set(seen)
-        landed = 0
-        for item in list(items or [])[:MAX_ITEMS_PER_SYNC]:
-            fp = _fingerprint(cid, item)
-            if fp in seen_set:
-                continue
-            try:
-                eid = land_item(connector, item, store=store)
-            except Exception as exc:
-                print(f"[connectors] {cid} item landing skipped ({exc}).")
-                continue
-            if eid:
-                landed += 1
-            seen.append(fp)
-            seen_set.add(fp)
-        if len(seen) > LEDGER_MAX:
-            seen = seen[-LEDGER_MAX:]
+        landed, seen = _land_new(connector, items, cursor, store)
         merged = dict(new_cursor or cursor)
         merged["seen"] = seen
         store.connector_sync_set(cid, cursor=merged, last_sync=now,

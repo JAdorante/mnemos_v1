@@ -328,10 +328,12 @@ def stage_curate(args) -> int:
                       dedupe_sim=args.dedupe_sim,
                       upweight_edited=args.upweight_edited,
                       synthetic_rows=dc.load_synthetic(args.synthetic),
-                      synthetic_cap=args.synthetic_cap)
+                      synthetic_cap=args.synthetic_cap,
+                      reply_rows=dc.load_text_replies())
     n = stats["train_pairs"]
     n_syn = int(stats.get("synthetic_pairs") or 0)
     print(f"[curate] {n} train pairs + {n_syn} synthetic "
+          f"+ {stats.get('reply_pairs', 0)} text replies "
           f"(holdout {stats['holdout_n']} excluded — real rows only, "
           f"readiness: {stats['readiness']})")
     if n + n_syn < args.min_pairs and not args.force:

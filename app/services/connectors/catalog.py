@@ -11,6 +11,7 @@ from typing import Any
 CATEGORIES: tuple[dict[str, str], ...] = (
     {"id": "productivity", "label": "Productivity"},
     {"id": "calendar", "label": "Calendar & email"},
+    {"id": "messages", "label": "Messages"},
     {"id": "crm", "label": "CRM & sales"},
     {"id": "dev", "label": "Engineering"},
     {"id": "custom", "label": "Custom"},
@@ -53,6 +54,17 @@ DIRECTORY: dict[str, dict[str, Any]] = {
         ),
         "auth": "oauth",
         "scopes_blurb": "Mail.ReadBasic + Calendars.Read",
+    },
+    "imessage": {
+        "category": "messages",
+        "description": (
+            "Read-only texts from Messages on this Mac. Sparrow can't send them."
+        ),
+        "capabilities": (
+            "Remember iMessage and SMS conversations",
+            "Close tasks when you text someone back",
+        ),
+        "auth": "device",
     },
     "hubspot": {
         "category": "crm",

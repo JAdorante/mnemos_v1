@@ -42,6 +42,8 @@ _CSRF_EXACT_EXEMPT = frozenset({
     "/oauth/mcp/register",   # remote MCP: open registration, consent gates use
     "/oauth/mcp/token",      # code + PKCE / refresh token is the auth
     "/mcp",                  # remote MCP: OAuth Bearer checked in the route
+    "/imessage-relay/claim", # Mac helper: single-use pairing code is the auth
+    "/imessage-relay/push",  # Mac helper: push token checked in the route
 })
 
 # Paths that must stay reachable without the LAN API token.
@@ -70,6 +72,11 @@ _EXACT_EXEMPT = frozenset({
     "/oauth/mcp/authorize",
     "/oauth/mcp/token",
     "/mcp",
+    # The Mac helper has no browser session. claim and push check their own
+    # credentials; helper.pyz is public code with no user data in it.
+    "/imessage-relay/claim",
+    "/imessage-relay/push",
+    "/imessage-relay/helper.pyz",
     "/docs",
     "/openapi.json",
     "/redoc",

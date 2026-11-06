@@ -4,10 +4,12 @@ Kept out of routes.py so the September workstreams don't fight a 7k-line file.
 """
 from __future__ import annotations
 
+import json
 import threading
 from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Request, Response
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
@@ -316,6 +318,99 @@ def connector_one(connector_id: str, request: Request) -> dict:
     except Exception as exc:
         st = {**st, "sync_error": str(exc)}
     return st
+
+
+# --- iMessage on a hosted seat (services/connectors/imessage_relay.py) -----------------
+@router.post("/connectors/imessage/connect")
+def imessage_connect(request: Request) -> dict:
+    """On a Mac this is the ordinary connect. On a seat it starts pairing, and
+    only after the user agrees to the texts being copied off their Mac."""
+    from app.services.connectors.imessage import imessage, relay_mode
+    if not relay_mode():
+        return connector_connect("imessage", request)
+    from app.api.assistants_routes import public_base
+    from app.services import capture_consent
+    from app.services.connectors import imessage_relay, prefs, scheduler
+    if not prefs.is_team_allowed(imessage.id):
+        return {"ok": False, "team_blocked": True,
+                "error": "This connector is not enabled for your team yet. "
+                         "An owner must add it under Connectors → Team first."}
+    if request.headers.get("x-consent-confirmed") != "1":
+        return {"ok": False, "needs_consent": True, "notice": imessage.consent_notice}
+    capture_consent.record_connector(
+        imessage.id, enabled=True, sentence=scheduler.consent_sentence(imessage),
+        interval_s=scheduler.interval_for(imessage))
+    base = public_base(request)
+    code = imessage_relay.start_pairing()
+    return {"ok": True, "mode": "pair", "expires_in": imessage_relay.PAIR_TTL_S,
+            "command": imessage_relay.install_command(base, code)}
+
+
+def _imessage_relay_or_404():
+    from app.services.connectors.imessage import relay_mode
+    if not relay_mode():
+        raise HTTPException(404, "not found")
+
+
+@router.get("/imessage-relay/helper.pyz")
+def imessage_helper_download() -> Response:
+    _imessage_relay_or_404()
+    from app.services.connectors import imessage_relay
+    return Response(imessage_relay.build_helper(),
+                    media_type="application/octet-stream")
+
+
+@router.post("/imessage-relay/claim")
+async def imessage_claim(request: Request) -> dict:
+    _imessage_relay_or_404()
+    from app.services.connectors import imessage_relay
+    try:
+        body = await request.json()
+        code, device = body.get("code"), body.get("device")
+    except (ValueError, AttributeError):
+        raise HTTPException(400, "bad request") from None
+    token = imessage_relay.claim(code if isinstance(code, str) else None,
+                                 device if isinstance(device, str) else None)
+    if not token:
+        raise HTTPException(401, "invalid or expired code")
+    return {"token": token}
+
+
+@router.post("/imessage-relay/push")
+async def imessage_push(request: Request) -> dict:
+    """Credentials before the body is read. 401 means this Mac is disconnected
+    for good; 403 means paused, and the helper keeps its place and retries."""
+    _imessage_relay_or_404()
+    from app.services import capture_consent
+    from app.services.connectors import imessage_relay, prefs
+    from app.services.connectors.imessage import imessage
+    auth = request.headers.get("authorization") or ""
+    token = auth[7:].strip() if auth[:7].lower() == "bearer " else None
+    if not imessage_relay.verify(token):
+        raise HTTPException(401, "not paired")
+    if not (capture_consent.allows_connector(imessage.id)
+            and prefs.is_team_allowed(imessage.id)):
+        raise HTTPException(403, "paused")
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw.extend(chunk)
+        if len(raw) > imessage_relay.MAX_BODY_BYTES:
+            raise HTTPException(413, "batch too large")
+    try:
+        payload = json.loads(bytes(raw))
+    except ValueError:
+        raise HTTPException(400, "bad json") from None
+    res = await run_in_threadpool(imessage_relay.accept_push, imessage, payload)
+    if not res.get("ok"):
+        raise HTTPException(400, res.get("error") or "bad batch")
+    return res
+
+
+@router.post("/connectors/imessage/purge")
+def imessage_purge() -> dict:
+    """Disconnect and delete every text kept on this install."""
+    from app.services.connectors.imessage import imessage
+    return imessage.purge()
 
 
 @router.post("/connectors/{connector_id}/connect")

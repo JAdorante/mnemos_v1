@@ -12,6 +12,7 @@ Phase 3.
 | Audio ingest | `WS /ingest/audio` — auth enforced in-handler |
 | Client-side VAD (Phase 4) | `/static/vad_worker.js` + `GET /capture/vad-model` + `GET /capture/config`; onnxruntime-web baked into `/static/ort/` by the Dockerfile |
 | Headless guard | `QUILL_HEADLESS=1` — local devices never open, `/capture/resume` 503s toward `/capture` |
+| iMessage | `QUILL_IMESSAGE_RELAY=1` — a helper on the user's Mac pushes texts to the seat; see [docs/imessage.md](../../docs/imessage.md) |
 | ASR warm-up | `QUILL_ASR_WARMUP=1` (default under headless) — model loads at boot, not on the first utterance |
 
 ## Checklist per user

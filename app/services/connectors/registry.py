@@ -1,4 +1,4 @@
-"""Connector registry — google + outlook (ready) + planned stubs + custom MCP."""
+"""Connector registry — google + outlook + imessage (ready) + planned stubs + custom MCP."""
 from __future__ import annotations
 
 from typing import Any
@@ -6,12 +6,14 @@ from typing import Any
 from app.services.connectors import catalog
 from app.services.connectors.base import Connector
 from app.services.connectors.google import google
+from app.services.connectors.imessage import imessage
 from app.services.connectors.outlook import outlook
 from app.services.connectors.planned import PLANNED
 
 
 def _builtins() -> dict[str, Connector]:
-    reg: dict[str, Connector] = {google.id: google, outlook.id: outlook}
+    reg: dict[str, Connector] = {google.id: google, outlook.id: outlook,
+                                 imessage.id: imessage}
     for stub in PLANNED:
         reg[stub.id] = stub
     return reg
