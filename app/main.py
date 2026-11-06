@@ -17,6 +17,7 @@ from app.api.fleet_routes import router as fleet_router
 from app.api.records_routes import router as records_router
 from app.api.assistants_routes import router as assistants_router
 from app.api.projects_routes import router as projects_router
+from app.api.replay_routes import router as replay_router
 from app.config import settings
 from app.events import bus
 from app.services.api_auth import (
@@ -37,6 +38,7 @@ app.include_router(fleet_router)
 app.include_router(records_router)
 app.include_router(assistants_router)
 app.include_router(projects_router)
+app.include_router(replay_router)
 
 
 # --- active-minute marker (WS-A) --------------------------------------------

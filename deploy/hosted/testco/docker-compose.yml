@@ -1,0 +1,85 @@
+# Two-Sparrow interaction test seats ("Testco": alice + bob).
+#
+# A separate compose project from the pilot (deploy/hosted/gb10) on purpose:
+# bringing these up or down never recreates a pilot seat. Same image recipe,
+# own tag (sparrow-testco) so a rebuild here cannot replace the pilot image.
+# Each seat is its own container, SQLite/LanceDB volume, and model context;
+# they only share the host Ollama (via the gb10 ollama-proxy on 11435) and
+# the Org Record Service (sparrow-org on gb10_default).
+#
+#   cd deploy/hosted/testco
+#   docker compose -p testco up -d --build
+#   python scripts/two_sparrow/run.py --help
+#
+# Differences from the pilot posture, all deliberate for the test:
+#   QUILL_REPLAY_INGEST=1   the corpus lands with its own timestamps
+#   AGENT_DRY_RUN=approval  human-gated commits (the runbook tests HITL), not
+#                           the pilot's no-commit "draft"
+#   ANTHROPIC_API_KEY       both seats escalate to the same key; cost is split
+#                           per seat from each volume's model_calls.jsonl
+#   QUILL_PEER_DEFAULT_PACK unset: the driver picks the pack at pairing
+
+x-sparrow: &sparrow
+  build:
+    context: ../../..
+    dockerfile: deploy/hosted/Dockerfile
+  image: sparrow-testco
+  restart: unless-stopped
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  networks:
+    default:
+    gb10_default:
+
+x-env: &sparrow-env
+  QUILL_TEXT_LOCAL: "1"
+  QUILL_OLLAMA_URL: http://host.docker.internal:11435
+  OLLAMA_HOST: host.docker.internal:11435
+  QUILL_TEXT_LOCAL_MODEL: qwen2.5:14b-instruct
+  QUILL_REPLAY_INGEST: "1"
+  AGENT_DRY_RUN: approval
+  QUILL_RECORDS: "1"
+  QUILL_EXEMPLARS: "0"
+  QUILL_MCP_REMOTE: "0"
+  QUILL_IMESSAGE_RELAY: "0"
+  QUILL_MAIL_SEND: "0"
+  QUILL_IDLE_TRAIN: "0"
+  ANTHROPIC_API_KEY: "${TESTCO_ANTHROPIC_KEY:-}"
+
+services:
+  alice:
+    <<: *sparrow
+    ports:
+      - "127.0.0.1:8007:8000"
+    volumes:
+      - testco-alice-data:/srv/sparrow/data
+    environment:
+      <<: *sparrow-env
+      QUILL_API_TOKEN: "${TESTCO_ALICE_TOKEN:?set in .env}"
+      QUILL_PEER_NAME: Alice Park
+      QUILL_LORA_TAG_SUFFIX: testco-alice
+      QUILL_PEER_INTERNAL_URL: http://alice:8000
+      QUILL_PEER_BASE_URL: http://alice:8000
+
+  bob:
+    <<: *sparrow
+    ports:
+      - "127.0.0.1:8008:8000"
+    volumes:
+      - testco-bob-data:/srv/sparrow/data
+    environment:
+      <<: *sparrow-env
+      QUILL_API_TOKEN: "${TESTCO_BOB_TOKEN:?set in .env}"
+      QUILL_PEER_NAME: Bob Lindqvist
+      QUILL_LORA_TAG_SUFFIX: testco-bob
+      QUILL_PEER_INTERNAL_URL: http://bob:8000
+      QUILL_PEER_BASE_URL: http://bob:8000
+
+volumes:
+  testco-alice-data:
+  testco-bob-data:
+
+networks:
+  default: {}
+  gb10_default:
+    external: true

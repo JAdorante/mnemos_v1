@@ -89,6 +89,14 @@ class HostedPostureTests(unittest.TestCase):
         src = inspect.getsource(routes.meeting_debrief_send)
         self.assertIn("live_session(request)", src)
 
+    def test_replay_ingest_stays_off(self) -> None:
+        """POST /replay/items (app/api/replay_routes.py) lands a synthetic
+        corpus with its own timestamps. It is a test seam for the two-Sparrow
+        interaction harness (deploy/hosted/testco), never a pilot seat."""
+        for seat in self.seats:
+            val = self._env(seat).get("QUILL_REPLAY_INGEST")
+            self.assertIn(val, (None, "0", 0, False), seat)
+
     def test_phone_link_stays_off(self) -> None:
         """An outbound channel to a real phone is not part of this trial."""
         for seat in self.seats:
