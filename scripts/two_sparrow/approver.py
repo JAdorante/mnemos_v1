@@ -70,7 +70,7 @@ def main() -> int:
                         resp = s.post("/peer/asks/deny", {"id": ask["id"]})
                 except Exception as exc:  # noqa: BLE001
                     resp = {"error": str(exc)}
-                log.write("approval", seat=s.name, kind="peer_ask", id=ask.get("id"), decision=d,
+                log.write("approval", seat=s.name, what="peer_ask", id=ask.get("id"), decision=d,
                           peer=ask.get("peer_name"), topic=ask.get("topic"), ask_kind=ask.get("kind"),
                           question=ask.get("question"), latency_ms=int((time.time() - t0) * 1000),
                           response=(resp or {}).get("status") or (resp or {}).get("ok"),
@@ -86,6 +86,13 @@ def main() -> int:
                 pid = st.get("packet_id")
                 key = f"{s.name}:packet:{pid or st.get('sig')}"
                 if key not in decided:
+                    if not (pid and st.get("payload_hash")):
+                        # a proactive offer or the agent asking the user something,
+                        # not a hash-bound approval: observe, never act
+                        decided[key] = "observed"
+                        log.write("offer.seen", seat=s.name, summary=st.get("summary"), intent=st.get("intent"),
+                                  outbound=st.get("outbound"), kind_=st.get("kind"))
+                        continue
                     d = decide(rng)
                     decided[key] = d
                     resp = None
@@ -102,7 +109,7 @@ def main() -> int:
                                           form={"accept": "1" if d == APPROVE else "0", "as_json": "1"})
                     except lib.HttpError as exc:
                         resp = {"error": str(exc), "status": exc.status}
-                    log.write("approval", seat=s.name, kind="packet", id=pid, decision=d,
+                    log.write("approval", seat=s.name, what="packet", id=pid, decision=d,
                               payload_hash=st.get("payload_hash"), summary=st.get("summary"),
                               intent=st.get("intent"), outbound=st.get("outbound"), steps=st.get("steps"),
                               payload=(st.get("payload") or "")[:2000], response=resp)
@@ -131,7 +138,7 @@ def main() -> int:
                                           live=True)
                         except lib.HttpError as exc:
                             resp = {"error": str(exc), "status": exc.status}
-                    log.write("approval", seat=s.name, kind="record", id=pk["id"], claim_id=c.get("id"),
+                    log.write("approval", seat=s.name, what="record", id=pk["id"], claim_id=c.get("id"),
                               decision=d, payload_hash=pk.get("payload_hash"), text=(c.get("text") or "")[:500],
                               response=resp)
             # 4. flow watcher: every peer round trip this seat has sent
@@ -147,7 +154,7 @@ def main() -> int:
                     continue
                 seen_answers.add(key)
                 log.write("peer.flow", seat=s.name, direction="outbound", ask_id=aid, status=status,
-                          to=ans.get("peer_name") or ans.get("peer_id"), kind=ans.get("kind"),
+                          to=ans.get("peer_name") or ans.get("peer_id"), ask_kind=ans.get("kind"),
                           question=ans.get("question"), answer=(ans.get("answer") or "")[:3000],
                           claims=ans.get("claims"), sources=ans.get("sources"), hop=ans.get("hop"),
                           asked_at=ans.get("asked_at") or ans.get("created_at"),

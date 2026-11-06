@@ -134,7 +134,7 @@ class Seat:
             except HttpError:
                 pass
         before = self.get("/chat/poll?since=0")
-        last_seq = max([int(e.get("seq") or 0) for e in before.get("events") or []] + [0])
+        last_seq = max([int(e.get("id") or e.get("seq") or 0) for e in before.get("events") or []] + [0])
         t0 = time.time()
         sent = self.post("/chat", {"message": message})
         if self.log:
@@ -146,9 +146,9 @@ class Seat:
         while time.time() < deadline:
             time.sleep(2)
             poll = self.get(f"/chat/poll?since={last_seq + 1}")
-            evs = [e for e in (poll.get("events") or []) if int(e.get("seq") or 0) > last_seq]
+            evs = [e for e in (poll.get("events") or []) if int(e.get("id") or e.get("seq") or 0) > last_seq]
             for e in evs:
-                last_seq = max(last_seq, int(e.get("seq") or 0))
+                last_seq = max(last_seq, int(e.get("id") or e.get("seq") or 0))
                 seen.append(e)
                 if e.get("kind") in ("result", "error", "ask"):
                     final = e
@@ -175,6 +175,42 @@ class Seat:
         if self.log:
             self.log.write("chat.done", **{k: v for k, v in out.items() if k != "events"},
                            n_events=len(seen), texts=[(e.get("kind"), (e.get("text") or "")[:2000]) for e in seen])
+        return out
+
+    def team_ask(self, question: str, peer_id: str, *, task: str = "", slug: str = "testco",
+                 timeout_s: float = 600.0) -> dict:
+        """The user clicking the 'Ask the Testco team' chip under their message:
+        POST /chat/suggestions/apply with the peer.team_ask payload (what
+        parse_team_ask yields on the seat), then wait for the round trip to
+        reach a terminal status in /peer/answers. The chat agent never
+        dispatches a team ask on its own (see README)."""
+        before = {x.get("ask_id") for x in (self.get("/peer/answers").get("answers") or [])}
+        t0 = time.time()
+        payload = {"fanout": True, "team_slug": slug, "team_name": slug, "peer_ids": [peer_id],
+                   "peer_name": f"{slug} team", "question": question, "kind": "question"}
+        try:
+            applied = self.post("/chat/suggestions/apply", {"action": "peer.team_ask", "payload": payload})
+        except HttpError as e:
+            applied = {"error": str(e)}
+        if self.log:
+            self.log.write("chat.sent", seat=self.name, task=task, message=f"[team_ask] {question}", resp=applied)
+        final = None
+        while time.time() - t0 < timeout_s:
+            time.sleep(3)
+            rows = [x for x in (self.get("/peer/answers").get("answers") or []) if x.get("ask_id") not in before]
+            if rows:
+                r = rows[-1]
+                if r.get("status") in ("answered", "null", "declined", "policy_denied", "failed", "error", "offline", "expired"):
+                    final = r
+                    break
+        out = {"seat": self.name, "task": task, "message": question, "applied": applied,
+               "status": (final or {}).get("status"), "final_kind": "peer_" + str((final or {}).get("status")),
+               "final_text": (final or {}).get("answer"), "null_reason": (final or {}).get("null_reason"),
+               "hop": (final or {}).get("hop"), "ask_id": (final or {}).get("ask_id"),
+               "elapsed_s": round(time.time() - t0, 1), "timed_out": final is None, "events": []}
+        if self.log:
+            self.log.write("chat.done", **{k: v for k, v in out.items() if k != "events"}, n_events=0,
+                           texts=[("peer_answer", (out["final_text"] or "")[:3000])])
         return out
 
     # -- docker ---------------------------------------------------------------------------

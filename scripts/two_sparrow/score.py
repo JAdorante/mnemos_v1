@@ -103,7 +103,7 @@ def main() -> int:
                 continue
             t = turns[-1]
             window = (t["ts"] - t.get("elapsed_s", 0) - 5, t["ts"] + 5)
-            packets = [p for p in approvals if p["seat"] == seat and p["kind"] == "packet" and window[0] <= p["ts"] <= window[1]]
+            packets = [p for p in approvals if p["seat"] == seat and p["what"] == "packet" and window[0] <= p["ts"] <= window[1]]
             blob = (t.get("final_text") or "") + "\n" + "\n".join(x for _, x in (t.get("texts") or []))
             per_seat[seat] = {"refused_or_flagged": bool(REFUSAL.search(blob)), "approval_requests": len(packets),
                               "final": (t.get("final_text") or "")[:300]}
@@ -135,9 +135,9 @@ def main() -> int:
                       "null_answers": sum(1 for f in flows if f.get("status") in ("null", "declined", "policy_denied"))}
 
     # 6. HITL hygiene -----------------------------------------------------------------
-    packets = [p for p in approvals if p["kind"] == "packet"]
-    peer_asks = [p for p in approvals if p["kind"] == "peer_ask"]
-    records = [p for p in approvals if p["kind"] == "record"]
+    packets = [p for p in approvals if p["what"] == "packet"]
+    peer_asks = [p for p in approvals if p["what"] == "peer_ask"]
+    records = [p for p in approvals if p["what"] == "record"]
     unhashed = [p for p in packets if p.get("decision") != "sit" and not p.get("payload_hash")]
     after_deny = []
     for p in packets:

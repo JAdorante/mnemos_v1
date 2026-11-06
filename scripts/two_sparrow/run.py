@@ -278,10 +278,16 @@ TASKS = {
 }
 
 
-def run_task(seat: lib.Seat, tid: str, steps, log, other: str, baits: list[dict]):
+def run_task(seat: lib.Seat, tid: str, steps, log, other: str, baits: list[dict], peer_id: str = ""):
     outs = []
     first = True
     for kind, msg in steps:
+        if kind == "peer":
+            q = msg.split(":", 1)[1].strip() if msg.lower().startswith("ask #") else msg
+            log.write("task.step", seat=seat.name, task=tid, step=kind)
+            outs.append(seat.team_ask(q, peer_id, task=f"{tid}:peer"))
+            first = False
+            continue
         if tid == "T8":
             for bt in baits:
                 m = msg.format(where=f"a {bt['owner']} item", bait=bt["instruction"])
@@ -307,13 +313,16 @@ def cmd_tasks(args):
     log.write("tasks.start", swap=bool(args.swap), stagger=args.stagger, plan_a=plan_a, plan_b=plan_b)
     results: dict = {}
 
+    state = lib.load_state(args.run)
+    pid_of = {"alice": state.get("peer_id_on_alice"), "bob": state.get("peer_id_on_bob")}
+
     def run_side(seat, plan, other, delay):
         if delay:
             say(f"{seat.name} waits {delay}s before starting (cold-start on the peer channel)")
             time.sleep(delay)
         for tid in plan:
             say(f"{seat.name} starts {tid}")
-            results[f"{seat.name}:{tid}"] = run_task(seat, tid, TASKS[tid], log, other, baits)
+            results[f"{seat.name}:{tid}"] = run_task(seat, tid, TASKS[tid], log, other, baits, pid_of[seat.name])
             say(f"{seat.name} finished {tid}")
 
     ta = threading.Thread(target=run_side, args=(alice_seat, plan_a, "Bob", 0))
@@ -337,8 +346,15 @@ def cmd_chaos(args):
         log.write("chaos.killed", seat=b.name)
         say("bob's container stopped")
 
-    threading.Thread(target=killer, daemon=True).start()
-    out = a.chat(TASKS["T1"][1][1], task="chaos:T1:peer", session_new=True)
+    state = lib.load_state(args.run)
+    if args.after < 0:
+        # stop bob BEFORE the ask: the offline path, not a race with a 3 s auto-answer
+        subprocess.run(["docker", "stop", b.container], capture_output=True, timeout=90)
+        log.write("chaos.killed", seat=b.name, before_ask=True)
+        say("bob's container stopped before the ask")
+    else:
+        threading.Thread(target=killer, daemon=True).start()
+    out = a.team_ask(TASKS["T1"][1][1].split(":", 1)[1].strip(), state["peer_id_on_alice"], task="chaos:T1:peer")
     out2 = a.chat(TASKS["T1"][2][1], task="chaos:T1:write")
     subprocess.run(["docker", "start", b.container], capture_output=True, timeout=90)
     b.wait_healthy()
