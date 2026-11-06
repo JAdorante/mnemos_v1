@@ -1,0 +1,40 @@
+{
+ "_doc": "Counted by reading each peer answer. Reviewer: please verify, then set verified_by.",
+ "verified_by": null,
+ "run_a": {
+  "answers_read": 0,
+  "note": "The only round trip was one null answer, so this run cannot distinguish a good scorer from one that always says 0; run_b does the real check.",
+  "A_to_bob": {
+   "needed": 9,
+   "asked": 8,
+   "crossed": [],
+   "partial": []
+  },
+  "B_to_alice": {
+   "needed": 8,
+   "asked": 7,
+   "crossed": [],
+   "partial": []
+  }
+ },
+ "run_b": {
+  "note": "A01 did not cross: Alice sent the stale Dec 5. A04 crossed beside the superseded $49. A07 is partial: 'Heron backend engineer' from the setup profile, nothing about running the call. Bob's answers name Northwind, Orbital and Pinecrest in profile rows but carry none of the needed facts.",
+  "A_to_bob": {
+   "needed": 9,
+   "asked": 8,
+   "crossed": [
+    "A03",
+    "A04"
+   ],
+   "partial": [
+    "A07"
+   ]
+  },
+  "B_to_alice": {
+   "needed": 8,
+   "asked": 7,
+   "crossed": [],
+   "partial": []
+  }
+ }
+}

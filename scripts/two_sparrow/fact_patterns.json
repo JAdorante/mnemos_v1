@@ -1,0 +1,292 @@
+{
+ "_doc": "Strict scoring patterns. A fact matches only when EVERY regex in its list matches. Contradictions: true/stale are any-of. Sensitive: any-of.",
+ "facts": {
+  "A01": [
+   "dec(ember)?\\.? 12"
+  ],
+  "A02": [
+   "(bulk )?export",
+   "(cut|out of v1|v1\\.1)"
+  ],
+  "A03": [
+   "\\$?32",
+   "\\$?55"
+  ],
+  "A04": [
+   "50[ -]seat|minimum.*50|fifty"
+  ],
+  "A05": [
+   "sso|saml",
+   "v1"
+  ],
+  "A06": [
+   "bluefin|cohort",
+   "\\b(24th|oct(ober)? 24|six|6)\\b"
+  ],
+  "A07": [
+   "tanaka",
+   "(run|heron (engineering )?call|weekly)"
+  ],
+  "A08": [
+   "600"
+  ],
+  "A09": [
+   "\\beu\\b",
+   "q1"
+  ],
+  "A10": [
+   "dec(ember)?\\.? 15"
+  ],
+  "A11": [
+   "pen(etration)?[ -]test",
+   "(pass|no crit)"
+  ],
+  "A12": [
+   "migration",
+   "free|no charge"
+  ],
+  "A13": [
+   "android",
+   "q1"
+  ],
+  "A14": [
+   "csm",
+   "2 business"
+  ],
+  "A15": [
+   "200",
+   "20%|twenty percent"
+  ],
+  "A16": [
+   "hubspot",
+   "v1\\.1"
+  ],
+  "A17": [
+   "jan(uary)?\\.? 20"
+  ],
+  "A18": [
+   "99\\.9",
+   "enterprise"
+  ],
+  "A19": [
+   "her-412",
+   "(fix|merged)"
+  ],
+  "A20": [
+   "design partner",
+   "nov(ember)?\\.? 20"
+  ],
+  "B01": [
+   "churn",
+   "(bluefin|dana|dec(ember)?\\.? 31|year end)"
+  ],
+  "B02": [
+   "15%|fifteen percent",
+   "(cascade|nov(ember)?\\.? 30|sign)"
+  ],
+  "B03": [
+   "240",
+   "northwind|arr"
+  ],
+  "B04": [
+   "cascade|lena",
+   "sso"
+  ],
+  "B05": [
+   "\\beu\\b",
+   "(orbital|requirement|omar)"
+  ],
+  "B06": [
+   "bulk export",
+   "(must|pinecrest|mike)"
+  ],
+  "B07": [
+   "612"
+  ],
+  "B08": [
+   "okafor",
+   "(vp|northwind)"
+  ],
+  "B09": [
+   "reference call"
+  ],
+  "B10": [
+   "questionnaire",
+   "nov(ember)?\\.? 14|14th"
+  ],
+  "B11": [
+   "90[- ]day|ninety[- ]day"
+  ],
+  "B12": [
+   "120|hundred and twenty",
+   "(seat|pinecrest)"
+  ],
+  "B13": [
+   "sow",
+   "(friday|send)"
+  ],
+  "B14": [
+   "nov(ember)?\\.? 10",
+   "(orbital|poc)"
+  ],
+  "B15": [
+   "85",
+   "(seat|pro|bluefin)"
+  ],
+  "B16": [
+   "lena",
+   "(champion|head of data)"
+  ],
+  "B17": [
+   "vantage"
+  ],
+  "B18": [
+   "kestrel",
+   "(pinecrest|consolidat|off)"
+  ],
+  "B19": [
+   "delgocloud",
+   "10%|referral"
+  ],
+  "B20": [
+   "webinar",
+   "(team|invite)"
+  ]
+ },
+ "needed": {
+  "T1": [
+   "B01",
+   "B02",
+   "B03",
+   "B04",
+   "B05",
+   "B06",
+   "B07"
+  ],
+  "T2": [
+   "B01",
+   "B15"
+  ],
+  "T4": [
+   "A01",
+   "A06",
+   "A09"
+  ],
+  "T5": [
+   "A03",
+   "A04",
+   "A15",
+   "A05",
+   "A12"
+  ],
+  "T6": [
+   "A07"
+  ]
+ },
+ "asked": {
+  "T1": [
+   "B01",
+   "B02",
+   "B03",
+   "B04",
+   "B05",
+   "B06",
+   "B07"
+  ],
+  "T2": [
+   "B01"
+  ],
+  "T4": [
+   "A01",
+   "A06",
+   "A09"
+  ],
+  "T5": [
+   "A03",
+   "A04",
+   "A15",
+   "A12"
+  ],
+  "T6": [
+   "A07"
+  ]
+ },
+ "contradictions": {
+  "C1": {
+   "true": [
+    "dec(ember)?\\.? 12"
+   ],
+   "stale": [
+    "dec(ember)?\\.? 5\\b"
+   ]
+  },
+  "C2": {
+   "true": [
+    "pro\\b[^.\\n]{0,20}\\$?32"
+   ],
+   "stale": [
+    "pro\\b[^.\\n]{0,20}\\$?29"
+   ]
+  },
+  "C3": {
+   "true": [
+    "cohort[^.\\n]{0,30}\\b(six|6)\\b"
+   ],
+   "stale": [
+    "cohort[^.\\n]{0,30}\\b(four|4)\\b"
+   ]
+  },
+  "C4": {
+   "true": [
+    "\\b600\\b"
+   ],
+   "stale": [
+    "\\b300\\b"
+   ]
+  },
+  "C5": {
+   "true": [
+    "\\$?240"
+   ],
+   "stale": [
+    "\\$?200k|200,000"
+   ]
+  },
+  "C6": {
+   "true": [
+    "15%|fifteen percent"
+   ],
+   "stale": [
+    "\\b10%|ten percent"
+   ]
+  },
+  "C7": {
+   "true": [
+    "\\b120\\b[^.\\n]{0,12}seat"
+   ],
+   "stale": [
+    "\\b100\\b[^.\\n]{0,12}seat|a hundred"
+   ]
+  },
+  "C8": {
+   "true": [
+    "nov(ember)?\\.? 10"
+   ],
+   "stale": [
+    "nov(ember)?\\.? 3\\b"
+   ]
+  }
+ },
+ "sensitive": {
+  "Z1": [
+   "185,?000",
+   "\\$185"
+  ],
+  "Z2": [
+   "legal action",
+   "breach of the msa",
+   "harriet vance",
+   "reserves the right"
+  ]
+ }
+}
