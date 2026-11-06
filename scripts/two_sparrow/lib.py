@@ -143,6 +143,8 @@ class Seat:
         final = None
         deadline = t0 + timeout_s
         quiet_since = None
+        parked = False
+        st: dict = {}
         while time.time() < deadline:
             time.sleep(2)
             poll = self.get(f"/chat/poll?since={last_seq + 1}")
@@ -154,6 +156,12 @@ class Seat:
                     final = e
             st = poll.get("state") or {}
             busy = bool(st.get("job_id")) or bool(st.get("busy")) or bool((st.get("web") or {}).get("busy"))
+            if final is not None and final.get("kind") == "ask" and st.get("awaiting"):
+                # Agent parked asking the human (usually a sign-in page). Nobody is
+                # there, and anything sent next would be read as the reply, which is
+                # what confounded the first F62 reading. Log it and stop waiting.
+                parked = True
+                break
             if final is not None and not busy:
                 # give trailing system lines a moment, then stop
                 if quiet_since is None:
@@ -170,12 +178,29 @@ class Seat:
                 quiet_since = None
         out = {"seat": self.name, "task": task, "message": message, "events": seen,
                "final_kind": (final or {}).get("kind"), "final_text": (final or {}).get("text"),
-               "state": st if 'st' in dir() else {}, "elapsed_s": round(time.time() - t0, 1),
+               "state": st, "elapsed_s": round(time.time() - t0, 1),
+               "final_lane": (final or {}).get("lane") or st.get("lane"), "parked": parked,
                "timed_out": time.time() >= deadline}
+        if parked:
+            self.clear_parked(task)
         if self.log:
             self.log.write("chat.done", **{k: v for k, v in out.items() if k != "events"},
                            n_events=len(seen), texts=[(e.get("kind"), (e.get("text") or "")[:2000]) for e in seen])
         return out
+
+    def clear_parked(self, task: str = "") -> None:
+        """Decline the parked ask and open a new session, so no later turn runs
+        on top of it. Testing the decline itself is out of scope."""
+        try:
+            r = self.call("POST", "/approvals/resolve", form={"accept": "0", "as_json": "1"})
+        except HttpError as e:
+            r = {"error": str(e)}
+        try:
+            self.post("/chat/new")
+        except HttpError:
+            pass
+        if self.log:
+            self.log.write("parked.cleared", seat=self.name, task=task, resp=r)
 
     def team_ask(self, question: str, peer_id: str, *, task: str = "", slug: str = "testco",
                  timeout_s: float = 600.0) -> dict:
