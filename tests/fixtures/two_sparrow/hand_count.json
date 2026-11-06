@@ -36,5 +36,28 @@
    "crossed": [],
    "partial": []
   }
+ },
+ "run_c": {
+  "note": "Clean volumes. The T4 answer says 'ship date is now Dec 12'. A04 crossed beside the superseded $49 Enterprise line. A06, A09 and A15 were asked and did not cross. On Bob's side B01 is partial: 'Heron slips past Dec 31' with no customer and no churn.",
+  "A_to_bob": {
+   "needed": 9,
+   "asked": 8,
+   "crossed": [
+    "A01",
+    "A03",
+    "A04",
+    "A07",
+    "A12"
+   ],
+   "partial": []
+  },
+  "B_to_alice": {
+   "needed": 8,
+   "asked": 7,
+   "crossed": [],
+   "partial": [
+    "B01"
+   ]
+  }
  }
 }

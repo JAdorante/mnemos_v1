@@ -40,6 +40,12 @@ class HandCount(unittest.TestCase):
         self.assertEqual(got["B_to_alice"]["crossed"], [])
 
 
+    def test_run_c(self):
+        got = self.check("c")
+        self.assertEqual(got["A_to_bob"]["crossed"], ["A01", "A03", "A04", "A07", "A12"])
+        self.assertEqual(got["B_to_alice"]["crossed"], [])
+
+
 class StrictMatching(unittest.TestCase):
     def test_old_false_positives_stay_out(self):
         self.assertFalse(scorer.matches_fact("A06", "Heron v1 ships December 2026"))
