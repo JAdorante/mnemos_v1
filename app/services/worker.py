@@ -135,3 +135,17 @@ class JobWorker:
 
 # Process-wide worker. Handlers are registered at startup (see app/main.py).
 worker = JobWorker()
+
+
+def nudge(kind: str, *, unique: bool = True) -> int | None:
+    """Enqueue `kind` only when a handler is registered for it. Producers
+    that are imported by tests and tools (phone ingest, connector landing,
+    attachments) call this so they never dead-letter a job into whatever
+    store the worker happens to be bound to. Returns the job id, or None."""
+    if kind not in worker._handlers:
+        return None
+    try:
+        return worker.enqueue(kind, unique=unique)
+    except Exception as exc:
+        print(f"[worker] nudge {kind} skipped ({exc}).")
+        return None

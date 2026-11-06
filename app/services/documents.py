@@ -217,6 +217,110 @@ def _page_text(page) -> str:
         return ""
 
 
+# --- scanned PDFs (pipeline fix list F28) ------------------------------------
+# A PDF with no embedded text (a scan, a photographed contract) used to yield
+# '' and contribute nothing. Pages are rasterised and read by the perception
+# OCR engine (Windows.Media.Ocr / tesseract, free and local); with no engine
+# on the box, the vision model's OCR is the fallback, bounded to a few pages
+# because each page is a model call.
+_PDF_OCR_MIN_CHARS = 40
+
+
+def _pdf_ocr_enabled() -> bool:
+    return os.environ.get("QUILL_PDF_OCR", "1") not in ("0", "false", "False")
+
+
+def _pdf_ocr_vlm_enabled() -> bool:
+    return os.environ.get("QUILL_PDF_OCR_VLM", "1") not in ("0", "false", "False")
+
+
+def _pdf_ocr_max_pages() -> int:
+    try:
+        return max(1, int(os.environ.get("QUILL_PDF_OCR_MAX_PAGES", "6")))
+    except ValueError:
+        return 6
+
+
+def _rasterize_pdf_pages(path: Path, *, max_pages: int, dpi: int = 150) -> list:
+    """RGB numpy arrays for the first `max_pages` pages. pypdfium2 when
+    importable (pure wheel), else poppler's pdftoppm on PATH; [] otherwise."""
+    import numpy as np
+    out: list = []
+    try:
+        import pypdfium2 as pdfium
+        doc = pdfium.PdfDocument(str(path))
+        for i in range(min(len(doc), max_pages)):
+            page = doc[i]
+            img = page.render(scale=dpi / 72.0).to_pil().convert("RGB")
+            out.append(np.asarray(img))
+        return out
+    except Exception:
+        out = []
+    import shutil
+    import subprocess
+    import tempfile
+    if not shutil.which("pdftoppm"):
+        return []
+    try:
+        from PIL import Image
+        with tempfile.TemporaryDirectory(prefix="pdfocr_") as td:
+            subprocess.run(
+                ["pdftoppm", "-r", str(dpi), "-png", "-f", "1", "-l",
+                 str(max_pages), str(path), f"{td}/p"],
+                capture_output=True, timeout=180, check=False)
+            for png in sorted(Path(td).glob("p*.png")):
+                with Image.open(png) as im:
+                    out.append(np.asarray(im.convert("RGB")))
+    except Exception as exc:
+        print(f"[documents] pdf rasterise skipped ({exc}).")
+        return []
+    return out
+
+
+def _ocr_pdf(path: Path, cap: int) -> str:
+    """Text for an image-only PDF via the OCR engine, else the VLM."""
+    if not _pdf_ocr_enabled():
+        return ""
+    pages = _rasterize_pdf_pages(path, max_pages=_pdf_ocr_max_pages())
+    if not pages:
+        return ""
+    parts: list[str] = []
+    try:
+        from app.perception.ocr import get_default_engine
+        engine = get_default_engine()
+    except Exception:
+        engine = None
+    if engine is not None and engine.available():
+        for rgb in pages:
+            try:
+                res = engine.recognize(rgb)
+                text = "\n".join(ln.text for ln in res.lines if ln.text.strip())
+            except Exception:
+                text = ""
+            if text.strip():
+                parts.append(text.strip())
+        if parts:
+            return "\n\n".join(parts)[:cap]
+    if not _pdf_ocr_vlm_enabled():
+        return ""
+    try:
+        import io
+        from PIL import Image
+        from app.services.vlm import vlm
+        for rgb in pages:
+            buf = io.BytesIO()
+            Image.fromarray(rgb).save(buf, format="JPEG", quality=85)
+            res = vlm.describe(buf.getvalue(),
+                               context={"frame_path": str(path),
+                                        "source": SOURCE, "modality": "document"}) or {}
+            text = (res.get("ocr_text") or "").strip()
+            if text:
+                parts.append(text)
+    except Exception as exc:
+        print(f"[documents] pdf VLM OCR skipped ({exc}).")
+    return "\n\n".join(parts)[:cap]
+
+
 def _read_pdf(path: Path, cap: int) -> str:
     try:
         from pypdf import PdfReader
@@ -230,7 +334,9 @@ def _read_pdf(path: Path, cap: int) -> str:
             except Exception:
                 return ""
         parts, total = [], 0
+        n_pages = 0
         for page in reader.pages:
+            n_pages += 1
             t = _page_text(page)
             if not t:
                 continue
@@ -238,7 +344,12 @@ def _read_pdf(path: Path, cap: int) -> str:
             total += len(t)
             if total >= cap:
                 break
-        return "\n".join(parts)[:cap]
+        text = "\n".join(parts)[:cap]
+        if n_pages and len(text.strip()) < _PDF_OCR_MIN_CHARS:
+            ocr = _ocr_pdf(path, cap)
+            if len(ocr.strip()) > len(text.strip()):
+                return ocr
+        return text
     except Exception:
         return ""
 
@@ -359,236 +470,12 @@ def _sig(path: Path) -> str:
         return ""
 
 
-# --- fact persistence (reuses the audio extractor, minus the live-offer path) --
-def _chat_people_names(text: str) -> list[str]:
-    """Multi-word proper names in typed chat worth minting as people.
-
-    The extractor often parks a meeting as a commitment/claim with empty or
-    self/unknown parties and never passes the counterparty into
-    resolve_person_mention — so "meeting with Andy Karos" never becomes a
-    People row. Harvesting multi-word names from the raw chat text closes that
-    gap without minting every capitalized single token ("Remember", "Today").
-    """
-    from app.services.answer_check import extract_name_tokens
-    from app.services import name_quality as nq
-    from app.services import self_profile
-
-    out: list[str] = []
-    seen: set[str] = set()
-    for tok in extract_name_tokens(text or ""):
-        if " " not in (tok or ""):
-            continue
-        if not nq.is_plausible_person(tok):
-            continue
-        if self_profile.is_self_name(tok):
-            continue
-        key = tok.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(tok)
-    return out
-
-
-def _persist_facts(store, facts: dict, anchor: int, chunk: str, now: float,
-                   index: bool = True, *, event_source: str = "document",
-                   window: str = "") -> int:
-    """Write the extractor's output for one chunk: tasks / commitments / claims +
-    the entity/relation graph, each anchored to the document event for provenance.
-
-    Deliberately does NOT call task_offer (that's for tasks heard *just now* in
-    conversation — a bulk document import must not fire a burst of 'run this?'
-    chat offers). Otherwise it mirrors Extractor._persist, including the
-    write-time hygiene gate (confidence floor / span faithfulness / dedup /
-    supersede — see services/fact_gate.py). `index` gates writing into the
-    shared vector store — off when a caller passes a throwaway store (its fact
-    ids wouldn't line up with the live index), like enrich() does; the
-    dedup/supersede probe is skipped too then, for the same id-mismatch reason.
-
-    People v2: `event_source` / `window` feed source_policy (screen vs docs vs
-    news) so person minting and contact attribution stay policy-gated."""
-    from app.services.extractor import _coerce_due, _index_fact, extractor
-    from app.services.resolution import resolver
-
-    def _person(name: str, *, role: str = "unknown", boost: float = 0.55):
-        name = (name or "").strip()
-        if not name:
-            return None
-        from app.services import self_profile
-        from app.services.people_pipeline import enabled, resolve_person_mention
-        if self_profile.is_self_name(name):
-            return self_profile.self_person_id(store)
-        if enabled():
-            res = resolve_person_mention(
-                name, store=store, event_id=anchor,
-                event_source=event_source, window=window, text=chunk,
-                grammatical_role=role, now=now,
-                relationship_boost=boost)
-            if res.person_id and chunk:
-                from app.services.people_pipeline import attribute_contacts_from_text
-                attribute_contacts_from_text(
-                    chunk, store=store, person_id=res.person_id,
-                    person_name=name, event_id=anchor, now=now,
-                    event_source=event_source, window=window)
-            return res.person_id
-        return resolver.resolve_person(name, ts=now)
-
-    def _fill_commitment_parties(fid: int, *, from_pid, to_pid) -> None:
-        """Backfill NULL party columns on a deduped commitment (never overwrite)."""
-        if not fid or (from_pid is None and to_pid is None):
-            return
-        try:
-            with store._lock:
-                if from_pid is not None:
-                    store._conn.execute(
-                        "UPDATE commitments SET from_person_id=? "
-                        "WHERE fact_id=? AND from_person_id IS NULL",
-                        (int(from_pid), int(fid)))
-                if to_pid is not None:
-                    store._conn.execute(
-                        "UPDATE commitments SET to_person_id=? "
-                        "WHERE fact_id=? AND to_person_id IS NULL",
-                        (int(to_pid), int(fid)))
-                store._conn.commit()
-            for pid in (from_pid, to_pid):
-                if pid:
-                    store.mark_graph_dirty("person", int(pid), ts=now)
-            store.mark_graph_dirty("fact", int(fid), ts=now)
-        except Exception as exc:
-            print(f"[documents] commitment party backfill skipped ({exc}).")
-
-    def _fill_task_owner(fid: int, owner_pid) -> None:
-        if not fid or owner_pid is None:
-            return
-        try:
-            with store._lock:
-                store._conn.execute(
-                    "UPDATE tasks SET owner_person_id=? "
-                    "WHERE fact_id=? AND owner_person_id IS NULL",
-                    (int(owner_pid), int(fid)))
-                store._conn.commit()
-            store.mark_graph_dirty("person", int(owner_pid), ts=now)
-            store.mark_graph_dirty("fact", int(fid), ts=now)
-        except Exception as exc:
-            print(f"[documents] task owner backfill skipped ({exc}).")
-
-    def _idx(fid: int, kind: str, text: str) -> None:
-        if index:
-            _index_fact(store, fid, kind, text, now)
-
-    def _gate(kind: str, item: dict):
-        try:
-            from app.config import settings
-            from app.services.fact_gate import Verdict, gate_fact
-            if index:
-                return gate_fact(kind, item.get("text") or "",
-                                 item.get("confidence"),
-                                 item.get("source_span", ""), chunk)
-            # Throwaway store: confidence floor only — no probe, no span gate
-            # (enrich() previews shouldn't drop rows the live pass would keep).
-            conf = item.get("confidence")
-            cfg = settings.facts
-            if cfg.min_conf > 0 and conf is not None and conf < cfg.min_conf:
-                return Verdict("drop", "confidence below floor")
-            return Verdict("insert")
-        except Exception:
-            class _Insert:  # duck-typed insert verdict
-                action = "insert"
-                dup_fact_id = None
-                supersede_ids: tuple = ()
-            return _Insert()
-
-    def _apply(v, fid: int) -> None:
-        for old in getattr(v, "supersede_ids", ()) or ():
-            store.supersede_fact(old, fid, now)
-
-    n = 0
-    for t in facts.get("tasks", []):
-        if not t.get("text"):
-            continue
-        v = _gate("task", t)
-        if v.action == "drop":
-            continue
-        if v.action == "dedup":
-            store.touch_fact(v.dup_fact_id, now, t.get("confidence"))
-            # Still mint/link the owner — dedupe must not skip people.
-            _fill_task_owner(
-                v.dup_fact_id,
-                _person(t.get("owner", ""), role="owner", boost=0.85))
-            continue
-        # Boosts match the live speech extractor: people minting requires
-        # relationship_boost >= 0.70 (CREATE_RELEVANCE). The old 0.65/0.6
-        # floors could only leave_open even when source_policy allowed minting.
-        fid = store.add_task(
-            t["text"], source_event_id=anchor, source_span=t.get("source_span", ""),
-            confidence=t.get("confidence"),
-            owner_person_id=_person(t.get("owner", ""), role="owner", boost=0.85),
-            due=_coerce_due(t.get("due")), extracted_at=now)
-        _apply(v, fid)
-        _idx(fid, "task", t["text"])
-        extractor._record_faithfulness(t, chunk)
-        n += 1
-    for c in facts.get("commitments", []):
-        if not c.get("text"):
-            continue
-        v = _gate("commitment", c)
-        if v.action == "drop":
-            continue
-        if v.action == "dedup":
-            store.touch_fact(v.dup_fact_id, now, c.get("confidence"))
-            _fill_commitment_parties(
-                v.dup_fact_id,
-                from_pid=_person(c.get("from_person", ""), role="from", boost=0.8),
-                to_pid=_person(c.get("to_person", ""), role="to", boost=0.75))
-            continue
-        fid = store.add_commitment(
-            c["text"], source_event_id=anchor, source_span=c.get("source_span", ""),
-            confidence=c.get("confidence"),
-            from_person_id=_person(c.get("from_person", ""), role="from", boost=0.8),
-            to_person_id=_person(c.get("to_person", ""), role="to", boost=0.75),
-            due=_coerce_due(c.get("due")),
-            extracted_at=now)
-        _apply(v, fid)
-        _idx(fid, "commitment", c["text"])
-        extractor._record_faithfulness(c, chunk)
-        n += 1
-    for cl in facts.get("claims", []):
-        if not cl.get("text"):
-            continue
-        v = _gate("claim", cl)
-        if v.action == "drop":
-            continue
-        if v.action == "dedup":
-            store.touch_fact(v.dup_fact_id, now, cl.get("confidence"))
-            continue
-        fid = store.add_claim(
-            cl["text"], source_event_id=anchor, source_span=cl.get("source_span", ""),
-            confidence=cl.get("confidence"), extracted_at=now)
-        _apply(v, fid)
-        _idx(fid, "claim", cl["text"])
-        extractor._record_faithfulness(cl, chunk)
-        # First-person claim (typed chat / user's own documents) → self node.
-        # `index` doubles as the live-store signal: never link on a throwaway.
-        if index:
-            from app.services import self_profile
-            if self_profile.is_first_person(cl["text"]):
-                self_profile.link_self(store, fid, now)
-        n += 1
-    # Entity nodes + asserted relation edges (the graph's non-person side).
-    # Pass source_policy context so relation persons obey news/feed gates.
-    try:
-        extractor._persist_entities(
-            facts, anchor, now,
-            event_source=event_source, window=window, text=chunk)
-    except Exception as exc:
-        print(f"[documents] entity persist skipped ({exc}).")
-    # Typed chat: mint multi-word names from the raw turn even when the
-    # extractor omitted them as from/to (common for "meeting with X").
-    if "chat" in (event_source or "").lower():
-        for name in _chat_people_names(chunk):
-            if _person(name, role="relation", boost=0.75):
-                n += 1
-    return n
+# --- fact persistence -------------------------------------------------------
+# Every document chunk is written through app.services.extractor.persist_facts
+# — the same path speech takes (pipeline fix list F01). The thinner
+# documents._persist_facts that used to live here is gone: it skipped the
+# candidate ledger, assertion review, field validation, entity-anchored
+# supersession and the KG belief dual-write.
 
 
 # --- public API -------------------------------------------------------------
@@ -634,7 +521,8 @@ def ingest(roots: list[Path] | None = None, store=None,
 
     from app.events import Event, Modality
     from app.services import confidence as _conf
-    from app.services.extractor import extractor
+    from app.services import ingest_salience as _sal
+    from app.services.extractor import extractor, persist_facts
     from app.storage import get_store
 
     store = store or get_store()
@@ -650,8 +538,8 @@ def ingest(roots: list[Path] | None = None, store=None,
     state = _load_state()
     ledger = dict(state.get("files") or {})
 
-    counts = {"documents": 0, "chunks": 0, "facts": 0, "skipped": 0,
-              "unreadable": 0, "errors": 0}
+    counts = {"documents": 0, "chunks": 0, "chunks_skipped": 0, "facts": 0,
+              "skipped": 0, "duplicates": 0, "unreadable": 0, "errors": 0}
 
     for fp in docs:
         key = _file_key(fp)
@@ -666,6 +554,19 @@ def ingest(roots: list[Path] | None = None, store=None,
             ledger[key] = sig            # remember so we don't retry every run
             continue
 
+        # F06: the same text under another name / path (a copy in Downloads
+        # and in Documents) is one document, not two rounds of mining.
+        sha = store.text_sha1(text) if hasattr(store, "text_sha1") else None
+        try:
+            dup = store.find_event_by_content_sha1(sha, sources=(SOURCE,)) \
+                if sha else None
+        except Exception:
+            dup = None
+        if dup:
+            counts["duplicates"] += 1
+            ledger[key] = sig
+            continue
+
         try:
             # One OBSERVED event holds the document (text read verbatim off disk —
             # perfect capture, no model), and every fact anchors back to it.
@@ -673,19 +574,34 @@ def ingest(roots: list[Path] | None = None, store=None,
                 time=now, modality=Modality.DOCUMENT, raw=text,
                 summary=f"[document] {fp.name} ({len(text)} chars)", source=SOURCE,
                 meta={"section": "documents", "path": str(fp), "title": fp.name,
-                      "ext": fp.suffix.lower()})
+                      "ext": fp.suffix.lower(), "content_sha1": sha})
             _conf.attach(ev, _conf.OBSERVED, capture=1.0)
             anchor = store.insert(ev)
-
-            doc_facts = 0
-            for ch in chunk_text(text):
+            if live:
+                # F02: the document's content is findable by meaning, not
+                # only through the facts mined from it.
                 try:
-                    facts = extractor._extract_text(ch)
+                    from app.services.memory import memory
+                    memory.index_event(anchor, ev)
+                except Exception as exc:
+                    print(f"[documents] index skipped ({exc}).")
+
+            # F26: only chunks worth a model call are extracted; the rest
+            # stay searchable through their chunk vectors.
+            plan = _sal.plan(text, source=SOURCE, store=store, now=now)
+            counts["chunks_skipped"] += int(plan.skipped)
+            doc_facts = 0
+            for ch in plan.chunks:
+                try:
+                    facts = extractor._extract_text(ch.text)
                 except Exception as exc:
                     print(f"[documents] extract error on {fp.name} ({exc}).")
                     counts["errors"] += 1
                     continue
-                doc_facts += _persist_facts(store, facts, anchor, ch, now, index=live)
+                _sal.charge(SOURCE, 1, now=now)
+                doc_facts += persist_facts(store, facts, anchor, ch.text, now,
+                                           event_source=SOURCE, index=live,
+                                           event_time=now)
                 counts["chunks"] += 1
 
             # The document event is itself fully processed — mark it extracted so

@@ -242,6 +242,13 @@ def ingest(device: dict, payload: dict) -> dict:
     # way it is memory CONTEXT; nothing here carries action authority.
     _conf.attach(ev, _conf.ACCEPTED if kind in _ACCEPTED_KINDS else _conf.OBSERVED)
     bus.publish_nowait(ev)
+    # F03: a note told to Sparrow is mined on the next worker cycle, not
+    # left as un-mined context forever.
+    try:
+        from app.services.worker import nudge
+        nudge("extract_text")
+    except Exception:
+        pass
 
     try:
         with _lock:

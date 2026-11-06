@@ -1405,6 +1405,7 @@ class Store:
         self._migrate()
         self._migrate_audio_tele()
         self._migrate_records()
+        self._migrate_pipeline()
         self._migrate_decisions()
 
     # Stage timers added after the table shipped. Additive only, and the type is
@@ -1446,6 +1447,54 @@ class Store:
         ("hold_ids", "TEXT"),        # JSON list; non-empty suspends expiry
         ("consent_mode", "TEXT"),
     )
+
+    def _migrate_pipeline(self) -> None:
+        """Pipeline fix list F06: a content fingerprint on every text-bearing
+        event, so a re-attached file or a re-typed statement is found before
+        a second row (and a second round of fact mining) is created."""
+        with self._lock:
+            cols = {r["name"] for r in self._conn.execute(
+                "PRAGMA table_info(events)").fetchall()}
+            if "content_sha1" not in cols:
+                self._conn.execute(
+                    "ALTER TABLE events ADD COLUMN content_sha1 TEXT")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_events_sha "
+                "ON events(content_sha1) WHERE content_sha1 IS NOT NULL")
+            self._conn.commit()
+
+    @staticmethod
+    def text_sha1(text: str | None) -> str | None:
+        """Fingerprint of a text body that ignores whitespace, case and
+        trailing punctuation: "Ship it Friday." and "ship it   friday" are
+        the same statement."""
+        norm = " ".join((text or "").split()).casefold()
+        norm = norm.rstrip(".!?…,;:'\"")
+        if not norm:
+            return None
+        return hashlib.sha1(norm.encode("utf-8")).hexdigest()
+
+    def find_event_by_content_sha1(self, sha1: str | None, *,
+                                   sources: tuple[str, ...] | list[str] | None = None,
+                                   since: float | None = None) -> int | None:
+        """Newest event carrying this fingerprint (F06 dedup probe), optionally
+        limited to a source family and a time window."""
+        if not sha1:
+            return None
+        sql = "SELECT id FROM events WHERE content_sha1 = ?"
+        args: list = [str(sha1)]
+        if sources:
+            srcs = [str(s) for s in sources if s]
+            if srcs:
+                sql += f" AND source IN ({','.join('?' for _ in srcs)})"
+                args.extend(srcs)
+        if since is not None:
+            sql += " AND time >= ?"
+            args.append(float(since))
+        sql += " ORDER BY id DESC LIMIT 1"
+        with self._lock:
+            row = self._conn.execute(sql, args).fetchone()
+        return int(row["id"]) if row else None
 
     def _migrate_records(self) -> None:
         """Records layer (Tier 1 policy columns, Tier 2 claims, promotion packets,
@@ -2902,6 +2951,12 @@ class Store:
         # the expiry job never has to re-derive a row's class or deadline.
         row["privacy_class"] = event.meta.get("privacy_class")
         row["consent_mode"] = event.meta.get("consent_mode")
+        # F06: content fingerprint. Uploads carry the byte digest in meta;
+        # typed and read text is fingerprinted on its normalised body.
+        sha = event.meta.get("content_sha1")
+        if not sha and event.modality in (Modality.DOCUMENT, Modality.TEXT):
+            sha = self.text_sha1(event.raw)
+        row["content_sha1"] = str(sha) if sha else None
         try:
             from app.services.records import retention as _retention
             row["expires_at"] = _retention.capture_expires_at(event)
@@ -2914,11 +2969,11 @@ class Store:
                 INSERT INTO events
                     (time, modality, raw, summary, source, confidence,
                      people, tasks, entities, meta, audio_path,
-                     privacy_class, consent_mode, expires_at)
+                     privacy_class, consent_mode, expires_at, content_sha1)
                 VALUES
                     (:time, :modality, :raw, :summary, :source, :confidence,
                      :people, :tasks, :entities, :meta, :audio_path,
-                     :privacy_class, :consent_mode, :expires_at)
+                     :privacy_class, :consent_mode, :expires_at, :content_sha1)
                 """,
                 row,
             )
@@ -3153,7 +3208,9 @@ class Store:
     def unextracted_events(self, limit: int = 200,
                            modality: str | None = None,
                            source: str | None = None,
-                           since: float | None = None) -> list[tuple[int, Event]]:
+                           since: float | None = None,
+                           modalities: list[str] | tuple[str, ...] | None = None,
+                           ) -> list[tuple[int, Event]]:
         """Oldest-first events not yet run through the extractor.
 
         Pass `modality` (e.g. 'audio') to filter in SQL. Without it, a modality
@@ -3174,6 +3231,10 @@ class Store:
         if modality is not None:
             sql += " AND modality = ?"
             params.append(modality)
+        elif modalities:
+            mods = [str(m) for m in modalities]
+            sql += f" AND modality IN ({','.join('?' for _ in mods)})"
+            params.extend(mods)
         if source is not None:
             sql += " AND source = ?"
             params.append(source)

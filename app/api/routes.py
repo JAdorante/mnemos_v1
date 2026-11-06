@@ -822,6 +822,34 @@ def desktop_capture_stop() -> dict:
     return {"desktop_capture_running": _desktop_capture_running}
 
 
+@router.get("/events/{event_id}/extraction")
+def event_extraction(event_id: int) -> dict:
+    """Has this event been mined for facts, and what came of it? The
+    completion signal for an upload (`/chat/attach` returns
+    `facts_pending`) and for any connector item or phone note on the text
+    lane (pipeline fix list F03 / F07)."""
+    from app.storage import get_store
+    row = get_store().get_event(int(event_id))
+    if not row:
+        raise HTTPException(status_code=404, detail="no such event")
+    try:
+        meta = json.loads(row.get("meta") or "{}")
+    except Exception:
+        meta = {}
+    result = meta.get("extraction") if isinstance(meta.get("extraction"), dict) else {}
+    done = row.get("extracted_at") is not None
+    status = (row.get("extract_status") or ("ok" if done else "pending"))
+    return {
+        "event_id": int(event_id), "source": row.get("source"),
+        "modality": row.get("modality"),
+        "done": bool(done), "status": status,
+        "extracted_at": row.get("extracted_at"),
+        "attempts": int(row.get("extract_attempts") or 0),
+        "facts": result.get("facts"), "chunks": result.get("chunks"),
+        "chunks_skipped": result.get("chunks_skipped"),
+    }
+
+
 @router.get("/memory/events")
 def memory_all() -> dict:
     """JSON timeline dump (formerly GET /memory — that path is now the HTML console)."""
@@ -4814,10 +4842,12 @@ async def chat_attach(file: UploadFile = File(...)) -> dict:
     """Upload a document or photo from Chat → Context.
 
     The file is saved under data/uploads/, ingested into the event timeline,
-    and indexed for semantic search (source='chat.attach'). Fact mining runs
-    in a background thread so a multi-chunk PDF cannot freeze the live server.
-    The response includes a `context` snippet the Chat UI merges into the next
-    message's sticky context.
+    and indexed for semantic search (source='chat.attach'), content chunks
+    included. Fact mining runs on the worker's text lane (`job_id`,
+    `facts_pending`; poll `GET /events/{id}/extraction`) so a multi-chunk
+    PDF cannot freeze the live server. Re-attaching the same bytes returns
+    the existing event with `duplicate: true`. The response includes a
+    `context` snippet the Chat UI merges into the next message's context.
     """
     import asyncio
 

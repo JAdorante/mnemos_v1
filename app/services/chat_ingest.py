@@ -47,6 +47,23 @@ def enabled() -> bool:
     return os.getenv("QUILL_CHAT_INGEST", "1") not in ("0", "false", "False")
 
 
+def _dedup_window_s() -> float:
+    """How long a re-typed identical statement counts as the same memory."""
+    try:
+        return max(0.0, float(os.getenv("QUILL_CHAT_DEDUP_S", str(6 * 3600))))
+    except ValueError:
+        return 6 * 3600.0
+
+
+def _dedup_min_chars() -> int:
+    """Below this length a statement is too generic to fingerprint: "sounds
+    good, ship it" said twice is two memories, not one."""
+    try:
+        return max(0, int(os.getenv("QUILL_CHAT_DEDUP_MIN_CHARS", "24")))
+    except ValueError:
+        return 24
+
+
 def looks_like_question(text: str) -> bool:
     """Heuristic: trailing '?' or a leading interrogative / request-to-answer."""
     t = (text or "").strip()
@@ -102,13 +119,30 @@ def ingest(
             meta["answer"] = ans[:4000]
 
         now = time.time()
+        store = get_store()
+        # F06: the same statement typed again within the window is one
+        # memory, not a second event and a second round of mining. Keyed on
+        # source + normalised text, time-windowed, and only for statements
+        # long enough to be specific.
+        try:
+            sha_fn = getattr(store, "text_sha1", None)
+            finder = getattr(store, "find_event_by_content_sha1", None)
+            sha = (sha_fn(text) if callable(sha_fn)
+                   and len(text) >= _dedup_min_chars() else None)
+            if sha and callable(finder):
+                dup = finder(sha, sources=(source,),
+                             since=now - _dedup_window_s())
+                if dup:
+                    return int(dup)
+        except Exception as exc:
+            print(f"[chat_ingest] dedup probe skipped ({exc}).")
         ev = Event(
             time=now, modality=Modality.TEXT, raw=text,
             summary=f"[chat] {text[:120]}", source=source,
             meta=meta,
         )
         _conf.attach(ev, _conf.ACCEPTED, capture=1.0)
-        anchor = get_store().insert(ev)
+        anchor = store.insert(ev)
         _index_event(anchor, ev)
 
         if not is_query:
@@ -159,8 +193,7 @@ def run_job(payload: dict) -> None:
     anchor = (payload or {}).get("event_id")
     if not text:
         return
-    from app.services.documents import _persist_facts
-    from app.services.extractor import extractor
+    from app.services.extractor import extractor, persist_facts
     from app.services.worker import worker
     from app.storage import get_store
 
@@ -204,8 +237,14 @@ def run_job(payload: dict) -> None:
     facts = extractor._extract_text(text, speaker=speaker)
     if event_source.startswith("assistant."):
         facts = _drop_speaker_self(facts)
-    n = _persist_facts(store, facts, anchor, text, now,
-                       event_source=event_source)
+    ev_time = None
+    try:
+        ev_time = float((raw_ev or {}).get("time")) if raw_ev else None
+    except (TypeError, ValueError):
+        ev_time = None
+    n = persist_facts(store, facts, anchor, text, now,
+                      event_source=event_source, speaker=speaker,
+                      event_time=ev_time)
     if event_source.startswith("assistant.") and anchor is not None:
         # The reviewer confirmed the project, so what the note yields belongs
         # to it even when no sentence names it.

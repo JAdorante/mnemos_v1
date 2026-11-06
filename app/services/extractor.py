@@ -913,15 +913,29 @@ class Extractor:
         except Exception:
             pass
 
-    def _gate(self, kind: str, item: dict, turn: Turn):
+    def _gate(self, kind: str, item: dict, turn: Turn, *, index: bool = True):
         """Run one candidate fact through the write-time hygiene gate
         (field validation / confidence floor / span faithfulness / assertion
         class / dedup / supersede). Returns the Verdict, or a fallback verdict
         on any gate failure — hygiene must never cost a fact, but a
-        quoted/hypothetical assertion still never falls back to auto-insert."""
+        quoted/hypothetical assertion still never falls back to auto-insert.
+
+        `index=False` means a throwaway store (a preview, a test fixture)
+        whose fact ids do not line up with the live vector index: the
+        dedup/supersede probe and the span check are skipped, but the
+        confidence floor and the assertion class still apply."""
         assertion = item.get("assertion")
         try:
-            from app.services.fact_gate import gate_fact
+            from app.services.fact_gate import Verdict, gate_fact
+            if not index:
+                conf = item.get("confidence")
+                cfg = settings.facts
+                if cfg.min_conf > 0 and conf is not None and conf < cfg.min_conf:
+                    return Verdict("drop", "confidence below floor")
+                if assertion in ("quoted", "hypothetical"):
+                    return Verdict(
+                        "review", f"assertion={assertion} requires human review")
+                return Verdict("insert")
             ids = [int(i) for i in (turn.event_ids or []) if i is not None]
             return gate_fact(kind, item.get("text") or "",
                              item.get("confidence"),
@@ -1002,18 +1016,60 @@ class Extractor:
                     print(f"[extract] fact_candidate write skipped ({exc})")
         return ids
 
-    def _persist(self, turn: Turn, facts: dict[str, Any], now: float) -> int:
+    def _persist(self, turn: Turn, facts: dict[str, Any], now: float, *,
+                 event_source: str = "audio.whisper", window: str = "",
+                 index: bool = True, me_is_user: bool | None = None,
+                 offer_tasks: bool | None = None) -> int:
         """Materialize this turn's LLM output into facts, routed through
         fact_candidates (plan 1.2): every task/commitment/claim is looked up
         by its (turn_hash, kind, payload) candidate row, gated, then either
         materialized or stamped drop/dedup/review — never both. Because
         `add_fact_candidate` dedupes on that same key, replaying an
         already-processed turn finds each candidate at a non-'pending' status
-        and skips it, so fact counts stay identical across replays."""
+        and skips it, so fact counts stay identical across replays.
+
+        This is THE persist path (pipeline fix list F01). Speech, typed chat,
+        uploads, read documents, research answers, teammate answers, screen
+        text and connector items all land here, so every source gets the
+        same candidate ledger, hygiene gate, assertion review, field
+        validation, entity-anchored supersession and KG belief dual-write.
+        What differs per source is data, not code path:
+
+        - `event_source` / `window` feed source_policy (who may mint people,
+          commitments, claims) and People v2 attribution.
+        - `index` is False for a throwaway store (preview / test fixture):
+          no vector index, no dedup probe (see `_gate`).
+        - `me_is_user`: whether a first-person party ('me', 'I') is the
+          enrolled user. Speech decides per speaker label; the user's own
+          typed chat, phone notes and documents say yes; a teammate's or a
+          web page's words say no. None picks that default by source.
+        - `offer_tasks`: the live "shall I do this?" chat offer — speech only
+          by default, never for a bulk import."""
         store = self._ensure_store()
         anchor = turn.event_ids[0] if turn.event_ids else None
         th = turn_hash(turn)
         n = 0
+        src = (event_source or "audio.whisper").strip().lower()
+        is_audio = src.startswith("audio")
+        if me_is_user is None:
+            me_is_user = (not is_audio) and _source_me_is_user(src)
+        if offer_tasks is None:
+            offer_tasks = is_audio
+        # Ambient context (meeting room / focused window) is attributable to
+        # what the user is doing NOW: speech, typed chat, a phone note. A
+        # document read off disk or a connector item carries its own context.
+        ambient = is_audio or src.startswith(("chat.user", "phone."))
+        # Source policy (data/source_policies.json) governs what a non-speech
+        # source may create. Speech keeps its per-speaker rules unchanged.
+        pol = None
+        if not is_audio:
+            try:
+                from app.services import source_policy as _sp
+                pol = _sp.policy_for_event(event_source=src, window=window,
+                                           text=turn.text or "")
+            except Exception as exc:
+                pol = None
+                print(f"[extract] source policy lookup skipped ({exc}).")
 
         # Plan 1.1/1.2: land (or find) every LLM output row as a candidate
         # before gating — dropped/deduped/reviewed items still leave an
@@ -1023,18 +1079,24 @@ class Extractor:
         # Meeting Layer P1: resolve once per turn so every mention in the
         # turn shares the same calendar-attendee prior set.
         _priors = self._attendee_priors_for_turn(
-            getattr(turn, "start", None), getattr(turn, "end", None))
+            getattr(turn, "start", None), getattr(turn, "end", None)) \
+            if is_audio else []
 
         def _person(name: str, *, role: str = "unknown", boost: float = 0.6):
             """Full ResolveResult so typed rows persist attribution provenance
             (mention_id + resolver confidence), not just the person id."""
+            from app.services import self_profile as _sp_self
+            if me_is_user and _sp_self.is_self_name(name):
+                from app.services.people_pipeline import ResolveResult
+                pid = _sp_self.self_person_id(store)
+                return ResolveResult(pid, "self", confidence=1.0 if pid else 0.0)
             return self._resolve_person_ref(
                 name, now, event_id=anchor,
-                event_source="audio.whisper", text=turn.text,
+                event_source=src, window=window, text=turn.text,
                 grammatical_role=role, relationship_boost=boost,
                 turn_speaker=turn.speaker or "",
-                turn_start=getattr(turn, "start", None),
-                turn_end=getattr(turn, "end", None),
+                turn_start=getattr(turn, "start", None) if is_audio else None,
+                turn_end=getattr(turn, "end", None) if is_audio else None,
                 attendee_priors=_priors)
 
         def _attr_conf(name: str, ref) -> float | None:
@@ -1042,15 +1104,83 @@ class Extractor:
             # resolve — a blank party stays NULL, not "confidently nobody".
             return float(ref.confidence) if (name or "").strip() else None
 
+        def _idx(fid: int, kind: str, text: str) -> None:
+            if index:
+                _index_fact(store, fid, kind, text, now)
+
+        def _blocked(kind: str, item: dict) -> bool:
+            """Source policy says this source may not create this kind."""
+            if pol is None:
+                return False
+            if kind in ("task", "commitment"):
+                bad = not pol.create_commitments
+            elif kind == "claim":
+                bad = not pol.create_claims
+            else:
+                bad = False
+            if not bad:
+                return False
+            try:
+                cand = store.find_fact_candidate(th, kind, dict(item))
+                if cand and cand.get("status") == "pending":
+                    store.set_fact_candidate_status(
+                        cand["id"], "dropped",
+                        verdict_reason=f"source policy {pol.source_class}: "
+                                       f"no {kind}s from this source")
+            except Exception:
+                pass
+            return True
+
+        def _fill_commitment_parties(fid: int, *, from_pid, to_pid) -> None:
+            """Backfill NULL party columns on a deduped commitment (never
+            overwrite): a dedupe must not skip the people in it."""
+            if not fid or (from_pid is None and to_pid is None):
+                return
+            try:
+                with store._lock:
+                    if from_pid is not None:
+                        store._conn.execute(
+                            "UPDATE commitments SET from_person_id=? "
+                            "WHERE fact_id=? AND from_person_id IS NULL",
+                            (int(from_pid), int(fid)))
+                    if to_pid is not None:
+                        store._conn.execute(
+                            "UPDATE commitments SET to_person_id=? "
+                            "WHERE fact_id=? AND to_person_id IS NULL",
+                            (int(to_pid), int(fid)))
+                    store._conn.commit()
+                for pid in (from_pid, to_pid):
+                    if pid:
+                        store.mark_graph_dirty("person", int(pid), ts=now)
+                store.mark_graph_dirty("fact", int(fid), ts=now)
+            except Exception as exc:
+                print(f"[extract] commitment party backfill skipped ({exc}).")
+
+        def _fill_task_owner(fid: int, owner_pid) -> None:
+            if not fid or owner_pid is None:
+                return
+            try:
+                with store._lock:
+                    store._conn.execute(
+                        "UPDATE tasks SET owner_person_id=? "
+                        "WHERE fact_id=? AND owner_person_id IS NULL",
+                        (int(owner_pid), int(fid)))
+                    store._conn.commit()
+                store.mark_graph_dirty("person", int(owner_pid), ts=now)
+                store.mark_graph_dirty("fact", int(fid), ts=now)
+            except Exception as exc:
+                print(f"[extract] task owner backfill skipped ({exc}).")
+
         # People v3 P3: this turn's durable voice-track id when the speaker is
         # an unbound provisional label AND QUILL_PEOPLE_ESCROW is on, else None
         # (flag off: no track is minted, nothing below changes behavior).
         escrow_track_id: int | None = None
-        try:
-            from app.services import people_escrow
-            escrow_track_id = people_escrow.track_for_turn(store, turn, now)
-        except Exception as exc:
-            print(f"[extract] escrow track skipped ({exc}).")
+        if is_audio:
+            try:
+                from app.services import people_escrow
+                escrow_track_id = people_escrow.track_for_turn(store, turn, now)
+            except Exception as exc:
+                print(f"[extract] escrow track skipped ({exc}).")
 
         def _escrows_to_track(party_name: str, pid: int | None) -> bool:
             """Does this unresolved party mean the turn's unbound speaker?
@@ -1068,11 +1198,13 @@ class Extractor:
         # below inherits them as origin="context" `about` edges, so work done
         # *inside* a project's room is attributed even when the sentence never
         # names the project.
+        _ctx_entities = []
         try:
-            from app.services import context_attribution as _ctx_attr
-            _ctx_entities = _ctx_attr.context_entities_for_turn(
-                store, turn_start=getattr(turn, "start", None),
-                turn_end=getattr(turn, "end", None), anchor_event_id=anchor)
+            if ambient:
+                from app.services import context_attribution as _ctx_attr
+                _ctx_entities = _ctx_attr.context_entities_for_turn(
+                    store, turn_start=getattr(turn, "start", None),
+                    turn_end=getattr(turn, "end", None), anchor_event_id=anchor)
         except Exception as exc:
             _ctx_entities = []
             print(f"[extract] context attribution skipped ({exc}).")
@@ -1084,7 +1216,8 @@ class Extractor:
         # a failed lookup must never block persistence.
         try:
             from app.services import context_anchor as _canchor
-            if _canchor.enabled() and getattr(turn, "start", None) is not None:
+            if ambient and _canchor.enabled() \
+                    and getattr(turn, "start", None) is not None:
                 _anchors = _canchor.anchors_for_window(
                     store, float(turn.start),
                     float(getattr(turn, "end", None) or turn.start))
@@ -1139,11 +1272,13 @@ class Extractor:
         for t in facts.get("tasks", []):
             if not t.get("text"):
                 continue
+            if _blocked("task", t):
+                continue
             cand = _candidate("task", t)
             if cand and cand.get("status") != "pending":
                 continue  # already gated in a prior pass — replay-safe
             cid = cand["id"] if cand else None
-            v = self._gate("task", t, turn)
+            v = self._gate("task", t, turn, index=index)
             reason = getattr(v, "reason", "") or ""
             if v.action == "drop":
                 if cid:
@@ -1157,6 +1292,12 @@ class Extractor:
                 store.touch_fact(v.dup_fact_id, now, t.get("confidence"))
                 if cid:
                     store.set_fact_candidate_status(cid, "deduped", verdict_reason=reason)
+                if not is_audio:
+                    # Still mint/link the owner — dedupe must not skip people.
+                    _fill_task_owner(
+                        v.dup_fact_id,
+                        _person(t.get("owner", ""), role="owner",
+                                boost=0.85).person_id)
                 continue
             owner_name = t.get("owner", "")
             owner_ref = _person(owner_name, role="owner", boost=0.85)
@@ -1191,22 +1332,26 @@ class Extractor:
             _apply(v, fid)
             if cid:
                 store.set_fact_candidate_status(cid, "accepted", verdict_reason=reason)
-            _index_fact(store, fid, "task", task_text, now)
+            _idx(fid, "task", task_text)
             _stamp_context(fid)
             self._record_faithfulness(t, turn.text)
             # Proactively ask if I should action this heard task (gated by
             # confidence + cooldown; no-op when the agent/offer is disabled).
-            from app.services.task_offer import offer_task
-            offer_task(task_text, t.get("confidence"), fid)
+            # Speech only: a bulk import must not fire a burst of offers.
+            if offer_tasks:
+                from app.services.task_offer import offer_task
+                offer_task(task_text, t.get("confidence"), fid)
             n += 1
         for c in facts.get("commitments", []):
             if not c.get("text"):
+                continue
+            if _blocked("commitment", c):
                 continue
             cand = _candidate("commitment", c)
             if cand and cand.get("status") != "pending":
                 continue
             cid = cand["id"] if cand else None
-            v = self._gate("commitment", c, turn)
+            v = self._gate("commitment", c, turn, index=index)
             reason = getattr(v, "reason", "") or ""
             if v.action == "drop":
                 if cid:
@@ -1220,6 +1365,13 @@ class Extractor:
                 store.touch_fact(v.dup_fact_id, now, c.get("confidence"))
                 if cid:
                     store.set_fact_candidate_status(cid, "deduped", verdict_reason=reason)
+                if not is_audio:
+                    _fill_commitment_parties(
+                        v.dup_fact_id,
+                        from_pid=_person(c.get("from_person", ""), role="from",
+                                         boost=0.8).person_id,
+                        to_pid=_person(c.get("to_person", ""), role="to",
+                                       boost=0.75).person_id)
                 continue
             from_name = c.get("from_person", "")
             from_ref = _person(from_name, role="from", boost=0.8)
@@ -1258,18 +1410,20 @@ class Extractor:
             _apply(v, fid)
             if cid:
                 store.set_fact_candidate_status(cid, "accepted", verdict_reason=reason)
-            _index_fact(store, fid, "commitment", commit_text, now)
+            _idx(fid, "commitment", commit_text)
             _stamp_context(fid)
             self._record_faithfulness(c, turn.text)
             n += 1
         for cl in facts.get("claims", []):
             if not cl.get("text"):
                 continue
+            if _blocked("claim", cl):
+                continue
             cand = _candidate("claim", cl)
             if cand and cand.get("status") != "pending":
                 continue
             cid = cand["id"] if cand else None
-            v = self._gate("claim", cl, turn)
+            v = self._gate("claim", cl, turn, index=index)
             reason = getattr(v, "reason", "") or ""
             if v.action == "drop":
                 if cid:
@@ -1307,19 +1461,23 @@ class Extractor:
             _apply(v, fid)
             if cid:
                 store.set_fact_candidate_status(cid, "accepted", verdict_reason=reason)
-            _index_fact(store, fid, "claim", cl["text"], now)
+            _idx(fid, "claim", cl["text"])
             _stamp_context(fid)
             self._record_faithfulness(cl, turn.text)
             # Plan 2.5: parseable SPO claims dual-write into kg_beliefs;
             # unparseable stay flat facts only.
             self._persist_claim_belief(
-                cl, fact_id=fid, turn=turn, anchor=anchor, now=now)
+                cl, fact_id=fid, turn=turn, anchor=anchor, now=now,
+                event_source=src, window=window)
             # First-person claims attach to the self node ONLY when the labeled
-            # speaker is the enrolled user (plan 2.1) — never when Marc says "I…".
+            # speaker is the enrolled user (plan 2.1) — never when Marc says
+            # "I…" — or when the source is the user's own words (typed chat,
+            # their documents, a phone note).
             from app.services import self_profile
             if (self_profile.is_first_person(cl["text"])
-                    and self_profile.speaker_is_enrolled_user(
-                        turn.speaker or "", store)):
+                    and (me_is_user
+                         or self_profile.speaker_is_enrolled_user(
+                             turn.speaker or "", store))):
                 self_profile.link_self(store, fid, now)
             # Plan 4.2 (a): resolve hint → offer only, never auto-complete.
             if cl.get("resolves_commitment"):
@@ -1339,7 +1497,7 @@ class Extractor:
             if cand and cand.get("status") != "pending":
                 continue
             cid = cand["id"] if cand else None
-            v = self._gate("question", q, turn)
+            v = self._gate("question", q, turn, index=index)
             reason = getattr(v, "reason", "") or ""
             if v.action == "drop":
                 if cid:
@@ -1366,7 +1524,7 @@ class Extractor:
             if cid:
                 store.set_fact_candidate_status(cid, "accepted",
                                                 verdict_reason=reason)
-            _index_fact(store, fid, "question", q["text"], now)
+            _idx(fid, "question", q["text"])
             _stamp_context(fid)
             self._record_faithfulness(q, turn.text)
             n += 1
@@ -1381,7 +1539,7 @@ class Extractor:
             if cand and cand.get("status") != "pending":
                 continue
             cid = cand["id"] if cand else None
-            v = self._gate("idea", idea, turn)
+            v = self._gate("idea", idea, turn, index=index)
             reason = getattr(v, "reason", "") or ""
             if v.action == "drop":
                 if cid:
@@ -1402,7 +1560,7 @@ class Extractor:
             spk = (turn.speaker or "").strip()
             orig_ref = self._resolve_me_relative_to_speaker(
                 spk or None, now, event_id=anchor,
-                event_source="audio.whisper", text=turn.text,
+                event_source=src, window=window, text=turn.text,
                 grammatical_role="speaker", relationship_boost=0.85)
             orig_pid = orig_ref.person_id
             escrowed = _escrows_to_track(spk, orig_pid)
@@ -1449,7 +1607,7 @@ class Extractor:
             if cid:
                 store.set_fact_candidate_status(cid, "accepted",
                                                 verdict_reason=reason)
-            _index_fact(store, fid, "idea", idea["text"], now)
+            _idx(fid, "idea", idea["text"])
             _stamp_context(fid)
             self._record_faithfulness(idea, turn.text)
             # Topic entities: only names LITERALLY present in the turn, and
@@ -1487,9 +1645,31 @@ class Extractor:
 
         # Entity nodes + asserted relation edges (the graph's non-person side).
         # Materialized fact ids + the turn text ride along so about_project
-        # relations (WS1) can attach and be span-checked.
-        self._persist_entities(facts, anchor, now, fact_ids=made_fact_ids,
-                               turn_text=turn.text or "")
+        # relations (WS1) can attach and be span-checked. Non-speech sources
+        # pass their source/window so news / feed gates apply to relation
+        # persons and entity minting (speech keeps its own default).
+        try:
+            if is_audio:
+                self._persist_entities(facts, anchor, now,
+                                       fact_ids=made_fact_ids,
+                                       turn_text=turn.text or "")
+            else:
+                self._persist_entities(facts, anchor, now,
+                                       event_source=src, window=window,
+                                       text=turn.text or "",
+                                       fact_ids=made_fact_ids,
+                                       turn_text=turn.text or "")
+        except Exception as exc:
+            if is_audio:
+                raise
+            print(f"[extract] entity persist skipped ({exc}).")
+        # Typed chat: mint multi-word names from the raw turn even when the
+        # extractor omitted them as from/to (common for "meeting with X").
+        # Not for an uploaded document, which merely contains names.
+        if "chat" in src and src not in _LANE_UPLOAD_SOURCES:
+            for name in _chat_people_names(turn.text or ""):
+                if _person(name, role="relation", boost=0.75).person_id:
+                    n += 1
         # Pilot ledger (WS-A): how many facts this turn actually materialized —
         # a count, never the facts. Placed here rather than in storage's
         # add_task/add_claim so backfills and test seeding don't inflate it.
@@ -1500,6 +1680,7 @@ class Extractor:
     def _persist_claim_belief(
         self, cl: dict, *, fact_id: int, turn: Turn,
         anchor: int | None, now: float,
+        event_source: str = "audio.whisper", window: str = "",
     ) -> None:
         """Dual-write structured claim → kg_beliefs when SPO is complete."""
         subj = (cl.get("subject") or "").strip()
@@ -1511,10 +1692,12 @@ class Extractor:
         if pred not in kg_beliefs._CLAIM_PREDICATES:
             return
         store = self._ensure_store()
+        event_source = event_source or "audio.whisper"
         try:
             from app.services import source_policy as sp
             pol = sp.policy_for_event(
-                event_source="audio.whisper", text=turn.text or "")
+                event_source=event_source, window=window,
+                text=turn.text or "")
             source_class = pol.source_class
         except Exception:
             source_class = "private_conversation"
@@ -1524,7 +1707,7 @@ class Extractor:
         # must dual-write into the bound Store).
         subj_pid = self._resolve_person_id(
             subj, now, event_id=anchor,
-            event_source="audio.whisper", text=turn.text or "",
+            event_source=event_source, window=window, text=turn.text or "",
             grammatical_role="claim_subject", relationship_boost=0.5,
             turn_speaker=turn.speaker or "")
         if subj_pid:
@@ -1750,5 +1933,301 @@ class Extractor:
                 "failed": failed,
                 "remaining": remaining, "next_settle_in": next_settle_in}
 
+    # --- the text lane (pipeline fix list F03 / F26) ----------------------
+    def run_text_once(self, *, verbose: bool = False) -> dict[str, Any]:
+        """Mine one batch of un-mined TEXT-BEARING events that no other lane
+        owns: connector items (mail, calendar, texts), phone notes, uploads,
+        and any future text source. Speech has `run_once`, the screen has
+        screen_extract / L3, and typed chat, research and teammate answers
+        are enqueued per event by their producers; `lane_decision` keeps
+        this lane off all of those.
+
+        Fresh events (last TEXT_LANE_FRESH_S) go first so what just landed
+        becomes memory within one worker cycle even mid-backlog. Each event
+        runs through ingest_salience (F26) — only chunks worth a model call
+        are extracted, under a per-source daily budget; the rest stay
+        searchable through their chunk vectors (F02) — and then through the
+        one persist path, so source policy governs what each may create."""
+        store = self._ensure_store()
+        now = time.time()
+        from app.services import ingest_salience as _sal
+
+        def _window(since: float | None) -> list:
+            rows = store.unextracted_events(
+                limit=TEXT_LANE_BATCH * 4, modalities=TEXT_LANE_MODALITIES,
+                since=since)
+            # Attached photos are VISION rows (OCR + description). Queried
+            # by source so the webcam / screen backlog never enters this
+            # window.
+            for upload_src in _LANE_UPLOAD_SOURCES:
+                try:
+                    rows += store.unextracted_events(
+                        limit=TEXT_LANE_BATCH, modality="vision",
+                        source=upload_src, since=since)
+                except Exception:
+                    pass
+            return [(eid, ev, *lane_decision(ev.source, ev.modality.value, ev.meta))
+                    for eid, ev in rows]
+
+        # Fresh first; but a fresh window holding only rows other lanes own
+        # must not keep the backlog from draining.
+        lane = "fresh"
+        cands = _window(now - TEXT_LANE_FRESH_S)
+        if not any(d == "mine" for _, _, d, _ in cands):
+            lane = "backlog"
+            cands = _window(None)
+        mined: list[int] = []
+        skipped: list[int] = []
+        deferred: list[int] = []
+        parked: list[int] = []
+        left = 0          # mineable rows this pass did not reach (batch cap)
+        total_facts = 0
+        calls = 0
+        for eid, ev, decision, why in cands:
+            if decision == "leave":
+                continue
+            if decision == "skip":
+                skipped.append(eid)
+                continue
+            if len(mined) >= TEXT_LANE_BATCH:
+                left += 1
+                continue
+            text, speaker, window, me = lane_text(ev)
+            if len(text) < TEXT_LANE_MIN_CHARS:
+                skipped.append(eid)
+                continue
+            plan = _sal.plan(text, source=ev.source, store=store, now=now)
+            if plan.budget_exhausted:
+                deferred.append(eid)
+                continue
+            n = 0
+            failed = False
+            for ch in plan.chunks:
+                try:
+                    facts = self._extract_text(ch.text, speaker=speaker)
+                except Exception as exc:
+                    attempts = store.bump_extract_attempts([eid])
+                    if attempts >= EXTRACT_MAX_ATTEMPTS:
+                        store.park_extract_failed([eid], now)
+                        parked.append(eid)
+                        print(f"[extract:text] LLM error on event {eid} "
+                              f"({exc}); parked after {attempts} attempt(s).")
+                    else:
+                        print(f"[extract:text] LLM error on event {eid} "
+                              f"({exc}); leaving for retry "
+                              f"({attempts}/{EXTRACT_MAX_ATTEMPTS}).")
+                    failed = True
+                    break
+                calls += 1
+                _sal.charge(ev.source, 1, now=now)
+                turn = Turn(start=float(ev.time), end=float(ev.time),
+                            speaker=speaker or "", text=ch.text,
+                            event_ids=[int(eid)])
+                n += self._persist(turn, facts, now, event_source=ev.source,
+                                   window=window, me_is_user=me)
+            if failed:
+                continue
+            try:
+                store.set_event_meta_key(eid, "extraction", {
+                    "facts": int(n), "chunks": len(plan.chunks),
+                    "chunks_skipped": int(plan.skipped), "at": now})
+            except Exception:
+                pass
+            mined.append(eid)
+            total_facts += n
+            if verbose:
+                print(f"[extract:text] {ev.source} event {eid} -> {n} fact(s) "
+                      f"from {len(plan.chunks)} chunk(s) ({why}): {text[:60]!r}")
+        store.mark_extracted(mined, now, status="ok")
+        store.mark_extracted(skipped, now, status="skipped")
+        store.mark_extracted(deferred, now, status="deferred")
+        return {"lane": lane, "events": len(mined), "facts": total_facts,
+                "skipped": len(skipped), "deferred": len(deferred),
+                "failed": len(parked), "calls": calls,
+                "remaining": left > 0}
+
 
 extractor = Extractor()
+
+
+# --- the one persist path for non-speech sources (F01) ----------------------
+_ME_IS_NOT_USER_PREFIXES = ("peer.", "assistant.", "fleet", "org.")
+
+
+def _source_me_is_user(src: str) -> bool:
+    """Does 'me' / 'I' in this source mean the enrolled user? Their own typed
+    chat, phone notes, uploads and documents: yes. A teammate's answer, a
+    cloud assistant's note, a web page: no — chat_ingest relabels the
+    assistant's first person and peer answers are someone else's words."""
+    s = (src or "").lower()
+    if s.startswith(_ME_IS_NOT_USER_PREFIXES) or "research" in s:
+        return False
+    return True
+
+
+def _chat_people_names(text: str) -> list[str]:
+    """Multi-word proper names in typed chat worth minting as people.
+
+    The extractor often parks a meeting as a commitment/claim with empty or
+    self/unknown parties and never passes the counterparty into
+    resolve_person_mention — so "meeting with Andy Karos" never becomes a
+    People row. Harvesting multi-word names from the raw chat text closes that
+    gap without minting every capitalized single token ("Remember", "Today").
+    """
+    from app.services.answer_check import extract_name_tokens
+    from app.services import name_quality as nq
+    from app.services import self_profile
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for tok in extract_name_tokens(text or ""):
+        if " " not in (tok or ""):
+            continue
+        if not nq.is_plausible_person(tok):
+            continue
+        if self_profile.is_self_name(tok):
+            continue
+        key = tok.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(tok)
+    return out
+
+
+def persist_facts(store, facts: dict, anchor: int | None, text: str,
+                  now: float, *, event_source: str = "document",
+                  window: str = "", speaker: str | None = None,
+                  index: bool = True, me_is_user: bool | None = None,
+                  event_time: float | None = None) -> int:
+    """Write the extractor's output for one piece of text through
+    `Extractor._persist` — the same path speech takes (fact_candidates,
+    hygiene gate, assertion review, field validation, entity-anchored
+    supersession, KG belief dual-write). Replaces the thinner
+    documents._persist_facts that chat, uploads, research, peers, screen
+    and L3 used to share.
+
+    `store` may be the live store or a throwaway one (pass `index=False`
+    for the latter so its fact ids never reach the shared vector index).
+    `event_time` dates the synthetic turn; defaults to `now`."""
+    if not isinstance(facts, dict):
+        return 0
+    ex = extractor if (store is None or store is extractor._store) \
+        else Extractor(store)
+    t = float(event_time if event_time is not None else now)
+    turn = Turn(start=t, end=t, speaker=(speaker or ""), text=text or "",
+                event_ids=[int(anchor)] if anchor is not None else [])
+    return ex._persist(turn, facts, now, event_source=event_source,
+                       window=window, index=index, me_is_user=me_is_user,
+                       offer_tasks=False)
+
+
+# --- text lane policy (F03) --------------------------------------------------
+TEXT_LANE_BATCH = int(os.environ.get("QUILL_TEXT_EXTRACT_BATCH", "20"))
+TEXT_LANE_FRESH_S = float(os.environ.get("QUILL_TEXT_EXTRACT_FRESH_S", "600"))
+TEXT_LANE_MIN_CHARS = int(os.environ.get("QUILL_TEXT_EXTRACT_MIN_CHARS", "12"))
+TEXT_LANE_MODALITIES = ("text", "document", "system", "notification")
+
+# Sources another lane or a per-event job already mines. The text lane
+# never touches these (not even to mark them), so nothing is mined twice
+# and nothing is marked out from under its owner. Exact sources where the
+# owner is a per-event job (only that source's rows are ever marked by
+# it); prefixes where a whole family is another lane's. Operational
+# SYSTEM rows from other families (org priorities, fleet feed, the
+# cold-start contact ingest, peer pairing notices) are nobody's: the lane
+# marks them skipped so they stop filling the oldest-first window.
+_LANE_DEDICATED_PREFIXES = ("audio", "desktop.", "assistant.")
+_LANE_DEDICATED_SOURCES = ("chat.user", "chat.research", "peer.answer",
+                           "documents.scan")
+_LANE_QUERY_SOURCES = ("chat.query",)
+_LANE_UPLOAD_SOURCES = ("chat.attach", "onboarding.upload")
+
+
+def lane_decision(source: str, modality: str, meta: dict | None
+                  ) -> tuple[str, str]:
+    """('mine' | 'skip' | 'leave', reason) for one unextracted event.
+
+    mine  — the text lane extracts it.
+    skip  — nothing will ever mine it (a chat question, an operational
+            SYSTEM row); mark it so it stops filling the oldest-first window.
+    leave — another lane / job owns it; do not touch."""
+    src = (source or "").strip().lower()
+    mod = (modality or "").strip().lower()
+    meta = meta if isinstance(meta, dict) else {}
+    if mod == "vision" and src in _LANE_UPLOAD_SOURCES:
+        return "mine", "upload photo"     # OCR + description of an attached photo
+    if mod not in TEXT_LANE_MODALITIES:
+        return "leave", "modality"
+    if src in _LANE_QUERY_SOURCES or meta.get("kind") == "query":
+        return "skip", "query"
+    if src in _LANE_DEDICATED_SOURCES or src.startswith(_LANE_DEDICATED_PREFIXES):
+        return "leave", "dedicated"
+    if src.startswith("phone."):
+        return "mine", "phone"
+    if src in _LANE_UPLOAD_SOURCES:
+        return "mine", "upload"
+    head = src.split(".", 1)[0]
+    try:
+        from app.services.source_policy import _connector_ids
+        if "." in src and head in _connector_ids():
+            return "mine", "connector"
+    except Exception:
+        pass
+    if "calendar" in src or "notif" in src:
+        return "mine", "calendar" if "calendar" in src else "notification"
+    if mod in ("text", "document"):
+        return "mine", "text"
+    return "skip", "not memory text"
+
+
+def _display_name(addr: str) -> str:
+    """'Dana Whitfield <dana@acme.com>' -> 'Dana Whitfield' (or the address)."""
+    try:
+        from app.services.exhaust_ingest import parse_rfc2822_addr
+        for a in parse_rfc2822_addr(addr or ""):
+            return (a.get("name") or a.get("email") or "").strip()
+    except Exception:
+        pass
+    return (addr or "").split("<", 1)[0].strip().strip('"')
+
+
+def lane_text(ev) -> tuple[str, str | None, str, bool]:
+    """(text to extract, speaker label, window/title, me_is_user) for one
+    lane event. Mail gets its header lines back on top of the body so the
+    extractor knows who is talking to whom; the sender is the speaker, and
+    'me' is the user only for mail they sent, phone notes and uploads."""
+    meta = ev.meta if isinstance(getattr(ev, "meta", None), dict) else {}
+    src = (ev.source or "").lower()
+    raw = (ev.raw or "").strip()
+    title = str(meta.get("title") or "").strip()
+    window = str(meta.get("window") or title or "")
+    speaker: str | None = None
+    me = False
+    user_name = None
+    try:
+        from app.services.identity import user_identity
+        user_name = (user_identity().get("name") or "").strip() or None
+    except Exception:
+        user_name = None
+    kind = src.split(".", 1)[1] if "." in src else ""
+    if src.startswith("phone."):
+        return raw, user_name, window, True
+    if src in _LANE_UPLOAD_SOURCES:
+        return raw, None, window, True
+    if kind in ("mail", "gmail", "email", "dm", "message", "chat", "text"):
+        frm = str(meta.get("from") or "")
+        sent = bool(meta.get("from_self")) or \
+            str(meta.get("direction") or "").lower() in ("sent", "outgoing")
+        speaker = user_name if sent else (_display_name(frm) or None)
+        me = bool(sent)
+        lines = []
+        if not raw.lower().startswith(("from:", "to:", "subject:")):
+            for label, key in (("From", "from"), ("To", "to"), ("Cc", "cc")):
+                val = meta.get(key)
+                if val:
+                    lines.append(f"{label}: {val}")
+            if title:
+                lines.append(f"Subject: {title}")
+        text = ("\n".join(lines) + "\n\n" + raw).strip() if lines else raw
+        return text, speaker, window, me
+    return raw, None, window, False

@@ -133,8 +133,7 @@ def run_job(payload: dict | None) -> None:
     anchor = (payload or {}).get("event_id")
     if not text:
         return
-    from app.services.documents import _persist_facts
-    from app.services.extractor import extractor
+    from app.services.extractor import extractor, persist_facts
     from app.services.worker import worker
     from app.storage import get_store
 
@@ -149,8 +148,8 @@ def run_job(payload: dict | None) -> None:
         except Exception:
             pass
     facts = extractor._extract_text(text)
-    n = _persist_facts(store, facts, anchor, text, now,
-                       event_source=event_source)
+    n = persist_facts(store, facts, anchor, text, now,
+                      event_source=event_source, me_is_user=False)
     try:
         if anchor is not None:
             store.mark_extracted([anchor], now)

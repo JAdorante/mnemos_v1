@@ -36,6 +36,11 @@ _DEFAULT_POLICY = {
     "update_people": False,
     "identity_evidence": False,
     "knowledge_entities": True,
+    # F59: may mint a person that STAYS a candidate (the review state the
+    # adjudicator and the People tab gate) — never promoted by this source.
+    # Attendee lists, org charts and contracts are real sources of people;
+    # they just do not get to decide who is recognised.
+    "hold_person_candidates": False,
 }
 
 _NEWS_WINDOW = re.compile(
@@ -112,6 +117,12 @@ class SourcePolicy:
     update_people: bool = False
     identity_evidence: bool = False
     knowledge_entities: bool = True
+    hold_person_candidates: bool = False
+
+    @property
+    def may_mint_people(self) -> bool:
+        """Create a person row at all (promoted later, or held in review)."""
+        return bool(self.create_person_candidates or self.hold_person_candidates)
 
 
 @lru_cache(maxsize=1)
@@ -172,6 +183,11 @@ def classify_source(
     # "chat" test below — "assistant.chatgpt" is not the user typing.
     if src.startswith("assistant."):
         return "assistant_capture"
+    # An uploaded file is a document the user handed over, not the user
+    # typing: it rides the document policy (no person minting from a PDF's
+    # names). Must precede the "chat" test below — "chat.attach" is not chat.
+    if src in ("chat.attach", "onboarding.upload"):
+        return "user_authored_document"
     if "." in src and src.split(".", 1)[0] in _connector_ids():
         kind = src.split(".", 1)[1]
         if kind in ("mail", "gmail", "email", "dm", "message", "chat"):

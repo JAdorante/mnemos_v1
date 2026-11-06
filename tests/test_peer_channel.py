@@ -870,7 +870,7 @@ class PeerIngestTests(PeerChannelBase):
         with mock.patch("app.storage.get_store",
                         return_value=mock.MagicMock()), \
              mock.patch("app.services.extractor.extractor") as ex, \
-             mock.patch("app.services.documents._persist_facts", persist), \
+             mock.patch("app.services.extractor.persist_facts", persist), \
              mock.patch("app.services.worker.worker", wk):
             ex._extract_text.return_value = {"claims": ["x"]}
             pch.run_ingest_job({"event_id": 42, "text": "Friday Aug 7.",

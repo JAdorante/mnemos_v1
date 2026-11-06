@@ -1,5 +1,5 @@
 {
-  "version": "1.9",
+  "version": "2.0",
   "classes": {
     "private_conversation": {
       "extract_mentions": true,
@@ -76,7 +76,8 @@
       "create_claims": true,
       "update_people": true,
       "identity_evidence": true,
-      "knowledge_entities": true
+      "knowledge_entities": true,
+      "hold_person_candidates": true
     },
     "shared_document": {
       "extract_mentions": true,
@@ -87,7 +88,8 @@
       "create_claims": true,
       "update_people": false,
       "identity_evidence": false,
-      "knowledge_entities": true
+      "knowledge_entities": true,
+      "hold_person_candidates": true
     },
     "presentation": {
       "extract_mentions": true,

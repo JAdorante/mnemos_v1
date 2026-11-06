@@ -329,7 +329,10 @@ class PeoplePipelineTests(unittest.TestCase):
         finally:
             sp._raw_policies.cache_clear()
 
-    def test_document_binds_existing_but_does_not_mint(self):
+    def test_document_binds_existing_and_holds_new_people_in_review(self):
+        """F59 (Nov 6 2026): a document may mint a person, but only from a
+        strong mention, and that person stays a `candidate` — the document
+        never promotes them. A weak mention is left open, not minted."""
         pid = self.store.insert_person(
             "Hugh Salva", ts=NOW, promotion_state="recognized")
         hit = pp.resolve_person_mention(
@@ -339,15 +342,37 @@ class PeoplePipelineTests(unittest.TestCase):
             now=NOW + 1)
         self.assertEqual(hit.decision, "auto_resolve")
         self.assertEqual(hit.person_id, pid)
-        miss = pp.resolve_person_mention(
+        # Binding an existing person never promotes them from a document.
+        self.assertEqual(self.store.get_person(pid).get("promotion_state"),
+                         "recognized")
+        weak = pp.resolve_person_mention(
             "Marc Sullivan", store=self.store, event_id=73,
             event_source="documents.scan",
             text="Marc Sullivan wrote the architecture note",
             now=NOW + 2)
-        self.assertEqual(miss.decision, "reject")
-        self.assertIsNone(miss.person_id)
+        self.assertEqual(weak.decision, "leave_open")
+        self.assertIsNone(weak.person_id)
         names = {p["name"] for p in self.store.all_people()}
         self.assertNotIn("Marc Sullivan", names)
+        strong = pp.resolve_person_mention(
+            "Marc Sullivan", store=self.store, event_id=74,
+            event_source="documents.scan",
+            text="Owner: Marc Sullivan — deliver the architecture note",
+            grammatical_role="owner", relationship_boost=0.85,
+            now=NOW + 3)
+        self.assertEqual(strong.decision, "create_new")
+        self.assertIsNotNone(strong.person_id)
+        self.assertEqual(self.store.get_person(strong.person_id)
+                         .get("promotion_state"), "candidate")
+        again = pp.resolve_person_mention(
+            "Marc Sullivan", store=self.store, event_id=75,
+            event_source="documents.scan",
+            text="Owner: Marc Sullivan — deliver the architecture note",
+            grammatical_role="owner", relationship_boost=0.85,
+            now=NOW + 4)
+        self.assertEqual(again.person_id, strong.person_id)
+        self.assertEqual(self.store.get_person(strong.person_id)
+                         .get("promotion_state"), "candidate")
 
     def test_soft_merge_hides_absorbed(self):
         a = self.store.insert_person("Alex One", ts=NOW, promotion_state="active")

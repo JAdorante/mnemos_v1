@@ -136,6 +136,44 @@ def allows_connector(connector_id: str) -> bool:
     return bool(rec and rec.get("enabled"))
 
 
+def allows_connector_bodies(connector_id: str) -> bool:
+    """True only when the user agreed to message BODIES for this connector
+    (pipeline fix list F04). Separate from background sync: headers can be
+    polled without bodies ever being read."""
+    rec = (load().get("connectors") or {}).get((connector_id or "").lower())
+    return bool(rec and rec.get("bodies"))
+
+
+def record_connector_bodies(connector_id: str, *, enabled: bool,
+                            sentence: str = "") -> dict:
+    """Persist the per-connector message-body consent and the sentence that
+    was shown (which names the wider OAuth scope it needs)."""
+    global _cached
+    cid = (connector_id or "").strip().lower()
+    now = time.time()
+    with _lock:
+        cur = load(force=True)
+        conns = dict(cur.get("connectors") or {})
+        rec = dict(conns.get(cid) or {})
+        rec["bodies"] = bool(enabled)
+        rec["bodies_sentence"] = sentence or rec.get("bodies_sentence") or ""
+        rec["bodies_consented_at"] = (
+            (rec.get("bodies_consented_at") or now) if enabled
+            else rec.get("bodies_consented_at"))
+        rec["updated_at"] = now
+        rec.setdefault("enabled", False)
+        conns[cid] = rec
+        cur["connectors"] = conns
+        cur["updated_at"] = now
+        try:
+            from app.atomic_json import write_json
+            write_json(_path(), cur, sort_keys=True)
+        except Exception as exc:
+            print(f"[capture_consent] connector body save failed ({exc}).")
+        _cached = dict(cur)
+        return dict(rec)
+
+
 def record_connector(connector_id: str, *, enabled: bool,
                      sentence: str = "", interval_s: float | None = None) -> dict:
     """Persist the per-connector background-sync consent and the sentence
@@ -148,6 +186,7 @@ def record_connector(connector_id: str, *, enabled: bool,
         conns = dict(cur.get("connectors") or {})
         prev = dict(conns.get(cid) or {})
         conns[cid] = {
+            **{k: v for k, v in prev.items() if k.startswith("bodies")},
             "enabled": bool(enabled),
             "sentence": sentence or prev.get("sentence") or "",
             "interval_s": interval_s if interval_s is not None

@@ -161,6 +161,19 @@ def land_item(connector, item: dict, *, store=None) -> int | None:
     return eid
 
 
+def _nudge_text_lane(store) -> None:
+    """F03: a landed item becomes memory within one worker cycle. Only for
+    the process store — a temp store (tests, replay) has no lane."""
+    try:
+        from app.services.memory import memory
+        if memory._store is not store:
+            return
+        from app.services.worker import nudge
+        nudge("extract_text")
+    except Exception as exc:
+        print(f"[connectors] extract nudge skipped ({exc}).")
+
+
 def _land_new(connector, items, cursor: dict, store) -> tuple[int, list[str]]:
     """Land the items the ledger hasn't seen. Returns (landed, updated ledger)."""
     cid = str(getattr(connector, "id", "") or "").lower()
@@ -200,6 +213,8 @@ def land_unseen(connector, items, *, store=None, now: float | None = None) -> in
     landed, seen = _land_new(connector, items, cursor, store)
     store.connector_sync_set(cid, cursor={**cursor, "seen": seen}, last_sync=now,
                              items_landed_add=landed, clear_error=True)
+    if landed:
+        _nudge_text_lane(store)
     return landed
 
 
@@ -235,6 +250,8 @@ def sync_connector(connector, *, store=None, now: float | None = None,
         store.connector_sync_set(cid, cursor=merged, last_sync=now,
                                  next_sync=now + interval,
                                  items_landed_add=landed, clear_error=True)
+        if landed:
+            _nudge_text_lane(store)
         return {"ok": True, "connector_id": cid, "landed": landed,
                 "fetched": len(items or []), "next_sync": now + interval}
     finally:

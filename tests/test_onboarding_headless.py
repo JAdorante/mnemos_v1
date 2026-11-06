@@ -95,7 +95,7 @@ class OnboardingUploadIngestTests(unittest.TestCase):
              patch("app.services.attachments._index_event"), \
              patch("app.services.documents.extract_text",
                    return_value="Resume for Jordan Lee at Foundry."), \
-             patch.object(attachments, "_schedule_fact_mine"):
+             patch.object(attachments, "_queue_fact_mine", return_value=None):
             doc = attachments.ingest_bytes(
                 "resume.txt", b"placeholder",
                 source="onboarding.upload", section="onboarding.upload",

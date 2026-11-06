@@ -431,7 +431,9 @@ def resolve_person_mention(
         decision, chosen_row, conf = decide_from_scores(
             scored,
             relationship_boost=relationship_boost,
-            create_person_candidates=policy.create_person_candidates,
+            # F59: a held source (documents) may mint a candidate too; it
+            # just never promotes one (see the auto_resolve bump below).
+            create_person_candidates=_may_mint(policy),
             auto_resolve=auto_t,
             auto_margin=margin_t,
             create_new=_thr_create_new(),
@@ -549,7 +551,7 @@ def resolve_person_mention(
     # Rebuild the ranked list with the new-person prior for decision logging
     # (mirrors decide_from_scores when create is allowed).
     log_scored = list(scored)
-    if policy.create_person_candidates:
+    if _may_mint(policy):
         if not log_scored:
             new_score = 0.93 if relevance >= _CREATE_RELEVANCE else 0.4
         else:
@@ -561,7 +563,7 @@ def resolve_person_mention(
 
     mid = None
     if event_id is not None:
-        if not policy.create_person_candidates:
+        if not _may_mint(policy):
             mid = store.insert_person_mention(
                 event_id=event_id, raw_text=raw, normalized_text=display,
                 discourse_role=discourse_role, grammatical_role=grammatical_role,
@@ -830,6 +832,14 @@ def agent_may_use_contact(store, person_id: int, contact_type: str) -> dict:
         return {"allow": False, "reason": "no_verified_contact"}
     best = max(ok, key=lambda c: float(c.get("confidence") or 0))
     return {"allow": True, "contact": best, "person": p}
+
+
+def _may_mint(policy) -> bool:
+    """Create a person row at all: promotable (create_person_candidates) or
+    held in review (hold_person_candidates, F59). Older test policies are
+    plain namespaces without the new field."""
+    return bool(getattr(policy, "create_person_candidates", False)
+                or getattr(policy, "hold_person_candidates", False))
 
 
 def _bump_promotion(store, person_id: int, relevance: float, ts: float) -> None:

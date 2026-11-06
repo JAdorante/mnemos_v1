@@ -79,6 +79,22 @@ def list_status() -> list[dict[str, Any]]:
     for c in all():
         st = catalog.enrich(c.status())
         st["team_allowed"] = prefs.is_team_allowed(c.id)
+        # F04: mail connectors carry a separate message-body consent.
+        sentence = getattr(c, "bodies_consent_sentence", None)
+        if sentence:
+            try:
+                from app.services import capture_consent
+                consented = capture_consent.allows_connector_bodies(c.id)
+            except Exception:
+                consented = False
+            try:
+                granted = bool(c.body_scope_granted())
+            except Exception:
+                granted = False
+            st.update({"bodies_consent_sentence": sentence,
+                       "bodies_consented": consented,
+                       "body_scope": getattr(c, "body_scope", None),
+                       "body_scope_granted": granted})
         rows.append(st)
     return rows
 

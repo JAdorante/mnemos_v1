@@ -407,6 +407,7 @@ async def _startup() -> None:
                 if res.get("events_marked") and res.get("remaining"):
                     worker.enqueue("extract", unique=True)
                 worker.enqueue("graph", unique=True)   # chain: facts -> edges
+                worker.enqueue("extract_text", unique=True)   # F03 text lane
                 # Meeting Layer P3: enhance after facts land for settled sessions.
                 worker.enqueue("session_enhance", unique=True)
                 # A turn is captured but not settled yet: schedule a one-shot
@@ -417,6 +418,23 @@ async def _startup() -> None:
                     _schedule_extract_nudge(delay + 0.5)
 
             worker.register("extract", _extract_job)
+
+            # F03: the text lane — connector items, phone notes, uploads and
+            # every other text-bearing event no other lane owns. Nudged by
+            # the producers as they land; chained from the speech pass; and
+            # drained once at boot so a backlog never waits for a sound.
+            def _extract_text_job(_payload) -> None:
+                res = extractor.run_text_once()
+                if res.get("remaining"):
+                    worker.enqueue("extract_text", unique=True)
+                if res.get("facts"):
+                    worker.enqueue("graph", unique=True)
+
+            worker.register("extract_text", _extract_text_job)
+            try:
+                worker.enqueue("extract_text", unique=True)
+            except Exception as exc:
+                print(f"[extract:text] boot drain skipped ({exc}).")
 
             def _graph_job(_payload) -> None:
                 graph.rebuild()

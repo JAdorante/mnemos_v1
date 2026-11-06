@@ -24,16 +24,16 @@ class AttachDeferExtractTests(unittest.TestCase):
             return {"tasks": [], "commitments": [], "claims": [],
                     "people": [], "entities": [], "relations": []}
 
-        def fake_schedule(fn, *args, label="attach"):
+        def fake_queue(anchor, *, label="attach"):
             called["scheduled"] += 1
-            # Do not run — proves the HTTP path does not wait on mining.
+            return 7   # a lane job id; nothing runs on the request path
 
         pdf_text = "Executive brief on Physical AI. Contact Jordan Lee at Foundry."
         with patch.object(attachments, "upload_dir", return_value=self.tmp), \
              patch("app.storage.get_store", return_value=self.store), \
              patch("app.services.attachments._index_event"), \
              patch("app.services.documents.extract_text", return_value=pdf_text), \
-             patch.object(attachments, "_schedule_fact_mine", side_effect=fake_schedule), \
+             patch.object(attachments, "_queue_fact_mine", side_effect=fake_queue), \
              patch("app.services.extractor.extractor._extract_text", side_effect=fake_extract):
             # Force document path via .txt
             out = attachments.ingest_bytes("brief.txt", b"placeholder")
@@ -64,7 +64,7 @@ class AttachContextWindowTests(unittest.TestCase):
              patch("app.services.attachments._index_event"), \
              patch("app.services.documents.extract_text", return_value=text), \
              patch.object(attachments, "settings", cfg), \
-             patch.object(attachments, "_schedule_fact_mine"):
+             patch.object(attachments, "_queue_fact_mine", return_value=7):
             return attachments.ingest_bytes("brief.txt", b"placeholder")
 
     def test_context_labels_the_file_as_the_turn_subject(self) -> None:

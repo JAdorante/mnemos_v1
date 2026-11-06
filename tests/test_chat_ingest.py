@@ -128,7 +128,8 @@ class IngestTests(unittest.TestCase):
 
 class RunJobTests(unittest.TestCase):
     """The job persists extracted facts into a REAL (temp) store through
-    _persist_facts, and chains a graph rebuild only when facts landed."""
+    extractor.persist_facts (the one persist path, F01), and chains a graph
+    rebuild only when facts landed."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -191,8 +192,8 @@ class RunJobTests(unittest.TestCase):
         queued: list[str] = []
         seen = {}
 
-        def _capture(store, facts, anchor, chunk, now, index=True, *,
-                     event_source="document", window=""):
+        def _capture(store, facts, anchor, chunk, now, *,
+                     event_source="document", **_kw):
             seen["event_source"] = event_source
             return 0
 
@@ -209,7 +210,7 @@ class RunJobTests(unittest.TestCase):
              patch("app.services.extractor.extractor._extract_text",
                    return_value={"tasks": [], "commitments": [], "claims": [],
                                  "entities": [], "relations": []}), \
-             patch("app.services.documents._persist_facts", side_effect=_capture):
+             patch("app.services.extractor.persist_facts", side_effect=_capture):
             chat_ingest.run_job({"event_id": eid,
                                  "text": "meeting with Andy Karos"})
         self.assertEqual(seen.get("event_source"), "chat.user")

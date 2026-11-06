@@ -244,9 +244,9 @@ def run_extract(payload: dict | None = None,
         n = 0
         if facts and anchor is not None:
             try:
-                from app.services.documents import _persist_facts
+                from app.services.extractor import persist_facts
                 from app.storage import get_store
-                n = _persist_facts(
+                n = persist_facts(
                     get_store(), facts, anchor, text, time.time(),
                     event_source=SOURCE, window="")
             except Exception as exc:

@@ -64,7 +64,7 @@ class FreshLaneTests(unittest.TestCase):
         fresh = [self.store.insert(_vision(now - 5 + i, "desktop.screen"))
                  for i in range(2)]
         with patch.object(screen_extract, "_extract", return_value={}), \
-             patch("app.services.documents._persist_facts", return_value=0), \
+             patch("app.services.extractor.persist_facts", return_value=0), \
              patch("app.storage.get_store", return_value=self.store):
             first = screen_extract.run_once()
             second = screen_extract.run_once()
@@ -94,7 +94,7 @@ class ScreenExtractProgressTests(unittest.TestCase):
             raw="[Outlook] From: Falloon, Chris  Subject: DTC PortDev Weekly"
                 "  When: Monday, July 20, 2026 10:00 AM"))
         with patch.object(screen_extract, "_extract", return_value={}), \
-             patch("app.services.documents._persist_facts", return_value=0), \
+             patch("app.services.extractor.persist_facts", return_value=0), \
              patch("app.storage.get_store", return_value=self.store):
             res = screen_extract.run_once()
         self.assertEqual(res["events"], 1)   # the screen frame WAS selected

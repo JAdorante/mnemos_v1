@@ -29,6 +29,75 @@ from app.storage import Store, get_store
 # can never collide; a hit with id >= this offset is a fact (fact_id = id - off).
 FACT_ID_OFFSET = 1_000_000_000
 
+# F02: document CONTENT is indexed as chunk rows beside the event row, so a
+# phrase from page 12 of an upload finds the document. A chunk row's id
+# encodes its parent event and its position — no schema change to the Lance
+# table, and the parent is recoverable from the hit alone.
+CHUNK_ID_OFFSET = 2_000_000_000_000
+CHUNK_STRIDE = 1024          # max chunk rows per event (index 0 .. 1023)
+_CHUNK_MODALITIES = ("document", "text")
+
+
+def chunk_vector_id(event_id: int, idx: int) -> int:
+    return CHUNK_ID_OFFSET + int(event_id) * CHUNK_STRIDE + int(idx)
+
+
+def is_chunk_id(vid: int) -> bool:
+    return int(vid) >= CHUNK_ID_OFFSET
+
+
+def parent_of_chunk_id(vid: int) -> tuple[int, int]:
+    """(parent event id, chunk index) for a chunk row id."""
+    rel = int(vid) - CHUNK_ID_OFFSET
+    return rel // CHUNK_STRIDE, rel % CHUNK_STRIDE
+
+
+def chunk_id_range(event_id: int) -> tuple[int, int]:
+    """Half-open [lo, hi) of every chunk row id an event can own."""
+    lo = chunk_vector_id(event_id, 0)
+    return lo, lo + CHUNK_STRIDE
+
+
+def _chunk_chars() -> int:
+    try:
+        return max(200, int(os.environ.get("QUILL_MEMORY_CHUNK_CHARS", "1200")))
+    except ValueError:
+        return 1200
+
+
+def _chunk_min_chars() -> int:
+    try:
+        return max(0, int(os.environ.get("QUILL_MEMORY_CHUNK_MIN", "600")))
+    except ValueError:
+        return 600
+
+
+def index_text_for_event(ev: Event) -> str:
+    """What the EVENT row embeds. Documents and typed text used to embed only
+    their one-line summary ('[attach] report.pdf (14233 chars)', the first
+    120 chars of a chat turn), so their content was findable only through
+    extracted facts or a substring match. Lead with the title, then content."""
+    raw = (ev.raw or "").strip()
+    mod = ev.modality.value if hasattr(ev.modality, "value") else str(ev.modality)
+    if mod in _CHUNK_MODALITIES and raw:
+        meta = ev.meta if isinstance(ev.meta, dict) else {}
+        title = str(meta.get("title") or "").strip()
+        head = raw[:1500]
+        return f"{title}\n{head}" if title and title not in head else head
+    return (ev.summary or raw or "")
+
+
+def chunk_rows_for_event(event_id: int, ev: Event) -> list[tuple[int, str]]:
+    """[(chunk vector id, chunk text)] for an event whose content is long
+    enough to deserve chunk rows; empty for short or non-text events."""
+    mod = ev.modality.value if hasattr(ev.modality, "value") else str(ev.modality)
+    raw = (ev.raw or "").strip()
+    if mod not in _CHUNK_MODALITIES or len(raw) < _chunk_min_chars():
+        return []
+    from app.services.documents import chunk_text
+    chunks = chunk_text(raw, size=_chunk_chars())[:CHUNK_STRIDE]
+    return [(chunk_vector_id(event_id, i), c) for i, c in enumerate(chunks)]
+
 
 def fact_is_retrievable(f: dict | None) -> bool:
     """A stored fact may surface in search only while it is the living version:
@@ -97,6 +166,11 @@ def vector_gc(store=None, vectors=None, *, now: float | None = None,
         orphans = sorted(event_existing - live_events)
         drop_ids.extend(orphans)
         result["orphan_event_ids"] = orphans
+        # F02 chunk rows whose parent event is gone.
+        chunk_orphans = sorted(i for i in existing if is_chunk_id(i)
+                               and parent_of_chunk_id(i)[0] not in live_events)
+        drop_ids.extend(chunk_orphans)
+        result["orphan_chunk_ids"] = chunk_orphans
     except Exception as exc:
         print(f"[memory] vector_gc orphan scan skipped ({exc}).")
         result["orphan_scan"] = str(exc)
@@ -151,9 +225,24 @@ def erase_event(event_id: int, *, store=None, vectors=None,
             FACT_ID_OFFSET + int(f) for f in (out.get("fact_ids") or [])]
         try:
             out["vectors"] = vectors.delete_ids(ids) if ids else 0
+            _drop_chunk_rows(vectors, [int(event_id)])
         except Exception as exc:
             out["vectors"] = {"error": str(exc)}
     return out
+
+
+def _drop_chunk_rows(vectors, event_ids: list[int]) -> int:
+    """Drop every chunk row of these events (F02). Tolerates an index that
+    predates range deletes (test doubles, older builds)."""
+    ids = [int(e) for e in event_ids if e is not None]
+    fn = getattr(vectors, "delete_ranges", None)
+    if not ids or not callable(fn):
+        return 0
+    try:
+        return int(fn([chunk_id_range(e) for e in ids]) or 0)
+    except Exception as exc:
+        print(f"[memory] chunk delete skipped ({exc}).")
+        return 0
 
 
 def signal_expired(payload: dict, now: float) -> bool:
@@ -264,6 +353,10 @@ class MemoryEngine:
             if not missing_ids:
                 if event_ids:
                     print(f"[memory] semantic index ok ({len(event_ids)} event(s)).")
+                try:
+                    self._backfill_chunks(vectors, rows, existing)
+                except Exception as exc:
+                    print(f"[memory] chunk backfill skipped ({exc}).")
                 return
             by_id = {int(eid): ev for eid, ev in rows}
             todo = [(eid, by_id[eid]) for eid in sorted(missing_ids) if eid in by_id]
@@ -275,7 +368,7 @@ class MemoryEngine:
             total = 0
             for i in range(0, len(todo), batch):
                 chunk = todo[i:i + batch]
-                texts = [(ev.summary or ev.raw or "") for _, ev in chunk]
+                texts = [index_text_for_event(ev) for _, ev in chunk]
                 vecs = embedder.encode_many(texts)
                 payload = [
                     {"id": int(eid), "time": float(ev.time),
@@ -289,6 +382,52 @@ class MemoryEngine:
         except Exception as exc:
             print(f"[memory] backfill error ({exc}); using substring search.")
             self._semantic = False
+            return
+        # F02: chunk rows for documents indexed before content chunking
+        # existed. Bounded per boot so a large catalogue never blocks startup
+        # for long; the remainder is picked up on the next boots.
+        try:
+            self._backfill_chunks(vectors, rows, existing)
+        except Exception as exc:
+            print(f"[memory] chunk backfill skipped ({exc}).")
+
+    def _backfill_chunks(self, vectors, rows, existing: set[int]) -> int:
+        try:
+            cap = max(0, int(os.environ.get("QUILL_MEMORY_CHUNK_BACKFILL", "300")))
+        except ValueError:
+            cap = 300
+        if not cap:
+            return 0
+        todo: list[tuple[int, Event]] = []
+        for eid, ev in rows:
+            mod = ev.modality.value
+            if mod not in _CHUNK_MODALITIES:
+                continue
+            if len((ev.raw or "").strip()) < _chunk_min_chars():
+                continue
+            if chunk_vector_id(int(eid), 0) in existing:
+                continue
+            todo.append((int(eid), ev))
+            if len(todo) >= cap:
+                break
+        if not todo:
+            return 0
+        from app.services.embeddings import embedder
+        total = 0
+        for eid, ev in todo:
+            chunks = chunk_rows_for_event(eid, ev)
+            if not chunks:
+                continue
+            vecs = embedder.encode_many([c for _, c in chunks])
+            vectors.add_many([
+                {"id": int(vid), "time": float(ev.time),
+                 "modality": ev.modality.value, "text": text,
+                 "vector": vec.tolist()}
+                for (vid, text), vec in zip(chunks, vecs)])
+            total += len(chunks)
+        print(f"[memory] chunk index: +{total} chunk row(s) for "
+              f"{len(todo)} document(s).")
+        return total
 
     def _on_event(self, event: Event) -> None:
         try:
@@ -311,13 +450,50 @@ class MemoryEngine:
         eid = store.insert(event)
         with self._lock:
             self._events.append(event)
+        self.index_event(eid, event, mirror=False)
+
+    def index_event(self, event_id: int, event: Event, *, mirror: bool = True) -> int:
+        """Index one stored event: its event row (title + leading content for
+        documents and typed text, the summary otherwise) and, for long text,
+        one chunk row per ~1,200 chars so any passage can find the document
+        (F02). `mirror` also appends it to the in-process timeline for
+        producers that inserted directly instead of through the bus.
+        Best-effort; returns the number of vector rows written."""
+        if mirror:
+            with self._lock:
+                self._events.append(event)
         vectors = self._ensure_vectors()
-        if vectors:
-            try:
-                text = event.summary or event.raw
-                vectors.add(eid, event.time, event.modality.value, text, self._embed(text))
-            except Exception as exc:
-                print(f"[memory] index error: {exc}")
+        if not vectors:
+            return 0
+        written = 0
+        try:
+            text = index_text_for_event(event)
+            if (text or "").strip():
+                vectors.add(int(event_id), event.time, event.modality.value,
+                            text, self._embed(text))
+                written += 1
+        except Exception as exc:
+            print(f"[memory] index error: {exc}")
+            return written
+        chunks = chunk_rows_for_event(int(event_id), event)
+        if not chunks:
+            return written
+        try:
+            rows = [{"id": int(vid), "time": float(event.time),
+                     "modality": event.modality.value, "text": ctext,
+                     "vector": list(self._embed(ctext))}
+                    for vid, ctext in chunks]
+            add_many = getattr(vectors, "add_many", None)
+            if callable(add_many):
+                add_many(rows)
+            else:
+                for r in rows:
+                    vectors.add(r["id"], r["time"], r["modality"], r["text"],
+                                r["vector"])
+            written += len(rows)
+        except Exception as exc:
+            print(f"[memory] chunk index error: {exc}")
+        return written
 
     def _on_store_change(self, store, change: dict) -> None:
         """Delete hook (app.storage): whichever path deleted or rewrote event
@@ -335,6 +511,11 @@ class MemoryEngine:
                 vectors.delete_ids(ids)
             except Exception as exc:
                 print(f"[memory] delete sync: vectors skipped ({exc}).")
+        if vectors and (gone or rewritten):
+            # A deleted document loses its chunk rows; a compacted one is
+            # re-indexed on its new (short) raw below, so its chunks go too.
+            _drop_chunk_rows(vectors, [int(i) for i, _ in gone]
+                             + [int(i) for i, _, _ in rewritten])
         # Event carries no row id; timestamps are effectively unique per event
         # (Store.event_ids_at relies on the same property).
         times = {float(t) for _, t in gone}
@@ -438,14 +619,29 @@ class MemoryEngine:
             hits = vectors.search(self._embed(query), k=k, modality=modality)
             store = self._ensure_store()
             ev_ids = [int(h["id"]) for h in hits if int(h["id"]) < FACT_ID_OFFSET]
+            # F02: a chunk hit hydrates its parent document event.
+            ev_ids += [parent_of_chunk_id(int(h["id"]))[0] for h in hits
+                       if is_chunk_id(int(h["id"]))]
             fact_ids = [int(h["id"]) - FACT_ID_OFFSET for h in hits
-                        if int(h["id"]) >= FACT_ID_OFFSET]
+                        if FACT_ID_OFFSET <= int(h["id"]) < CHUNK_ID_OFFSET]
             emap = store.by_ids_map(ev_ids)
             fmap = store.facts_by_ids(fact_ids) if fact_ids else {}
             out = []
             for h in hits:
                 hid = int(h["id"])
-                if hid >= FACT_ID_OFFSET:
+                if is_chunk_id(hid):
+                    eid, idx = parent_of_chunk_id(hid)
+                    ev = emap.get(eid)
+                    if ev is None:
+                        continue
+                    key = ("event", eid)
+                    d = ev.to_dict()
+                    d["event_id"] = eid
+                    d["parent_event_id"] = eid
+                    d["chunk_index"] = idx
+                    d["chunk_text"] = str(h.get("text") or "")
+                    ts = float(h.get("time") or 0)
+                elif hid >= FACT_ID_OFFSET:
                     f = fmap.get(hid - FACT_ID_OFFSET)
                     if not fact_is_retrievable(f):
                         continue
@@ -528,16 +724,17 @@ class MemoryEngine:
             hits = hits + self._keyword_hits(query, limit, modality)
 
         # Dedupe by (kind, id), keeping the max score: something found both
-        # ways is one result, ranked by its strongest evidence. The payload and
-        # timestamp come from the first sighting — both sides hydrate from the
-        # same store row, so they are the same view either way.
+        # ways is one result, ranked by its strongest evidence. The timestamp
+        # comes from the first sighting (both hydrate the same row); the
+        # payload follows the strongest hit, so a document found through one
+        # of its chunk rows (F02) carries that matching passage as chunk_text.
         best: dict[tuple, tuple[float, float, dict]] = {}
         for key, score, ts, payload in hits:
             prev = best.get(key)
             if prev is None:
                 best[key] = (score, ts, payload)
             elif score > prev[0]:
-                best[key] = (score, prev[1], prev[2])
+                best[key] = (score, prev[1], payload)
 
         now = time.time()
         ranked: list[tuple[float, dict]] = []

@@ -302,6 +302,37 @@ def connector_background(connector_id: str, body: ConnectorBackgroundIn) -> dict
             **scheduler.status(c.id)}
 
 
+class ConnectorBodiesIn(BaseModel):
+    enabled: bool
+
+
+@router.post("/connectors/{connector_id}/bodies")
+def connector_bodies(connector_id: str, body: ConnectorBodiesIn) -> dict:
+    """Allow (or stop) reading message BODIES for one mail connector
+    (pipeline fix list F04). Bodies need a wider read scope than headers,
+    so the consent sentence names it, and the response says whether the
+    stored grant already carries it (`reconnect_required` when not)."""
+    from app.services import capture_consent
+    from app.services.connectors import get as get_connector
+    c = get_connector(connector_id)
+    if not c:
+        raise HTTPException(404, f"unknown connector: {connector_id}")
+    sentence = getattr(c, "bodies_consent_sentence", None)
+    if not sentence:
+        raise HTTPException(400, f"{c.id} has no message bodies to read")
+    rec = capture_consent.record_connector_bodies(
+        c.id, enabled=bool(body.enabled), sentence=sentence)
+    granted = False
+    try:
+        granted = bool(c.body_scope_granted())
+    except Exception:
+        granted = False
+    return {"ok": True, "connector_id": c.id, "bodies": rec,
+            "body_scope_granted": granted,
+            "reconnect_required": bool(body.enabled and not granted),
+            "scope": getattr(c, "body_scope", None)}
+
+
 @router.get("/connectors/{connector_id}")
 def connector_one(connector_id: str, request: Request) -> dict:
     from app.services.connectors import get as get_connector, request_public_base
@@ -317,6 +348,18 @@ def connector_one(connector_id: str, request: Request) -> dict:
         st = {**st, **scheduler.status(c.id)}
     except Exception as exc:
         st = {**st, "sync_error": str(exc)}
+    # F04: message-body consent and whether the stored grant can honour it.
+    if getattr(c, "bodies_consent_sentence", None):
+        from app.services import capture_consent
+        try:
+            granted = bool(c.body_scope_granted())
+        except Exception:
+            granted = False
+        st = {**st,
+              "bodies_consented": capture_consent.allows_connector_bodies(c.id),
+              "bodies_consent_sentence": c.bodies_consent_sentence,
+              "body_scope": getattr(c, "body_scope", None),
+              "body_scope_granted": granted}
     return st
 
 

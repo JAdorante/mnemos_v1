@@ -2904,6 +2904,36 @@ window.MnemosCapture = {
       this.renderConnManage();
     }
   },
+  /* Message bodies for one mail connector: the consent sentence names the
+     wider permission; the server says whether the stored grant already
+     carries it. Until a reconnect does, only headers are read. */
+  async setConnectorBodies(id, enabled, box) {
+    const note = document.getElementById('pvConnNote');
+    const say = (m) => { if (note) note.textContent = m || ''; };
+    const c = [...((this._connDir || {}).connectors || [])].find((x) => x.id === id) || {};
+    if (enabled && !window.confirm(c.bodies_consent_sentence
+                                   || ('Read message bodies from ' + id + '?'))) {
+      if (box) box.checked = false;
+      return;
+    }
+    try {
+      const r = await MnemosJson('/connectors/' + encodeURIComponent(id) + '/bodies', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({enabled: !!enabled}),
+      });
+      if (enabled && r.reconnect_required) {
+        say('Message bodies on for ' + (c.label || id) + '. Reconnect it to grant '
+            + 'the wider permission; until then only headers are read.');
+      } else {
+        say(enabled ? 'Message bodies on.' : 'Message bodies off.');
+      }
+    } catch (e) {
+      say(e.message);
+      if (box) box.checked = !enabled;
+    }
+    this.renderConnManage();
+  },
   async setToolAccess(mode) {
     try {
       await MnemosJson('/connectors/tool-access', {
@@ -3028,6 +3058,10 @@ window.MnemosCapture = {
         const detail = e.target.closest('[data-conn-detail]');
         if (detail) this.showConnDetail(detail.dataset.connDetail);
       });
+      modal.addEventListener('change', (e) => {
+        const box = e.target.closest('input[data-conn-bodies]');
+        if (box) this.setConnectorBodies(box.dataset.connBodies, box.checked, box);
+      });
     }
     MnemosDialog.open(modal, {
       lockScroll: true,
@@ -3107,8 +3141,24 @@ window.MnemosCapture = {
       return '<span style="font-size:11px;color:var(--mut)">Team locked</span>';
     }
     if (c.connected) {
-      return '<button type="button" class="pv-btn quiet" data-conn-act="disconnect"'
+      let out = '<button type="button" class="pv-btn quiet" data-conn-act="disconnect"'
         + ' data-conn-id="' + id + '">Disconnect</button>';
+      if (c.bodies_consent_sentence) {
+        /* Message bodies are a separate consent and a wider sign-in
+           permission; headers keep flowing either way. */
+        out = '<div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">'
+          + out
+          + '<label style="display:flex;align-items:center;gap:6px;font-size:11px;'
+          + 'color:var(--mut);white-space:nowrap;cursor:pointer">'
+          + '<input type="checkbox" data-conn-bodies="' + id + '"'
+          + (c.bodies_consented ? ' checked' : '') + '>Read message bodies</label>'
+          + ((c.bodies_consented && !c.body_scope_granted)
+             ? '<span style="font-size:11px;color:var(--mut)">Reconnect to grant '
+               + 'the wider permission</span>'
+             : '')
+          + '</div>';
+      }
+      return out;
     }
     if (!c.configured && c.kind !== 'custom') {
       return '<span style="font-size:11px;color:var(--mut)">'
@@ -3467,8 +3517,8 @@ window.MnemosCapture = {
       + '</div>'
       + '<p style="font-size:12px;color:var(--mut);margin:6px 0 8px;line-height:1.45">'
       + 'Connect an account here, then enable it per chat from the Chat composer. '
-      + 'Sparrow reads only what it needs \u2014 never message bodies. Tokens stay '
-      + 'on this machine.</p>'
+      + 'Sparrow reads message headers only, unless you turn on bodies for a '
+      + 'connector under Manage connectors. Tokens stay on this machine.</p>'
       + '<label style="display:flex;align-items:center;gap:8px;font-size:12px;'
       + 'color:var(--mut);margin:0 0 8px">Tool access '
       + '<select id="pvToolAccess" style="font:inherit;font-size:12px;padding:4px 6px;'

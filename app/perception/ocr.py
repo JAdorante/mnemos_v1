@@ -217,8 +217,105 @@ def _rgb_to_software_bitmap(rgb: np.ndarray):
             return None
 
 
+class TesseractOcr:
+    """Cross-platform fallback: pytesseract when importable, else the
+    `tesseract` CLI on PATH. Lines come back without bounding boxes from
+    the CLI path (text only), with boxes from pytesseract."""
+
+    def __init__(self) -> None:
+        self._mode: str | None = None
+        self._probed = False
+        self.engine_name = "tesseract"
+        self.version = ""
+
+    def _probe(self) -> str | None:
+        if self._probed:
+            return self._mode
+        self._probed = True
+        try:
+            import pytesseract  # noqa: F401
+            self._mode = "py"
+            try:
+                self.version = str(pytesseract.get_tesseract_version())
+            except Exception:
+                self.version = ""
+            return self._mode
+        except Exception:
+            pass
+        import shutil
+        if shutil.which("tesseract"):
+            self._mode = "cli"
+        return self._mode
+
+    def available(self) -> bool:
+        return self._probe() is not None
+
+    def recognize(self, rgb: np.ndarray) -> OcrResult:
+        mode = self._probe()
+        if mode is None:
+            return OcrResult(lines=[], engine="null", version="")
+        try:
+            from PIL import Image
+            img = Image.fromarray(np.ascontiguousarray(rgb))
+            if mode == "py":
+                import pytesseract
+                data = pytesseract.image_to_data(
+                    img, output_type=pytesseract.Output.DICT)
+                lines: dict[tuple, list] = {}
+                order: list[tuple] = []
+                for i, word in enumerate(data.get("text") or []):
+                    w = (word or "").strip()
+                    if not w:
+                        continue
+                    key = (data["block_num"][i], data["par_num"][i],
+                           data["line_num"][i])
+                    if key not in lines:
+                        lines[key] = []
+                        order.append(key)
+                    try:
+                        conf = float(data["conf"][i])
+                    except (TypeError, ValueError):
+                        conf = -1.0
+                    lines[key].append((w, data["left"][i], data["top"][i],
+                                       data["width"][i], data["height"][i],
+                                       conf))
+                out = []
+                for key in order:
+                    words = lines[key]
+                    x0 = min(w[1] for w in words)
+                    y0 = min(w[2] for w in words)
+                    x1 = max(w[1] + w[3] for w in words)
+                    y1 = max(w[2] + w[4] for w in words)
+                    confs = [w[5] for w in words if w[5] >= 0]
+                    out.append(OcrLineResult(
+                        text=" ".join(w[0] for w in words),
+                        bbox_x=float(x0), bbox_y=float(y0),
+                        bbox_w=float(x1 - x0), bbox_h=float(y1 - y0),
+                        conf=(sum(confs) / len(confs) / 100.0) if confs else 1.0))
+                return OcrResult(lines=out, engine=self.engine_name,
+                                 version=self.version)
+            import subprocess
+            import tempfile
+            with tempfile.TemporaryDirectory(prefix="ocr_") as td:
+                p = f"{td}/page.png"
+                img.save(p)
+                res = subprocess.run(["tesseract", p, "stdout"],
+                                     capture_output=True, text=True, timeout=120)
+            text = res.stdout or ""
+            return OcrResult(
+                lines=[OcrLineResult(text=ln.strip()) for ln in text.splitlines()
+                       if ln.strip()],
+                engine=self.engine_name, version=self.version)
+        except Exception as exc:
+            print(f"[perception.ocr] tesseract recognize failed ({exc}).")
+            return OcrResult(lines=[], engine=self.engine_name, version=self.version)
+
+
 def get_default_engine() -> OcrEngine:
     eng = WindowsMediaOcr()
     if eng.available():
         return eng
+    tess = TesseractOcr()
+    if tess.available():
+        return tess
     return NullOcr()

@@ -117,8 +117,8 @@ class SelfNodeTests(unittest.TestCase):
 
 
 class OwnerRoutingTests(unittest.TestCase):
-    """documents._persist_facts routes owner='me' to the self node and links
-    first-person claims — the path typed chat ingestion uses."""
+    """extractor.persist_facts routes owner='me' to the self node and links
+    first-person claims — the path typed chat ingestion uses (F01)."""
 
     def setUp(self):
         self_profile.reset()
@@ -128,7 +128,7 @@ class OwnerRoutingTests(unittest.TestCase):
                            audio_dir=Path(self.tmp) / "audio")
 
     def test_me_owner_and_first_person_claim_reach_self_node(self):
-        from app.services.documents import _persist_facts
+        from app.services.extractor import persist_facts as _persist_facts
         facts = {
             "tasks": [{"text": "send Marc the revised deck", "owner": "me",
                        "source_span": "send Marc the revised deck",

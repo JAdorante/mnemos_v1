@@ -7,7 +7,7 @@ didn't. This closes that gap on the audio pipeline's pattern:
 
   batch unextracted desktop.screen events (settled, oldest first)
     → ONE local-first extraction call (screen-specific precision prompt)
-    → documents._persist_facts (the same hygiene gate: confidence floor,
+    → extractor.persist_facts (the same hygiene gate: confidence floor,
       verbatim-span check against the OCR, dedup/supersede — critical here,
       the same email on screen for five minutes must not mint five claims)
     → graph rebuild chain → people/org/tool/task nodes + edges → constellation
@@ -79,7 +79,7 @@ def run_once() -> dict:
     call any time — no frames, or the feature off, is a cheap no-op."""
     if not enabled():
         return {"enabled": False}
-    from app.services.documents import _persist_facts
+    from app.services.extractor import persist_facts
     from app.storage import get_store
 
     store = get_store()
@@ -137,7 +137,7 @@ def run_once() -> dict:
         try:
             facts = _extract(joined)
             anchor = batch[0][0]      # provenance: first frame of the batch
-            n = _persist_facts(
+            n = persist_facts(
                 store, facts, anchor, joined, now,
                 event_source=SOURCE, window=window_blob)
             # Desktop email → People v2 contacts / works_at (capture-first CRM).

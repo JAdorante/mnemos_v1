@@ -38,6 +38,90 @@ SCOPES = (
     "https://www.googleapis.com/auth/gmail.metadata",
     "https://www.googleapis.com/auth/calendar.events.readonly",
 )
+# Pipeline fix list F04: message bodies need the wider read-only mail scope.
+# Requested ONLY when the user has recorded body consent for this connector
+# (capture_consent.allows_connector_bodies), and accepted back only then.
+METADATA_SCOPE = SCOPES[0]
+BODY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+CALENDAR_SCOPE = SCOPES[1]
+
+
+def bodies_consented() -> bool:
+    try:
+        from app.services import capture_consent
+        return capture_consent.allows_connector_bodies("google")
+    except Exception:
+        return False
+
+
+def requested_scopes() -> tuple[str, ...]:
+    """The scopes the next sign-in asks for: metadata by default, the
+    read-only mail scope in its place once bodies are consented."""
+    if bodies_consented():
+        return (BODY_SCOPE, CALENDAR_SCOPE)
+    return SCOPES
+
+
+def body_scope_granted() -> bool:
+    """Does the stored grant already carry the body scope?"""
+    try:
+        return BODY_SCOPE in str(load_tokens().get("scope") or "")
+    except Exception:
+        return False
+
+
+def html_to_text(html: str, *, cap: int | None = None) -> str:
+    """Plain text from an HTML mail body: scripts/styles dropped, block
+    tags become line breaks, entities unescaped, whitespace collapsed."""
+    import html as _html
+    s = re.sub(r"(?is)<(script|style|head)[^>]*>.*?</\1>", " ", html or "")
+    s = re.sub(r"(?i)<br\s*/?>|</(p|div|li|tr|h[1-6]|blockquote)>", "\n", s)
+    s = re.sub(r"(?s)<[^>]+>", " ", s)
+    s = _html.unescape(s)
+    lines = [" ".join(ln.split()) for ln in s.splitlines()]
+    out = "\n".join(ln for ln in lines if ln)
+    return out[:cap] if cap else out
+
+
+def mail_body_cap() -> int:
+    try:
+        return max(500, int(os.environ.get("QUILL_MAIL_BODY_MAX_CHARS", "20000")))
+    except ValueError:
+        return 20000
+
+
+def _b64url(data: str) -> str:
+    import base64
+    try:
+        raw = base64.urlsafe_b64decode((data or "") + "=" * (-len(data or "") % 4))
+        return raw.decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def gmail_body_text(payload: dict) -> str:
+    """Best text body from a Gmail `format=full` payload: text/plain parts
+    first, then text/html stripped to text, walking nested multiparts."""
+    plain: list[str] = []
+    html: list[str] = []
+
+    def walk(part: dict) -> None:
+        if not isinstance(part, dict):
+            return
+        mime = str(part.get("mimeType") or "").lower()
+        data = (part.get("body") or {}).get("data")
+        if data and mime.startswith("text/plain"):
+            plain.append(_b64url(data))
+        elif data and mime.startswith("text/html"):
+            html.append(_b64url(data))
+        for sub in part.get("parts") or []:
+            walk(sub)
+
+    walk(payload or {})
+    text = "\n".join(p for p in plain if p.strip()).strip()
+    if not text and html:
+        text = html_to_text("\n".join(html))
+    return text[:mail_body_cap()]
 SOURCE_GMAIL = "exhaust.gmail"
 SOURCE_CAL = "exhaust.calendar"
 
@@ -306,14 +390,22 @@ def co_attendance_pairs(events: Iterable[dict], *,
 
 
 def assert_metadata_scopes(scope_string: str) -> None:
-    """Refuse any grant that is not exactly the metadata/read-only pair."""
+    """Refuse any grant that is not exactly the metadata/read-only pair —
+    or, once bodies are consented (F04), the read-only mail scope in place
+    of the metadata one. The body scope is never accepted without consent."""
     got = {s.strip() for s in (scope_string or "").split() if s.strip()}
     allowed = set(SCOPES)
+    if bodies_consented():
+        allowed.add(BODY_SCOPE)
     extra = got - allowed
     if extra:
         raise PermissionError(
             f"OAuth grant includes disallowed scopes: {sorted(extra)}")
-    missing = allowed - got
+    missing = set()
+    if CALENDAR_SCOPE not in got:
+        missing.add(CALENDAR_SCOPE)
+    if METADATA_SCOPE not in got and BODY_SCOPE not in got:
+        missing.add(METADATA_SCOPE)
     if missing:
         raise PermissionError(
             f"OAuth grant missing required scopes: {sorted(missing)}")
@@ -331,7 +423,7 @@ def _auth_url(redirect: str, state: str) -> str:
         "client_id": settings.exhaust.client_id,
         "redirect_uri": redirect,
         "response_type": "code",
-        "scope": " ".join(SCOPES),
+        "scope": " ".join(requested_scopes()),
         "access_type": "offline",
         "prompt": "consent",
         "state": state,
@@ -351,7 +443,7 @@ def _exchange_code(code: str, redirect: str) -> dict:
     req.add_header("Content-Type", "application/x-www-form-urlencoded")
     with urlopen(req, timeout=30) as resp:
         data = json.loads(resp.read().decode("utf-8"))
-    assert_metadata_scopes(data.get("scope") or " ".join(SCOPES))
+    assert_metadata_scopes(data.get("scope") or " ".join(requested_scopes()))
     return data
 
 
@@ -552,12 +644,18 @@ def _google_get(url: str) -> dict:
 
 def fetch_gmail_headers(*, days: float | None = None,
                         now: float | None = None,
-                        include_subject: bool = False) -> list[dict]:
+                        include_subject: bool = False,
+                        include_body: bool = False) -> list[dict]:
     """Last N days of Gmail metadata (From/To/Cc/Date/Message-ID only).
 
     `include_subject=True` (connector background capture, spec F1) also
     requests the Subject header — still the gmail.metadata scope, still no
-    body. The cold-start contact ingest keeps the narrower default."""
+    body. The cold-start contact ingest keeps the narrower default.
+
+    `include_body=True` (F04) fetches `format=full` and returns the text
+    body under `body`. Callers pass it only when body consent is recorded
+    AND the stored grant carries the read-only scope; without the scope
+    Google refuses the call rather than leaking anything."""
     days = float(days if days is not None else settings.exhaust.days)
     ts = time.time() if now is None else float(now)
     after = int(ts - days * 86400)
@@ -581,21 +679,29 @@ def fetch_gmail_headers(*, days: float | None = None,
             mid = m.get("id")
             if not mid:
                 continue
-            got = _google_get(
-                "https://gmail.googleapis.com/gmail/v1/users/me/messages/"
-                f"{quote(mid)}?format=metadata"
-                "&metadataHeaders=From&metadataHeaders=To"
-                "&metadataHeaders=Cc&metadataHeaders=Date"
-                "&metadataHeaders=Message-ID" + extra
-            )
+            if include_body:
+                got = _google_get(
+                    "https://gmail.googleapis.com/gmail/v1/users/me/messages/"
+                    f"{quote(mid)}?format=full")
+            else:
+                got = _google_get(
+                    "https://gmail.googleapis.com/gmail/v1/users/me/messages/"
+                    f"{quote(mid)}?format=metadata"
+                    "&metadataHeaders=From&metadataHeaders=To"
+                    "&metadataHeaders=Cc&metadataHeaders=Date"
+                    "&metadataHeaders=Message-ID" + extra
+                )
             payload = got.get("payload") or {}
             headers = {
                 (h.get("name") or "").lower(): (h.get("value") or "")
                 for h in (payload.get("headers") or [])
                 if (h.get("name") or "").lower() in wanted
             }
+            body_text = ""
+            if include_body:
+                body_text = gmail_body_text(payload)
             # Guard: Gmail metadata format must never include a body.
-            if payload.get("body", {}).get("data") or payload.get("parts"):
+            elif payload.get("body", {}).get("data") or payload.get("parts"):
                 raise RuntimeError("gmail returned body data; aborting ingest")
             msg_ts = float(got.get("internalDate") or 0) / 1000.0
             if not msg_ts and headers.get("date"):
@@ -613,9 +719,12 @@ def fetch_gmail_headers(*, days: float | None = None,
             # requested here). Note there is deliberately no per-message event
             # in this module, so this is not yet a CAL `thread:` binding: it is
             # the identity, carried rather than discarded, for whatever wants it.
-            out.append({"id": headers.get("message-id") or mid,
-                        "thread_id": str(got.get("threadId") or "") or None,
-                        "headers": headers, "ts": msg_ts})
+            row = {"id": headers.get("message-id") or mid,
+                   "thread_id": str(got.get("threadId") or "") or None,
+                   "headers": headers, "ts": msg_ts}
+            if include_body:
+                row["body"] = body_text
+            out.append(row)
         page = data.get("nextPageToken")
         if reached_cutoff or not page:
             break
@@ -994,7 +1103,8 @@ def status() -> dict[str, Any]:
         "oauth_configured": oauth_configured(),
         "connected": connected(),
         "days": settings.exhaust.days,
-        "scopes": list(SCOPES),
+        "scopes": list(requested_scopes()),
+        "body_scope_granted": body_scope_granted(),
         "progress": progress(),
         "ledger": _ledger_path().is_file(),
     }

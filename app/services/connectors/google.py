@@ -24,6 +24,20 @@ class GoogleConnector:
     sync_interval_s = 300
     sync_blurb = ("new Gmail message headers (sender, recipients, subject) "
                   "and Google Calendar events")
+    # F04: bodies are a separate consent and a wider Google permission.
+    body_scope = "https://www.googleapis.com/auth/gmail.readonly"
+    bodies_consent_sentence = (
+        "Sparrow will also read the text of new Gmail messages, not just "
+        "their headers, and keep it as observed memory on this machine "
+        "(never below the 'personal' privacy class, so it does not leave "
+        "the machine unless you share it). This needs Google's read-only "
+        "Gmail permission (gmail.readonly) instead of the headers-only one, "
+        "so you will be asked to sign in to Google again.")
+
+    @staticmethod
+    def body_scope_granted() -> bool:
+        from app.services import exhaust_ingest as ex
+        return ex.body_scope_granted()
     description = (
         "Read-only Gmail headers and Google Calendar events. "
         "You sign in on Google's screen — Sparrow never sees your password."
@@ -59,6 +73,7 @@ class GoogleConnector:
             "enabled": st.get("enabled", True),
             "days": st.get("days"),
             "scopes": st.get("scopes"),
+            "body_scope_granted": st.get("body_scope_granted", False),
             "progress": st.get("progress"),
             "ledger": st.get("ledger"),
             "oauth_mode": "redirect" if public_base_url() else "loopback",
@@ -126,8 +141,10 @@ class GoogleConnector:
         # were fetching is not missed; the ledger dedupes the overlap.
         window_days = max(1.0 / 24.0, (now - since + 3600) / 86400)
         items: list[dict] = []
+        include_body = ex.bodies_consented() and ex.body_scope_granted()
         for m in ex.fetch_gmail_headers(days=window_days, now=now,
-                                        include_subject=True):
+                                        include_subject=True,
+                                        include_body=include_body):
             items.append(self._mail_item(m))
         for e in ex.fetch_calendar_events(days=window_days, now=now):
             items.append(self._calendar_item(e))
@@ -152,10 +169,17 @@ class GoogleConnector:
         people = self._addr_names(frm) + self._addr_names(to) + self._addr_names(cc)
         lines = [f"From: {frm}" if frm else "", f"To: {to}" if to else "",
                  f"Cc: {cc}" if cc else "", f"Subject: {subject}" if subject else ""]
-        return {"kind": "mail", "external_id": m.get("id"),
+        item = {"kind": "mail", "external_id": m.get("id"),
                 "thread_id": m.get("thread_id"), "ts": m.get("ts"),
                 "title": subject, "text": "\n".join(l for l in lines if l),
                 "people": people, "from": frm, "to": to, "cc": cc}
+        body = (m.get("body") or "").strip() if isinstance(m.get("body"), str) else ""
+        if body:
+            # F04: a body is personal by floor; Store.insert keeps the higher
+            # of this and the computed class.
+            item["body"] = body
+            item["meta"] = {"privacy_class": "personal", "body_consent": True}
+        return item
 
     def _calendar_item(self, e: dict) -> dict:
         attendees = [a.get("name") or a.get("email") for a in (e.get("attendees") or [])

@@ -130,6 +130,35 @@ class VectorStore:
                 print(f"[vectorstore] delete skipped ({exc}).")
                 return 0
 
+    def delete_ranges(self, ranges: list[tuple[int, int]]) -> int:
+        """Delete every row whose id falls in one of the half-open [lo, hi)
+        ranges — how a document's chunk rows (F02) are dropped without
+        enumerating them. Best-effort; returns the number of ranges applied."""
+        spans = [(int(lo), int(hi)) for lo, hi in ranges if int(hi) > int(lo)]
+        if not spans:
+            return 0
+        with self._lock:
+            try:
+                if getattr(self, "_table", None) is None:
+                    import lancedb
+                    if getattr(self, "_db", None) is None:
+                        self._db = lancedb.connect(str(self.path))
+                    if "events" not in self._db.table_names():
+                        return 0
+                    self._table = self._db.open_table("events")
+                done = 0
+                for i in range(0, len(spans), 50):
+                    batch = spans[i:i + 50]
+                    expr = " OR ".join(f"(id >= {lo} AND id < {hi})"
+                                       for lo, hi in batch)
+                    self._table.delete(expr)
+                    done += len(batch)
+                self._after_commit()
+                return done
+            except Exception as exc:
+                print(f"[vectorstore] range delete skipped ({exc}).")
+                return 0
+
     def search(self, vector: np.ndarray, k: int = 8, modality: str | None = None) -> list[dict]:
         table = self._ensure(len(vector))
         with self._lock:

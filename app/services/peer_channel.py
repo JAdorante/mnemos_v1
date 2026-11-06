@@ -3027,17 +3027,19 @@ def run_ingest_job(payload: dict) -> None:
     anchor = (payload or {}).get("event_id")
     if not text:
         return
-    from app.services.documents import _persist_facts
-    from app.services.extractor import extractor
+    from app.services.extractor import extractor, persist_facts
     from app.services.worker import worker
     from app.storage import get_store
 
     store = get_store()
     now = time.time()
-    facts = extractor._extract_text(text)
-    n = _persist_facts(store, facts, anchor, text, now,
-                       event_source=(payload or {}).get("source")
-                       or "peer.answer")
+    # The teammate is the speaker: their "I'll send it" is theirs, never
+    # the user's own commitment.
+    facts = extractor._extract_text(text, speaker=(payload or {}).get("peer"))
+    n = persist_facts(store, facts, anchor, text, now,
+                      event_source=(payload or {}).get("source")
+                      or "peer.answer",
+                      speaker=(payload or {}).get("peer"), me_is_user=False)
     try:
         if anchor is not None:
             store.mark_extracted([anchor], now)

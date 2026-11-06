@@ -32,6 +32,33 @@ GRAPH_SCOPE_PREFIX = "https://graph.microsoft.com/"
 
 # Graph permission scopes we ask for and the only ones we accept back.
 SCOPES = ("Mail.ReadBasic", "Calendars.Read")
+# F04: message bodies need Mail.Read (a superset of Mail.ReadBasic). Asked
+# for, and accepted back, only once the user has recorded body consent.
+METADATA_SCOPE = "Mail.ReadBasic"
+BODY_SCOPE = "Mail.Read"
+CALENDAR_SCOPE = "Calendars.Read"
+
+
+def bodies_consented() -> bool:
+    try:
+        from app.services import capture_consent
+        return capture_consent.allows_connector_bodies("outlook")
+    except Exception:
+        return False
+
+
+def requested_scopes() -> tuple[str, ...]:
+    return (BODY_SCOPE, CALENDAR_SCOPE) if bodies_consented() else SCOPES
+
+
+def body_scope_granted() -> bool:
+    try:
+        raw = str(load_tokens().get("scope") or "")
+    except Exception:
+        return False
+    got = {s[len(GRAPH_SCOPE_PREFIX):] if s.startswith(GRAPH_SCOPE_PREFIX) else s
+           for s in raw.split()}
+    return BODY_SCOPE in got
 # Identity-platform scopes that ride along on every grant; never data access.
 _PLATFORM_SCOPES = {"offline_access", "openid", "profile", "email", "User.Read"}
 
@@ -89,7 +116,7 @@ def _authority() -> str:
 
 
 def _scope_string() -> str:
-    return " ".join(("offline_access", "User.Read") + SCOPES)
+    return " ".join(("offline_access", "User.Read") + requested_scopes())
 
 
 def _auth_url(redirect: str, state: str) -> str:
@@ -120,6 +147,8 @@ def assert_metadata_scopes(scope_string: str) -> None:
         if s and s not in _PLATFORM_SCOPES:
             got.add(s)
     allowed = set(SCOPES)
+    if bodies_consented():
+        allowed.add(BODY_SCOPE)
     # Consent is per app on Microsoft: once the user has granted the separate
     # send permission (mail_send), a read token may list Mail.Send too. The
     # read path never calls a send endpoint; tolerated only where sending is on.
@@ -129,7 +158,11 @@ def assert_metadata_scopes(scope_string: str) -> None:
     if extra:
         raise PermissionError(
             f"OAuth grant includes disallowed scopes: {sorted(extra)}")
-    missing = allowed - got
+    missing = set()
+    if CALENDAR_SCOPE not in got:
+        missing.add(CALENDAR_SCOPE)
+    if METADATA_SCOPE not in got and BODY_SCOPE not in got:
+        missing.add(METADATA_SCOPE)
     if missing:
         raise PermissionError(
             f"OAuth grant missing required scopes: {sorted(missing)}")
@@ -385,11 +418,14 @@ def _addrs(recs: list | None) -> str:
 
 def fetch_mail_headers(*, days: float | None = None,
                        now: float | None = None,
-                       include_subject: bool = False) -> list[dict]:
+                       include_subject: bool = False,
+                       include_body: bool = False) -> list[dict]:
     """Last N days of message metadata via ``Mail.ReadBasic``.
 
     Same shape as ``exhaust_ingest.fetch_gmail_headers`` so both feed the
     People-seeding ingest and the background capture unchanged.
+    `include_body=True` (F04, consent + Mail.Read grant) selects the body
+    too and returns its text under `body`.
     """
     days = float(days if days is not None else settings.exhaust.days)
     ts = time.time() if now is None else float(now)
@@ -398,6 +434,8 @@ def fetch_mail_headers(*, days: float | None = None,
               "sentDateTime,from,toRecipients,ccRecipients,isDraft")
     if include_subject:
         select += ",subject"
+    if include_body:
+        select += ",body"
     url = (f"{GRAPH}/me/messages?$select={quote(select)}"
            f"&$filter={quote(f'receivedDateTime ge {since}')}"
            f"&$orderby={quote('receivedDateTime desc')}&$top=100")
@@ -407,8 +445,16 @@ def fetch_mail_headers(*, days: float | None = None,
         for m in data.get("value") or []:
             if m.get("isDraft"):
                 continue
+            body_text = ""
+            if include_body:
+                from app.services.exhaust_ingest import html_to_text, mail_body_cap
+                b = m.get("body") if isinstance(m.get("body"), dict) else {}
+                content = str(b.get("content") or "")
+                if str(b.get("contentType") or "").lower() == "html":
+                    content = html_to_text(content)
+                body_text = content.strip()[:mail_body_cap()]
             # Guard: Mail.ReadBasic must never carry a body.
-            if m.get("body") or m.get("attachments") or m.get("bodyPreview"):
+            elif m.get("body") or m.get("attachments") or m.get("bodyPreview"):
                 raise RuntimeError("graph returned message body data; aborting")
             headers = {
                 "from": _addr(m.get("from")),
@@ -421,9 +467,12 @@ def fetch_mail_headers(*, days: float | None = None,
                 headers["subject"] = m.get("subject") or ""
             msg_ts = _parse_iso(m.get("receivedDateTime")
                                 or m.get("sentDateTime")) or ts
-            out.append({"id": headers["message-id"] or m.get("id"),
-                        "thread_id": str(m.get("conversationId") or "") or None,
-                        "headers": headers, "ts": msg_ts})
+            row = {"id": headers["message-id"] or m.get("id"),
+                   "thread_id": str(m.get("conversationId") or "") or None,
+                   "headers": headers, "ts": msg_ts}
+            if include_body:
+                row["body"] = body_text
+            out.append(row)
         url = data.get("@odata.nextLink")
         if len(out) >= 5000:
             break
@@ -497,7 +546,8 @@ def status() -> dict[str, Any]:
         "oauth_configured": oauth_configured(),
         "connected": connected(),
         "days": settings.exhaust.days,
-        "scopes": list(SCOPES),
+        "scopes": list(requested_scopes()),
+        "body_scope_granted": body_scope_granted(),
         "tenant": _cfg().tenant or "common",
         "progress": progress(),
     }
@@ -515,6 +565,19 @@ class OutlookConnector:
     sync_interval_s = 300
     sync_blurb = ("new Outlook message headers (sender, recipients, subject) "
                   "and Microsoft Calendar events")
+    # F04: bodies are a separate consent and a wider Microsoft permission.
+    body_scope = BODY_SCOPE
+    bodies_consent_sentence = (
+        "Sparrow will also read the text of new Outlook messages, not just "
+        "their headers, and keep it as observed memory on this machine "
+        "(never below the 'personal' privacy class, so it does not leave "
+        "the machine unless you share it). This needs Microsoft's Mail.Read "
+        "permission instead of Mail.ReadBasic, so you will be asked to sign "
+        "in to Microsoft again.")
+
+    @staticmethod
+    def body_scope_granted() -> bool:
+        return body_scope_granted()
     description = (
         "Read-only Outlook mail headers and Microsoft Calendar events. "
         "You sign in on Microsoft's screen — Sparrow never sees your password."
@@ -593,8 +656,10 @@ class OutlookConnector:
             since = now - backfill_days * 86400
         window_days = max(1.0 / 24.0, (now - since + 3600) / 86400)
         items: list[dict] = []
+        include_body = bodies_consented() and body_scope_granted()
         for m in fetch_mail_headers(days=window_days, now=now,
-                                    include_subject=True):
+                                    include_subject=True,
+                                    include_body=include_body):
             items.append(self._mail_item(m))
         for e in fetch_calendar_events(days=window_days, now=now):
             items.append(self._calendar_item(e))
@@ -617,10 +682,17 @@ class OutlookConnector:
         people = self._addr_names(frm) + self._addr_names(to) + self._addr_names(cc)
         lines = [f"From: {frm}" if frm else "", f"To: {to}" if to else "",
                  f"Cc: {cc}" if cc else "", f"Subject: {subject}" if subject else ""]
-        return {"kind": "mail", "external_id": m.get("id"),
+        item = {"kind": "mail", "external_id": m.get("id"),
                 "thread_id": m.get("thread_id"), "ts": m.get("ts"),
                 "title": subject, "text": "\n".join(l for l in lines if l),
                 "people": people, "from": frm, "to": to, "cc": cc}
+        body = (m.get("body") or "").strip() if isinstance(m.get("body"), str) else ""
+        if body:
+            # F04: a body is personal by floor; Store.insert keeps the higher
+            # of this and the computed class.
+            item["body"] = body
+            item["meta"] = {"privacy_class": "personal", "body_consent": True}
+        return item
 
     def _calendar_item(self, e: dict) -> dict:
         attendees = [a.get("name") or a.get("email") for a in (e.get("attendees") or [])
