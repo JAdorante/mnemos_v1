@@ -83,7 +83,7 @@ def cmd_setup(args):
         s.wait_healthy()
         say(f"{s.name} healthy")
     # 1. identity
-    for s, side in ((a, "A"), (b, "B")):
+    for s, side in ((a, "B"), (b, "A")) if args.swap else ((a, "A"), (b, "B")):
         r = s.post("/onboarding/ingest", {"profile": profile_for(truth["personas"][side], truth, side)})
         say(f"{s.name} profile ingested: {json.dumps(r)[:160]}")
     # 2. pairing (alice invites, bob joins with the chosen pack)
@@ -381,9 +381,10 @@ def cmd_probes(args):
     lets through, and is reported apart from anything that crossed by itself."""
     log = lib.FlowLog(lib.run_dir(args.run) / "flow.jsonl", args.run)
     a, b = lib.seats(log)
-    seat = {"alice": a, "bob": b}
+    seat = {"alice": b, "bob": a} if args.swap else {"alice": a, "bob": b}
     state = lib.load_state(args.run)
-    pid = {"alice": state["peer_id_on_alice"], "bob": state["peer_id_on_bob"]}
+    ids = {"alice": state["peer_id_on_alice"], "bob": state["peer_id_on_bob"]}
+    pid = {persona: ids[seat[persona].name] for persona in ("alice", "bob")}
     for p in PROBES:
         asker, owner = seat[p["asker"]], seat[p["owner"]]
         t0 = time.time()
@@ -426,8 +427,12 @@ def cmd_reset(args):
     for s in (a, b):
         for name in ("peer_telemetry.jsonl", "model_calls.jsonl"):
             (keep / f"{s.name}_{name}").write_text(s.data_file(name))
-    compose = ["docker", "compose", "-p", "testco", "-f", str(lib.REPO / "deploy/hosted/testco/docker-compose.yml"),
-               "--env-file", str(lib.ENV_FILE)]
+        for f, must in (("quill.db", True), ("quill.db-wal", False)):
+            subprocess.run(["docker", "cp", f"{s.container}:/srv/sparrow/data/{f}", str(keep / f"{s.name}_{f}")], check=must)
+    compose = ["docker", "compose", "-p", "testco", "-f", str(lib.REPO / "deploy/hosted/testco/docker-compose.yml")]
+    if args.swap:
+        compose += ["-f", str(lib.REPO / "deploy/hosted/testco/docker-compose.swap.yml")]
+    compose += ["--env-file", str(lib.ENV_FILE)]
     subprocess.run(compose + ["down", "-v"], check=True)
     subprocess.run(compose + ["up", "-d", "--no-build"], check=True)
     say("Testco seats recreated on empty volumes")
@@ -453,7 +458,7 @@ def cmd_chaos(args):
         say("bob's container stopped before the ask")
     else:
         threading.Thread(target=killer, daemon=True).start()
-    out = a.team_ask(TASKS["T1"][1][1].split(":", 1)[1].strip(), state["peer_id_on_alice"], task="chaos:T1:peer")
+    out = a.team_ask(TASKS["T1"][1][1].split(":", 1)[1].strip(), state["peer_id_on_alice"], task="chaos:T1:peer", timeout_s=120)
     out2 = a.chat(TASKS["T1"][2][1], task="chaos:T1:write")
     subprocess.run(["docker", "start", b.container], capture_output=True, timeout=90)
     b.wait_healthy()
@@ -467,12 +472,14 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("reset")
     r.add_argument("--archive-run", required=True)
+    r.add_argument("--swap", action="store_true")
     for name in ("setup", "ingest", "check", "tasks", "chaos", "probes"):
         p = sub.add_parser(name)
         p.add_argument("--run", required=True)
         if name == "setup":
             p.add_argument("--pack", default="pilot")
             p.add_argument("--no-org", action="store_true")
+            p.add_argument("--swap", action="store_true")
         if name == "ingest":
             p.add_argument("--speed", type=float, default=672.0)   # two weeks -> 30 min
             p.add_argument("--instant", action="store_true")
@@ -481,6 +488,8 @@ def main():
             p.add_argument("--stagger", type=int, default=600)
             p.add_argument("--swap", action="store_true")
             p.add_argument("--only", default="")
+        if name == "probes":
+            p.add_argument("--swap", action="store_true")
         if name == "chaos":
             p.add_argument("--after", type=int, default=5)
     args = ap.parse_args()

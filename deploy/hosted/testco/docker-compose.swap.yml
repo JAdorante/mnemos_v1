@@ -1,0 +1,10 @@
+# Role-swap overlay for the two-Sparrow test: each container takes the other
+# persona's name, so data, profile and identity all move together.
+#   docker compose -p testco -f docker-compose.yml -f docker-compose.swap.yml up -d --no-build
+services:
+  alice:
+    environment:
+      QUILL_PEER_NAME: Bob Lindqvist
+  bob:
+    environment:
+      QUILL_PEER_NAME: Alice Park
