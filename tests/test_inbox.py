@@ -37,6 +37,31 @@ def _isolate() -> list:
     ]
 
 
+def _seed_dispute(store: Store) -> tuple[int, int]:
+    """Two simultaneous values for one field → a flagged dispute (kg_beliefs).
+    record_from_claim accepts the claim predicates (costs, priced_at, due_on)."""
+    from app.services import kg_beliefs
+    now = time.time()
+    subj = store.resolve_entity("pilot plan", "other", ts=now)
+    a = store.resolve_entity("$49", "other", ts=now)
+    b = store.resolve_entity("$55", "other", ts=now)
+    kg_beliefs.record_from_claim(
+        store, subj_type="entity", subj_id=subj, predicate="costs",
+        obj_type="entity", obj_id=a, fact_id=1, confidence=0.8, ts=now - 120,
+        quote="the pilot plan is $49 a month", source_class="private_conversation",
+        speaker="David", speaker_is_source=False)
+    kg_beliefs.record_from_claim(
+        store, subj_type="entity", subj_id=subj, predicate="costs",
+        obj_type="entity", obj_id=b, fact_id=2, confidence=0.8, ts=now - 60,
+        quote="we moved the pilot plan to $55", source_class="private_conversation",
+        speaker="David", speaker_is_source=False)
+    pa = store.find_kg_predicate(subj_type="entity", subj_id=subj, predicate="costs",
+                                 obj_type="entity", obj_id=a)
+    pb = store.find_kg_predicate(subj_type="entity", subj_id=subj, predicate="costs",
+                                 obj_type="entity", obj_id=b)
+    return int(pa["id"]), int(pb["id"])
+
+
 def _seed(store: Store) -> dict:
     now = time.time()
     e1 = store.insert(Event(time=now - 3600, modality=Modality.AUDIO,
@@ -183,6 +208,29 @@ class InboxCollectTests(unittest.TestCase):
         self.assertGreaterEqual(h["count"], 1)
         self.assertIn("Facts updated on their own", [b["kind"] for b in h["breakdown"]])
 
+    def test_dispute_rows_carry_both_quotes_and_resolve(self) -> None:
+        pa, pb = _seed_dispute(self.store)
+        out = inbox.collect(self.store, worker=None)
+        decide = [i for i in out["needs_you"] if i["kind"] == "decide"]
+        self.assertEqual(len(decide), 1, out.get("errors"))
+        item = decide[0]
+        self.assertIn("costs", item["title"])
+        self.assertEqual([e["value"] for e in item["evidence"]], ["$49", "$55"])
+        self.assertIn("$49 a month", item["evidence"][0]["quote"])
+        self.assertIn("moved the pilot plan to $55", item["evidence"][1]["quote"])
+        for e in item["evidence"]:
+            self.assertEqual(e["chip"]["kind"], "extracted")
+            self.assertTrue(e["chip"]["source"].startswith("heard"))
+        look = [a for a in item["actions"] if a["key"] == "inspect"][0]
+        self.assertEqual(look["href"], f"/inspect/belief/{min(pa, pb)}-{max(pa, pb)}")
+        # Both are true clears the flags; undo puts them back.
+        res = inbox.act(self.store, item["id"], "both_true", worker=None)
+        self.assertTrue(res["ok"], res)
+        self.assertFalse(self.store.get_kg_predicate(pa)["conflict"])
+        self.assertEqual([i for i in inbox.collect(self.store)["needs_you"] if i["kind"] == "decide"], [])
+        self.assertTrue(inbox.undo(res["undo_token"])["ok"])
+        self.assertTrue(self.store.get_kg_predicate(pa)["conflict"])
+
     def test_rule_in_force_reads_settings(self) -> None:
         r = inbox.rule_in_force()
         self.assertIn(str(r["alias_days"]), r["text"])
@@ -285,6 +333,19 @@ class InboxRouteTests(unittest.TestCase):
                              headers=self._headers(), follow_redirects=False)
         self.assertEqual(r.status_code, 303)
         self.assertEqual(r.headers["location"], "/inbox")
+
+    def test_look_closer_is_a_page_not_json(self) -> None:
+        pa, pb = _seed_dispute(self.store)
+        with patch("app.api.shell_routes._store", return_value=self.store):
+            r = self.client.get(f"/inspect/belief/{pa}-{pb}", headers={"Accept": "text/html"})
+            self.assertEqual(r.status_code, 200, r.text[:300])
+            self.assertIn("$49 a month", r.text)
+            self.assertIn("moved the pilot plan to $55", r.text)
+            self.assertIn("Both are true", r.text)
+            self.assertIn('id="sparrowRail"', r.text)
+            self.assertNotIn("predicate_id", r.text)       # internal names stay out of the copy
+            self.assertEqual(self.client.get("/inspect/belief/999999").status_code, 404)
+            self.assertEqual(self.client.get("/inspect/belief/x").status_code, 404)
 
     def test_the_rail_pill_counts_needs_you_only(self) -> None:
         r = self.client.get("/today", headers={"Accept": "text/html"})

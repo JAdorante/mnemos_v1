@@ -230,13 +230,7 @@ def _conflict_items(store, now: float) -> list[dict]:
             continue
         subject = ea.get("subject") or ""
         field = str(pa.get("predicate") or "").replace("_", " ")
-        ev = []
-        for p, e in ((pa, ea), (pb, eb)):
-            layer = str(p.get("layer") or "asserted")
-            kind = "confirmed" if layer == "user_verified" else "extracted"
-            ev.append(_evidence(str(e.get("object") or ""),
-                                _chip(kind, f"{layer.replace('_', ' ')} · "
-                                      + _when(p.get("last_seen")))))
+        ev = [belief_evidence(p, e) for p, e in ((pa, ea), (pb, eb))]
         out.append(_item(
             f"conflict:{pair[0]}-{pair[1]}", "decide",
             f"Two sources disagree on {subject}'s {field}", now=now,
@@ -244,9 +238,41 @@ def _conflict_items(store, now: float) -> list[dict]:
             evidence=ev, created_at=r.get("created_at"),
             actions=[_action("both_true", "Both are true", primary=True),
                      _action("inspect", "Look closer",
-                             href=f"/kg/predicates/{pair[0]}/explain")],
+                             href=f"/inspect/belief/{pair[0]}-{pair[1]}")],
         ))
     return out
+
+
+def strongest_evidence(explained: dict) -> dict | None:
+    """The evidence row that carries a belief: heaviest weight, newest first."""
+    rows = [e for e in (explained.get("evidence") or []) if isinstance(e, dict)]
+    if not rows:
+        return None
+    return max(rows, key=lambda e: (float(e.get("weight") or 0),
+                                    float(e.get("observed_at") or 0)))
+
+
+def belief_chip(pred: dict, evidence: dict | None) -> dict:
+    """Chip for one side of a belief: the layer and the source class decide."""
+    layer = str(pred.get("layer") or "asserted")
+    src = str((evidence or {}).get("source_class") or "").lower()
+    when = _when((evidence or {}).get("observed_at") or pred.get("last_seen"))
+    label = {"private_conversation": "heard", "unknown": "heard",
+             "": "heard"}.get(src, src.replace("_", " "))
+    source = " · ".join(b for b in (label, when) if b)
+    if layer == "user_verified":
+        return _chip("confirmed", source, (evidence or {}).get("event_id"))
+    if src.startswith("peer"):
+        return _chip("peer", source, (evidence or {}).get("event_id"))
+    return _chip("extracted", source, (evidence or {}).get("event_id"))
+
+
+def belief_evidence(pred: dict, explained: dict) -> dict:
+    """One evidence box for one side of a dispute: value, chip, the quote."""
+    e = strongest_evidence(explained)
+    quote = ((e or {}).get("quote") or "").strip().replace("\n", " ") or None
+    return _evidence(str(explained.get("object") or ""), belief_chip(pred, e),
+                     quote=quote)
 
 
 def _consent_items(now: float) -> list[dict]:

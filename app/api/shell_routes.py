@@ -8,8 +8,9 @@ Inspect is the developer index: every old console view behind one link.
 from __future__ import annotations
 
 import os
+import time
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from app.api import ui
 
@@ -113,3 +114,57 @@ def inspect_page():
     from app.api.routes import _agent_worker
     return ui.render("inspect.html", path="/inspect", agent_worker=_agent_worker(),
                      groups=INSPECT_GROUPS)
+
+
+def _store():
+    from app.services.memory import memory
+    return memory._ensure_store()
+
+
+def _belief_side(store, pid: int) -> dict:
+    from app.services import inbox, kg_beliefs
+    ex = kg_beliefs.explain_predicate(store, pid)
+    if not ex.get("ok"):
+        raise HTTPException(status_code=404, detail="no such belief")
+    pred = ex["predicate"]
+    rows = []
+    for e in ex.get("evidence") or []:
+        rows.append({
+            "quote": (e.get("quote") or "").strip(),
+            "chip": inbox.belief_chip(pred, e),
+            "weight": float(e.get("weight") or 0),
+            "event_id": e.get("event_id"),
+        })
+    rows.sort(key=lambda r: -r["weight"])
+    return {
+        "id": pid,
+        "subject": ex.get("subject") or "",
+        "field": str(pred.get("predicate") or "").replace("_", " "),
+        "value": ex.get("object") or "",
+        "confidence": int(round(float(ex.get("confidence") or 0) * 100)),
+        "layer": str(pred.get("layer") or "asserted").replace("_", " "),
+        "status": pred.get("status") or "active",
+        "first_seen": inbox._when(pred.get("first_seen")),
+        "last_seen": inbox._when(pred.get("last_seen")),
+        "disputed": bool(pred.get("conflict")),
+        "evidence": rows,
+    }
+
+
+@router.get("/inspect/belief/{pair}")
+def belief_page(pair: str):
+    """Look closer at one belief, or at the two sides of a dispute
+    (`/inspect/belief/{a}-{b}`), in user vocabulary with every quote."""
+    try:
+        ids = [int(x) for x in pair.split("-") if x]
+    except ValueError:
+        raise HTTPException(status_code=404, detail="no such belief")
+    if not ids or len(ids) > 2:
+        raise HTTPException(status_code=404, detail="no such belief")
+    store = _store()
+    sides = [_belief_side(store, pid) for pid in ids]
+    from app.api.routes import _agent_worker
+    return ui.render("belief.html", path=f"/inspect/belief/{pair}",
+                     agent_worker=_agent_worker(), sides=sides,
+                     pair=f"{ids[0]}-{ids[1]}" if len(ids) == 2 else None,
+                     disputed=(len(ids) == 2 and all(s["disputed"] for s in sides)))

@@ -1,0 +1,42 @@
+{% extends "layout.html" %}
+{% from "components.html" import card, chipset, button %}
+{% set s0 = sides[0] %}
+{% block title %}{{ s0.subject }} · {{ s0.field }} · {{ brand }}{% endblock %}
+{% block page_title %}{{ s0.subject }}'s {{ s0.field }}{% endblock %}
+{% block page_summary %}
+<p class="page-sum">{% if sides|length == 2 %}Two sources disagree. Here is everything behind each side.{% else %}What Sparrow believes, and why.{% endif %}</p>
+{% endblock %}
+{% block content %}
+<div class="grid">
+  {% for side in sides %}
+  {% call card(side.value, span=(1 if sides|length == 3 else (2 if sides|length == 1 else 1)), id='belief-' ~ side.id, label=(side.confidence ~ '% sure · ' ~ side.layer ~ ' · ' ~ side.status)) %}
+    <p class="section-lead">First seen {{ side.first_seen or '—' }}, last seen {{ side.last_seen or '—' }}.</p>
+    {% if side.evidence %}
+    <ol class="belief-evidence">
+      {% for e in side.evidence %}
+      <li class="evidence">
+        {% if e.quote %}<blockquote class="ev-quote">{{ e.quote }}</blockquote>{% else %}<div class="ev-value">No quote was kept for this observation.</div>{% endif %}
+        <div class="ev-meta">{{ chipset(e.chip) }}<span class="link-note">weight {{ '%.1f'|format(e.weight) }}</span>{% if e.event_id %}<a class="link-note" href="/memory?event={{ e.event_id }}">open in Memory</a>{% endif %}</div>
+      </li>
+      {% endfor %}
+    </ol>
+    {% else %}
+    <p class="empty-line">No evidence rows yet for this belief.</p>
+    {% endif %}
+  {% endcall %}
+  {% endfor %}
+
+  {% call card('What you can do', span=1, id='belief-actions') %}
+    {% if disputed %}
+    <form method="post" action="/inbox/conflict:{{ pair }}/act" class="ir-actions" data-inbox-actions>
+      <button class="btn btn-primary" type="submit" name="action" value="both_true" data-action="both_true">Both are true</button>
+      {{ button('Back to Inbox', 'quiet', href='/inbox') }}
+    </form>
+    <p class="section-lead" style="margin-top:12px">"Both are true" keeps both values (for example two roles at once). Picking one side over the other is not available yet; until it is, a wrong value can be corrected from the person's page.</p>
+    {% else %}
+    <p class="section-lead">{% if sides|length == 2 %}This dispute has been settled.{% else %}This belief is not in dispute.{% endif %}</p>
+    {{ button('Back to Inbox', 'quiet', href='/inbox') }}
+    {% endif %}
+  {% endcall %}
+</div>
+{% endblock %}

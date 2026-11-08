@@ -41,6 +41,20 @@ store.upsert_entity_alias(eid, "Atlas rollout", "atlas rollout", source="email",
 store.upsert_entity_alias(eid, "Project Atlas", "project atlas", source="meeting", day="2026-11-04")
 pid = store.resolve_entity("Platform team", "team")
 store.upsert_entity_alias(pid, "platform group", "platform group", source="chat", day="2026-11-06")
+# One dispute: two simultaneous values for one field (the Decide kind).
+from app.services import kg_beliefs
+subj = store.resolve_entity("pilot plan", "other", ts=now)
+v49 = store.resolve_entity("$49", "other", ts=now)
+v55 = store.resolve_entity("$55", "other", ts=now)
+kg_beliefs.record_from_claim(store, subj_type="entity", subj_id=subj, predicate="costs", obj_type="entity", obj_id=v49,
+                             fact_id=f2, confidence=0.8, ts=now - 3600 * 40, quote="the pilot plan is $49 a month",
+                             source_class="private_conversation", speaker="David", speaker_is_source=False)
+kg_beliefs.record_from_claim(store, subj_type="entity", subj_id=subj, predicate="costs", obj_type="entity", obj_id=v55,
+                             fact_id=f1, confidence=0.8, ts=now - 3600 * 6, quote="we moved the pilot plan to $55",
+                             source_class="private_conversation", speaker="David", speaker_is_source=False)
+pa = store.find_kg_predicate(subj_type="entity", subj_id=subj, predicate="costs", obj_type="entity", obj_id=v49)
+pb = store.find_kg_predicate(subj_type="entity", subj_id=subj, predicate="costs", obj_type="entity", obj_id=v55)
+BELIEF = f"/inspect/belief/{min(pa['id'], pb['id'])}-{max(pa['id'], pb['id'])}"
 store.close()
 from app.services import capture_consent
 capture_consent.save({"mic": False, "webcam": False, "screen": False, "system_audio": False}, consented=True)
@@ -64,7 +78,7 @@ if not ok:
 print("up", base)
 
 from playwright.sync_api import sync_playwright
-PAGES = ["/inbox", "/today", "/chat", "/memory", "/settings", "/profile", "/inspect", "/peer"]
+PAGES = ["/inbox", BELIEF, "/today", "/chat", "/memory", "/settings", "/profile", "/inspect", "/peer"]
 errors = []
 with sync_playwright() as pw:
     browser = pw.chromium.launch(headless=True)
@@ -78,7 +92,7 @@ with sync_playwright() as pw:
             for path in (PAGES if tag == "desktop" else ["/inbox", "/today", "/chat"]):
                 page.goto(base + path, wait_until="load", timeout=30000)
                 page.wait_for_timeout(600)
-                name = OUT / f"{theme}-{tag}-{path.strip('/').replace('/', '_') or 'root'}.png"
+                name = OUT / f"{theme}-{tag}-{(path.strip('/').replace('/', '_').split('_belief_')[0] + ('_belief' if 'belief' in path else '')) or 'root'}.png"
                 page.screenshot(path=str(name), full_page=False)
                 hs = page.evaluate("document.documentElement.scrollWidth > document.documentElement.clientWidth")
                 print(f"{theme:5} {tag:7} {path:10} hscroll={hs} -> {name.name}")
