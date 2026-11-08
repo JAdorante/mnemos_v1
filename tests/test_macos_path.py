@@ -153,7 +153,7 @@ class CaptureSupportTests(unittest.TestCase):
     def test_every_privacy_sheet_source_has_an_entry(self) -> None:
         """A source the UI shows but the map omits would render un-annotated."""
         from app.services import capture_support as cs
-        ui = (REPO / "app" / "api" / "mnemos_ui.py").read_text(encoding="utf-8")
+        ui = (REPO / "app" / "static" / "js" / "mnemos-ui.js").read_text(encoding="utf-8")
         block = ui[ui.index("_SOURCES: ["):ui.index("async status()")]
         shown = set(re.findall(r"key:'([a-z_]+)'", block))
         self.assertTrue(shown)
@@ -187,7 +187,7 @@ class CaptureStatusRouteTests(unittest.TestCase):
         self.assertEqual(body["support"]["unsupported"], [])
 
     def test_the_privacy_sheet_disables_what_it_cannot_run(self) -> None:
-        ui = (REPO / "app" / "api" / "mnemos_ui.py").read_text(encoding="utf-8")
+        ui = (REPO / "app" / "static" / "js" / "mnemos-ui.js").read_text(encoding="utf-8")
         self.assertIn("box.disabled = blocked", ui)
         self.assertIn("cap.available === false", ui)
         # The reason is shown, not just the disabled state.

@@ -1,0 +1,22 @@
+{% from "components.html" import icon, count_pill %}
+<aside class="app-rail" id="sparrowRail" aria-label="Primary">
+  <a class="rail-brand" href="/today">{{ brand_mark }}<span class="rail-word">{{ brand }}</span></a>
+  <nav class="rail-nav" aria-label="Destinations">
+    {% for key, label, href in rail['items'] %}
+    <a href="{{ href }}" data-nav="{{ key }}"{% if key == 'chat' %} id="navChat"{% endif %}{% if rail.active == key %} class="on" aria-current="page"{% endif %}>
+      {{ icon(key) }}<span class="rail-label">{{ label }}</span>
+      {% if key == 'inbox' %}{{ count_pill(rail.inbox_count, 'inbox') }}{% endif %}
+    </a>
+    {% endfor %}
+  </nav>
+  <nav class="rail-nav rail-secondary" aria-label="Settings">
+    <a href="{{ rail.settings[2] }}" data-nav="settings"{% if rail.active == 'settings' %} class="on" aria-current="page"{% endif %}>
+      {{ icon('settings') }}<span class="rail-label">{{ rail.settings[1] }}</span>
+    </a>
+  </nav>
+  <div class="rail-foot">
+    <a class="rail-inspect" href="{{ rail.inspect[2] }}" data-nav="inspect"{% if rail.active == 'inspect' %} aria-current="page"{% endif %}>{{ rail.inspect[1] }}</a>
+    <div class="rail-meta">{{ rail.local_line }}</div>
+    {% if rail.scope_line %}<div class="rail-meta">{{ rail.scope_line }}</div>{% endif %}
+  </div>
+</aside>

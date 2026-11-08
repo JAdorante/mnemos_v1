@@ -464,12 +464,9 @@ async def ingest_frame(request: Request,
 @router.get("/capture", response_class=HTMLResponse)
 def capture_page() -> HTMLResponse:
     from app.api.capture_page import CAPTURE_PAGE
+    from app.api import ui
     # Inline JS shell — same no-store policy as the other SSR pages.
-    return HTMLResponse(
-        CAPTURE_PAGE,
-        headers={"Cache-Control": "no-store, must-revalidate",
-                 "Pragma": "no-cache"},
-    )
+    return ui.page_response(CAPTURE_PAGE, path="/capture")
 
 
 @router.get("/capture/dock", response_class=HTMLResponse)

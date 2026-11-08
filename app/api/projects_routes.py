@@ -18,7 +18,8 @@ router = APIRouter()
 @router.get("/projects", response_class=HTMLResponse)
 def projects_page() -> str:
     from app.api.projects_page import PROJECTS_PAGE
-    return PROJECTS_PAGE
+    from app.api import ui
+    return ui.page_response(PROJECTS_PAGE, path="/projects")
 
 
 @router.get("/projects/list")

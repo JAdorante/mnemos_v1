@@ -1,0 +1,153 @@
+:root{
+  color-scheme:dark;
+  /* Spec surfaces — soft ink, not #000. */
+  --ink:#101216;--surface-2:#161920;--raised:#1c2029;
+  --paper:var(--ink);--bg:var(--ink);--bg-elev:var(--raised);
+  --workspace:var(--ink);--surface:var(--surface-2);--panel:var(--surface-2);--panel-2:var(--raised);
+  --folio:var(--surface-2);--overlay:rgba(0,0,0,.6);--float:var(--raised);
+  /* Spec text. --faint is for meta lines only — never load-bearing. */
+  --text:#e9e7e2;--mut:#9298a3;--muted:var(--mut);--faint:#5d626d;
+  /* One opaque hairline everywhere. */
+  --line:#262b35;--hairline:#1f232b;--line-strong:#333947;
+  --navy:#e9e7e2;--charcoal:#9298a3;
+  /* Semantic: violet = primary action + people; amber = topics + attention;
+     green = healthy/idle. */
+  --violet:#8d85f2;--amber:#dfb35e;--green:#74c294;
+  --violet-dim:rgba(141,133,242,.14);
+  --acc:var(--violet);--acc-fg:#15131f;
+  --acc-05:color-mix(in srgb,var(--acc) 5%,transparent);
+  --acc-06:color-mix(in srgb,var(--acc) 6%,transparent);
+  --acc-07:color-mix(in srgb,var(--acc) 7%,transparent);
+  --acc-08:color-mix(in srgb,var(--acc) 8%,transparent);
+  --acc-10:color-mix(in srgb,var(--acc) 10%,transparent);
+  --acc-12:color-mix(in srgb,var(--acc) 12%,transparent);
+  --acc-14:color-mix(in srgb,var(--acc) 14%,transparent);
+  --acc-15:color-mix(in srgb,var(--acc) 15%,transparent);
+  --acc-18:color-mix(in srgb,var(--acc) 18%,transparent);
+  --acc-20:color-mix(in srgb,var(--acc) 20%,transparent);
+  --acc-22:color-mix(in srgb,var(--acc) 22%,transparent);
+  --acc-25:color-mix(in srgb,var(--acc) 25%,transparent);
+  --acc-28:color-mix(in srgb,var(--acc) 28%,transparent);
+  --acc-35:color-mix(in srgb,var(--acc) 35%,transparent);
+  --acc-40:color-mix(in srgb,var(--acc) 40%,transparent);
+  --acc-45:color-mix(in srgb,var(--acc) 45%,transparent);
+  --acc-55:color-mix(in srgb,var(--acc) 55%,transparent);
+  --acc-dim:var(--acc-12);--acc-ink:var(--acc-22);--acc-warm:#14131D;
+  /* Ink tints — washes from strongest text so the ground can re-theme. */
+  --ink-03:color-mix(in srgb,var(--navy) 3%,transparent);
+  --ink-04:color-mix(in srgb,var(--navy) 4%,transparent);
+  --ink-06:color-mix(in srgb,var(--navy) 6%,transparent);
+  --ink-08:color-mix(in srgb,var(--navy) 8%,transparent);
+  --ink-10:color-mix(in srgb,var(--navy) 10%,transparent);
+  --ink-12:color-mix(in srgb,var(--navy) 12%,transparent);
+  --ink-16:color-mix(in srgb,var(--navy) 16%,transparent);
+  --ink-20:color-mix(in srgb,var(--navy) 20%,transparent);
+  --ink-28:color-mix(in srgb,var(--navy) 28%,transparent);
+  --emerald:var(--green);
+  --ok:var(--green);--warn:var(--amber);--danger:#e0716a;
+  /* Chip tints — the same recipe as --acc-12 (frontend spec, tokens). */
+  --ok-12:color-mix(in srgb,var(--ok) 14%,transparent);
+  --warn-12:color-mix(in srgb,var(--warn) 14%,transparent);
+  --danger-12:color-mix(in srgb,var(--danger) 14%,transparent);
+  --audio:var(--green);--vision:var(--amber);--desktop:#d4788c;
+  /* Geometry — 4pt grid; never invent an off-grid gap. */
+  --sp-1:4px;--sp-2:8px;--sp-3:12px;--sp-4:16px;--sp-5:20px;
+  --sp-6:24px;--sp-7:28px;--sp-8:32px;--sp-10:40px;--sp-12:48px;--sp-14:56px;
+  /* Corner scale — three tiers mapped to hierarchy: lg section cards,
+     sm nested panels/inputs, xs buttons and small controls. */
+  --radius-xs:7px;--radius-sm:10px;--radius:14px;
+  --radius-lg:14px;--radius-xl:18px;--radius-full:999px;
+  --r-lg:var(--radius);--r-md:var(--radius-sm);--r-sm:var(--radius-xs);
+  /* Optical type scale + matched tracking; caps labels track wide. */
+  --fs-caption2:11px;--fs-caption:12px;--fs-footnote:13px;--fs-sub:14px;
+  --fs-body:15px;--fs-title3:17px;--fs-title2:21px;--fs-title1:26px;--fs-large:32px;
+  --lh-tight:1.2;--lh-snug:1.35;--lh-body:1.55;--lh-loose:1.65;
+  --track-tight:-.022em;--track-snug:-.012em;--track-caps:.06em;
+  /* Elevation is border + fill delta; shadow tokens stay defined as none. */
+  --shadow:none;
+  --shadow-workspace:none;
+  --shadow-surface:none;
+  --shadow-folio:none;
+  --shadow-float:none;
+  --shadow-press:none;
+  /* Material — surfaces that opt into lift (today: the constellation). */
+  --card-hi:color-mix(in srgb,var(--navy) 8%,transparent);
+  --device-hi:color-mix(in srgb,var(--navy) 13%,transparent);
+  --lift-1:0 1px 2px rgb(0 0 0 / .34);
+  --lift-2:0 1px 2px rgb(0 0 0 / .36),0 14px 34px -16px rgb(0 0 0 / .6);
+  --lift-3:0 2px 5px rgb(0 0 0 / .42),0 24px 56px -20px rgb(0 0 0 / .7);
+  --lift-acc:0 1px 2px rgb(0 0 0 / .4),0 10px 22px -12px var(--acc-45);
+  /* Motion — fast to start, long to settle; springs only for the mark. */
+  --ease:cubic-bezier(.22,1,.36,1);
+  --ease-io:cubic-bezier(.4,0,.2,1);
+  --ease-spring:cubic-bezier(.34,1.45,.5,1);
+  --dur-fast:.15s;--dur:.26s;--dur-slow:.45s;
+  --glass:saturate(1.8) blur(20px);
+  --sans:"Instrument Sans","Instrument Sans Fallback",system-ui,sans-serif;
+  --serif:"Fraunces","Fraunces Fallback",Georgia,serif;
+  --font:var(--sans);
+  --display:var(--serif);
+  --mono:"IBM Plex Mono",ui-monospace,Consolas,monospace;
+  --grain:none;
+  --z-base: 1;
+  --z-raised: 5;
+  --z-rail: 15;
+  --z-banner: 25;
+  --z-float: 40;
+  --z-popover: 50;
+  --z-system: 70;
+  --z-modal: 80;
+  --chrome-h: 56px;
+  --composer-h: 0px;
+  --dock-clear: 72px;
+  --chrome-bg: rgba(16,18,22,.88);
+  --chrome-bg-solid: #101216;
+}
+/* Light — cool off-white ground, near-black type, soft violet accent.
+   Matches the Ravenry/Sparrow marketing landing feel. */
+html[data-theme="light"]{
+  color-scheme:light;
+  --ink:#f7f8fa;--surface-2:#ffffff;--raised:#eef0f4;
+  --paper:var(--ink);--bg:var(--ink);--bg-elev:var(--raised);
+  --workspace:var(--ink);--surface:var(--surface-2);--panel:var(--surface-2);--panel-2:var(--raised);
+  --folio:var(--surface-2);--overlay:rgba(15,17,21,.42);--float:var(--surface-2);
+  --text:#111318;--mut:#5c6370;--muted:var(--mut);--faint:#8b919c;
+  --line:#e4e7ec;--hairline:#eceef2;--line-strong:#d0d5dd;
+  --navy:#111318;--charcoal:#5c6370;
+  --violet:#6e66e8;--amber:#c9922e;--green:#2f9a60;
+  --violet-dim:rgba(110,102,232,.12);
+  --acc:var(--violet);--acc-fg:#ffffff;
+  --acc-warm:#f3f2ff;
+  --danger:#c44b44;
+  --ok-12:color-mix(in srgb,var(--ok) 14%,transparent);
+  --warn-12:color-mix(in srgb,var(--warn) 14%,transparent);
+  --danger-12:color-mix(in srgb,var(--danger) 14%,transparent);
+  --desktop:#c45f78;
+  --card-hi:color-mix(in srgb,#fff 70%,transparent);
+  --device-hi:color-mix(in srgb,#fff 85%,transparent);
+  --lift-1:0 1px 2px rgb(15 17 21 / .05);
+  --lift-2:0 1px 2px rgb(15 17 21 / .05),0 14px 34px -16px rgb(15 17 21 / .12);
+  --lift-3:0 2px 5px rgb(15 17 21 / .06),0 24px 56px -20px rgb(15 17 21 / .14);
+  --lift-acc:0 1px 2px rgb(15 17 21 / .06),0 10px 22px -12px var(--acc-45);
+  --chrome-bg: rgba(247,248,250,.88);
+  --chrome-bg-solid: #f7f8fa;
+}
+html[data-theme="light"] body{
+  background:
+    radial-gradient(ellipse 80% 55% at 50% -10%,#ffffff 0%,transparent 70%),
+    var(--ink);
+}
+/* `hidden` must beat any class that sets display (.fetch-err{display:flex}),
+   or the element stays painted forever. Author rules outrank the UA sheet. */
+[hidden]{display:none!important}
+@supports not (backdrop-filter: blur(1px)) {
+  :root{ --chrome-bg: var(--chrome-bg-solid); }
+}
+@font-face{
+  font-family:"Instrument Sans Fallback";src:local("Arial");
+  size-adjust:102%;ascent-override:94%;descent-override:24%;line-gap-override:0%;
+}
+@font-face{
+  font-family:"Fraunces Fallback";src:local("Georgia");
+  size-adjust:104%;ascent-override:96%;descent-override:24%;line-gap-override:0%;
+}

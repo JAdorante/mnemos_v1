@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""Sync theme CSS and UI JS from Python modules into app/static/ (audit Q-2).
+"""Sync theme CSS and approval JS from Python modules into app/static/ (audit Q-2).
 
-Run after editing mnemos_theme.py, approval_partial.py, or mnemos_ui.py:
+Run after editing mnemos_theme.py or approval_partial.py:
   python3 scripts/sync_ui_static.py
+
+app/static/js/mnemos-ui.js and the Sparrow shell assets (sparrow.css,
+sparrow.js) are edited in place — they have no Python twin.
 """
 from __future__ import annotations
 
@@ -31,16 +34,15 @@ def _unwrap_script(text: str) -> str:
 def main() -> int:
     sys.path.insert(0, str(ROOT))
     from app.api.approval_partial import APPROVAL_CSS, APPROVAL_JS
-    from app.api.mnemos_theme import CHROME_CSS, INK_CSS
-    from app.api.mnemos_ui import UI_JS
+    from app.api.mnemos_theme import CHROME_CSS, INK_CSS, ROOT_TOKENS
 
     CSS_DIR.mkdir(parents=True, exist_ok=True)
     JS_DIR.mkdir(parents=True, exist_ok=True)
     targets = (
+        (CSS_DIR / "mnemos-theme.css", ROOT_TOKENS),
         (CSS_DIR / "mnemos-ink.css", INK_CSS),
         (CSS_DIR / "mnemos-chrome.css", CHROME_CSS),
         (CSS_DIR / "mnemos-approval.css", APPROVAL_CSS),
-        (JS_DIR / "mnemos-ui.js", _unwrap_script(UI_JS)),
         (JS_DIR / "mnemos-approval.js", _unwrap_script(APPROVAL_JS)),
     )
     for path, content in targets:

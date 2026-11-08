@@ -58,15 +58,17 @@ def _agent_worker():
 
 
 def _html_with_approval(page: str, *, next_url: str) -> HTMLResponse:
-    """SSR approval banner into a themed HTML page (no-JS Yes/No forms)."""
-    from app.api.approval_partial import inject_page
-    return HTMLResponse(
-        inject_page(page, next_url=next_url, agent_worker=_agent_worker()),
-        # These pages carry their own inline JS, so a stale copy silently runs
-        # old client code against a new server. Versioned /static assets may be
-        # cached; the SSR shell never is.
-        headers={"Cache-Control": "no-store, must-revalidate", "Pragma": "no-cache"},
-    )
+    """SSR a themed page: live rail + approval banner (no-JS Yes/No forms)."""
+    from app.api import ui
+    return ui.page_response(page, path=next_url, next_url=next_url,
+                            agent_worker=_agent_worker())
+
+
+def _shell_page(page: str, *, path: str) -> HTMLResponse:
+    """A themed page inside the app shell, without the approval banner
+    (pages that never carried one keep that profile)."""
+    from app.api import ui
+    return ui.page_response(page, path=path)
 
 
 def _agent_disabled() -> bool:
@@ -1248,7 +1250,7 @@ def triggers_ui() -> HTMLResponse:
     """Standing-triggers management page (pause/resume/retire/adopt)."""
     from app.api.triggers_page import TRIGGERS_PAGE
 
-    return HTMLResponse(TRIGGERS_PAGE)
+    return _shell_page(TRIGGERS_PAGE, path="/triggers")
 
 
 @router.get("/triggers/list")
@@ -2428,7 +2430,7 @@ def selfreport_ui() -> HTMLResponse:
     """Weekly check-in form — the subjective half of the Phase 0 harness."""
     from app.api.selfreport_page import SELFREPORT_PAGE
 
-    return HTMLResponse(SELFREPORT_PAGE)
+    return _shell_page(SELFREPORT_PAGE, path="/selfreport")
 
 
 @router.get("/selfreport/status")
@@ -2476,7 +2478,7 @@ def memory_changes_ui() -> HTMLResponse:
     reversible old→new card. Automatic, never invisible."""
     from app.api.changes_page import CHANGES_PAGE
 
-    return HTMLResponse(CHANGES_PAGE)
+    return _shell_page(CHANGES_PAGE, path="/memory/changes")
 
 
 @router.get("/memory/supersessions")
@@ -3496,7 +3498,7 @@ def profile_ui() -> HTMLResponse:
 def org_ui(entity_id: int) -> HTMLResponse:
     """Living brief for one org/entity — people, facts, open work."""
     from app.api.org_page import ORG_PAGE
-    return HTMLResponse(ORG_PAGE)
+    return _shell_page(ORG_PAGE, path=f"/org/{entity_id}")
 
 
 @router.get("/org/{entity_id}/data")
@@ -5602,7 +5604,7 @@ def welcome_ui() -> HTMLResponse:
     """Launch page (same as `/`) — new setup vs continue on this machine."""
     from app.api.welcome_page import WELCOME_PAGE
 
-    return HTMLResponse(WELCOME_PAGE)
+    return _shell_page(WELCOME_PAGE, path="/welcome")
 
 
 @router.get("/welcome/status")
@@ -5625,7 +5627,7 @@ def onboarding_ui() -> HTMLResponse:
     """Guided web wizard — preferred over hand-editing the JSON profile sheet."""
     from app.api.onboarding_page import ONBOARDING_PAGE
 
-    return HTMLResponse(ONBOARDING_PAGE)
+    return _shell_page(ONBOARDING_PAGE, path="/onboarding")
 
 
 @router.get("/onboarding/status")
@@ -6000,7 +6002,7 @@ def phone_setup_ui() -> HTMLResponse:
     """Mobile page the QR opens: claim the code, get shortcut instructions."""
     from app.api.phone_page import PHONE_SETUP_PAGE
 
-    return HTMLResponse(PHONE_SETUP_PAGE)
+    return _shell_page(PHONE_SETUP_PAGE, path="/phone/setup")
 
 
 @router.get("/phone/status")
@@ -6204,7 +6206,7 @@ def peer_ui() -> HTMLResponse:
     """Team page: pair instances, disclosure policy, approval queue."""
     from app.api.peer_page import PEER_PAGE
 
-    return HTMLResponse(PEER_PAGE)
+    return _shell_page(PEER_PAGE, path="/peer")
 
 
 @router.get("/peer/status")
@@ -6852,7 +6854,7 @@ class OrgGoalIn(BaseModel):
 @router.get("/org-network", response_class=HTMLResponse)
 def org_network_ui() -> HTMLResponse:
     from app.api.org_network_page import ORG_NETWORK_PAGE
-    return HTMLResponse(ORG_NETWORK_PAGE)
+    return _shell_page(ORG_NETWORK_PAGE, path="/org-network")
 
 
 @router.get("/org-network/status")

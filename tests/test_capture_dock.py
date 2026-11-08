@@ -25,6 +25,10 @@ from urllib import error, request
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _ui_js() -> str:
+    return (ROOT / "app" / "static" / "js" / "mnemos-ui.js").read_text(encoding="utf-8")
+
+
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
@@ -141,7 +145,7 @@ class DockStructureTests(unittest.TestCase):
     def test_ui_opens_the_dock_instead_of_navigating(self) -> None:
         """The whole point: hosted capture must not send the user to another
         page — a MediaStream dies with the document that created it."""
-        from app.api.mnemos_ui import UI_JS
+        UI_JS = _ui_js()
 
         self.assertIn("/capture/dock", UI_JS)
         self.assertIn("mnemosCaptureDock", UI_JS)        # one dock, focused
@@ -156,21 +160,21 @@ class DockStructureTests(unittest.TestCase):
     def test_reopening_never_reloads_a_capturing_dock(self) -> None:
         """window.open on an existing NAME navigates that window, which would
         kill the stream — while capture is live, re-open must only focus."""
-        from app.api.mnemos_ui import UI_JS
+        UI_JS = _ui_js()
 
         start = UI_JS.index("openDock(want) {")
         body = UI_JS[start:start + 500]
         self.assertIn("this.webLive() && this.dockOpen()", body)
         self.assertIn("dockCommand('focus')", body)
 
-    def test_static_ui_bundle_is_synced(self) -> None:
-        from app.api.mnemos_ui import UI_JS
+    def test_static_ui_bundle_is_served(self) -> None:
+        """The bundle is static/js/mnemos-ui.js itself (no Python twin)."""
+        from app.api.mnemos_theme import THEME_SCRIPT_LINKS
 
-        js = (ROOT / "app" / "static" / "js" / "mnemos-ui.js").read_text(
-            encoding="utf-8")
+        js = _ui_js()
         self.assertIn("/capture/dock", js)
-        self.assertIn("openDockFromConsent", UI_JS)
         self.assertIn("openDockFromConsent", js)
+        self.assertIn("/static/js/mnemos-ui.js", THEME_SCRIPT_LINKS)
 
 
 # Every live conferencing surface the capture path claims to recognize:

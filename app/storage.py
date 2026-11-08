@@ -8033,6 +8033,18 @@ class Store:
                 self._FACT_SELECT + " WHERE f.id = ?", (fact_id,)).fetchone()
         return dict(row) if row else None
 
+    def unreview_fact(self, fact_id: int) -> bool:
+        """Take a verdict back (Inbox undo): the fact is unreviewed again.
+        Only the review stamp moves; a dismissed commitment stays cancelled,
+        so callers offer undo for approve only."""
+        import time as _time
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE facts SET review = NULL, updated_at = ? WHERE id = ?",
+                (_time.time(), int(fact_id)))
+            self._conn.commit()
+        return cur.rowcount > 0
+
     def review_fact(self, fact_id: int, review: str) -> bool:
         """Record the human verdict. 'dismissed' also cancels the typed row."""
         if review not in ("approved", "dismissed", "edited"):

@@ -47,6 +47,11 @@ HEX_COLOR = re.compile(
 HTML_MARKER = re.compile(r"<!doctype html", re.I)
 
 
+def _ui_js() -> str:
+    """The shared UI bundle is static/js/mnemos-ui.js itself (no Python twin)."""
+    return (ROOT / "app" / "static" / "js" / "mnemos-ui.js").read_text(encoding="utf-8")
+
+
 def _ships_html(src: str) -> bool:
     return bool(HTML_MARKER.search(src))
 
@@ -132,7 +137,13 @@ class UiTokenEnforcementTests(unittest.TestCase):
             ("desktop", DESKTOP_ACCESS_PAGE),
         ):
             self.assertIn("<!doctype html", page.lower(), msg=name)
-            self.assertIn(CANONICAL_MUT, page, msg=name)
+        # Utility pages inline the tokens; shell pages link the stylesheet
+        # (frontend spec, step 1: tokens move to static/css/mnemos-theme.css).
+        self.assertIn(CANONICAL_MUT, AUTH_PAGE)
+        for name, page in (("chat", CHAT_PAGE), ("console", CONSOLE_PAGE),
+                           ("desktop", DESKTOP_ACCESS_PAGE)):
+            self.assertIn("/static/css/mnemos-theme.css", page, msg=name)
+            self.assertIn('id="sparrowRail"', page, msg=name)
         self.assertIn("katex.min.js", CHAT_PAGE)
         self.assertIn("katex.min.js", CONSOLE_PAGE)
         self.assertNotIn("katex.min.js", AUTH_PAGE)
@@ -150,13 +161,12 @@ class UiTokenEnforcementTests(unittest.TestCase):
         self.assertIn("thinkShimmer", CHAT_PAGE)
 
     def test_mnemos_chat_stream_in_ui_bundle(self) -> None:
-        from app.api.mnemos_ui import UI_JS
+        UI_JS = _ui_js()
         from pathlib import Path
 
         self.assertIn("window.MnemosChatStream", UI_JS)
         self.assertIn("/chat/stream", UI_JS)
-        ui_js = Path(__file__).resolve().parents[1] / "app/static/js/mnemos-ui.js"
-        self.assertIn("window.MnemosChatStream", ui_js.read_text(encoding="utf-8"))
+        self.assertIn("window.MnemosChatStream", UI_JS)
 
     def test_chat_stream_route(self) -> None:
         """The handler returns when the ASGI client disconnects.
@@ -171,14 +181,12 @@ class UiTokenEnforcementTests(unittest.TestCase):
         stream_releases_on_disconnect()
 
     def test_mnemos_dialog_in_ui_bundle(self) -> None:
-        from app.api.mnemos_ui import UI_JS
+        UI_JS = _ui_js()
         from pathlib import Path
 
         self.assertIn("window.MnemosDialog", UI_JS)
         self.assertIn("e.key !== 'Tab'", UI_JS)
-        ui_js = Path(__file__).resolve().parents[1] / "app/static/js/mnemos-ui.js"
-        self.assertTrue(ui_js.is_file(), "run scripts/sync_ui_static.py")
-        self.assertIn("window.MnemosDialog", ui_js.read_text(encoding="utf-8"))
+        self.assertIn("window.MnemosDialog", UI_JS)
 
     def test_theme_static_assets_synced(self) -> None:
         root = Path(__file__).resolve().parents[1]
@@ -188,8 +196,7 @@ class UiTokenEnforcementTests(unittest.TestCase):
         if str(sys_path) not in sys.path:
             sys.path.insert(0, str(sys_path))
         from app.api.approval_partial import APPROVAL_CSS, APPROVAL_JS
-        from app.api.mnemos_theme import CHROME_CSS, INK_CSS
-        from app.api.mnemos_ui import UI_JS
+        from app.api.mnemos_theme import CHROME_CSS, INK_CSS, ROOT_TOKENS
 
         spec = importlib.util.spec_from_file_location(
             "_sync_ui_static", root / "scripts/sync_ui_static.py"
@@ -198,10 +205,10 @@ class UiTokenEnforcementTests(unittest.TestCase):
         spec.loader.exec_module(sync)
 
         pairs = (
+            (root / "app/static/css/mnemos-theme.css", ROOT_TOKENS),
             (root / "app/static/css/mnemos-ink.css", INK_CSS),
             (root / "app/static/css/mnemos-chrome.css", CHROME_CSS),
             (root / "app/static/css/mnemos-approval.css", APPROVAL_CSS),
-            (root / "app/static/js/mnemos-ui.js", sync._unwrap_script(UI_JS)),
             (root / "app/static/js/mnemos-approval.js", sync._unwrap_script(APPROVAL_JS)),
         )
         for path, expected in pairs:
@@ -246,7 +253,7 @@ class UiTokenEnforcementTests(unittest.TestCase):
         Windows precision-touchpads fire pointerleave / pointercancel on a
         1px slip; aborting the hold there made approval look broken.
         """
-        from app.api.mnemos_ui import UI_JS
+        UI_JS = _ui_js()
 
         hold_src = UI_JS.split("window.MnemosHold")[1].split("window.MnemosSeal")[0]
         self.assertIn("setPointerCapture", hold_src)
@@ -285,7 +292,7 @@ class UiTokenEnforcementTests(unittest.TestCase):
     def test_rec_bar_separates_status_from_meta(self) -> None:
         """Capture sources stay chips; Privacy/Voice are quieter trailing meta."""
         from app.api.mnemos_theme import CHROME_CSS
-        from app.api.mnemos_ui import UI_JS
+        UI_JS = _ui_js()
 
         self.assertIn(".rec-status", CHROME_CSS)
         self.assertIn(".rec-meta", CHROME_CSS)
@@ -333,7 +340,7 @@ class UiTokenEnforcementTests(unittest.TestCase):
 
     def test_light_theme_tokens_and_boot(self) -> None:
         from app.api.mnemos_theme import ROOT_TOKENS, THEME_BOOT, apply, nav_markup
-        from app.api.mnemos_ui import UI_JS
+        UI_JS = _ui_js()
 
         self.assertIn('html[data-theme="light"]', ROOT_TOKENS)
         self.assertIn("--ink:#f7f8fa", ROOT_TOKENS)
@@ -438,7 +445,7 @@ class UiTokenEnforcementTests(unittest.TestCase):
         )
 
     def test_dock_and_chrome_helpers_in_ui_bundle(self) -> None:
-        from app.api.mnemos_ui import UI_JS
+        UI_JS = _ui_js()
 
         self.assertIn("window.MnemosDock", UI_JS)
         self.assertIn("window.MnemosChrome", UI_JS)

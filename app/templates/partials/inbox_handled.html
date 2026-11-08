@@ -1,0 +1,6 @@
+<div class="handled-n">{{ inbox.handled_7d.count }}</div>
+<ul class="handled-breakdown">
+  {% for b in inbox.handled_7d.breakdown %}<li><span>{{ b.kind }}</span><span class="handled-count">{{ b.count }}</span></li>{% endfor %}
+  {% if not inbox.handled_7d.breakdown %}<li><span>Nothing settled on its own yet</span></li>{% endif %}
+</ul>
+<p class="card-foot"><a href="/memory/changes">Review a sample</a></p>

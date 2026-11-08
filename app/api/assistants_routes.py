@@ -267,7 +267,8 @@ def mcp_no_stream() -> Response:
 @router.get("/assistants", response_class=HTMLResponse)
 def assistants_page() -> HTMLResponse:
     from app.api.assistants_page import ASSISTANTS_PAGE
-    return HTMLResponse(ASSISTANTS_PAGE)
+    from app.api import ui
+    return ui.page_response(ASSISTANTS_PAGE, path="/assistants")
 
 
 @router.get("/assistants/status")

@@ -1,0 +1,41 @@
+{% extends "layout.html" %}
+{% from "components.html" import card, inbox_row, button %}
+{% block title %}Inbox · {{ brand }}{% endblock %}
+{% block page_title %}Inbox{% endblock %}
+{% block page_summary %}
+<p class="page-sum"><span data-count-line>{{ inbox.needs_you|length }} need you · {{ inbox.can_wait|length }} can wait · {{ inbox.handled_7d.count }} handled without asking this week</span></p>
+{% endblock %}
+{% block content %}
+<div class="grid inbox-grid">
+  <section class="card" data-span="2" id="inbox-queue" aria-labelledby="inbox-queue-t" data-watch="inbox" data-partial="/inbox/partials/queue">
+    <header class="card-h"><h2 class="label" id="inbox-queue-t">Decisions</h2></header>
+    <div class="card-b">
+      {% include "partials/inbox_queue.html" %}
+    </div>
+  </section>
+
+  <div class="inbox-side" data-span="1">
+    {% call card('Handled without asking', id='inbox-handled', watch='inbox', partial='/inbox/partials/handled') %}
+      {% include "partials/inbox_handled.html" %}
+    {% endcall %}
+
+    {% call card('Why these ask', id='inbox-why') %}
+      <p class="why">Sparrow asks when two sources disagree, when a name might be someone you already know, when something would leave this device, and when an outside assistant wants to add to your memory.</p>
+      <p class="why">Everything else it settles itself and lists on the left card. {{ rule.text }}</p>
+    {% endcall %}
+
+    {% call card('Crossed to the team', id='inbox-crossed') %}
+      {% if crossed %}
+      <ul class="crossed">
+        {% for r in crossed %}
+        <li><span class="crossed-when">{{ r.when }}</span> <span class="crossed-what">{{ r.what }}</span> <span class="crossed-to">to {{ r.to }}</span> <span class="chip chip-{{ 'confirmed' if r.by == 'human' else 'plain' }}">{{ 'you' if r.by == 'human' else 'rule' }}</span></li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <p class="empty-line">Nothing left this device for the team in the last 7 days.</p>
+      {% endif %}
+      <p class="card-foot"><a href="/privacy/egress">Full ledger</a></p>
+    {% endcall %}
+  </div>
+</div>
+{% endblock %}

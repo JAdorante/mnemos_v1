@@ -117,7 +117,8 @@ class VoiceMuteRouteTests(unittest.TestCase):
 
 class VoiceMuteUiTests(unittest.TestCase):
     def test_ui_exposes_voice_toggle(self):
-        from app.api.mnemos_ui import UI_JS
+        from pathlib import Path
+        UI_JS = (Path(__file__).resolve().parents[1] / "app/static/js/mnemos-ui.js").read_text(encoding="utf-8")
         self.assertIn("/speak/mute", UI_JS)
         self.assertIn("Speak replies aloud", UI_JS)
         self.assertIn("recVoice", UI_JS)
