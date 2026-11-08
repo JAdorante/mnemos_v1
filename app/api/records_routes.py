@@ -123,7 +123,8 @@ def _typed_ok(body, payload_hash: str) -> bool:
 @router.get("/records", response_class=HTMLResponse)
 def records_page() -> str:
     from app.api.records_page import RECORDS_PAGE
-    return RECORDS_PAGE
+    from app.api import ui
+    return ui.page_response(RECORDS_PAGE, path="/records")
 
 
 @router.get("/claims")

@@ -1,0 +1,18 @@
+{% extends "layout.html" %}
+{% from "components.html" import card %}
+{% block title %}Inspect · {{ brand }}{% endblock %}
+{% block page_title %}Inspect{% endblock %}
+{% block page_summary %}<p class="page-sum">The developer views, unchanged, behind one link. Internal names live here.</p>{% endblock %}
+{% block content %}
+<div class="grid">
+  {% for g in groups %}
+  {% call card(g.title, id='inspect-' ~ loop.index) %}
+    <ul class="link-list">
+      {% for l in g.links %}
+      <li><a href="{{ l.href }}">{{ l.label }}</a>{% if l.note %} <span class="link-note">{{ l.note }}</span>{% endif %}</li>
+      {% endfor %}
+    </ul>
+  {% endcall %}
+  {% endfor %}
+</div>
+{% endblock %}

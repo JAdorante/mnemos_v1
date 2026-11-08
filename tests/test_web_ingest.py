@@ -371,7 +371,7 @@ class WsIngestTests(unittest.TestCase):
         self.assertIn("/capture/vad-model", r.text)
         self.assertIn("/capture/config", r.text)
         self.assertIn('header class="top"', r.text)
-        self.assertIn("mnemosNav", r.text)
+        self.assertIn("sparrowRail", r.text)   # the app shell rail (frontend spec, step 1)
 
     def test_vad_model_is_served_from_the_installed_package(self):
         r = self.client.get("/capture/vad-model")

@@ -1,0 +1,24 @@
+{% extends "layout.html" %}
+{% from "components.html" import card %}
+{% block title %}Settings · {{ brand }}{% endblock %}
+{% block page_title %}Settings{% endblock %}
+{% block page_summary %}<p class="page-sum">Capture, connectors, privacy, peers and team — one place.</p>{% endblock %}
+{% block content %}
+<nav class="tabs" aria-label="Settings sections">
+  {% for key, label in tabs %}
+  <a class="tab{% if key == tab %} on{% endif %}" href="/settings?tab={{ key }}"{% if key == tab %} aria-current="page"{% endif %}>{{ label }}</a>
+  {% endfor %}
+</nav>
+<div class="grid">
+  {% for s in sections %}
+  {% call card(s.title, id='settings-' ~ loop.index) %}
+    <p class="section-lead">{{ s.lead }}</p>
+    <ul class="link-list">
+      {% for l in s.links %}
+      <li><a href="{{ l.href }}">{{ l.label }}</a>{% if l.note %} <span class="link-note">{{ l.note }}</span>{% endif %}</li>
+      {% endfor %}
+    </ul>
+  {% endcall %}
+  {% endfor %}
+</div>
+{% endblock %}

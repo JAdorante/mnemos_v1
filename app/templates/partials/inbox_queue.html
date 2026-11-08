@@ -1,0 +1,21 @@
+{% from "components.html" import inbox_row %}
+{% if not inbox.needs_you and not inbox.can_wait %}
+<p class="inbox-empty">Nothing needs you. {{ inbox.handled_7d.count }} thing{{ '' if inbox.handled_7d.count == 1 else 's' }} {{ 'was' if inbox.handled_7d.count == 1 else 'were' }} handled without asking this week — <a href="/memory/changes">review a sample</a>.</p>
+{% else %}
+<h3 class="group-label">Needs you <span class="group-n">{{ inbox.needs_you|length }}</span></h3>
+{% if inbox.needs_you %}
+<ul class="inbox-list" data-inbox-group="needs_you">
+  {% for item in inbox.needs_you %}{{ inbox_row(item) }}{% endfor %}
+</ul>
+{% else %}<p class="empty-line">Nothing is blocking you.</p>{% endif %}
+<h3 class="group-label">Can wait <span class="group-n">{{ inbox.can_wait|length }}</span></h3>
+{% if inbox.can_wait %}
+<ul class="inbox-list" data-inbox-group="can_wait">
+  {% for item in inbox.can_wait[:40] %}{{ inbox_row(item) }}{% endfor %}
+</ul>
+{% if inbox.can_wait|length > 40 %}<p class="empty-line">{{ inbox.can_wait|length - 40 }} more can wait — they appear here as these are settled.</p>{% endif %}
+{% else %}<p class="empty-line">Nothing waiting.</p>{% endif %}
+{% endif %}
+{% if inbox.errors %}
+<p class="inbox-errors">Some queues could not be read: {{ inbox.errors|join('; ') }}</p>
+{% endif %}

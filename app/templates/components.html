@@ -1,0 +1,165 @@
+{# Sparrow components — frontend spec (2026-11-06), "Components".
+   Each macro has a matching CSS block in static/css/sparrow.css. No macro
+   owns a colour that is not a token. Interactive ones are real elements
+   (button, a, input+label) so the keyboard path exists before any script. #}
+
+{% macro icon(name) %}
+{% if name == 'today' %}<svg class="ic" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3.5" y="5.5" width="17" height="15" rx="2.5" stroke="currentColor" stroke-width="1.6"/><path d="M3.5 10h17M8 3.5v4M16 3.5v4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+{% elif name == 'chat' %}<svg class="ic" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v8a2.5 2.5 0 0 1-2.5 2.5H10l-4.5 3.5V17H6.5A2.5 2.5 0 0 1 4 14.5v-8z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
+{% elif name == 'memory' %}<svg class="ic" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 4l8 4-8 4-8-4 8-4z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M4 12l8 4 8-4M4 16l8 4 8-4" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
+{% elif name == 'people' %}<svg class="ic" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="9" cy="8.5" r="3.25" stroke="currentColor" stroke-width="1.6"/><path d="M3.5 19c.6-3.2 2.8-5 5.5-5s4.9 1.8 5.5 5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M15.5 6.2a3 3 0 0 1 0 5.6M17 14.2c2 .5 3.2 2 3.6 4.8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+{% elif name == 'inbox' %}<svg class="ic" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 13l2.2-7.2A1.5 1.5 0 0 1 7.6 5h8.8a1.5 1.5 0 0 1 1.4.8L20 13v4.5A1.5 1.5 0 0 1 18.5 19h-13A1.5 1.5 0 0 1 4 17.5V13z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M4 13h4.5l1.5 2.5h4l1.5-2.5H20" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
+{% elif name == 'settings' %}<svg class="ic" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="16" cy="7" r="2.25" stroke="currentColor" stroke-width="1.6"/><circle cx="10" cy="17" r="2.25" stroke="currentColor" stroke-width="1.6"/></svg>
+{% else %}<svg class="ic" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="7" stroke="currentColor" stroke-width="1.6"/></svg>
+{% endif %}
+{% endmacro %}
+
+{% macro count_pill(n, name=None) %}
+<span class="count-pill"{% if name %} data-count="{{ name }}"{% endif %}{% if not n %} hidden{% endif %}>{{ n or 0 }}</span>
+{% endmacro %}
+
+{% macro card(title, span=1, id=None, watch=None, partial=None, actions=None, label=None) %}
+{% set cid = id or ('card-' ~ (title|lower|replace(' ', '-')|replace('&', 'and'))) %}
+<section class="card" data-span="{{ span }}" id="{{ cid }}" aria-labelledby="{{ cid }}-t"{% if watch %} data-watch="{{ watch }}"{% endif %}{% if partial %} data-partial="{{ partial }}"{% endif %}>
+  <header class="card-h">
+    <h2 class="label" id="{{ cid }}-t">{{ title }}{% if label %} <span class="label-note">{{ label }}</span>{% endif %}</h2>
+    {% if actions %}<div class="card-actions">{{ actions }}</div>{% endif %}
+  </header>
+  <div class="card-b">{{ caller() }}</div>
+</section>
+{% endmacro %}
+
+{% macro chip(kind, label=None, source=None, href=None) %}
+{% set k = kind if kind in ('observed', 'extracted', 'confirmed', 'peer', 'review') else 'plain' %}
+{% if href %}<a class="chip chip-{{ k }}" href="{{ href }}">{{ label or kind }}</a>{% else %}<span class="chip chip-{{ k }}">{{ label or kind }}</span>{% endif %}{% if source %}<span class="chip-source">{{ source }}</span>{% endif %}
+{% endmacro %}
+
+{% macro chipset(c) %}
+{# c = {kind, source, event_id} — the chip contract #}
+<span class="chipset">{{ chip(c.kind, source=c.source, href=('/memory?event=' ~ c.event_id) if c.event_id else None) }}</span>
+{% endmacro %}
+
+{% macro cite(n, source) %}
+<a class="cite" href="{{ source.href or ('/memory?event=' ~ source.event_id) }}" data-cite="{{ n }}" data-chip="{{ source.chip.kind if source.chip else 'extracted' }}" data-source="{{ source.chip.source if source.chip else (source.source or '') }}"{% if source.quote %} data-quote="{{ source.quote }}"{% endif %} aria-label="Source {{ n }}">[{{ n }}]</a>
+{% endmacro %}
+
+{% macro button(label, variant='default', type='button', href=None, name=None, value=None, attrs='') %}
+{% set cls = 'btn' ~ (' btn-' ~ variant if variant != 'default' else '') %}
+{% if href %}<a class="{{ cls }}" href="{{ href }}" {{ attrs|safe }}>{{ label }}</a>{% else %}<button class="{{ cls }}" type="{{ type }}"{% if name %} name="{{ name }}"{% endif %}{% if value is not none %} value="{{ value }}"{% endif %} {{ attrs|safe }}>{{ label }}</button>{% endif %}
+{% endmacro %}
+
+{% macro avatar(initials, tone='neutral', size=32) %}
+<span class="avatar avatar-{{ tone }}{% if size == 34 %} avatar-lg{% endif %}" aria-hidden="true">{{ initials }}</span>
+{% endmacro %}
+
+{% macro loop_row(row) %}
+{# row = {title, href, meta, age_label, chip_kind, direction} #}
+<li class="loop">
+  <span class="chip chip-{{ row.chip_kind or 'plain' }}">{{ row.age_label }}</span>
+  <span class="loop-main">
+    {% if row.href %}<a class="loop-title" href="{{ row.href }}">{{ row.title }}</a>{% else %}<span class="loop-title">{{ row.title }}</span>{% endif %}
+    {% if row.meta %}<span class="loop-meta">{{ row.meta }}</span>{% endif %}
+  </span>
+  {% if row.direction %}<span class="loop-dir">{{ row.direction }}</span>{% endif %}
+</li>
+{% endmacro %}
+
+{% macro change(row) %}
+{# row = {kind, entity:{name, href}, before, after, meta} #}
+<li class="change">
+  <span class="chip chip-plain">{{ row.kind }}</span>
+  <span class="change-main">
+    {% if row.entity %}<a class="change-entity" href="{{ row.entity.href }}">{{ row.entity.name }}</a>{% endif %}
+    <span class="change-diff">{% if row.before %}<span class="change-before">{{ row.before }}</span><span class="change-arrow" aria-hidden="true">→</span>{% endif %}<span class="change-after">{{ row.after }}</span></span>
+    {% if row.meta %}<span class="change-meta">{{ row.meta }}</span>{% endif %}
+  </span>
+</li>
+{% endmacro %}
+
+{% macro field_table(fields, entity_id=None) %}
+<div class="table-scroll">
+<table class="field-table">
+  <thead><tr><th>Field</th><th>Current</th><th>Since</th><th>How Sparrow knows</th><th><span class="sr-only">Action</span></th></tr></thead>
+  <tbody>
+  {% for f in fields %}
+  <tr data-field="{{ f.key }}">
+    <td class="ft-field">{{ f.label }}</td>
+    <td class="ft-value">{{ f.value }}{% if f.prior %} <span class="ft-prior">({{ f.prior }})</span>{% endif %}</td>
+    <td class="ft-since">{{ f.since or '' }}</td>
+    <td class="ft-chips">{% for c in f.chips %}{{ chip(c.kind, source=c.source) }}{% endfor %}</td>
+    <td class="ft-action">
+      {% if f.disputed %}{{ button('Resolve', 'primary', href='/inbox#' ~ (f.inbox_id or '')) }}
+      {% elif f.editable %}{{ button('Edit', 'quiet', attrs='data-edit="' ~ f.key ~ '"') }}{% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endmacro %}
+
+{% macro timeline(events, as_of=False) %}
+<ol class="timeline">
+  {% for e in events %}
+  <li class="tl-item">
+    <span class="tl-dot" aria-hidden="true"></span>
+    <span class="tl-when">{{ e.when }}</span>
+    <span class="tl-main">{% if e.href %}<a href="{{ e.href }}">{{ e.title }}</a>{% else %}{{ e.title }}{% endif %}{% if e.meta %} <span class="tl-meta">{{ e.meta }}</span>{% endif %}</span>
+  </li>
+  {% endfor %}
+</ol>
+{% if as_of %}<a class="tl-asof" href="?as_of=">Show as of a date</a>{% endif %}
+{% endmacro %}
+
+{% macro evidence_box(ev) %}
+<div class="evidence">
+  <div class="ev-value">{{ ev.value }}</div>
+  {% if ev.quote %}<blockquote class="ev-quote">{{ ev.quote }}</blockquote>{% endif %}
+  <div class="ev-meta">{{ chipset(ev.chip) }}{% if ev.confirmed_by %}<span class="ev-confirmed">confirmed by {{ ev.confirmed_by }}</span>{% endif %}</div>
+</div>
+{% endmacro %}
+
+{% macro inbox_row(item, compact=False) %}
+<li class="inbox-row{% if compact %} compact{% endif %}" id="inbox-{{ item.id|replace(':', '-') }}" data-id="{{ item.id }}" data-kind="{{ item.kind }}" tabindex="-1" aria-keyshortcuts="Enter 1 2 3 4" aria-label="{{ item.kind_label }}: {{ item.title }}">
+  <span class="ir-kind">{{ item.kind_label }}</span>
+  <div class="ir-body">
+    <div class="ir-title">{% if item.entity and item.entity.href %}<a href="{{ item.entity.href }}" class="ir-entity">{{ item.entity.name }}</a> · {% endif %}{{ item.title }}</div>
+    {% if item.meta or item.age_label %}<div class="ir-meta">{% if item.age_label %}{{ item.age_label }} ago{% endif %}{% if item.meta and item.age_label %} · {% endif %}{{ item.meta }}</div>{% endif %}
+    {% if not compact and item.evidence %}
+    <div class="ir-evidence{% if item.evidence|length > 1 %} two{% endif %}">
+      {% for ev in item.evidence %}{{ evidence_box(ev) }}{% endfor %}
+    </div>
+    {% endif %}
+    <form class="ir-actions" method="post" action="/inbox/{{ item.id }}/act" data-inbox-actions>
+      {% for a in item.actions %}
+        {% if compact and not loop.first and not a.primary and loop.index > 2 %}{% else %}
+        {% if a.href %}<a class="btn{% if a.primary %} btn-primary{% endif %}" href="{{ a.href }}" data-action="{{ a.key }}">{{ a.label }}</a>
+        {% elif a.local %}<button class="btn btn-quiet" type="button" data-action="{{ a.key }}" data-local>{{ a.label }}</button>
+        {% else %}<button class="btn{% if a.primary %} btn-primary{% endif %}" type="submit" name="action" value="{{ a.key }}" data-action="{{ a.key }}">{{ a.label }}</button>{% endif %}
+        {% endif %}
+      {% endfor %}
+    </form>
+  </div>
+</li>
+{% endmacro %}
+
+{% macro brief(text, cites, generated_at=None, trigger=None) %}
+<div class="brief">
+  <div class="brief-text">{{ text|safe }}</div>
+  {% if cites %}
+  <ol class="brief-cites">
+    {% for c in cites %}<li><span class="cite-n">[{{ c.n }}]</span> {{ chip(c.chip.kind, source=c.source or c.chip.source, href=('/memory?event=' ~ c.chip.event_id) if c.chip.event_id else None) }}</li>{% endfor %}
+  </ol>
+  {% endif %}
+</div>
+{% endmacro %}
+
+{% macro alias_chips(aliases, add_href=None) %}
+<div class="aliases">
+  {% for a in aliases %}
+    {% if a.confirmed %}<span class="alias">{{ a.alias }}</span>
+    {% else %}<a class="alias alias-unconfirmed" href="/inbox#inbox-alias-{{ a.id }}">{{ a.alias }}</a>{% endif %}
+  {% endfor %}
+  {% if add_href %}<a class="alias alias-add" href="{{ add_href }}">Add alias</a>{% endif %}
+</div>
+{% endmacro %}

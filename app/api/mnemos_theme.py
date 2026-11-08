@@ -27,6 +27,8 @@ the same palette; new code should use the spec names. --navy = strongest ink,
 reads as a high-contrast solid on every page.
 """
 
+import re
+
 BRAND = "Sparrow"
 COMPANY = "Ravenry"
 COPYRIGHT = "Copyright 2026 Ravenry LLC"
@@ -34,11 +36,14 @@ COPYRIGHT = "Copyright 2026 Ravenry LLC"
 # Fingerprinted on each apply() so deploys bust browser caches without
 # asking testers to hard-refresh. Paths are relative to app/static/.
 _ASSET_FINGERPRINT_FILES = (
+    "css/mnemos-theme.css",
     "css/mnemos-ink.css",
     "css/mnemos-chrome.css",
     "css/mnemos-approval.css",
+    "css/sparrow.css",
     "js/mnemos-ui.js",
     "js/mnemos-approval.js",
+    "js/sparrow.js",
     "fonts/mnemos-fonts.css",
 )
 
@@ -74,9 +79,11 @@ def font_links(v: str | None = None) -> str:
 def theme_style_links(v: str | None = None) -> str:
     q = _q(v or asset_version())
     return (
+        f'<link rel="stylesheet" href="/static/css/mnemos-theme.css{q}">\n'
         f'<link rel="stylesheet" href="/static/css/mnemos-ink.css{q}">\n'
         f'<link rel="stylesheet" href="/static/css/mnemos-chrome.css{q}">\n'
-        f'<link rel="stylesheet" href="/static/css/mnemos-approval.css{q}">'
+        f'<link rel="stylesheet" href="/static/css/mnemos-approval.css{q}">\n'
+        f'<link rel="stylesheet" href="/static/css/sparrow.css{q}">'
     )
 
 
@@ -84,7 +91,8 @@ def theme_script_links(v: str | None = None) -> str:
     q = _q(v or asset_version())
     return (
         f'<script src="/static/js/mnemos-ui.js{q}"></script>\n'
-        f'<script src="/static/js/mnemos-approval.js{q}"></script>'
+        f'<script src="/static/js/mnemos-approval.js{q}"></script>\n'
+        f'<script src="/static/js/sparrow.js{q}"></script>'
     )
 
 
@@ -160,6 +168,10 @@ ROOT_TOKENS = """\
   --ink-28:color-mix(in srgb,var(--navy) 28%,transparent);
   --emerald:var(--green);
   --ok:var(--green);--warn:var(--amber);--danger:#e0716a;
+  /* Chip tints — the same recipe as --acc-12 (frontend spec, tokens). */
+  --ok-12:color-mix(in srgb,var(--ok) 14%,transparent);
+  --warn-12:color-mix(in srgb,var(--warn) 14%,transparent);
+  --danger-12:color-mix(in srgb,var(--danger) 14%,transparent);
   --audio:var(--green);--vision:var(--amber);--desktop:#d4788c;
   /* Geometry — 4pt grid; never invent an off-grid gap. */
   --sp-1:4px;--sp-2:8px;--sp-3:12px;--sp-4:16px;--sp-5:20px;
@@ -230,6 +242,9 @@ html[data-theme="light"]{
   --acc:var(--violet);--acc-fg:#ffffff;
   --acc-warm:#f3f2ff;
   --danger:#c44b44;
+  --ok-12:color-mix(in srgb,var(--ok) 14%,transparent);
+  --warn-12:color-mix(in srgb,var(--warn) 14%,transparent);
+  --danger-12:color-mix(in srgb,var(--danger) 14%,transparent);
   --desktop:#c45f78;
   --card-hi:color-mix(in srgb,#fff 70%,transparent);
   --device-hi:color-mix(in srgb,#fff 85%,transparent);
@@ -1000,35 +1015,23 @@ html[data-theme="dark"] .theme-toggle .icon-moon,
 
 
 def nav_markup() -> str:
-    """Shared chrome: daily work in the bar, connections/settings under More."""
-    import os
-    tester = os.environ.get("QUILL_PROFILE", "").strip().lower() == "tester"
-    hide = {"phone", "desktop", "org"} if tester else set()
-    primary = (
-        ('/today', 'Today', ''),
-        ('/chat', 'Chat', ' id="navChat"'),
-        ('/memory', 'Memory', ''),
-        ('/profile?tab=people', 'People', ''),
-    )
-    more = (
-        ('/meetings', 'Meetings', 'meetings'),
-        ('/peer', 'Team', 'team'),
-        ('/projects', 'Projects', 'projects'),
-        ('/assistants', 'Assistants', 'assistants'),
-        ('/phone', 'Phone', 'phone'),
-        ('/desktop-access', 'Desktop', 'desktop'),
-        ('/org-network', 'Org', 'org'),
-        ('/onboarding', 'Setup', 'setup'),
-    )
-    links = "".join(
-        f'<a href="{href}"{extra}>{label}</a>' for href, label, extra in primary)
-    extra_links = "".join(
-        f'<a href="{href}">{label}</a>'
-        for href, label, key in more if key not in hide)
-    right = (
-        '<div class="nav-right">'
+    """Top-bar controls (frontend spec, App shell): menu, search, Ask, capture,
+    theme toggle, avatar. Primary navigation lives in the rail — see
+    app/api/ui.py:rail_html — which the shell wrapper adds to every page."""
+    return (
+        '<button type="button" class="topbar-menu" id="sparrowMenu"'
+        ' aria-label="Open navigation" aria-expanded="false" aria-controls="sparrowRail">'
+        '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true">'
+        '<path d="M4 7h16M4 12h16M4 17h16" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/>'
+        '</svg></button>'
+        '<form class="topbar-search" id="sparrowSearch" action="/memory" method="get" role="search">'
+        '<input type="search" name="q" id="sparrowSearchBox" autocomplete="off"'
+        ' placeholder="Search memory · start with ? to ask" aria-label="Search memory">'
+        '</form>'
         f'<button type="button" class="ask-trigger" id="mnemosAskOpen">'
-        f'Ask {BRAND} anything… <kbd>⌘K</kbd></button>'
+        f'Ask {BRAND} <kbd>⌘K</kbd></button>'
+        '<a class="topbar-capture" id="sparrowCapture" href="/capture" data-capture>'
+        '<span class="cap-dot" aria-hidden="true"></span><span class="cap-label">Capture</span></a>'
         '<button type="button" class="theme-toggle" id="mnemosThemeToggle"'
         ' title="Toggle light / dark" aria-label="Toggle light and dark mode">'
         '<svg class="icon-sun" viewBox="0 0 24 24" fill="none" aria-hidden="true">'
@@ -1042,52 +1045,40 @@ def nav_markup() -> str:
         '</button>'
         '<button type="button" class="status-dot" id="mnemosStatusDot"'
         ' title="worker" aria-label="worker status"></button>'
-        '<a class="nav-profile" href="/profile" title="You" aria-label="Profile">'
-        '<span class="nav-profile-dot" aria-hidden="true"></span>'
-        '</a></div>'
+        '<a class="topbar-avatar" href="/profile" title="You" aria-label="Profile">'
+        '<span class="avatar avatar-accent" data-avatar aria-hidden="true">You</span></a>'
     )
-    return (
-        f'<nav class="nav" id="mnemosNav" aria-label="Primary">'
-        f'{links}'
-        f'<details class="nav-more">'
-        f'<summary>More</summary>'
-        f'<div class="nav-more-menu">{extra_links}'
-        f'<div class="nav-more-copy">{COPYRIGHT}</div></div>'
-        f'</details></nav>'
-        f'<span class="spacer"></span>'
-        f'{right}'
-        f'<script>(function(){{'
-        f'var n=document.getElementById("mnemosNav");if(!n)return;'
-        f'var p=(location.pathname||"/").replace(/\\/$/,"")||"/";'
-        f'var q=(location.search||"");'
-        f'function hit(h){{'
-        f'if(h==="/today")return p==="/today"||p==="/"||p==="/shell";'
-        f'if(h==="/meetings")return p==="/meetings"||p.indexOf("/meetings/")===0||p.indexOf("/meeting/")===0;'
-        f'if(h==="/chat")return p==="/chat"||p.indexOf("/chat/")===0;'
-        f'if(h==="/memory")return p==="/memory"||p==="/console";'
-        f'if(h.indexOf("/profile?tab=people")===0)'
-        f'return p==="/profile"&&q.indexOf("tab=people")>=0;'
-        f'if(h==="/profile")return p==="/profile";'
-        f'if(h==="/peer")return p==="/peer"||p.indexOf("/peer/")===0;'
-        f'if(h==="/phone")return p.indexOf("/phone")===0;'
-        f'if(h==="/desktop-access")return p==="/desktop-access";'
-        f'if(h==="/org-network")return p==="/org-network"||p.indexOf("/org/")===0;'
-        f'if(h==="/onboarding")return p==="/onboarding";'
-        f'return p===h;}}'
-        f'var moreOn=false;'
-        f'n.querySelectorAll("a[href]").forEach(function(a){{'
-        f'if(hit(a.getAttribute("href")||"")){{a.classList.add("on");'
-        f'a.setAttribute("aria-current","page");'
-        f'if(a.closest(".nav-more"))moreOn=true;}}'
-        f'}});'
-        f'var m=n.querySelector(".nav-more");'
-        f'if(moreOn&&m)m.classList.add("on");'
-        f'var pf=document.querySelector(".nav-profile");'
-        f'if(pf&&p==="/profile"&&q.indexOf("tab=people")<0)pf.classList.add("on");'
-        f'document.addEventListener("click",function(e){{'
-        f'if(m&&m.open&&!m.contains(e.target))m.removeAttribute("open");}});'
-        f'}})();</script>'
-    )
+
+
+_BRAND_ANCHOR = re.compile(
+    r'<a class="brand" href="/">\s*@@MARK@@\s*@@BRAND@@\s*</a>\s*')
+_BODY_OPEN = re.compile(r"<body[^>]*>", re.I)
+
+
+def shell_wrap(page: str) -> str:
+    """Put a page inside the app shell: rail on the left, the page's own top
+    bar and content on the right (frontend spec, App shell / migration step 1).
+
+    Legacy pages keep their markup; only the wordmark anchor leaves the top bar
+    (it lives in the rail now) and @@NAV@@ becomes the top-bar controls. A page
+    without a top bar gets one. The rail here is a static default; the route
+    swaps in the per-request rail (active item, inbox count) via ui.finish().
+    """
+    m = _BODY_OPEN.search(page)
+    if not m:
+        return page
+    end = page.lower().rfind("</body>")
+    if end < 0 or end < m.end():
+        return page
+    page = _BRAND_ANCHOR.sub("", page, count=1)
+    body = page[m.end():end]
+    if "@@NAV@@" not in body:
+        body = '\n<header class="top">@@NAV@@</header>' + body
+    from app.api.ui import rail_html  # lazy: ui imports this module
+    return (page[:m.end()]
+            + '\n<div class="shell" id="sparrowShell">' + rail_html("")
+            + '<div class="shell-main">' + body + '</div></div>\n'
+            + page[end:])
 
 
 def _inject_theme_boot(page: str) -> str:
@@ -1119,16 +1110,20 @@ def apply_plain(page: str) -> str:
 
 
 def apply(page: str) -> str:
-    """Inject shared fonts/tokens/ink/chrome/UI into a page with @@placeholders@@.
+    """Inject shared fonts/tokens/ink/chrome/UI into a page with @@placeholders@@
+    and wrap it in the app shell.
 
     Leaves @@APPROVAL@@ for per-request SSR via approval_partial.inject_page.
     Pages that render math include @@KATEX@@ after @@FONTS@@ (Chat, Console).
+    Tokens are a stylesheet (static/css/mnemos-theme.css); @@ROOT@@ is kept as
+    a placeholder so older pages need no edit.
     """
     v = asset_version()
     return _inject_theme_boot(
-        page.replace("@@FONTS@@", font_links(v) + "\n" + theme_style_links(v))
+        shell_wrap(page)
+        .replace("@@FONTS@@", font_links(v) + "\n" + theme_style_links(v))
         .replace("@@KATEX@@", KATEX_LINKS)
-        .replace("@@ROOT@@", ROOT_TOKENS)
+        .replace("@@ROOT@@", "")
         .replace("@@INK@@", "")
         .replace("@@CHROME@@", "")
         .replace("@@UI_JS@@", theme_script_links(v))

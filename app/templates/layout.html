@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+{{ theme_boot }}
+<meta charset="utf-8">
+<title>{% block title %}{{ brand }}{% endblock %}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+{{ head_links }}
+{{ katex_links }}
+{% block head %}{% endblock %}
+</head>
+<body class="sparrow-page">
+<div class="shell" id="sparrowShell">
+{% include "rail.html" %}
+<div class="shell-main">
+<header class="top">{{ topbar }}</header>
+@@APPROVAL@@
+<main class="content" id="main">
+  <div class="page-head">
+    <h1 class="page-title{% if entity_page %} entity{% endif %}">{% block page_title %}{% endblock %}</h1>
+    {% block page_summary %}{% endblock %}
+  </div>
+  {% block content %}{% endblock %}
+</main>
+</div>
+</div>
+{{ script_links }}
+{% block scripts %}{% endblock %}
+</body>
+</html>

@@ -18,6 +18,8 @@ from app.api.records_routes import router as records_router
 from app.api.assistants_routes import router as assistants_router
 from app.api.projects_routes import router as projects_router
 from app.api.replay_routes import router as replay_router
+from app.api.inbox_routes import router as inbox_router
+from app.api.shell_routes import router as shell_router
 from app.config import settings
 from app.events import bus
 from app.services.api_auth import (
@@ -39,6 +41,8 @@ app.include_router(records_router)
 app.include_router(assistants_router)
 app.include_router(projects_router)
 app.include_router(replay_router)
+app.include_router(inbox_router)
+app.include_router(shell_router)
 
 
 # --- active-minute marker (WS-A) --------------------------------------------
@@ -765,6 +769,6 @@ def api_stub() -> dict:
 @app.get("/")
 def root():
     """Launch page — new user setup or continue / unlock on this machine."""
-    from fastapi.responses import HTMLResponse
+    from app.api import ui
     from app.api.welcome_page import WELCOME_PAGE
-    return HTMLResponse(WELCOME_PAGE)
+    return ui.page_response(WELCOME_PAGE, path="/")

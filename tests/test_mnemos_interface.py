@@ -336,7 +336,8 @@ class ThemeApplyTests(unittest.TestCase):
         from app.api.mnemos_theme import apply
 
         page = apply("<html>@@FONTS@@ @@ROOT@@ @@INK@@ @@CHROME@@ @@UI_JS@@ @@BRAND@@</html>")
-        self.assertIn("--paper:", page)
+        self.assertIn("/static/css/mnemos-theme.css", page)
+        self.assertNotIn("@@ROOT@@", page)
         self.assertIn("/static/css/mnemos-ink.css", page)
         self.assertIn("/static/css/mnemos-chrome.css", page)
         self.assertIn("/static/js/mnemos-ui.js", page)
