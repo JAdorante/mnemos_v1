@@ -108,7 +108,7 @@ x-env: &sparrow-env
   # retrieval exemplars for the local model on every seat. Kill switch
   # without a rebuild: the "_all" gate in data/exemplar_type_gates.json.
   QUILL_EXEMPLARS: "1"
-  # Chat-grounding search (2026-11-09, scripts/search_bench.py): search hits
+  # Chat-grounding search (2026-11-09, measured with the Sparrow 1.0 search bench): search hits
   # render as the matching passage, not just a title; the search section keeps
   # 1600 of the 2600-char block; it searches the user's request, not the
   # planner's whole goal; and results are reranked (person, tag, recency).

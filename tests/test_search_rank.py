@@ -102,9 +102,9 @@ class QueryAndBudgetTests(unittest.TestCase):
 
 class FakeStore:
     def __init__(self):
-        self.people = [{"name": "Rachel Osei"}, {"name": "Rachel Kim"},
+        self.people = [{"name": "Tomas Ferreira"}, {"name": "Tomas Lindgren"},
                        {"name": "Hidden Person", "hide_from_people": True}]
-        self.entities = [{"name": "Bayview Clinic Group"}, {"name": "Review"}]
+        self.entities = [{"name": "Larkspur Clinic Group"}, {"name": "Review"}]
 
     def all_people(self):
         return self.people
@@ -125,10 +125,10 @@ class FakeStore:
 class RerankTests(unittest.TestCase):
     def test_query_context_names_people_entities_and_recency(self):
         ctx = search_rank.query_context(
-            "what did Rachel Osei's latest email say about Bayview?", FakeStore())
+            "what did Tomas Ferreira's latest email say about Larkspur?", FakeStore())
         self.assertEqual({p["name"] for p in ctx["people"]},
-                         {"Rachel Osei", "Rachel Kim"})      # first-name match
-        self.assertEqual(ctx["entities"], ["bayview clinic group"])
+                         {"Tomas Ferreira", "Tomas Lindgren"})      # first-name match
+        self.assertEqual(ctx["entities"], ["larkspur clinic group"])
         self.assertTrue(ctx["recency_cue"])
         self.assertFalse(search_rank.query_context("who owns it?", FakeStore())
                          ["recency_cue"])
@@ -137,20 +137,20 @@ class RerankTests(unittest.TestCase):
         hits = [
             {"score": 0.40, "time": 100, "summary": "[google.mail] Lunch",
              "raw": "anyone for lunch", "meta": {"from": "Sam <s@x>"}},
-            {"score": 0.38, "time": 200, "summary": "[google.mail] Bayview demo",
-             "raw": "please move the demo", "meta": {"from": "Rachel Osei <r@x>"}},
+            {"score": 0.38, "time": 200, "summary": "[google.mail] Larkspur demo",
+             "raw": "please move the demo", "meta": {"from": "Tomas Ferreira <r@x>"}},
         ]
-        out = search_rank.rerank(hits, "Rachel's latest email on Bayview?",
+        out = search_rank.rerank(hits, "Tomas's latest email on Larkspur?",
                                  store=FakeStore())
-        self.assertIn("Bayview demo", out[0]["summary"])
+        self.assertIn("Larkspur demo", out[0]["summary"])
         self.assertEqual(out[0]["rank_features"],
                          {"person": 1.0, "tag": 1.0, "recency": 1.0})
 
     def test_mention_counts_less_than_participation(self):
-        h = {"score": 0.3, "time": 1, "raw": "Rachel Osei asked for it",
+        h = {"score": 0.3, "time": 1, "raw": "Tomas Ferreira asked for it",
              "meta": {"from": "Sam"}}
         f = search_rank.features(h, search_rank.query_context(
-            "Rachel Osei", FakeStore()))
+            "Tomas Ferreira", FakeStore()))
         self.assertEqual((f["person"], f["person_mention"]), (0.0, 1.0))
 
     def test_references_and_approval_read_the_store(self):
