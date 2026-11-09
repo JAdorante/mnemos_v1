@@ -1189,6 +1189,22 @@ def compose(question: str, *, semantic_limit: int = 5, min_score: float = 0.15,
         except Exception as exc:
             print(f"[grounding] context seed skipped ({exc}).")
 
+    # Sparrow 1.0 capture (no-op unless SPARROW_CAPTURE_PATH is set): report
+    # which facts and timeline events this block carries, so a recorded call
+    # can be checked for whether the answer was ever in front of the model.
+    try:
+        from app.services import model_capture
+        if model_capture.enabled():
+            shown = [h for h in hits
+                     if h.get("score") is None or h["score"] >= min_score]
+            model_capture.note_retrieved(
+                facts=list(grounded_fact_ids)
+                + [h.get("fact_id") for h in shown if h.get("fact_id")],
+                # memory.search hits carry the event id as "event_id".
+                events=[h.get("event_id") or h.get("id") for h in shown])
+    except Exception as exc:  # pragma: no cover
+        print(f"[grounding] capture note skipped ({exc}).")
+
     block = assemble_block(sections, sem_index, _sem_reserve())
     return {"block": block, "hits": hits, "sources": sources, "route": route}
 

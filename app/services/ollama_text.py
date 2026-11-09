@@ -259,8 +259,11 @@ class OllamaText:
             return False
 
     def _chat(self, task: str, msgs: list[dict], *, num_predict: int,
-              fmt: dict | None) -> dict[str, Any]:
-        """One raw /api/chat round trip, logged. Raises on transport errors."""
+              fmt: dict | None,
+              capture_meta: dict | None = None) -> dict[str, Any]:
+        """One raw /api/chat round trip, logged. Raises on transport errors.
+        With SPARROW_CAPTURE_PATH set, the round trip is also recorded in
+        full by model_capture (off by default; see that module)."""
         payload: dict[str, Any] = {
             "model": self.model,
             "stream": False,
@@ -276,9 +279,19 @@ class OllamaText:
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(self.url + "/api/chat", data=data,
                                      headers={"Content-Type": "application/json"})
+        from app.services import model_capture
+        cap = model_capture.begin(url=self.url, task=task, payload=payload,
+                                  meta=capture_meta)
         t0 = time.time()
-        with urllib.request.urlopen(req, timeout=self.timeout) as r:
-            out = json.load(r)
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                out = json.load(r)
+        except BaseException as exc:
+            if cap is not None:
+                cap.fail(exc)
+            raise
+        if cap is not None:
+            cap.done(out)
         # Stage breakdown at zero cost: Ollama returns its own nanosecond
         # timings (load / prompt_eval / eval) for work it already did, so
         # cold-load, prefill and generation need no extra probe on this path.
@@ -325,8 +338,19 @@ class OllamaText:
         )
         num_predict = max_tokens
         retried = False
+        meta = None
+        from app.services import model_capture
+        if model_capture.enabled():
+            trailer = ("text" if schema is None
+                       else "json_injected" if injected else "json")
+            meta = {"prompt_version": model_capture.prompt_version(
+                        task, system, schema, trailer),
+                    "had_exemplars": bool(exemplars)}
         while True:
-            out = self._chat(task, msgs, num_predict=num_predict, fmt=fmt)
+            if meta is not None:
+                meta = {**meta, "attempt": 2 if retried else 1}
+            out = self._chat(task, msgs, num_predict=num_predict, fmt=fmt,
+                             capture_meta=meta)
             raw = ((out.get("message") or {}).get("content") or "")
             text = strip_reasoning(raw)
             truncated = str(out.get("done_reason") or "") == "length"
