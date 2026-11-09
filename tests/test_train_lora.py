@@ -8,6 +8,7 @@ conversation assembly. No WSL, no GPU, no subprocesses.
 """
 from __future__ import annotations
 
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -44,6 +45,18 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(tl.hf_base_for("LLAMA3.2"),
                          "unsloth/Llama-3.2-3B-Instruct")
         self.assertIsNone(tl.hf_base_for("some-unknown:latest"))
+
+    def test_hf_base_env_override(self) -> None:
+        prev = os.environ.get("QUILL_LORA_BASE_HF")
+        os.environ["QUILL_LORA_BASE_HF"] = "/srv/sparrow-1.0-r2-qwen"
+        try:
+            self.assertEqual(tl.hf_base_for("sparrow-1.0-r2"),
+                             "/srv/sparrow-1.0-r2-qwen")
+        finally:
+            if prev is None:
+                os.environ.pop("QUILL_LORA_BASE_HF", None)
+            else:
+                os.environ["QUILL_LORA_BASE_HF"] = prev
 
     def test_default_tag_is_dated(self) -> None:
         self.assertEqual(tl.default_tag("qwen2.5:7b-instruct", date="20260717"),

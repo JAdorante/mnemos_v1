@@ -47,6 +47,23 @@ def response_markers_for(base_hf: str) -> tuple[str, str] | None:
     return None
 
 
+def single_gpu_map() -> dict | None:
+    """Pin every module to GPU 0 on a one-GPU box. accelerate's "auto" map
+    sizes the GPU from cudaMemGetInfo, which on unified-memory boards (the
+    GB10) counts only MemFree, not reclaimable page cache: with the base
+    weights just read into cache it saw ~8 GB of 121 and spilled layers to
+    the CPU, where bitsandbytes cannot quantize. Pinned, the allocation
+    simply reclaims cache. A discrete GPU too small for the model fails
+    either way, so this costs nothing there."""
+    try:
+        import torch
+        if torch.cuda.is_available() and torch.cuda.device_count() == 1:
+            return {"": 0}
+    except Exception:
+        pass
+    return None
+
+
 def load_rows(path: Path) -> list[dict]:
     """Curated training records (distill_curate.to_example shape)."""
     rows = []
@@ -137,6 +154,7 @@ def do_train(args) -> None:
         model_name=args.base_hf,
         max_seq_length=args.max_seq,
         load_in_4bit=True,
+        **({"device_map": dm} if (dm := single_gpu_map()) else {}),
     )
     model = FastLanguageModel.get_peft_model(
         model,
@@ -249,6 +267,7 @@ def do_export(args) -> None:
         model_name=str(adapter_dir),          # base + adapter resume
         max_seq_length=args.max_seq,
         load_in_4bit=True,
+        **({"device_map": dm} if (dm := single_gpu_map()) else {}),
     )
     model.save_pretrained_gguf(str(scratch), tokenizer,
                                quantization_method=args.quant)

@@ -69,6 +69,13 @@ def wsl_path(win: str | Path) -> str:
 
 
 def hf_base_for(tag: str) -> str | None:
+    """HF weights to fine-tune for an Ollama tag. QUILL_LORA_BASE_HF wins: a
+    seat running a base this table cannot know (a Sparrow 1.0 candidate,
+    whose merged weights live in a local dir) names them there. The path must
+    contain "qwen" for completions-only loss (lora_train_wsl._FAMILY_MARKERS)."""
+    override = os.environ.get("QUILL_LORA_BASE_HF", "").strip()
+    if override:
+        return override
     return HF_BASES.get((tag or "").strip().lower())
 
 
