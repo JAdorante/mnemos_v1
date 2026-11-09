@@ -108,6 +108,16 @@ x-env: &sparrow-env
   # retrieval exemplars for the local model on every seat. Kill switch
   # without a rebuild: the "_all" gate in data/exemplar_type_gates.json.
   QUILL_EXEMPLARS: "1"
+  # Chat-grounding search (2026-11-09, scripts/search_bench.py): search hits
+  # render as the matching passage, not just a title; the search section keeps
+  # 1600 of the 2600-char block; it searches the user's request, not the
+  # planner's whole goal; and results are reranked (person, tag, recency).
+  # Holdout worlds: evidence reached the model 20/42 -> 38/42. Rollback: drop
+  # these four lines and rebuild.
+  QUILL_GROUND_PASSAGES: "1"
+  QUILL_GROUND_SEM_RESERVE: "1600"
+  QUILL_GROUND_SEM_QUERY: task
+  QUILL_SEARCH_RERANK: "1"
 
 services:
   # Host Ollama binds 127.0.0.1 only and changing that needs root; this

@@ -120,7 +120,16 @@ _PRONOUN_OR_FOLLOWUP = re.compile(
 )
 
 # Keep the block small enough for a 3B context window to actually use.
-_MAX_BLOCK_CHARS = 2600
+# QUILL_GROUND_MAX_CHARS raises it for larger local models (the hosted seats
+# run a 14B with a 32k context); read once at import.
+def _env_int(name: str, default: int) -> int:
+    try:
+        return max(0, int(os.environ.get(name, default)))
+    except ValueError:
+        return default
+
+
+_MAX_BLOCK_CHARS = _env_int("QUILL_GROUND_MAX_CHARS", 2600)
 
 # Loose-promise contamination guard for email-ish goals (drafting must not
 # paste unrelated commitments) — moved verbatim from the agent provider,
@@ -376,12 +385,79 @@ def _tasks_section(store) -> tuple[list[str], list[int]]:
     return lines, fact_ids
 
 
-def _dedup_hit_lines(kept: list[dict]) -> list[str]:
+# Search-hit passages. A connector item's summary is only its title
+# ("[google.mail] Pricing - approved"), so a hit rendered as its summary told
+# the model THAT a mail exists, never what it says: on the Sparrow 1.0
+# holdout worlds the evidence sat in the top-5 hits and still never reached
+# the model for 11 of 42 questions. With QUILL_GROUND_PASSAGES on, document /
+# mail / chat hits render as title + the stretch of the body that best matches
+# the question. Speech and screen keep their summaries (raw ASR is noisy).
+_PASSAGE_CHARS = _env_int("QUILL_GROUND_PASSAGE_CHARS", 360)
+_PASSAGE_MODALITIES = frozenset({"document", "text", "system"})
+_PASSAGE_STOP = frozenset({
+    "the", "a", "an", "and", "or", "to", "of", "for", "in", "on", "my", "me",
+    "you", "we", "is", "are", "be", "with", "at", "this", "that", "it", "as",
+    "from", "about", "what", "who", "when", "where", "how", "did", "does",
+    "was", "were", "has", "have", "had", "our", "your", "any", "anything",
+    "can", "should", "will", "would", "there", "their", "they", "them",
+})
+
+
+def _passages_on() -> bool:
+    return os.environ.get("QUILL_GROUND_PASSAGES", "0") not in ("0", "false", "False")
+
+
+def _content_words(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9]{3,}", (text or "").lower())
+            if w not in _PASSAGE_STOP}
+
+
+def best_window(text: str, query: str, limit: int = _PASSAGE_CHARS) -> str:
+    """The sentence (or transcript turn) of `text` sharing the most content
+    words with `query`, grown with its neighbours to about `limit` chars.
+    Elided ends are marked with an ellipsis."""
+    parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+|\n+", text or "")
+             if p.strip()]
+    if not parts:
+        return (text or "")[:limit]
+    q = _content_words(query)
+    best = max(range(len(parts)),
+               key=lambda i: (len(q & _content_words(parts[i])), -i))
+    lo = hi = best
+    out = parts[best]
+    while True:
+        for j in (hi + 1, lo - 1):            # forward context first
+            if 0 <= j < len(parts) and len(out) + len(parts[j]) + 1 <= limit:
+                if j > hi:
+                    out, hi = out + " " + parts[j], j
+                else:
+                    out, lo = parts[j] + " " + out, j
+                break
+        else:
+            break
+    if len(out) > limit:
+        out = out[:limit - 1].rstrip() + "…"
+    return ("… " if lo > 0 else "") + out + (" …" if hi < len(parts) - 1 else "")
+
+
+def _hit_text(h: dict, query: str = "") -> str:
+    title = (h.get("summary") or "").strip()
+    raw = (h.get("raw") or "").strip()
+    if not (_passages_on() and h.get("modality") in _PASSAGE_MODALITIES):
+        return title or raw
+    body = (h.get("chunk_text") or raw).strip()
+    if not body or body == title:
+        return title or body
+    passage = body if len(body) <= _PASSAGE_CHARS else best_window(body, query)
+    return f"{title} — {passage}" if title else passage
+
+
+def _dedup_hit_lines(kept: list[dict], query: str = "") -> list[str]:
     """Render hits one per line, summaries over raw, exact repeats dropped."""
     lines: list[str] = []
     seen: set[str] = set()
     for h in kept:
-        text = h.get("summary") or h.get("raw", "")
+        text = _hit_text(h, query)
         key = " ".join(text.lower().split())
         if key in seen:
             continue
@@ -405,11 +481,35 @@ def _screen_section(question: str, *, limit: int = 6) -> list[str]:
              "newest matches first):"] + body)
 
 
+def semantic_query(question: str) -> str:
+    """What the timeline search embeds. The chat lane hands compose the
+    planner's enriched goal ("RELEVANT CONTEXT ... Current task: <ask>"),
+    ~1-2k chars of which the user's request is the last line; embedding all
+    of it pulls the search toward whatever the planner already found. With
+    QUILL_GROUND_SEM_QUERY=task the search uses the request alone."""
+    if os.environ.get("QUILL_GROUND_SEM_QUERY", "goal") != "task":
+        return question
+    i = (question or "").rfind("Current task:")
+    task = question[i + len("Current task:"):].strip() if i >= 0 else ""
+    return task or question
+
+
 def _semantic_section(question: str, *, limit: int, min_score: float,
                       email_guard: bool) -> tuple[list[str], list[dict]]:
     """Timeline search as fallback context; summaries preferred over raw ASR."""
+    from app.services import search_rank
     from app.services.memory import memory
-    hits = memory.search(question, limit=limit)
+    if search_rank.enabled():
+        # Rerank a wider pool, then show the usual `limit`.
+        try:
+            from app.storage import get_store
+            store = get_store()
+        except Exception:
+            store = None
+        hits = search_rank.rerank(memory.search(question, limit=max(limit * 4, 20)),
+                                  question, store=store)[:limit]
+    else:
+        hits = memory.search(question, limit=limit)
     kept = [h for h in hits
             if h.get("score") is None or h["score"] >= min_score]
     if email_guard:
@@ -417,7 +517,7 @@ def _semantic_section(question: str, *, limit: int, min_score: float,
                 if not (_LOOSE_PROMISE.search(h.get("summary") or h.get("raw") or "")
                         and not _overlaps_goal(
                             h.get("summary") or h.get("raw") or "", question))]
-    body = _dedup_hit_lines(kept)
+    body = _dedup_hit_lines(kept, question)
     if not body:
         return [], hits
     return (["RELEVANT MEMORIES (raw timeline — may contain transcription "
@@ -1014,9 +1114,11 @@ def compose(question: str, *, semantic_limit: int = 5, min_score: float = 0.15,
         print(f"[grounding] screen layer skipped ({exc}).")
 
     hits: list[dict] = []
+    sem_index: int | None = None
     if not people_list_q:
         try:
-            sem, hits = _semantic_section(question, limit=semantic_limit,
+            sem, hits = _semantic_section(semantic_query(question),
+                                          limit=semantic_limit,
                                           min_score=min_score,
                                           email_guard=email_guard)
             if meeting_scope is not None and (sem or hits):
@@ -1051,6 +1153,7 @@ def compose(question: str, *, semantic_limit: int = 5, min_score: float = 0.15,
                 label = ("meeting memories" if meeting_scope is not None
                          else "timeline memories")
                 _add(label, sem)
+                sem_index = len(sections) - 1
         except Exception as exc:
             print(f"[grounding] semantic layer skipped ({exc}).")
         try:
@@ -1086,7 +1189,32 @@ def compose(question: str, *, semantic_limit: int = 5, min_score: float = 0.15,
         except Exception as exc:
             print(f"[grounding] context seed skipped ({exc}).")
 
-    block = "\n\n".join("\n".join(s) for s in sections if s)
-    if len(block) > _MAX_BLOCK_CHARS:
-        block = block[:_MAX_BLOCK_CHARS] + "…"
+    block = assemble_block(sections, sem_index, _sem_reserve())
     return {"block": block, "hits": hits, "sources": sources, "route": route}
+
+
+def _sem_reserve() -> int:
+    return _env_int("QUILL_GROUND_SEM_RESERVE", 0)
+
+
+def assemble_block(sections: list[list[str]], sem_index: int | None,
+                   reserve: int = 0) -> str:
+    """Join sections under _MAX_BLOCK_CHARS. The timeline search comes last,
+    so a plain cut drops it first whenever the structured layers run long
+    (they filled the whole 2600 on every Sparrow 1.0 holdout question). A
+    `reserve` > 0 keeps up to that many chars of the search section and what
+    follows it, trimming the sections before it instead."""
+    cap = _MAX_BLOCK_CHARS
+    items = [(i, "\n".join(sec)) for i, sec in enumerate(sections) if sec]
+    full = "\n\n".join(t for _, t in items)
+    if len(full) <= cap:
+        return full
+    if reserve <= 0 or sem_index is None:
+        return full[:cap] + "…"
+    head = "\n\n".join(t for i, t in items if i < sem_index)
+    tail = "\n\n".join(t for i, t in items if i >= sem_index)
+    room = max(0, cap - min(len(tail), reserve) - 2)
+    if len(head) > room:
+        head = head[:room].rstrip() + "…"
+    out = f"{head}\n\n{tail}" if head else tail
+    return out if len(out) <= cap else out[:cap] + "…"
