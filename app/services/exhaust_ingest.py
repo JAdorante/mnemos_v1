@@ -253,10 +253,14 @@ def parse_rfc2822_addr(raw: str) -> list[dict[str, str]]:
             continue
         seen.add(email)
         name = (name or "").strip(" \"'")
+        from_local = False
         if not name:
+            # No display name: the local-part stands in for display only.
+            # It is NOT identity evidence (audit 2026-11-11: "Ckempton").
             local = email.split("@", 1)[0]
             name = re.sub(r"[._+]+", " ", local).title()
-        out.append({"name": name, "email": email})
+            from_local = True
+        out.append({"name": name, "email": email, "name_from_local": from_local})
     return out
 
 
@@ -312,8 +316,10 @@ def derive_contact_stats(
             if p["email"] in self_set:
                 continue
             r = row(p["email"])
-            if p.get("name") and (not r["name"] or len(p["name"]) > len(r["name"])):
+            if p.get("name") and (not r["name"] or len(p["name"]) > len(r["name"])
+                                  or (r.get("name_from_local") and not p.get("name_from_local"))):
                 r["name"] = p["name"]
+                r["name_from_local"] = bool(p.get("name_from_local"))
             r["interaction_count"] += 1
             r["last_seen"] = max(float(r["last_seen"] or 0), ts)
             if we_sent:
@@ -345,8 +351,10 @@ def derive_contact_stats(
             if not email or email in self_set:
                 continue
             r = row(email)
-            if p.get("name") and (not r["name"] or len(p["name"]) > len(r["name"])):
+            if p.get("name") and (not r["name"] or len(p["name"]) > len(r["name"])
+                                  or r.get("name_from_local")):
                 r["name"] = p["name"]
+                r["name_from_local"] = False
             r["from_calendar"] = True
             r["co_attendance"] += 1
             r["last_seen"] = max(float(r["last_seen"] or 0), ts)
@@ -826,6 +834,7 @@ def apply_stats(
 ) -> dict[str, Any]:
     """Mint people/orgs/edges. Returns ledger + counts."""
     from app.services import people_pipeline as pp
+    from app.services import name_quality as nq
 
     prov = PROVIDERS.get(provider) or PROVIDERS["google"]
     src_mail, src_cal = prov["mail"], prov["cal"]
@@ -864,7 +873,15 @@ def apply_stats(
 
     for email, st in stats.items():
         name = (st.get("name") or email.split("@")[0]).strip()
+        # Audit 2026-11-11: no-reply / alerts mailboxes are systems, not people.
+        if pp.is_automated_sender(email, name):
+            continue
+        # A name the parser derived from the mailbox local-part ("Ckempton")
+        # is display-only; such a header may bind an existing contact but
+        # never mints a person.
+        named = bool(name) and not st.get("name_from_local")
         pid = None
+        res = None
         try:
             pid = store.find_person_by_contact("email", email)
         except Exception:
@@ -879,6 +896,12 @@ def apply_stats(
                 relationship_boost=0.8)
             pid = res.person_id
         if not pid:
+            # The fallback mint used to bypass every gate (that is how
+            # "Google" and "Matt" became people). Respect the resolver's
+            # verdict and require a real, plausible display name.
+            if (not named or (res is not None and res.decision == "reject")
+                    or not nq.is_plausible_person(name)):
+                continue
             try:
                 pid = store.insert_person(name, ts=st.get("last_seen") or ts,
                                           promotion_state="candidate")
@@ -913,16 +936,17 @@ def apply_stats(
                 pass
         org_name = org_from_email_domain(email)
         if org_name:
+            pred = "member_of" if pp.is_academic_domain(email) else "works_at"
             try:
                 eid = store.resolve_entity(org_name, "org", ts=ts)
                 store.add_relation(
-                    "person", int(pid), "works_at", "entity", int(eid),
+                    "person", int(pid), pred, "entity", int(eid),
                     origin="asserted", ts=ts,
                     source_event_id=gmail_eid,
                     quote=f"{name} <{email}>", source_class="exhaust")
                 n_org += 1
                 ledger.setdefault("relations", []).append(
-                    ["person", int(pid), "works_at", "entity", int(eid)])
+                    ["person", int(pid), pred, "entity", int(eid)])
             except Exception:
                 pass
         ledger.setdefault("people", []).append(int(pid))

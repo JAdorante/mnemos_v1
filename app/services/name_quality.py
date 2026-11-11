@@ -51,7 +51,7 @@ _SELF_TOKENS = frozenset({
 # human name (and virtually no brand label we store) carries.
 _CODE_PUNCT = re.compile(
     r"[\\/(){}\[\]<>=;:|`~^@#$%*]|::|"
-    r"\.(py|md|db|json|txt|js|ts|tsx|jsx|csv|log|toml|yaml|yml|ini|cfg|sh|bat|"
+    r"\.\s?(py|md|db|json|txt|js|ts|tsx|jsx|csv|log|toml|yaml|yml|ini|cfg|sh|bat|"
     r"ai|com|org|io|net|co|dev)\b",
     re.I)
 # ALL_CAPS env-var-ish tokens: QUILL_AGENT, MAX_RETRIES.

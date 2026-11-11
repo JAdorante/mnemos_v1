@@ -193,7 +193,11 @@ class Resolver:
                 store.touch_entity(exact["id"], ts=ts)
                 return int(exact["id"])
             from app.services.entity_correction import corrector
-            m = corrector.match(key, existing)
+            # The corrector folds ASR slips ("Dell Capitol" -> "Dell Capital").
+            # An all-caps acronym from a document is not an ASR slip, and
+            # Soundex makes "ABB" a twin of "Abby" (audit 2026-11-11).
+            is_acronym = key.isupper() and key.isalpha() and len(key) <= 5
+            m = None if is_acronym else corrector.match(key, existing)
             if m is not None:
                 store.touch_entity(int(m.ref), ts=ts, alias=key)
                 return int(m.ref)
@@ -202,7 +206,10 @@ class Resolver:
             # node — that's how "Justin"[project] and "Marc"[project] happened.
             # Orgs/tools/places stay allowed: a company can share a founder's
             # name; a second project named "Marc" cannot.
-            if kind_n in ("project", "idea") and _is_known_person_name(store, key):
+            # Audit 2026-11-11: OCR of an inbox re-minted five known people as
+            # kind=tool, so the guard now covers every non-org kind; only an
+            # org may legitimately share a person's name (a founder's firm).
+            if kind_n != "org" and _is_known_person_name(store, key):
                 return 0
             return store.resolve_entity(key, kind_n, ts=ts)
 

@@ -101,12 +101,45 @@ def _entity_patterns(e: dict) -> list:
     return pats
 
 
+def _longest_match_hits(text: str, ppat: list, epat: list) -> tuple[list, list]:
+    """Longest match wins. A node counts as mentioned only if at least one of
+    its matches is NOT strictly inside a longer match of another node —
+    "Google" inside "Google Sheets" and "Dave" inside "Dave Cappell" are not
+    mentions of Google-the-person or Dave-the-project (audit 2026-11-11)."""
+    found: list[tuple[str, dict, list[tuple[int, int]]]] = []
+    for kind, lst in (("person", ppat), ("entity", epat)):
+        for node, pats in lst:
+            spans = [m.span() for pat in pats for m in pat.finditer(text)]
+            if spans:
+                found.append((kind, node, spans))
+    all_spans = [(sp, i) for i, (_, _, spans) in enumerate(found) for sp in spans]
+
+    def _covered(span: tuple[int, int], idx: int) -> bool:
+        return any(j != idx and o[0] <= span[0] and span[1] <= o[1]
+                   and (o[1] - o[0]) > (span[1] - span[0])
+                   for o, j in all_spans)
+
+    phits, ehits = [], []
+    for i, (kind, node, spans) in enumerate(found):
+        if all(_covered(sp, i) for sp in spans):
+            continue
+        (phits if kind == "person" else ehits).append(node)
+    return phits, ehits
+
+
 def _person_patterns(p: dict) -> list:
     """Match patterns for a person: canonical name PLUS aliases — facts say
     "Hugh", not "Hugh Salva", so scanning the full name alone missed most
     mentions (observed live: a cofounder scored 0.0). Junk-guard each alias
     like a name (length + stop words)."""
     pats, seen = [], set()
+    # An unconfirmed candidate whose whole name is one bare token (a
+    # header-only "Matt") is not identity evidence for every "Matt" in the
+    # corpus. A confirmed person, or a candidate with a full name, keeps its
+    # short aliases ("Hugo" for Hugo Salvatore).
+    if (p.get("promotion_state") or "candidate") == "candidate" \
+            and len((p.get("name") or "").split()) < 2:
+        return []
     for n in [p.get("name") or ""] + list(p.get("aliases") or []):
         n = (n or "").strip()
         low = n.lower()
@@ -204,8 +237,7 @@ def rebuild(store: Store | None = None, *, scope: str = "full") -> dict:
         fid = f["fact_id"]
         text = f"{f.get('text') or ''} {f.get('source_span') or ''}"
         sev = f.get("source_event_id")
-        phits = [p for p, pats in ppat if any(pat.search(text) for pat in pats)]
-        ehits = [e for e, pats in epat if any(pat.search(text) for pat in pats)]
+        phits, ehits = _longest_match_hits(text, ppat, epat)
         touches = (
             _in_nb("fact", fid)
             or any(_in_nb("person", p["id"]) for p in phits)

@@ -821,11 +821,19 @@ class Extractor:
         return ResolveResult(int(pid) if pid else None, "legacy",
                              confidence=0.5)
 
+    # Edges that assert structure (who works where, what is part of what).
+    # Sources without relationship_evidence may still say what a fact is
+    # about or that two things are related.
+    _STRUCTURAL_PREDICATES = frozenset({"works_at", "part_of", "member_of",
+                                        "located_in"})
+
     def _persist_entities(self, facts: dict[str, Any], anchor: int | None,
                           now: float, *, event_source: str = "",
                           window: str = "", text: str = "",
                           fact_ids: list[int] | None = None,
-                          turn_text: str = "") -> tuple[int, int]:
+                          turn_text: str = "",
+                          turn_speaker: str | None = None,
+                          me_is_user: bool = True) -> tuple[int, int]:
         """Persist entity nodes + asserted relation edges. Idempotent: entity
         resolution dedupes by name, edge insert upserts. Shared by the live
         extractor and the backfill (which persists ONLY these, not facts).
@@ -841,13 +849,33 @@ class Extractor:
         from app.services import kg_beliefs
         mint_ok, source_class = kg_beliefs.allow_entity_mint(
             event_source=event_source, window=window, text=text)
+        # Screen OCR is seen, not said: it may BIND existing entities but
+        # never mint (audit 2026-11-11: inbox sender lists became places,
+        # misreads like "sparrow.raventry.us" became nodes). Same rule as
+        # identifier_rollup.
+        if (event_source or "").lower().startswith("desktop.screen"):
+            mint_ok = False
+        # Audit 2026-11-11: four uploaded market briefs asserted ~55 bogus
+        # structural edges and projects (acquirer part_of acquiree, "EU CBAM"
+        # as a project). A document can name things and say what it is
+        # about; it is not evidence of the user's org chart or projects.
+        from app.services import source_policy as _sp_pol
+        try:
+            _pol = _sp_pol.policy_for(source_class)
+            rel_ok = bool(_pol.relationship_evidence) or not event_source
+        except Exception:
+            rel_ok = True
+        doc_class = source_class in ("user_authored_document", "shared_document")
 
         for e in facts.get("entities", []):
             name = (e.get("name") or "").strip()
             if not name:
                 continue
+            kind = e.get("kind")
+            if doc_class and (kind or "").strip().lower() == "project":
+                kind = "idea"
             if mint_ok:
-                resolver.resolve_entity(name, e.get("kind"), ts=now)
+                resolver.resolve_entity(name, kind, ts=now)
                 ne += 1
             else:
                 # Bind-only: still touch last_seen if the org/tool already exists.
@@ -866,7 +894,18 @@ class Extractor:
             # "I work at Acme" → an edge FROM the user's own graph node.
             from app.services import self_profile
             if self_profile.is_self_name(nm):
-                pid = self_profile.self_person_id(store)
+                if me_is_user:
+                    pid = self_profile.self_person_id(store)
+                else:
+                    # Speech: 'me' belongs to the labeled speaker, and an
+                    # unverified / diarization-only speaker owns nothing
+                    # (audit 2026-11-11: a lecturer's "I was on the board"
+                    # became the user's works_at edge).
+                    pid = self._resolve_me_relative_to_speaker(
+                        turn_speaker, now, event_id=anchor,
+                        event_source=event_source or "audio.whisper",
+                        window=window, text=text,
+                        grammatical_role="relation").person_id
                 return ("person", pid) if pid else None
             if kind == "person":
                 # Chat / DM sources are allowed to mint; ambient ASR stays
@@ -916,6 +955,15 @@ class Extractor:
                         confidence=r.get("confidence"), ts=now,
                         quote=span[:400], source_class=source_class)
                     nr += 1
+                continue
+            # Email affiliation comes only from ingest_email_network (each
+            # party's own address domain). An LLM works_at read off a header
+            # or recipient line is noise ("To: Patrick <…@dell.com>; Justin"
+            # made Justin work at Dell, audit 2026-11-11).
+            if pred == "works_at" and source_class == "email" \
+                    and (r.get("subject_kind") or "") == "person":
+                continue
+            if pred in self._STRUCTURAL_PREDICATES and not rel_ok:
                 continue
             subj = _node(r.get("subject", ""), r.get("subject_kind"))
             obj = _node(r.get("object", ""), r.get("object_kind"))
@@ -1682,13 +1730,17 @@ class Extractor:
             if is_audio:
                 self._persist_entities(facts, anchor, now,
                                        fact_ids=made_fact_ids,
-                                       turn_text=turn.text or "")
+                                       turn_text=turn.text or "",
+                                       turn_speaker=turn.speaker or "",
+                                       me_is_user=bool(me_is_user))
             else:
                 self._persist_entities(facts, anchor, now,
                                        event_source=src, window=window,
                                        text=turn.text or "",
                                        fact_ids=made_fact_ids,
-                                       turn_text=turn.text or "")
+                                       turn_text=turn.text or "",
+                                       turn_speaker=turn.speaker or "",
+                                       me_is_user=bool(me_is_user))
         except Exception as exc:
             if is_audio:
                 raise

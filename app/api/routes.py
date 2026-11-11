@@ -3792,6 +3792,16 @@ def person_alias(person_id: int, body: PersonAlias) -> dict:
     return {"ok": True, "id": person_id, "alias": alias}
 
 
+def _same_note(rows: list[dict], text: str) -> int | None:
+    """fact_id of an existing claim whose text equals `text` after
+    case/whitespace folding, else None."""
+    norm = " ".join((text or "").casefold().split())
+    for row in rows:
+        if " ".join((row.get("text") or "").casefold().split()) == norm:
+            return int(row["fact_id"])
+    return None
+
+
 @router.post("/people/{person_id}/note")
 def person_note(person_id: int, body: PersonNote) -> dict:
     """A human-written fact about this person — stored as an APPROVED claim
@@ -3807,6 +3817,10 @@ def person_note(person_id: int, body: PersonNote) -> dict:
     if p["name"].lower() not in text.lower():
         text = f"About {p['name']}: {text}"
     now = _time.time()
+    dup = _same_note(store.recent_claims_about_person(person_id, limit=50), text)
+    if dup is not None:
+        store.touch_fact(dup, now, 1.0)
+        return {"ok": True, "fact_id": dup, "text": text, "deduped": True}
     fid = store.add_claim(text, confidence=1.0, extracted_at=now)
     store.review_fact(fid, "approved")
     store.add_relation("person", person_id, "mentioned_in", "fact", fid,
@@ -4165,6 +4179,13 @@ def entity_note(entity_id: int, body: PersonNote) -> dict:
     if e["name"].lower() not in text.lower():
         text = f"About {e['name']}: {text}"
     now = _time.time()
+    # Idempotent: the same note posted again (an eval harness re-seeding a
+    # seat wrote one claim four times, audit 2026-11-11) refreshes the
+    # existing approved claim instead of appending an unsourced duplicate.
+    dup = _same_note(store.recent_claims_about_entity(entity_id, limit=50), text)
+    if dup is not None:
+        store.touch_fact(dup, now, 1.0)
+        return {"ok": True, "fact_id": dup, "text": text, "deduped": True}
     fid = store.add_claim(text, confidence=1.0, extracted_at=now)
     store.review_fact(fid, "approved")
     store.add_relation("fact", fid, "about", "entity", entity_id,

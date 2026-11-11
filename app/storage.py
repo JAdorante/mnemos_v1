@@ -6224,6 +6224,28 @@ class Store:
             out.setdefault(int(r["fact_id"]), []).append(r["name"])
         return out
 
+    def recent_claims_about_person(self, person_id: int, *,
+                                   kind: str = "claim",
+                                   limit: int = 2) -> list[dict]:
+        """Person-anchored twin of recent_claims_about_entity (edge direction
+        is person --mentioned_in--> fact)."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT f.id AS fact_id, f.text AS text
+                FROM relations r
+                JOIN facts f ON f.id = r.obj_id
+                WHERE r.subj_type = 'person' AND r.subj_id = ?
+                  AND r.predicate = 'mentioned_in' AND r.obj_type = 'fact'
+                  AND f.kind = ?
+                  AND COALESCE(f.text, '') != ''
+                  AND COALESCE(f.state, 'active') != 'superseded'
+                  AND COALESCE(f.review, '') != 'dismissed'
+                ORDER BY f.id DESC LIMIT ?
+                """, (int(person_id), kind, int(limit))).fetchall()
+        return [{"fact_id": int(r["fact_id"]), "text": r["text"] or ""}
+                for r in rows]
+
     def recent_claims_about_entity(self, entity_id: int, *,
                                    kind: str = "claim",
                                    limit: int = 2) -> list[dict]:

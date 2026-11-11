@@ -70,7 +70,7 @@
     "user_authored_document": {
       "extract_mentions": true,
       "create_person_candidates": false,
-      "relationship_evidence": true,
+      "relationship_evidence": false,
       "extract_contacts": true,
       "create_commitments": true,
       "create_claims": true,

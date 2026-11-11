@@ -292,8 +292,6 @@ class SpeakerIdentifier:
         ``space``: default (ambient mix), ``self`` (mic during a MeetingSession —
         skip clustering), ``remote`` (loopback — cluster only among remotes).
         """
-        if space == "self":
-            return self._self_channel_result()
         emb = self.embed(audio, sample_rate)
         return self.identify_embedding(emb, aq, space=space)
 
@@ -315,12 +313,39 @@ class SpeakerIdentifier:
             "thresholds": {"id": 1.0, "cluster": 1.0, "margin": 0.0},
         }
 
+    def _verify_self_channel(self, emb: np.ndarray, aq: dict | None) -> dict:
+        """The mic channel is a prior, not proof. A laptop mic hears lectures,
+        TVs and the person across the table (audit 2026-11-11: a finance
+        lecture became 'the user was on the board of Slack'). The channel keeps
+        ``decision='self_channel'`` as routing, but ``is_known``/``name`` are
+        only set when the user's ENROLLED voiceprint matches; with no
+        enrollment or no match the utterance stays unidentified."""
+        base = self._self_channel_result()
+        name = base.get("name") or ""
+        with self._lock:
+            vp = self._voiceprints.get(name) if name and name != "You" else None
+        if vp is None:
+            base.update({"is_known": False, "name": None, "label": "Unverified mic",
+                         "similarity": 0.0, "confidence": 0.0, "margin": 0.0,
+                         "reason": "no enrolled voiceprint for the user"})
+            return base
+        sim = _cos(emb, vp)
+        profile = classify_environment(aq)
+        eff_id, _, _ = self._eff_thresholds(profile)
+        base.update({"similarity": sim, "confidence": sim,
+                     "margin": sim - eff_id, "environment_profile": profile,
+                     "thresholds": {"id": eff_id, "cluster": eff_id, "margin": 0.0}})
+        if sim < eff_id:
+            base.update({"is_known": False, "name": None, "label": "Unverified mic",
+                         "reason": "mic speech does not match the user's voiceprint"})
+        return base
+
     def identify_embedding(self, emb: np.ndarray, aq: dict | None = None,
                            space: str = "default") -> dict:
         """Pure decision logic over a precomputed embedding (model-free -> testable).
         Mutates cluster state / profile stats; returns the rich result dict."""
         if space == "self":
-            return self._self_channel_result()
+            return self._verify_self_channel(emb, aq)
         profile = classify_environment(aq)
         eff_id, eff_cluster, eff_margin = self._eff_thresholds(profile)
 

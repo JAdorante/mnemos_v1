@@ -901,12 +901,14 @@ def parse_email_parties(text: str) -> list[dict]:
                 continue
             seen.add(email)
             name = (em.group("name") or "").strip()
+            from_local = False
             if not name:
                 local = email.split("@", 1)[0]
                 name = re.sub(r"[._]+", " ", local).title()
+                from_local = True
             parties.append({
                 "role": field, "name": name, "email": email,
-                "quote": body.strip()[:200],
+                "quote": body.strip()[:200], "name_from_local": from_local,
             })
     # Signature org: prefer a line with company cues or matching the From domain.
     sig_org = None
@@ -941,8 +943,39 @@ def parse_email_parties(text: str) -> list[dict]:
     return parties
 
 
+# Audit 2026-11-11: header seeding minted "Google", "Microsoft Learn" and
+# "Google Workspace Alerts" as people, named people after mailbox local-parts,
+# took the FIRST hostname label as the org ("Accounts", "Mails", "College"),
+# and asserted works_at for students at @villanova.edu / @college.harvard.edu.
+_AUTOMATED_LOCAL = re.compile(
+    r"^(?:no-?reply|do-?not-?reply|donotreply|notifications?|alerts?|"
+    r"mailer-daemon|postmaster|bounces?|news(?:letter)?|updates?|marketing|"
+    r"billing|security|support|info|hello|team)(?:[._+-].*)?$", re.I)
+_AUTOMATED_SUBDOMAINS = frozenset({
+    "mail", "mails", "email", "emails", "e", "em", "news", "notify", "notifications",
+    "alerts", "accounts", "accountprotection", "marketing", "info"})
+_AUTOMATED_NAME = re.compile(r"\b(?:alerts?|notifications?|no-?reply|team)\b", re.I)
+_PUBLIC_SLD = frozenset({"co", "com", "ac", "edu", "org", "net", "gov"})
+
+
+def is_automated_sender(email: str, name: str = "") -> bool:
+    """A no-reply / alerts / notification mailbox — a system, not a person."""
+    local, _, dom = (email or "").lower().partition("@")
+    labels = dom.split(".")
+    return bool(_AUTOMATED_LOCAL.match(local)
+                or (len(labels) > 2 and labels[0] in _AUTOMATED_SUBDOMAINS)
+                or _AUTOMATED_NAME.search(name or ""))
+
+
+def is_academic_domain(email_or_domain: str) -> bool:
+    dom = (email_or_domain or "").lower().rpartition("@")[2]
+    return dom.endswith(".edu") or ".ac." in dom or dom.endswith(".ac")
+
+
 def org_from_email_domain(email: str) -> str | None:
-    """Corporate domain → org display name; free-mail domains → None."""
+    """Corporate domain → org display name; free-mail domains → None. Uses the
+    registrable label (google in accounts.google.com, harvard in
+    college.harvard.edu), not the leftmost hostname label."""
     try:
         domain = (email or "").split("@", 1)[1].lower().strip()
     except IndexError:
@@ -950,10 +983,13 @@ def org_from_email_domain(email: str) -> str | None:
     if not domain or domain in _FREE_MAIL or domain.endswith(".example.com") \
             or domain == "example.com":
         return None
-    # strip common second-level consumer-ish hosts
-    if domain.startswith("mail.") or domain.startswith("email."):
-        domain = domain.split(".", 1)[-1]
-    label = domain.split(".")[0]
+    labels = [x for x in domain.split(".") if x]
+    if len(labels) >= 3 and len(labels[-1]) == 2 and labels[-2] in _PUBLIC_SLD:
+        label = labels[-3]          # acme.co.uk -> acme
+    elif len(labels) >= 2:
+        label = labels[-2]          # accounts.google.com -> google
+    else:
+        label = labels[0] if labels else ""
     if not label or len(label) < 2:
         return None
     return label.replace("-", " ").title()
@@ -991,12 +1027,15 @@ def ingest_email_network(
         email = party.get("email") or ""
         if not email:
             continue
+        if is_automated_sender(email, name):
+            continue
         pid = None
         try:
             pid = store.find_person_by_contact("email", email)
         except Exception:
             pid = None
-        if not pid and name and nq.is_plausible_person(name):
+        if not pid and name and not party.get("name_from_local") \
+                and nq.is_plausible_person(name):
             res = resolve_person_mention(
                 name, store=store, event_id=event_id,
                 event_source=event_source, window=window, text=text,
@@ -1022,16 +1061,18 @@ def ingest_email_network(
                 pass
         org_name = party.get("org") or org_from_email_domain(email)
         if org_name and policy.update_people and policy.relationship_evidence:
+            # A university address says "member", not "employee".
+            pred = "member_of" if is_academic_domain(email) else "works_at"
             try:
                 eid = store.resolve_entity(org_name, "org", ts=ts)
                 store.add_relation(
-                    "person", int(pid), "works_at", "entity", int(eid),
+                    "person", int(pid), pred, "entity", int(eid),
                     origin="asserted", ts=ts,
                     quote=f"{name} <{email}>", source_class="email")
                 from app.services import kg_beliefs
                 kg_beliefs.record_from_relation(
                     store, subj_type="person", subj_id=int(pid),
-                    predicate="works_at", obj_type="entity", obj_id=int(eid),
+                    predicate=pred, obj_type="entity", obj_id=int(eid),
                     origin="asserted", source_event_id=event_id,
                     confidence=0.7, ts=ts,
                     quote=f"{name} <{email}>", source_class="email")
