@@ -8,13 +8,15 @@ from __future__ import annotations
 from typing import Any, Iterable, Iterator
 
 from sqlalchemy import bindparam, func, insert, or_, select, text, update
+from sqlalchemy.dialects.postgresql import array as pg_array
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Connection
 
 from org_coordinator.repo.schema import (alerts, audit_anchors, audit_log,
                                          connector_mappings, connectors,
                                          drift_notices, forwarded_packets,
                                          holds, invites, members,
-                                         node_credentials, orgs,
+                                         node_credentials, orgs, pointers,
                                          record_evidence, record_versions,
                                          records, scope_grants, scopes,
                                          sync_jobs, sync_queue)
@@ -615,6 +617,81 @@ class Repo:
             alerts.c.org_id == self.org_id, alerts.c.id == alert_id)
             .values(acked_at=now))
         return int(r.rowcount or 0)
+
+
+    # ------------------------------------------------------------ pointers --
+    _POINTER_SET = ("node_id", "kind", "scope_id", "tags", "people", "terms",
+                    "text_terms", "item_at", "source", "title", "snippet",
+                    "refs", "published_at")
+
+    def upsert_pointers(self, rows: list[dict]) -> int:
+        if not rows:
+            return 0
+        stmt = pg_insert(pointers).values(
+            [{"org_id": self.org_id, **r} for r in rows])
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[pointers.c.org_id, pointers.c.owner_id,
+                            pointers.c.item_ref],
+            set_={k: stmt.excluded[k] for k in self._POINTER_SET})
+        self.conn.execute(stmt)
+        return len(rows)
+
+    def delete_pointers(self, owner_id: str, item_refs: list[str]) -> int:
+        if not item_refs:
+            return 0
+        r = self.conn.execute(pointers.delete().where(
+            pointers.c.org_id == self.org_id, pointers.c.owner_id == owner_id,
+            pointers.c.item_ref.in_(list(item_refs))))
+        return int(r.rowcount or 0)
+
+    def pointer_refs(self, owner_id: str, node_id: str | None = None) -> list[str]:
+        q = select(pointers.c.item_ref).where(
+            pointers.c.org_id == self.org_id, pointers.c.owner_id == owner_id)
+        if node_id is not None:
+            q = q.where(pointers.c.node_id == node_id)
+        return [r.item_ref for r in self.conn.execute(q)]
+
+    def delete_owner_pointers(self, owner_id: str, *,
+                              scope_id: str | None = None) -> int:
+        q = pointers.delete().where(pointers.c.org_id == self.org_id,
+                                    pointers.c.owner_id == owner_id)
+        if scope_id is not None:
+            q = q.where(pointers.c.scope_id == scope_id)
+        return int(self.conn.execute(q).rowcount or 0)
+
+    def owner_pointer_scopes(self, owner_id: str) -> list[str]:
+        rs = self.conn.execute(select(pointers.c.scope_id).distinct().where(
+            pointers.c.org_id == self.org_id, pointers.c.owner_id == owner_id,
+            pointers.c.scope_id.is_not(None)))
+        return [r.scope_id for r in rs]
+
+    def delete_all_pointers(self) -> int:
+        r = self.conn.execute(pointers.delete().where(
+            pointers.c.org_id == self.org_id))
+        return int(r.rowcount or 0)
+
+    def count_pointers(self, owner_id: str | None = None) -> int:
+        q = select(func.count()).select_from(pointers).where(
+            pointers.c.org_id == self.org_id)
+        if owner_id is not None:
+            q = q.where(pointers.c.owner_id == owner_id)
+        return int(self.conn.execute(q).scalar() or 0)
+
+    def pointer_candidates(self, keys: list[str], *, open_scopes: list[str],
+                           exclude_owner: str, limit: int = 2000) -> list[dict]:
+        """Pointers whose tags/people match a key anywhere, or whose title or
+        snippet match one in a scope the reader may open. Newest first."""
+        if not keys:
+            return []
+        arr = pg_array(list(keys))
+        cond = pointers.c.terms.has_any(arr)
+        if open_scopes:
+            cond = or_(cond, (pointers.c.scope_id.in_(list(open_scopes))
+                              & pointers.c.text_terms.has_any(arr)))
+        q = (select(pointers).where(pointers.c.org_id == self.org_id,
+                                    pointers.c.owner_id != exclude_owner, cond)
+             .order_by(pointers.c.item_at.desc()).limit(int(limit)))
+        return _rows(self.conn.execute(q))
 
 
 __all__ = ["Conflict", "Repo"]

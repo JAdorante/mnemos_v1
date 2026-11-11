@@ -1807,7 +1807,16 @@ def handle_ask(peer: dict, payload: dict) -> dict:
     # auto-accept work on someone's behalf. Org escalations are likewise
     # always offer (Phase 1: exec must see them). Notify is an inbound update
     # from their teammate's Sparrow — also offer unless the sim flag.
-    if kind in ("handoff", "org_escalate", "notify"):
+    if kind == "pointer_query":
+        # A teammate's team search (Sealed / Perimeter rungs, or federated by
+        # setting): answered from this seat's pointers with the central
+        # index's rule, or held for the owner when the rung wants a human.
+        from app.services import team_search
+        reply = team_search.inbound(peer, question, ask_id=ask_id)
+        if reply is not None:
+            return reply
+        action, topic = "offer", "pointers"
+    elif kind in ("handoff", "org_escalate", "notify"):
         action, topic = "offer", "work"
         if kind == "notify" and settings.peer.auto_answer:
             action = "auto"
@@ -1941,6 +1950,9 @@ def _ask_line(item: dict) -> str:
         return f"{who} sent company priority guidance"
     if kind == "org_escalate":
         return f"{who} escalated a strategic issue"
+    if kind == "pointer_query":
+        return (f"{who}'s Sparrow is searching the team for “{q}”. Approve "
+                "to tell them where your matching items are")
     return f"{who}'s Sparrow asks: “{q}”"
 
 
@@ -2186,6 +2198,10 @@ def decide_ask(local_id: str, approve: bool) -> dict:
                 pass
         return {"ok": True, "status": "denied", "delivered": delivered}
 
+    if item.get("kind") == "pointer_query":
+        from app.services import team_search
+        return team_search.approve(local_id, item, peer_rec)
+
     if item.get("kind") == "handoff":
         # Accepting a handoff doesn't compose an answer — it takes the task:
         # ACCEPTED tier (this human just said yes to it), mined by the same
@@ -2418,6 +2434,7 @@ def ask(peer_id: str, question: str, kind: str = "question",
     from app.services import egress
     verdict = egress.decide(
         path=("org_digest" if kind.startswith("org_") else
+              "pointers" if kind == "pointer_query" else
               "team" if (team_slug or team_ask_id) else "peer"),
         destination=peer_rec.get("name") or peer_id, policy="allow",
         approved=not kind.startswith("org_"), text=question,
@@ -3087,7 +3104,8 @@ _EMAIL_ENVELOPE_RE = re.compile(
 # inbound credential (routes.py hands it to fleet/inbound.py before pairing
 # auth runs). A paired peer can neither send nor receive one directly.
 _PEER_KINDS = ("question", "handoff", "notify", "slot_request",
-               "org_digest", "org_priority", "org_escalate", "signal")
+               "org_digest", "org_priority", "org_escalate", "signal",
+               "pointer_query")
 _RELAY_ONLY_KINDS = ("signal",)
 _ORG_KINDS = ("org_digest", "org_priority", "org_escalate")
 

@@ -317,3 +317,72 @@ def answerable(body: AnswerableIn, p: Principal = Depends(principal)) -> dict:
     return {"records": service.answerable(
         get_db(), p, asker_member_id=body.asker_member_id,
         question=body.question)}
+
+
+# ------------------------------------------- team search: pointer index --
+class PointersIn(BaseModel):
+    pointers: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ItemRefsIn(BaseModel):
+    item_refs: list[str] = Field(default_factory=list)
+
+
+class UnshareIn(BaseModel):
+    scope_id: str = Field(..., min_length=1, max_length=64)
+
+
+@router.post("/pointers")
+def publish_pointers(body: PointersIn, p: Principal = Depends(principal)) -> dict:
+    from org_coordinator.records import pointer_index
+    return pointer_index.publish(get_db(), p, body.pointers)
+
+
+@router.post("/pointers/withdraw")
+def withdraw_pointers(body: ItemRefsIn, p: Principal = Depends(principal)) -> dict:
+    from org_coordinator.records import pointer_index
+    return pointer_index.withdraw(get_db(), p, body.item_refs)
+
+
+@router.post("/pointers/reconcile")
+def reconcile_pointers(body: ItemRefsIn,
+                       p: Principal = Depends(principal)) -> dict:
+    from org_coordinator.records import pointer_index
+    return pointer_index.reconcile(get_db(), p, body.item_refs)
+
+
+@router.post("/pointers/unshare")
+def unshare_pointers(body: UnshareIn, p: Principal = Depends(principal)) -> dict:
+    from org_coordinator.records import pointer_index
+    return pointer_index.unshare(get_db(), p, body.scope_id)
+
+
+@router.get("/pointers/search")
+def search_pointers(q: str, limit: int = 8, ask_limit: int = 3,
+                    p: Principal = Depends(principal)) -> dict:
+    from org_coordinator.records import pointer_index
+    return pointer_index.search(get_db(), p, query=q, limit=limit,
+                                ask_limit=ask_limit)
+
+
+@router.get("/pointers/status")
+def pointer_status(p: Principal = Depends(principal)) -> dict:
+    from org_coordinator.records import pointer_index
+    return pointer_index.status(get_db(), p)
+
+
+@router.get("/scopes/common")
+def common_scopes(member_id: str, p: Principal = Depends(principal)) -> dict:
+    from org_coordinator.records import pointer_index
+    return pointer_index.common_scopes(get_db(), p, member_id=member_id)
+
+
+@router.post("/orgs/{org_id}/members/{member_id}/depart")
+def depart_member(org_id: str, member_id: str,
+                  p: Principal = Depends(principal)) -> dict:
+    return service.depart_member(get_db(), p, org_id, member_id)
+
+
+@router.post("/members/leave")
+def leave(p: Principal = Depends(principal)) -> dict:
+    return service.leave(get_db(), p)

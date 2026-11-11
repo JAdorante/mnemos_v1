@@ -293,3 +293,30 @@ alerts = Table(
     Column("created_at", Double, nullable=False),
     Column("acked_at", Double),
 )
+
+
+# --- Team search: the pointer index -----------------------------------------
+# Where an item lives and who has it, never what it says. A title or snippet
+# exists only on a pointer in a shared project (CHECK in 0004), and `terms` /
+# `text_terms` are match keys the service derives itself.
+pointers = Table(
+    "pointers", metadata,
+    Column("org_id", Text, ForeignKey("orgs.id"), nullable=False),
+    Column("owner_id", Text, ForeignKey("members.id"), nullable=False),
+    Column("item_ref", Text, nullable=False),
+    Column("node_id", Text, nullable=False),
+    Column("kind", Text, nullable=False),
+    Column("scope_id", Text, ForeignKey("scopes.id")),
+    Column("tags", JSONB, nullable=False, server_default="[]"),
+    Column("people", JSONB, nullable=False, server_default="[]"),
+    Column("terms", JSONB, nullable=False, server_default="[]"),
+    Column("text_terms", JSONB, nullable=False, server_default="[]"),
+    Column("item_at", Double, nullable=False),
+    Column("source", Text, nullable=False),
+    Column("title", Text),
+    Column("snippet", Text),
+    Column("refs", Integer, nullable=False, server_default="0"),
+    Column("published_at", Double, nullable=False),
+    PrimaryKeyConstraint("org_id", "owner_id", "item_ref"),
+    Index("ix_pointers_scope", "org_id", "scope_id"),
+)

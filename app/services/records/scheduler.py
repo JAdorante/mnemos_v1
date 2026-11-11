@@ -5,6 +5,11 @@
                    submits, expiry notices), heartbeat the org service.
   capture_expiry   due-checked hourly, runs once per UTC day. Mode comes from
                    QUILL_CAPTURE_EXPIRY (default dry_run: receipts only).
+  team_index       every 10 min when QUILL_TEAM_SEARCH is set: rebuild this
+                   seat's team search pointers, publish them (Connected) and
+                   withdraw what no longer qualifies (app/services/team_index).
+                   With the setting off it still runs once, to take back
+                   anything an earlier setting published.
 """
 from __future__ import annotations
 
@@ -31,6 +36,11 @@ def records_tick() -> dict:
         except Exception as exc:
             out["org_error"] = str(exc)
     return out
+
+
+def _team_index_tick() -> dict:
+    from app.services import team_index
+    return team_index.sync()
 
 
 def expiry_due(store=None, *, now: float | None = None) -> bool:
@@ -71,6 +81,12 @@ def attach(worker) -> None:
 
     worker.register("records_tick", lambda _p: records_tick())
     worker.register("capture_expiry", lambda _p: retention.sweep())
+    worker.register("team_index", lambda _p: _team_index_tick())
+    try:
+        from app.services import team_index
+        team_index.attach()
+    except Exception as exc:
+        print(f"[records] team index hook skipped ({exc}).")
 
     def _tick_records() -> None:
         from app.services.records import claim_builder
@@ -81,8 +97,14 @@ def attach(worker) -> None:
         if expiry_due():
             worker.enqueue("capture_expiry", unique=True)
 
+    def _tick_team_index() -> None:
+        from app.services import team_index
+        if team_index.setting() != "off" or team_index.holds_published():
+            worker.enqueue("team_index", unique=True)
+
     with _lock:
         _every("records_tick", _TICK_S, _tick_records)
         _every("capture_expiry", _EXPIRY_CHECK_S, _tick_expiry)
+        _every("team_index", _TICK_S, _tick_team_index)
     print(f"[records] attached (claims every {int(_TICK_S)}s, expiry mode "
           f"{retention.mode()}).")

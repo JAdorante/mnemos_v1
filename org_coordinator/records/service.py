@@ -205,6 +205,61 @@ def members_view(db, org_id: str) -> list[dict[str, Any]]:
                 for m in repo.list_members()]
 
 
+def _depart(repo, member: dict, *, actor: str, now: float) -> dict[str, Any]:
+    from org_coordinator.records import pointer_index
+    repo.update_member(member["id"], status="departed", left_at=now)
+    revoked = repo.revoke_credentials(member["id"], now)
+    withdrawn = pointer_index.purge_member(repo, member["id"], why="departed",
+                                           at=now, actor=actor)
+    audit.append(repo, actor, "member.depart", member["id"],
+                 {"revoked_credentials": revoked,
+                  "pointers_withdrawn": withdrawn}, at=now)
+    return {"ok": True, "member_id": member["id"], "status": "departed",
+            "revoked_credentials": revoked, "pointers_withdrawn": withdrawn}
+
+
+def depart_member(db, principal: Principal, org_id: str, member_id: str, *,
+                  now: float | None = None) -> dict[str, Any]:
+    """An admin removes a member: their credentials stop working at the next
+    request and every pointer they published leaves the index now."""
+    now = _now(now)
+    if org_id != principal.org_id:
+        raise ServiceError(403, "org_mismatch")
+    with db.tenant(org_id) as repo:
+        _require_org_admin(repo, principal)
+        member = repo.get_member(member_id)
+        if member is None:
+            raise ServiceError(404, "member_not_found")
+        if member["status"] == "departed":
+            return {"ok": True, "member_id": member_id, "status": "departed",
+                    "revoked_credentials": 0, "pointers_withdrawn": 0}
+        return _depart(repo, member, actor=principal.member_id, now=now)
+
+
+def depart_operator(db, org_id: str, *, member_id: str,
+                    now: float | None = None) -> dict[str, Any]:
+    """Operator CLI: the same departure, for when no admin node is at hand."""
+    now = _now(now)
+    with db.tenant(org_id) as repo:
+        member = repo.get_member(member_id)
+        if member is None:
+            raise ServiceError(404, "member_not_found")
+        if member["status"] == "departed":
+            return {"ok": True, "member_id": member_id, "status": "departed",
+                    "revoked_credentials": 0, "pointers_withdrawn": 0}
+        return _depart(repo, member, actor="operator", now=now)
+
+
+def leave(db, principal: Principal, *, now: float | None = None) -> dict[str, Any]:
+    """A member leaves the org from their own node."""
+    now = _now(now)
+    with db.tenant(principal.org_id) as repo:
+        member = repo.get_member(principal.member_id)
+        if member is None or member["status"] != "active":
+            raise ServiceError(403, "member_inactive")
+        return _depart(repo, member, actor=member["id"], now=now)
+
+
 def reissue_credential(db, org_id: str, *, member_id: str,
                        now: float | None = None) -> dict[str, Any]:
     """Operator CLI, for a node that lost its credential (a crash zeroed the
@@ -305,8 +360,11 @@ def heartbeat(db, principal: Principal, *, peer_url: str | None = None,
                           if {"approve", "admin"} & set(s["permissions"])]
         drift = [_drift_view(repo, d) for d in repo.open_drift(approve_scopes)]
         roster = _roster(repo, member, scopes)
+        from org_coordinator.records import pointer_index
+        team_index = pointer_index.index_state(org)
     return {"org_id": principal.org_id, "member_id": principal.member_id,
             "role": member["role"], "rung": org["rung"],
+            "team_index": team_index,
             "policy_version": org["policy_version"], "policy": policy,
             "scopes": [s for s in scopes if s["permissions"]],
             "forwarded": forwarded, "sync": sync_out, "drift": drift,
@@ -449,6 +507,11 @@ def update_scope(db, principal: Principal, org_id: str, scope_id: str,
             repo.update_scope(scope_id, **allowed)
             audit.append(repo, principal.member_id, "scope.update", scope_id,
                          allowed, at=now)
+            if "parent_id" in allowed:
+                from org_coordinator.records import pointer_index
+                for m in repo.list_members():
+                    pointer_index.drop_unreadable(repo, m["id"], at=now,
+                                                  actor=principal.member_id)
         member = repo.get_member(principal.member_id)
         return _scope_view(repo, member, repo.get_scope(scope_id))
 
@@ -473,6 +536,10 @@ def set_grant(db, principal: Principal, scope_id: str, *, member_id: str,
         if revoke:
             n = repo.delete_grant(scope_id, member_id, permission)
             action = "grant.revoke"
+            if n:
+                from org_coordinator.records import pointer_index
+                pointer_index.drop_unreadable(repo, member_id, at=now,
+                                              actor=principal.member_id)
         else:
             if target["role"] == "viewer" and permission != "read":
                 raise ServiceError(400, "viewer_read_only")
@@ -869,14 +936,29 @@ def put_policy(db, principal: Principal, org_id: str, body: dict[str, Any], *,
     rung = body.get("rung")
     if rung is not None and rung not in RUNGS:
         raise ServiceError(422, "bad_rung")
+    team_search = (body.get("policy") or {}).get("team_search")
+    if team_search is not None and not (
+            isinstance(team_search, dict)
+            and isinstance(team_search.get("publish", True), bool)):
+        raise ServiceError(422, "bad_policy", "team_search.publish is a bool")
     with db.tenant(org_id) as repo:
         _require_org_admin(repo, principal)
         merged = dict(repo.get_org()["policy_json"] or {})
         merged["retention"] = {**DEFAULT_POLICY["retention"],
                                **(merged.get("retention") or {}), **retention}
+        if team_search is not None:
+            merged["team_search"] = {"publish": bool(
+                team_search.get("publish", True))}
         org = repo.set_policy(merged, rung=rung)
         audit.append(repo, principal.member_id, "policy.change", org_id,
                      {"policy": merged, "rung": org["rung"]}, at=now)
+        # Leaving Connected (or turning publishing off) means metadata stops
+        # leaving seats, so what already left comes out in the same change.
+        from org_coordinator.records import pointer_index
+        state = pointer_index.index_state(org)
+        if state != "open":
+            pointer_index.purge_org(repo, why=state.split(":", 1)[1], at=now,
+                                    actor=principal.member_id)
     return {"rung": org["rung"], "policy": org["policy_json"],
             "policy_version": org["policy_version"]}
 

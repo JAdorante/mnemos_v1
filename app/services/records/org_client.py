@@ -21,6 +21,7 @@ from urllib import error, request
 from app.atomic_json import write_json
 
 _TIMEOUT_S = 10.0
+_CHAT_TIMEOUT_S = 3.0
 _transport: Callable[..., tuple[int, dict]] | None = None
 _access: dict[str, Any] = {}
 _warned_unreadable = False
@@ -96,13 +97,14 @@ def cached_permissions(scope_id: str) -> set[str]:
 
 
 def _http(method: str, url: str, body: dict | None,
-          headers: dict[str, str]) -> tuple[int, dict]:
+          headers: dict[str, str],
+          timeout: float = _TIMEOUT_S) -> tuple[int, dict]:
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = request.Request(url, data=data, method=method,
                           headers={"Content-Type": "application/json",
                                    **headers})
     try:
-        with request.urlopen(req, timeout=_TIMEOUT_S) as resp:
+        with request.urlopen(req, timeout=timeout) as resp:
             return int(resp.status), json.loads(resp.read() or b"{}")
     except error.HTTPError as exc:
         try:
@@ -115,14 +117,16 @@ def _http(method: str, url: str, body: dict | None,
 
 
 def _call(method: str, path: str, body: dict | None = None, *,
-          auth: bool = True, base_url: str | None = None) -> dict:
+          auth: bool = True, base_url: str | None = None,
+          timeout: float = _TIMEOUT_S) -> dict:
     base = (base_url or membership().get("service_url") or "").rstrip("/")
     if not base and _transport is None:
         raise OrgUnavailable("not joined to an org")
     headers: dict[str, str] = {}
     if auth:
         headers["Authorization"] = f"Bearer {_access_token()}"
-    send = _transport or (lambda m, p, b, h: _http(m, base + p, b, h))
+    send = _transport or (lambda m, p, b, h: _http(m, base + p, b, h,
+                                                     timeout))
     status, payload = send(method, path, body, headers)
     if status >= 500:
         raise OrgUnavailable(f"{status} {payload}")
@@ -181,6 +185,7 @@ def heartbeat(store=None) -> dict[str, Any]:
     m = membership()
     m.update(scopes=out.get("scopes") or [], policy=out.get("policy") or {},
              rung=out.get("rung") or m.get("rung"),
+             team_index=out.get("team_index") or m.get("team_index"),
              heartbeat_at=time.time(), org_id=out.get("org_id", m.get("org_id")),
              roster=out.get("roster") or [])
     _save(m)
@@ -287,6 +292,37 @@ def report_expired(event_refs: list[int], expired_at: float) -> dict[str, Any]:
                  {"node_id": membership().get("node_id"),
                   "event_refs": [int(e) for e in event_refs],
                   "expired_at": float(expired_at)})
+
+
+# --------------------------------------------- team search: pointer index --
+def publish_pointers(pointers: list[dict[str, Any]]) -> dict[str, Any]:
+    return _call("POST", "/pointers", {"pointers": pointers})
+
+
+def withdraw_pointers(item_refs: list[str]) -> dict[str, Any]:
+    return _call("POST", "/pointers/withdraw", {"item_refs": list(item_refs)})
+
+
+def reconcile_pointers(item_refs: list[str]) -> dict[str, Any]:
+    return _call("POST", "/pointers/reconcile", {"item_refs": list(item_refs)})
+
+
+def unshare_pointers(scope_id: str) -> dict[str, Any]:
+    return _call("POST", "/pointers/unshare", {"scope_id": scope_id})
+
+
+def search_pointers(query: str, *, limit: int = 8,
+                    ask_limit: int = 3) -> dict[str, Any]:
+    from urllib.parse import urlencode
+    # On the chat path: a slow org costs a few seconds, not ten.
+    return _call("GET", "/pointers/search?" + urlencode(
+        {"q": query, "limit": limit, "ask_limit": ask_limit}),
+        timeout=_CHAT_TIMEOUT_S)
+
+
+def common_scopes(member_id: str) -> dict[str, Any]:
+    from urllib.parse import urlencode
+    return _call("GET", "/scopes/common?" + urlencode({"member_id": member_id}))
 
 
 def drain_outbox(store=None, *, now: float | None = None) -> dict[str, Any]:

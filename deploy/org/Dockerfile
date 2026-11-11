@@ -6,12 +6,13 @@ WORKDIR /srv/org
 COPY requirements-org.txt .
 RUN pip install --no-cache-dir -r requirements-org.txt
 COPY org_coordinator ./org_coordinator
-# The canonical-hash module is shared with nodes (stdlib only); nothing else
-# from app/ is imported by the service.
+# The canonical-hash and team-search pointer modules are shared with nodes
+# (stdlib only); nothing else from app/ is imported by the service.
 COPY app/__init__.py ./app/__init__.py
 COPY app/services/__init__.py ./app/services/__init__.py
 COPY app/services/records/__init__.py ./app/services/records/__init__.py
 COPY app/services/records/canonical.py ./app/services/records/canonical.py
+COPY app/services/records/pointers.py ./app/services/records/pointers.py
 # The fleet relay (mounted on the same coordinator app) imports the
 # stdlib-only signal envelope; the package __init__ is import-free on purpose.
 COPY app/services/fleet/__init__.py ./app/services/fleet/__init__.py
