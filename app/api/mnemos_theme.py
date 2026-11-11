@@ -44,6 +44,7 @@ _ASSET_FINGERPRINT_FILES = (
     "js/mnemos-ui.js",
     "js/mnemos-approval.js",
     "js/sparrow.js",
+    "js/sparrow-brains.js",
     "fonts/mnemos-fonts.css",
 )
 

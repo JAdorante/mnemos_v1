@@ -1,0 +1,137 @@
+{
+  "$id": "sparrow/brains/deal",
+  "version": "deal-v1",
+  "type": "deal",
+  "label": "deal",
+  "phrase": "a live deal",
+  "description": "A transaction Sparrow is tracking: a company being bought, sold, or financed.",
+  "sections": [
+    {
+      "key": "thesis",
+      "label": "Thesis",
+      "order": 0,
+      "required": true,
+      "max_items": 12,
+      "sources": [
+        "keywords:thesis",
+        "hint:model"
+      ],
+      "gap": "What is the thesis for {label}?",
+      "hints": [
+        "thesis"
+      ]
+    },
+    {
+      "key": "people",
+      "label": "People",
+      "order": 1,
+      "required": true,
+      "max_items": 20,
+      "sources": [
+        "people_links",
+        "hint:model"
+      ],
+      "gap": "Who are the people on {label}?",
+      "hints": [
+        "role",
+        "relationship"
+      ]
+    },
+    {
+      "key": "status",
+      "label": "Status",
+      "order": 2,
+      "required": true,
+      "max_items": 4,
+      "sources": [
+        "status_claims",
+        "status_attr",
+        "next_task",
+        "hint:model"
+      ],
+      "gap": "What is the current status of {label}?",
+      "hints": [
+        "status",
+        "performance"
+      ]
+    },
+    {
+      "key": "commitments",
+      "label": "Commitments",
+      "order": 3,
+      "required": true,
+      "max_items": 20,
+      "sources": [
+        "open_commitments",
+        "commitment_claims",
+        "hint:model"
+      ],
+      "gap": "Who owes what on {label}?",
+      "hints": [
+        "commitment"
+      ]
+    },
+    {
+      "key": "risks",
+      "label": "Risks and objections",
+      "order": 4,
+      "required": false,
+      "max_items": 12,
+      "sources": [
+        "keywords:risks",
+        "hint:model"
+      ],
+      "gap": "What are the risks and objections on {label}?",
+      "hints": [
+        "risk"
+      ]
+    },
+    {
+      "key": "competitors",
+      "label": "Competitors",
+      "order": 5,
+      "required": false,
+      "max_items": 12,
+      "sources": [
+        "competes_with",
+        "keywords:competitors",
+        "hint:model"
+      ],
+      "gap": "Who competes with {label}?",
+      "hints": [
+        "competitor"
+      ]
+    },
+    {
+      "key": "decisions",
+      "label": "Decisions",
+      "order": 6,
+      "required": false,
+      "max_items": 12,
+      "sources": [
+        "decision_claims",
+        "hint:model"
+      ],
+      "gap": "What has been decided on {label}?",
+      "hints": [
+        "decision"
+      ]
+    },
+    {
+      "key": "open_questions",
+      "label": "Open questions",
+      "order": 7,
+      "required": false,
+      "max_items": 20,
+      "sources": [
+        "gaps",
+        "question_facts",
+        "hint:model"
+      ],
+      "gap": null,
+      "hints": [
+        "question"
+      ]
+    }
+  ]
+}

@@ -32,6 +32,10 @@ body{
 #constPane{display:none;flex:1;min-height:0;overflow:auto;
   padding:16px 24px calc(20px + var(--dock-clear, 72px))}
 #constPane.on{display:block}
+#brainsPane{display:none;flex:1;min-height:0;overflow:auto;
+  padding:16px 24px calc(20px + var(--dock-clear, 72px))}
+#brainsPane.on{display:block}
+#brainsHost{max-width:1120px;margin:0 auto}
 .const-grid{
   max-width:1120px;margin:0 auto;display:grid;
   grid-template-columns:minmax(0,1fr) 340px;gap:24px;align-items:start;
@@ -581,6 +585,7 @@ img.thumb.big{max-height:none;max-width:100%}
     <div class="mode-seg" id="layerRow" role="tablist" aria-label="Memory layer">
       <button type="button" class="chip on" data-layer="archive" id="modeFeed">Feed</button>
       <button type="button" class="chip" data-layer="constellation" id="modeConst">Constellation</button>
+      <button type="button" class="chip" data-layer="brains" id="modeBrains">Brains</button>
     </div>
     <div class="mode-seg" id="segRow" role="tablist" aria-label="Memory views">
       <button type="button" class="chip on" data-seg="all">All</button>
@@ -657,6 +662,10 @@ img.thumb.big{max-height:none;max-width:100%}
     </aside>
   </div>
 </div>
+<div id="brainsPane">
+  <div id="brainsHost"></div>
+  <div id="brainsMsg" class="mut" style="font-size:12.5px;padding:8px 2px 0" hidden></div>
+</div>
 </div>
 </div>
 @@UI_JS@@
@@ -668,7 +677,7 @@ MnemosMemory.set('lastRoute','/memory');
 (function restoreConsole(){
   const st=MnemosMemory.get('console',{});
   if(st.q) document.getElementById('q').value=st.q;
-  if(st.layer==='constellation') layer='constellation';
+  if(st.layer==='constellation'||st.layer==='brains') layer=st.layer;
   if(st.view) view=st.view;
   if(st.mod!=null) mod=st.mod;
   if(st.src!=null) src=st.src;
@@ -678,6 +687,7 @@ MnemosMemory.set('lastRoute','/memory');
     const qp=new URLSearchParams(location.search);
     const m=qp.get('mode')||qp.get('layer');
     if(m==='constellation') layer='constellation';
+    else if(m==='brains') layer='brains';
     else if(m==='archive') layer='archive';
   }catch(e){}
 })();
@@ -710,16 +720,48 @@ function setLayer(name){
   layer=name; persistConsole();
   document.getElementById('list').style.display=layer==='archive'?'flex':'none';
   document.getElementById('constPane').classList.toggle('on', layer==='constellation');
+  document.getElementById('brainsPane').classList.toggle('on', layer==='brains');
   const sub=document.getElementById('constSub');
-  if(sub) sub.hidden = layer!=='constellation';
+  if(sub){
+    sub.hidden = layer==='archive';
+    sub.textContent = layer==='brains' ? 'What Sparrow knows, one subject at a time' : 'What currently has your attention';
+  }
   syncSegUI();
   try{
     const u=new URL(location.href);
-    if(layer==='constellation') u.searchParams.set('mode','constellation');
+    if(layer==='constellation'||layer==='brains') u.searchParams.set('mode',layer);
     else u.searchParams.delete('mode');
+    if(layer!=='brains'){ u.searchParams.delete('brain'); u.searchParams.delete('section'); }
     history.replaceState(null,'',u.pathname+(u.search||'')+(u.hash||''));
   }catch(e){}
   if(layer==='constellation') loadConstellation();
+  if(layer==='brains') loadBrains();
+}
+/* Brains: the 3D map lives in /static/js/sparrow-brains.js (plus vendored
+   Three.js) and is fetched the first time the mode is opened, so the feed
+   pays nothing for it. One mount per page; switching modes keeps it. */
+let brainsCtl=null, brainsLoading=null;
+function loadBrains(){
+  const host=document.getElementById('brainsHost');
+  if(!host||brainsCtl) return;
+  const msg=document.getElementById('brainsMsg');
+  const mount=()=>{
+    if(brainsCtl||!window.SparrowBrains) return;
+    try{
+      brainsCtl=window.SparrowBrains.mount(host,{});
+      if(msg) msg.hidden=true;
+    }catch(e){
+      if(msg){ msg.hidden=false; msg.textContent='The brain map could not start: '+(e.message||e); }
+    }
+  };
+  if(window.SparrowBrains){ mount(); return; }
+  if(brainsLoading) return;
+  brainsLoading=true;
+  const sc=document.createElement('script');
+  sc.src='@@BRAINS_JS@@';
+  sc.onload=()=>{ brainsLoading=false; mount(); };
+  sc.onerror=()=>{ brainsLoading=false; if(msg){ msg.hidden=false; msg.textContent='The brain map script did not load.'; } };
+  document.head.appendChild(sc);
 }
 let constVersion=null, constPoll=null, constStreamOn=false, constLoading=false, constRetry=null;
 async function constCheck(){
@@ -1034,7 +1076,7 @@ function activeSeg(){
 }
 function syncSegUI(){
   const seg=activeSeg();
-  const inConst=layer==='constellation';
+  const inConst=layer==='constellation'||layer==='brains';
   document.querySelectorAll('#layerRow .chip').forEach(c=>{
     const on=c.dataset.layer===layer;
     c.classList.toggle('on',on);

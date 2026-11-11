@@ -77,6 +77,7 @@ INSPECT_GROUPS = (
     {"title": "Memory console", "links": [
         {"href": "/memory", "label": "Feed and search"},
         {"href": "/memory?mode=constellation", "label": "Constellation"},
+        {"href": "/memory?mode=brains", "label": "Brains", "note": "one subject, typed sections, agent packet"},
         {"href": "/memory/changes", "label": "Changes", "note": "supersessions, revert"},
         {"href": "/meetings", "label": "Meetings"},
     ]},

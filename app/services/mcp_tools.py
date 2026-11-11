@@ -23,6 +23,7 @@ READ_TOOLS = (
     "org_brief",
     "provenance",
     "signals",
+    "brain_context",
 )
 
 _PERSONAL_RE = re.compile(
@@ -200,6 +201,19 @@ def tool_schemas() -> list[dict[str, Any]]:
          "inputSchema": {"type": "object", "properties": {
              "org": {"type": "string"},
          }, "required": ["org"]}},
+        {"name": "brain_context",
+         "description": ("Agent-ready context for one subject (a deal, a person, "
+                         "an org): approved facts grouped by section, each with "
+                         "its source and date, plus the open questions as UNKNOWN "
+                         "lines. Same text the Copy button in the memory map "
+                         "produces. " + refusal),
+         "inputSchema": {"type": "object", "properties": {
+             "subject": {"type": "string",
+                         "description": "A name, or a brain id like entity:412"},
+             "section": {"type": "string",
+                         "description": "One section key (optional)"},
+             "include_pending": {"type": "boolean", "default": False},
+         }, "required": ["subject"]}},
         {"name": "provenance",
          "description": "Source quote and path-confined artifact for an event. " + refusal,
          "inputSchema": {"type": "object", "properties": {
@@ -358,6 +372,36 @@ def call_tool(name: str, arguments: dict | None = None) -> dict[str, Any]:
                                    "peer_node": it.get("peer_node")},
                 })
             return {"ok": True, "results": redact_result(items)}
+        if name == "brain_context":
+            from app.services import brains
+            from app.services.memory import memory
+            store = memory._ensure_store()
+            subject = str(args.get("subject") or "").strip()
+            if not subject:
+                return {"ok": False, "error": "subject required"}
+            brain_id = brains.resolve_subject(store, subject)
+            if not brain_id:
+                return {"ok": True, "result": {"found": False, "query": subject}}
+            section = str(args.get("section") or "").strip() or None
+            try:
+                pkt = brains.compile_packet(
+                    store, brain_id, scope="section" if section else "brain",
+                    section_key=section,
+                    include_pending=bool(args.get("include_pending")),
+                    destination="mcp")
+            except brains.BrainError as exc:
+                return {"ok": False, "error": str(exc)}
+            if pkt.get("verdict") == "deny":
+                return {"ok": False, "error": f"withheld: {pkt.get('reason')}",
+                        "verdict": "deny", "brain": brain_id}
+            payload = {
+                "found": True, "brain": brain_id, "text": pkt["text"],
+                "tokens": pkt["tokens"], "included": pkt["included"],
+                "withheld": pkt["withheld"], "verdict": pkt["verdict"],
+                "provenance": {"source": "brains.compile_packet",
+                               "egress_id": pkt.get("egress_id")},
+            }
+            return {"ok": True, "result": redact_result(payload)}
         if name == "provenance":
             from app.services.memory import memory
             store = memory._ensure_store()

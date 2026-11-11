@@ -17,6 +17,8 @@ from app.api.fleet_routes import router as fleet_router
 from app.api.records_routes import router as records_router
 from app.api.assistants_routes import router as assistants_router
 from app.api.projects_routes import router as projects_router
+from app.api.team_search_routes import router as team_search_router
+from app.api.brain_routes import router as brain_router
 from app.api.replay_routes import router as replay_router
 from app.api.inbox_routes import router as inbox_router
 from app.api.shell_routes import router as shell_router
@@ -40,6 +42,8 @@ app.include_router(fleet_router)
 app.include_router(records_router)
 app.include_router(assistants_router)
 app.include_router(projects_router)
+app.include_router(team_search_router)
+app.include_router(brain_router)
 app.include_router(replay_router)
 app.include_router(inbox_router)
 app.include_router(shell_router)

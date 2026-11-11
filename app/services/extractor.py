@@ -98,6 +98,29 @@ def _extract_context_enabled() -> bool:
     return os.environ.get("QUILL_EXTRACT_CONTEXT", "0") not in ("0", "false", "False")
 
 
+def _extract_section_hint_enabled() -> bool:
+    """Ask the extractor which brain section each claim belongs in
+    (services/brains.py)? OFF by default like every other prompt change
+    here: flip on with QUILL_EXTRACT_SECTION_HINT=1 once eval_extraction
+    shows the extra field costs no precision."""
+    return os.environ.get("QUILL_EXTRACT_SECTION_HINT", "0") not in ("0", "false", "False")
+
+
+SECTION_HINTS = ("thesis", "status", "commitment", "risk", "competitor",
+                 "decision", "question", "role", "relationship", "performance",
+                 "other")
+_SECTION_HINT_PROP = {
+    "type": "string",
+    "enum": list(SECTION_HINTS) + [""],
+    "description": "Which section of a subject's brain this claim belongs in: "
+    "thesis (why the deal/company is attractive), status (where it stands now), "
+    "commitment (who owes what), risk (concerns, objections), competitor, "
+    "decision (a choice that was made), question (something still open), "
+    "role (a person's title or employer), relationship (who works with whom), "
+    "performance (numbers: revenue, growth, margins), other. Empty if unsure.",
+}
+
+
 def _extract_ideas_enabled() -> bool:
     """Extract speaker-attributed IDEA facts (WS3)? OFF by default until the
     idea-precision eval bar is met (QUILL_EXTRACT_IDEAS=1)."""
@@ -487,10 +510,15 @@ def _schema() -> dict:
     """The JSON schema for this call, honoring the eval-gated flags: ideas
     (facts-schema-v4) and the about_project relation (context builds).
     Flags off → byte-identical to _SCHEMA."""
-    if not (_extract_ideas_enabled() or _extract_context_enabled()):
+    if not (_extract_ideas_enabled() or _extract_context_enabled()
+            or _extract_section_hint_enabled()):
         return _SCHEMA
     import copy
     schema = copy.deepcopy(_SCHEMA)
+    if _extract_section_hint_enabled():
+        items = schema["properties"]["claims"]["items"]
+        items["properties"]["section_hint"] = copy.deepcopy(_SECTION_HINT_PROP)
+        items["required"] = list(items["required"]) + ["section_hint"]
     if _extract_ideas_enabled():
         schema["properties"]["ideas"] = copy.deepcopy(_IDEAS_SCHEMA)
         schema["required"] = list(schema["required"]) + ["ideas"]
@@ -1438,10 +1466,12 @@ class Extractor:
                 if cid:
                     store.set_fact_candidate_status(cid, "deduped", verdict_reason=reason)
                 continue
+            hint = str(cl.get("section_hint") or "").strip().lower()
             fid = store.add_claim(
                 cl["text"], source_event_id=anchor,
                 source_span=cl.get("source_span", ""),
                 confidence=cl.get("confidence"), extracted_at=now,
+                section_hint=hint if hint in SECTION_HINTS else None,
             )
             # P3: a first-person claim from an unbound voice track is ABOUT a
             # speaker who hasn't earned identity yet — escrow it against the

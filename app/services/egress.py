@@ -1,14 +1,16 @@
 """One egress policy, decided once.
 
-Data leaves this node six ways: the peer channel, the team layer, org
-digests, the fleet relay, the records outbox and team records read by a
-connected cloud assistant. Each still owns its policy
+Data leaves this node nine ways: the peer channel, the team layer, org
+digests, the fleet relay, the records outbox, team records read by a
+connected cloud assistant, team search (pointers published to the org
+index on Connected, or a teammate's search answered directly), and a brain
+packet copied for an agent or read over MCP. Each still owns its policy
 *configuration* (a peer's per-class disclosure map, a fleet routing rule, a
 human-approved records packet); this module owns the *decision*. Every
 outbound path calls `decide()` with (path, destination, scope, data class,
 content) plus what its own configuration says, and gets back allow, offer or
 deny. Every outcome is written to the same egress trail that /privacy/egress
-reads, so the view covers all six paths, not just the two that used to log.
+reads, so the view covers every path, not just the two that used to log.
 
 The rule, most restrictive wins:
 
@@ -27,7 +29,8 @@ QUILL_EGRESS_RUNG overrides it on this node:
   connected   today's behavior: ceiling `personal`, paths decide.
   sealed      ceiling `internal`; nothing leaves without a human (allow →
               offer unless approved).
-  perimeter   only human-approved records cross; every other path is denied.
+  perimeter   only human-approved records cross, plus a team search answer
+              its owner approved; every other path is denied.
 """
 from __future__ import annotations
 
@@ -36,11 +39,17 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-PATHS = ("peer", "team", "org_digest", "fleet_relay", "records", "assistant")
+PATHS = ("peer", "team", "org_digest", "fleet_relay", "records", "assistant",
+         "index", "pointers", "brain_packet")
 RUNGS = ("connected", "sealed", "perimeter")
 ACTIONS = ("allow", "offer", "deny")
 
 _ORDER = {"allow": 0, "offer": 1, "deny": 2}
+# What a human may approve across a perimeter: a records packet, a team
+# search answer (a teammate asked this seat directly; the owner said yes),
+# and a brain packet line that a recorded claim backs (services/brains.py
+# passes approved=True only for those under perimeter).
+_PERIMETER_PATHS = ("records", "pointers", "brain_packet")
 _POLICY_ALIASES = {"auto": "allow", "share": "allow", "allow": "allow",
                    "offer": "offer", "deny": "deny", "local": "deny",
                    "refused": "deny"}
@@ -166,7 +175,7 @@ def decide(*, path: str, destination: str, policy: str = "offer",
 
     if path not in PATHS:
         tighten("deny", f"unknown path {path!r}")
-    elif r == "perimeter" and not (path == "records" and approved):
+    elif r == "perimeter" and not (path in _PERIMETER_PATHS and approved):
         tighten("deny", "rung perimeter: only approved records leave")
     elif r == "sealed":
         tighten("offer", "rung sealed: a human approves each send")

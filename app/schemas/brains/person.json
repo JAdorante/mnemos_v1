@@ -1,0 +1,123 @@
+{
+  "$id": "sparrow/brains/person",
+  "version": "person-v1",
+  "type": "person",
+  "label": "person",
+  "phrase": "a person",
+  "description": "Someone Sparrow knows: where they work, what they owe and are owed, what was decided with them.",
+  "sections": [
+    {
+      "key": "role",
+      "label": "Role",
+      "order": 0,
+      "required": true,
+      "max_items": 8,
+      "sources": [
+        "affiliations",
+        "person_attrs",
+        "hint:model"
+      ],
+      "gap": "What is {label}'s role, and where?",
+      "hints": [
+        "role"
+      ]
+    },
+    {
+      "key": "relationships",
+      "label": "Relationships",
+      "order": 1,
+      "required": false,
+      "max_items": 16,
+      "sources": [
+        "person_links",
+        "hint:model"
+      ],
+      "gap": "Who does {label} work with?",
+      "hints": [
+        "relationship"
+      ]
+    },
+    {
+      "key": "status",
+      "label": "Status",
+      "order": 2,
+      "required": false,
+      "max_items": 4,
+      "sources": [
+        "status_claims",
+        "hint:model"
+      ],
+      "gap": null,
+      "hints": [
+        "status"
+      ]
+    },
+    {
+      "key": "commitments",
+      "label": "Commitments",
+      "order": 3,
+      "required": true,
+      "max_items": 20,
+      "sources": [
+        "open_commitments",
+        "commitment_claims",
+        "open_tasks",
+        "hint:model"
+      ],
+      "gap": "What is open with {label}?",
+      "hints": [
+        "commitment"
+      ]
+    },
+    {
+      "key": "decisions",
+      "label": "Decisions",
+      "order": 4,
+      "required": false,
+      "max_items": 12,
+      "sources": [
+        "decision_claims",
+        "hint:model"
+      ],
+      "gap": null,
+      "hints": [
+        "decision"
+      ]
+    },
+    {
+      "key": "notes",
+      "label": "Notes",
+      "order": 5,
+      "required": false,
+      "max_items": 20,
+      "sources": [
+        "hint:model",
+        "remaining_facts"
+      ],
+      "gap": null,
+      "hints": [
+        "thesis",
+        "risk",
+        "competitor",
+        "performance",
+        "other"
+      ]
+    },
+    {
+      "key": "open_questions",
+      "label": "Open questions",
+      "order": 6,
+      "required": false,
+      "max_items": 20,
+      "sources": [
+        "gaps",
+        "question_facts",
+        "hint:model"
+      ],
+      "gap": null,
+      "hints": [
+        "question"
+      ]
+    }
+  ]
+}

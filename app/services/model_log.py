@@ -30,6 +30,7 @@ _CLOUD_PROVIDERS = frozenset({
     "peer", "agent_fetch",
     # The rest of egress.PATHS: every way data leaves through one policy.
     "team", "org_digest", "fleet_relay", "records", "assistant",
+    "index", "pointers", "brain_packet",
 })
 
 # USD per 1M tokens, (input, output). Source: Claude pricing, 2026-07.
@@ -230,7 +231,7 @@ class ModelLog:
                    meta: dict | None = None) -> dict:
         """One row for something that left the machine WITHOUT a model call:
         one of the egress.PATHS (peer, team, org_digest, fleet_relay,
-        records, assistant) or an Option B fetch (`agent_fetch`). Appears in
+        records, assistant, index, pointers) or an Option B fetch (`agent_fetch`). Appears in
         egress_inventory next to cloud model calls with the destination,
         privacy_class, and the approving action. `action` is the egress
         verdict (allow / offer / deny) when one was taken."""

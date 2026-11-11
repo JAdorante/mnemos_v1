@@ -1,0 +1,8 @@
+three.module.min.js — Three.js r170 (0.170.0), vendored 2026-11-10 from
+https://cdnjs.cloudflare.com/ajax/libs/three.js/0.170.0/three.module.min.js
+
+Copyright 2010-2024 Three.js Authors. MIT License.
+https://github.com/mrdoob/three.js/blob/r170/LICENSE
+
+Vendored, not fetched from a CDN, because the app must work offline and under
+the Perimeter rung. Loaded on demand by /static/js/sparrow-brains.js.

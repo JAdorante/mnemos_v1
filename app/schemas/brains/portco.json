@@ -1,0 +1,137 @@
+{
+  "$id": "sparrow/brains/portco",
+  "version": "portco-v1",
+  "type": "portco",
+  "label": "portfolio company",
+  "phrase": "a portfolio company",
+  "description": "A company the firm owns a stake in. Set by the user (brain type override); nothing in the data marks one yet.",
+  "sections": [
+    {
+      "key": "performance",
+      "label": "Performance",
+      "order": 0,
+      "required": true,
+      "max_items": 12,
+      "sources": [
+        "keywords:performance",
+        "status_attr",
+        "hint:model"
+      ],
+      "gap": "How is {label} performing?",
+      "hints": [
+        "performance",
+        "thesis"
+      ]
+    },
+    {
+      "key": "people",
+      "label": "People",
+      "order": 1,
+      "required": true,
+      "max_items": 20,
+      "sources": [
+        "people_links",
+        "hint:model"
+      ],
+      "gap": "Who runs {label}?",
+      "hints": [
+        "role",
+        "relationship"
+      ]
+    },
+    {
+      "key": "status",
+      "label": "Status",
+      "order": 2,
+      "required": true,
+      "max_items": 4,
+      "sources": [
+        "status_claims",
+        "next_task",
+        "hint:model"
+      ],
+      "gap": "What is the current status of {label}?",
+      "hints": [
+        "status"
+      ]
+    },
+    {
+      "key": "commitments",
+      "label": "Commitments",
+      "order": 3,
+      "required": false,
+      "max_items": 20,
+      "sources": [
+        "open_commitments",
+        "commitment_claims",
+        "hint:model"
+      ],
+      "gap": null,
+      "hints": [
+        "commitment"
+      ]
+    },
+    {
+      "key": "risks",
+      "label": "Risks",
+      "order": 4,
+      "required": false,
+      "max_items": 12,
+      "sources": [
+        "keywords:risks",
+        "hint:model"
+      ],
+      "gap": null,
+      "hints": [
+        "risk"
+      ]
+    },
+    {
+      "key": "competitors",
+      "label": "Competitors",
+      "order": 5,
+      "required": false,
+      "max_items": 12,
+      "sources": [
+        "competes_with",
+        "keywords:competitors",
+        "hint:model"
+      ],
+      "gap": null,
+      "hints": [
+        "competitor"
+      ]
+    },
+    {
+      "key": "decisions",
+      "label": "Decisions",
+      "order": 6,
+      "required": false,
+      "max_items": 12,
+      "sources": [
+        "decision_claims",
+        "hint:model"
+      ],
+      "gap": null,
+      "hints": [
+        "decision"
+      ]
+    },
+    {
+      "key": "open_questions",
+      "label": "Open questions",
+      "order": 7,
+      "required": false,
+      "max_items": 20,
+      "sources": [
+        "gaps",
+        "question_facts",
+        "hint:model"
+      ],
+      "gap": null,
+      "hints": [
+        "question"
+      ]
+    }
+  ]
+}

@@ -3310,6 +3310,9 @@ def memory_console_page() -> HTMLResponse:
         '<div class="layout">',
         _policy_preflight_banner() + _adoption_console_chrome() + '<div class="layout">',
         1)
+    from app.api.mnemos_theme import asset_version
+    page = page.replace("@@BRAINS_JS@@",
+                        f"/static/js/sparrow-brains.js?v={asset_version()}")
     return _html_with_approval(page, next_url="/memory")
 
 
@@ -4959,6 +4962,18 @@ def chat(body: ChatIn) -> dict:
         return payload
 
     try:
+        # Team search is a command, not a chip: the person typing it is the
+        # one asking, so it runs now, ahead of any pending approval prompt
+        # (which stays pending) and whether or not the agent is on.
+        try:
+            from app.services import team_search as _tsearch
+            team_q = _tsearch.parse_command(display)
+        except Exception as exc:
+            print(f"[team_search] command parse skipped ({exc}).")
+            team_q = None
+        if team_q is not None:
+            out = _tsearch.run_command(team_q, agent.worker._emit)
+            return _turn({**out, "since": since, "mode": study_mode})
         # Learning Memory: short homework/quiz verdicts update mastery (best-effort).
         if study_mode in ("homework", "study_quiz"):
             try:

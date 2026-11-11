@@ -817,6 +817,79 @@ class Store:
                 """
             )
 
+            # --- brains (memory constellation v2) -----------------------------
+            # brain_items is DERIVED: facts/claims/commitments/relations grouped
+            # into typed sections per subject by services/brains.py. Safe to
+            # drop and rebuild. brain_gaps holds the questions a section cannot
+            # answer yet (system rows are re-derived; user rows survive).
+            # brain_overrides is the user's word (move / hide / set_type) and
+            # must survive every rebuild, like origin='asserted' on relations.
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS brain_items (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    subject_type    TEXT    NOT NULL,   -- entity | person
+                    subject_id      INTEGER NOT NULL,
+                    section_key     TEXT    NOT NULL,
+                    item_type       TEXT    NOT NULL,   -- fact|claim|commitment|task|relation|gap
+                    item_id         TEXT    NOT NULL,
+                    text            TEXT    NOT NULL,
+                    review_state    TEXT    NOT NULL,   -- approved | pending | gap
+                    confidence      REAL,
+                    source_event_id INTEGER,
+                    source_label    TEXT,
+                    observed_at     REAL,
+                    privacy_class   TEXT,
+                    rank            REAL    NOT NULL DEFAULT 0,
+                    assigned_by     TEXT    NOT NULL DEFAULT 'rule',
+                    schema_version  TEXT,
+                    updated_at      REAL    NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_brain_items_item "
+                "ON brain_items(subject_type, subject_id, item_type, item_id)")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_brain_items_section "
+                "ON brain_items(subject_type, subject_id, section_key, rank)")
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS brain_gaps (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    subject_type  TEXT    NOT NULL,
+                    subject_id    INTEGER NOT NULL,
+                    section_key   TEXT    NOT NULL,
+                    question      TEXT    NOT NULL,
+                    created_by    TEXT    NOT NULL DEFAULT 'system',  -- system | user
+                    resolved_item TEXT,
+                    created_at    REAL    NOT NULL,
+                    resolved_at   REAL
+                )
+                """
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_brain_gaps_subject "
+                "ON brain_gaps(subject_type, subject_id, section_key)")
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS brain_overrides (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    subject_type  TEXT    NOT NULL,
+                    subject_id    INTEGER NOT NULL,
+                    item_type     TEXT,                -- null for a brain-level override
+                    item_id       TEXT,
+                    action        TEXT    NOT NULL,    -- move | hide | set_type
+                    section_key   TEXT,
+                    brain_type    TEXT,
+                    created_at    REAL    NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_brain_overrides_subject "
+                "ON brain_overrides(subject_type, subject_id)")
+
             # --- weekly self-report (Phase 0 harness) -------------------------
             # The subjective metrics nothing else can measure: perceived
             # cognitive-load relief, trust, and interruption quality — asked
@@ -1737,6 +1810,13 @@ class Store:
                 self._conn.execute("ALTER TABLE facts ADD COLUMN review TEXT")
                 self._conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_facts_review ON facts(review)")
+                self._conn.commit()
+            # facts.section_hint: which brain section this fact belongs in,
+            # from the extractor (QUILL_EXTRACT_SECTION_HINT) or the local
+            # backlog pass (services/brain_classifier.py). A hint, never the
+            # user's word — brain_overrides outranks it.
+            if fcols and "section_hint" not in fcols:
+                self._conn.execute("ALTER TABLE facts ADD COLUMN section_hint TEXT")
                 self._conn.commit()
             # facts lifecycle (memory hygiene): `state` marks a fact active or
             # superseded-by-a-newer-fact, `superseded_by` points at its
@@ -5618,16 +5698,19 @@ class Store:
 
     def add_claim(self, text: str, *, source_event_id: int | None = None,
                   source_span: str = "", confidence: float | None = None,
-                  extracted_at: float) -> int:
+                  extracted_at: float, section_hint: str | None = None) -> int:
         """A claim is a fact with no typed detail table — text lives in
         facts.text. `source_span` is strictly the verbatim provenance quote:
         empty when there is none (user-typed claims), never a paraphrase
-        substitute — extracted claims with no span are the gate's job to drop."""
+        substitute — extracted claims with no span are the gate's job to drop.
+        `section_hint` is the extractor's guess at the brain section."""
         with self._lock:
             cur = self._conn.execute(
                 "INSERT INTO facts (kind, text, source_event_id, source_span, "
-                "confidence, extracted_at) VALUES ('claim', ?, ?, ?, ?, ?)",
-                (text, source_event_id, source_span, confidence, extracted_at),
+                "confidence, extracted_at, section_hint) "
+                "VALUES ('claim', ?, ?, ?, ?, ?, ?)",
+                (text, source_event_id, source_span, confidence, extracted_at,
+                 (section_hint or None)),
             )
             fid = int(cur.lastrowid)
             self._conn.commit()
@@ -7935,7 +8018,7 @@ class Store:
     # --- facts for the Console (step 5: approve/edit/dismiss) -------------
     _FACT_SELECT = """
         SELECT f.id AS fact_id, f.kind, f.source_event_id, f.source_span,
-               f.confidence, f.extracted_at, f.review,
+               f.confidence, f.extracted_at, f.review, f.section_hint,
                f.state, f.superseded_by,
                COALESCE(f.updated_at, f.extracted_at) AS updated_at,
                e.time AS source_time, e.modality AS source_modality,
@@ -8045,6 +8128,20 @@ class Store:
             self._conn.commit()
         return cur.rowcount > 0
 
+    def set_fact_section_hints(self, hints: dict[int, str | None]) -> int:
+        """Write brain section hints for many facts at once (backlog pass)."""
+        if not hints:
+            return 0
+        with self._lock:
+            n = 0
+            for fid, hint in hints.items():
+                cur = self._conn.execute(
+                    "UPDATE facts SET section_hint = ? WHERE id = ?",
+                    ((hint or None), int(fid)))
+                n += int(cur.rowcount or 0)
+            self._conn.commit()
+        return n
+
     def review_fact(self, fact_id: int, review: str) -> bool:
         """Record the human verdict. 'dismissed' also cancels the typed row."""
         if review not in ("approved", "dismissed", "edited"):
@@ -8106,7 +8203,11 @@ class Store:
                 " (SELECT COUNT(*) FROM people),"
                 " (SELECT MAX(last_seen) FROM people),"
                 " (SELECT COUNT(*) FROM entities),"
-                " (SELECT MAX(last_seen) FROM entities)"
+                " (SELECT MAX(last_seen) FROM entities),"
+                # Brains: a recompile that changes a section or an item must
+                # move the token so the map refetches (services/brains.py).
+                " (SELECT COUNT(*) FROM brain_items),"
+                " (SELECT MAX(updated_at) FROM brain_items)"
             ).fetchone()
         return "-".join(str(x if x is not None else 0) for x in tuple(row))
 
