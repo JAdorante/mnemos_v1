@@ -235,6 +235,12 @@ def rebuild(store: Store | None = None, *, scope: str = "full") -> dict:
     facts = store.list_facts(limit=100000)
     for f in facts:
         fid = f["fact_id"]
+        # A fact the human dismissed is not evidence of anything; its text
+        # must not keep deriving mentions/associations (audit 2026-11-11: a
+        # dismissed "on the board of Slack" claim kept the user associated
+        # with Slack through every rebuild).
+        if (f.get("review") or "") == "dismissed":
+            continue
         text = f"{f.get('text') or ''} {f.get('source_span') or ''}"
         sev = f.get("source_event_id")
         phits, ehits = _longest_match_hits(text, ppat, epat)

@@ -243,3 +243,19 @@ class EntityNoteIdempotentTests(unittest.TestCase):
             ids = {self.client.post(f"/entities/{eid}/note", json={"text": text}).json()["fact_id"] for _ in range(4)}
         self.assertEqual(len(ids), 1)
         self.assertEqual(self.store._conn.execute("SELECT count(*) FROM facts WHERE text = ?", (text,)).fetchone()[0], 1)
+
+# ---------------------------------------------------------------- close-out: dismissed facts derive nothing
+class DismissedFactDerivesNoEdgesTests(unittest.TestCase):
+    """fact#308 (dismissed) kept 'Justin Adorante associated with Slack' alive through rebuilds."""
+    def test_dismissed_fact_text_is_not_scanned_by_graph_rebuild(self):
+        from app.services import graph
+        td = tempfile.mkdtemp(); store = _fresh_store(td); self.addCleanup(store.close)
+        me = store.insert_person("Justin Adorante", ts=NOW, promotion_state="active")
+        slack = store.resolve_entity("Slack", "tool", ts=NOW)
+        fid = store.add_claim("Justin Adorante was on the board of Slack when it went public", extracted_at=NOW)
+        store.review_fact(fid, "dismissed")
+        graph.rebuild(store)
+        out = store.relations_of("person", int(me)).get("out") or []
+        self.assertFalse(any(e["predicate"] == "mentioned_in" and int(e["obj_id"]) == fid for e in out), out)
+        self.assertFalse(any(e["predicate"] == "associated_with" and int(e["obj_id"]) == int(slack) for e in out), out)
+        self.assertEqual(store.relations_of("fact", fid).get("out") or [], [])
