@@ -40,6 +40,19 @@ x-env: &sparrow-env
   MS_OAUTH_CLIENT_ID: "${MS_OAUTH_CLIENT_ID:-}"
   MS_OAUTH_CLIENT_SECRET: "${MS_OAUTH_CLIENT_SECRET:-}"
   MS_OAUTH_TENANT: "${MS_OAUTH_TENANT:-common}"
+  # GitHub / Linear / HubSpot connectors (read-only). Same relay: register
+  # .../oauth/github/callback, .../oauth/linear/callback,
+  # .../oauth/hubspot/callback on the funnel hostname.
+  GITHUB_OAUTH_CLIENT_ID: "${GITHUB_OAUTH_CLIENT_ID:-}"
+  GITHUB_OAUTH_CLIENT_SECRET: "${GITHUB_OAUTH_CLIENT_SECRET:-}"
+  LINEAR_OAUTH_CLIENT_ID: "${LINEAR_OAUTH_CLIENT_ID:-}"
+  LINEAR_OAUTH_CLIENT_SECRET: "${LINEAR_OAUTH_CLIENT_SECRET:-}"
+  HUBSPOT_OAUTH_CLIENT_ID: "${HUBSPOT_OAUTH_CLIENT_ID:-}"
+  HUBSPOT_OAUTH_CLIENT_SECRET: "${HUBSPOT_OAUTH_CLIENT_SECRET:-}"
+  NOTION_OAUTH_CLIENT_ID: "${NOTION_OAUTH_CLIENT_ID:-}"
+  NOTION_OAUTH_CLIENT_SECRET: "${NOTION_OAUTH_CLIENT_SECRET:-}"
+  SLACK_OAUTH_CLIENT_ID: "${SLACK_OAUTH_CLIENT_ID:-}"
+  SLACK_OAUTH_CLIENT_SECRET: "${SLACK_OAUTH_CLIENT_SECRET:-}"
   # The ONE redirect URI registered with Google — a stable Tailscale Funnel
   # hostname, not a quick tunnel. Whichever container the funnel points at
   # relays the code back to the seat that started the flow (the live origin

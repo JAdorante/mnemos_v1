@@ -951,6 +951,47 @@ class OutlookConfig:
         return f"{_get('QUILL_DATA_DIR', 'data')}/connectors/outlook/oauth_state.json"
 
 
+def _oauth_connector_config(name: str, env_prefix: str, default_scopes: str):
+    """OAuth-app settings for the GitHub / Linear / HubSpot / Notion / Slack connectors
+    (services/connectors/oauth_base.py). Each needs a confidential client
+    (id + secret); the env-token alternative (GITHUB_TOKEN, LINEAR_API_KEY,
+    HUBSPOT_ACCESS_TOKEN, NOTION_TOKEN, SLACK_USER_TOKEN) is read live by the
+    connector, not here."""
+    @dataclass(frozen=True)
+    class _Cfg:
+        client_id: str = _get(f"{env_prefix}_OAUTH_CLIENT_ID", "")
+        client_secret: str = _get(f"{env_prefix}_OAUTH_CLIENT_SECRET", "")
+        scopes: str = _get(f"{env_prefix}_OAUTH_SCOPES", default_scopes)
+
+        @property
+        def token_path(self) -> str:
+            return _get(
+                f"QUILL_{env_prefix}_TOKEN_PATH",
+                f"{_get('QUILL_DATA_DIR', 'data')}/connectors/{name}/token.json")
+
+        @property
+        def oauth_state_path(self) -> str:
+            return f"{_get('QUILL_DATA_DIR', 'data')}/connectors/{name}/oauth_state.json"
+
+    _Cfg.__name__ = _Cfg.__qualname__ = f"{name.capitalize()}Config"
+    return _Cfg
+
+
+GithubConfig = _oauth_connector_config("github", "GITHUB", "repo read:org read:user")
+LinearConfig = _oauth_connector_config("linear", "LINEAR", "read")
+HubspotConfig = _oauth_connector_config(
+    "hubspot", "HUBSPOT",
+    "oauth crm.objects.contacts.read crm.objects.deals.read "
+    "crm.objects.companies.read crm.objects.owners.read")
+# Notion has no scopes: read capabilities are set on the integration itself.
+NotionConfig = _oauth_connector_config("notion", "NOTION", "")
+# Slack *user* scopes, read-only: the user token sees what the user sees.
+SlackConfig = _oauth_connector_config(
+    "slack", "SLACK",
+    "channels:history channels:read groups:history groups:read "
+    "im:history im:read mpim:history mpim:read users:read")
+
+
 @dataclass(frozen=True)
 class McpConfig:
     """Read-only MCP memory server (mcp_server/). Off until QUILL_MCP=1.
@@ -1814,6 +1855,11 @@ class Settings:
     first_run: FirstRunConfig = FirstRunConfig()
     exhaust: ExhaustConfig = ExhaustConfig()
     outlook: OutlookConfig = OutlookConfig()
+    github: GithubConfig = GithubConfig()
+    linear: LinearConfig = LinearConfig()
+    hubspot: HubspotConfig = HubspotConfig()
+    notion: NotionConfig = NotionConfig()
+    slack: SlackConfig = SlackConfig()
     mcp: McpConfig = McpConfig()
     external_capture: ExternalCaptureConfig = ExternalCaptureConfig()
     onboarding: OnboardingConfig = OnboardingConfig()

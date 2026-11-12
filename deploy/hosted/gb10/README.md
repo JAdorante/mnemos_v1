@@ -163,6 +163,74 @@ MS_OAUTH_TENANT=common        # or organizations | consumers | <tenant id>
 4. `docker compose -f docker-compose.yml -f docker-compose.tunnel.yml up -d --build`,
    then Privacy → Connections → **Connect** on Outlook.
 
+### GitHub, Linear and HubSpot (read-only work and CRM items)
+
+Same relay, three more paths. Each connector (`app/services/connectors/
+github.py`, `linear.py`, `hubspot.py`, sharing `oauth_base.py`) lands on
+`/oauth/<id>/callback` and needs a confidential client: the id *and* the
+secret, or the connector shows as Unavailable with a hint naming the vars.
+
+```bash
+# 1. Expose each callback path on the SAME funnel hostname.
+for p in github linear hubspot; do
+  sudo tailscale funnel --bg --set-path=/oauth/$p/callback \
+       http://127.0.0.1:8001/oauth/$p/callback
+done
+tailscale funnel status
+```
+
+```bash
+# 2. .env on the GB10
+GITHUB_OAUTH_CLIENT_ID=...      # GitHub → Settings → Developer settings → OAuth Apps
+GITHUB_OAUTH_CLIENT_SECRET=...  #   callback https://gb10.<tailnet>.ts.net/oauth/github/callback
+LINEAR_OAUTH_CLIENT_ID=...      # Linear → Settings → API → OAuth applications
+LINEAR_OAUTH_CLIENT_SECRET=...  #   callback https://gb10.<tailnet>.ts.net/oauth/linear/callback
+HUBSPOT_OAUTH_CLIENT_ID=...     # HubSpot developer account → Apps → Auth
+HUBSPOT_OAUTH_CLIENT_SECRET=... #   redirect https://gb10.<tailnet>.ts.net/oauth/hubspot/callback
+```
+
+3. Scopes. GitHub: the connector asks for `repo read:org read:user` (GitHub
+   has no read-only scope that reaches private repositories; the connector
+   never calls a write endpoint; `GITHUB_OAUTH_SCOPES="public_repo read:user"`
+   keeps it to public repos). Linear: `read`. HubSpot: tick
+   `crm.objects.contacts.read`, `crm.objects.deals.read`,
+   `crm.objects.companies.read`, `crm.objects.owners.read` on the app, and
+   `oauth` stays on. A grant that carries a scope the connector did not ask
+   for is refused.
+4. Rebuild, then Privacy → Connections → **Connect** on each.
+
+Without an OAuth app, a single-user install can set `GITHUB_TOKEN` (a
+personal access token), `LINEAR_API_KEY` or `HUBSPOT_ACCESS_TOKEN` (a private
+app token) instead; Connect then verifies the token against the provider,
+and Disconnect stops using it until Connect is pressed again. Desktop
+installs with an OAuth app but no HTTPS origin use loopback redirects:
+`http://127.0.0.1:<any port>/` for GitHub, and the exact
+`http://localhost:48621/` (Linear) and `http://localhost:48622/` (HubSpot)
+registered on the app (`QUILL_OAUTH_LOOPBACK_PORT_<ID>` changes the port).
+
+### Notion and Slack
+
+Same base, two more paths (`notion.py`, `slack.py`), funnel paths
+`/oauth/notion/callback` and `/oauth/slack/callback`, env
+`NOTION_OAUTH_CLIENT_ID/SECRET` and `SLACK_OAUTH_CLIENT_ID/SECRET`.
+
+- **Notion**: a *public* integration (notion.so/my-integrations), redirect
+  `https://gb10.<tailnet>.ts.net/oauth/notion/callback`, read-only content
+  and user capabilities. There are no scopes; each user picks the pages to
+  share on Notion's screen. `NOTION_TOKEN` (an internal integration secret)
+  works for a single workspace without a public integration. Page text is
+  read one call per changed page, at most `QUILL_NOTION_MAX_BODIES` (50) per
+  check.
+- **Slack**: an app with *user* token scopes `channels:history channels:read
+  groups:history groups:read im:history im:read mpim:history mpim:read
+  users:read` and the redirect above. No bot is installed and nothing is
+  ever posted. Slack redirects only to HTTPS, so a desktop install uses
+  `SLACK_USER_TOKEN` (an `xoxp-` token) instead. Messages are bodies, so the
+  consent sentence at Connect says they are kept: DMs are stamped
+  `sensitive` and private channels `personal`, and neither leaves the
+  machine on its own. `QUILL_SLACK_MAX_CONVERSATIONS` (60) bounds the
+  history calls per check.
+
 Users who come in through the gateway (`sparrow.ravenry.us`) arrive with
 `X-Forwarded-Host` set, so their seat mints the redirect from *that* origin
 unless `SPARROW_OAUTH_REDIRECT_BASE` is set. With the funnel anchor set, every

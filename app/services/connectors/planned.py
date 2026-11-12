@@ -61,10 +61,6 @@ class PlannedConnector:
         return {"ok": True, "noop": True}
 
 
-PLANNED: tuple[PlannedConnector, ...] = (
-    PlannedConnector("slack", "Slack", ("Slack",)),
-    PlannedConnector("hubspot", "HubSpot", ("HubSpot",)),
-    PlannedConnector("linear", "Linear", ("Linear",)),
-    PlannedConnector("notion", "Notion", ("Notion",)),
-    PlannedConnector("github", "GitHub", ("GitHub",)),
-)
+# Empty since 2026-11-11: every directory card connects. Add the next
+# provider here first so the UI can show it as Planned before it is built.
+PLANNED: tuple[PlannedConnector, ...] = ()

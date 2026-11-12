@@ -23,19 +23,21 @@ class RegistryTests(unittest.TestCase):
         self.assertIsNone(connectors.for_tool("NoSuchTool"))
 
     def test_planned_stubs_refuse_connect(self) -> None:
-        slack = connectors.get("slack")
-        self.assertIsInstance(slack, PlannedConnector)
-        self.assertEqual(slack.availability, "planned")
-        r = slack.begin_connect()
+        # Every directory card connects now; the stub stays as the seam for
+        # the next provider, so exercise it directly.
+        stub = PlannedConnector("acme", "Acme", ("Acme",))
+        self.assertEqual(stub.availability, "planned")
+        r = stub.begin_connect()
         self.assertFalse(r.get("ok"))
         self.assertTrue(r.get("planned"))
+        self.assertFalse(stub.sync().get("ok"))
 
     def test_tool_status_map_includes_gmail(self) -> None:
         m = connectors.tool_status_map()
         self.assertIn("Gmail", m)
         self.assertEqual(m["Gmail"]["connector_id"], "google")
         self.assertIn("Slack", m)
-        self.assertEqual(m["Slack"]["availability"], "planned")
+        self.assertEqual(m["Slack"]["availability"], "ready")
 
     def test_directory_has_categories_and_enrichment(self) -> None:
         d = connectors.directory()

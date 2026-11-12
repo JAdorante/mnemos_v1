@@ -1,4 +1,5 @@
-"""Reusable app connectors (Google, Outlook, iMessage; others planned; custom MCP)."""
+"""Reusable app connectors (Google, Outlook, iMessage, GitHub, Linear,
+HubSpot, Notion, Slack; custom MCP)."""
 from app.services.connectors.base import (
     Connector,
     oauth_redirect_base,

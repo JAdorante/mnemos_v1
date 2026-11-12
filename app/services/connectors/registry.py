@@ -1,19 +1,28 @@
-"""Connector registry — google + outlook + imessage (ready) + planned stubs + custom MCP."""
+"""Connector registry — every directory connector is ready (google,
+outlook, imessage, github, linear, hubspot, notion, slack); PLANNED stays
+as the seam for the next one; custom MCP overlays."""
 from __future__ import annotations
 
 from typing import Any
 
 from app.services.connectors import catalog
 from app.services.connectors.base import Connector
+from app.services.connectors.github import github
 from app.services.connectors.google import google
+from app.services.connectors.hubspot import hubspot
 from app.services.connectors.imessage import imessage
+from app.services.connectors.linear import linear
+from app.services.connectors.notion import notion
 from app.services.connectors.outlook import outlook
+from app.services.connectors.slack import slack
 from app.services.connectors.planned import PLANNED
 
 
 def _builtins() -> dict[str, Connector]:
     reg: dict[str, Connector] = {google.id: google, outlook.id: outlook,
-                                 imessage.id: imessage}
+                                 imessage.id: imessage, github.id: github,
+                                 linear.id: linear, hubspot.id: hubspot,
+                                 notion.id: notion, slack.id: slack}
     for stub in PLANNED:
         reg[stub.id] = stub
     return reg

@@ -83,7 +83,12 @@ def _seat_env(seat: str, token: str) -> dict[str, str]:
     }
     for optional in ("GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_SECRET",
                      "MS_OAUTH_CLIENT_ID", "MS_OAUTH_CLIENT_SECRET",
-                     "MS_OAUTH_TENANT"):
+                     "MS_OAUTH_TENANT",
+                     "GITHUB_OAUTH_CLIENT_ID", "GITHUB_OAUTH_CLIENT_SECRET",
+                     "LINEAR_OAUTH_CLIENT_ID", "LINEAR_OAUTH_CLIENT_SECRET",
+                     "HUBSPOT_OAUTH_CLIENT_ID", "HUBSPOT_OAUTH_CLIENT_SECRET",
+                     "NOTION_OAUTH_CLIENT_ID", "NOTION_OAUTH_CLIENT_SECRET",
+                     "SLACK_OAUTH_CLIENT_ID", "SLACK_OAUTH_CLIENT_SECRET"):
         if os.environ.get(optional):
             env[optional] = os.environ[optional]
     if os.environ.get("SEAT_OAUTH_REDIRECT_BASE"):

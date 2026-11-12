@@ -355,7 +355,7 @@ class AuthWallTests(unittest.TestCase):
         from app.services import api_auth
         self.assertTrue(api_auth.path_is_exempt("/oauth/google/callback", "GET"))
         self.assertTrue(api_auth.path_is_exempt("/oauth/outlook/callback", "GET"))
-        self.assertFalse(api_auth.path_is_exempt("/oauth/slack/callback", "GET"))
+        self.assertFalse(api_auth.path_is_exempt("/oauth/nosuch/callback", "GET"))
         self.assertFalse(api_auth.path_is_exempt("/connectors/outlook/connect", "POST"))
 
 
@@ -428,7 +428,7 @@ class CallbackRouteTests(_Sandbox):
             headers={"host": "anchor.ts.net", "x-forwarded-proto": "https"},
             follow_redirects=False)
         self.assertTrue(resp.headers["location"].startswith("https://sparrow.example.com/"))
-        self.assertEqual(self._client().get("/oauth/slack/callback?code=x",
+        self.assertEqual(self._client().get("/oauth/nosuch/callback?code=x",
                                             follow_redirects=False).status_code, 404)
 
 

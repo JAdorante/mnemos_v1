@@ -30,6 +30,11 @@ _HOSTS: dict[str, tuple[str, ...]] = {
     "outlook": ("outlook.live.com", "outlook.office.com",
                 "outlook.office365.com", "login.microsoftonline.com",
                 "login.live.com", "office.com", "www.office.com"),
+    "github": ("github.com", "www.github.com"),
+    "linear": ("linear.app",),
+    "hubspot": ("app.hubspot.com", "hubspot.com", "www.hubspot.com"),
+    "notion": ("notion.so", "www.notion.so", "notion.site"),
+    "slack": ("slack.com", "app.slack.com"),
 }
 
 # Router `site` values that name a provider (the router prompt suggests

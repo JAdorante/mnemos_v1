@@ -1408,7 +1408,12 @@ doesn't raise, it quietly changes what becomes a memory.
   directory browse (`GET /connectors/directory`), Connect/OAuth (Google
   and Outlook ready — Outlook is Microsoft Graph `Mail.ReadBasic` +
   `Calendars.Read` via `MS_OAUTH_CLIENT_ID`, callback
-  `/oauth/outlook/callback`; HubSpot/Slack still planned), **per-conversation enable**
+  `/oauth/outlook/callback`; GitHub, Linear and HubSpot ready as of
+  2026-11-11 — read-only issues/PRs/repos, issues/projects, and
+  contacts/deals/companies on a shared `connectors/oauth_base.py`, each via
+  `<PROVIDER>_OAUTH_CLIENT_ID/SECRET` or an env token; Notion pages and
+  databases and Slack channel/DM messages on the same base, so nothing in
+  the directory is planned any more), **per-conversation enable**
   (Chat → Connectors; `POST /connectors/session`), custom MCP connectors
   (`POST /connectors/custom` — reached from *this* machine, so localhost
   is fine), team allowlist (`POST /connectors/team`), and Tool access

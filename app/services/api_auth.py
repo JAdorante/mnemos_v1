@@ -60,6 +60,11 @@ _EXACT_EXEMPT = frozenset({
     "/peer/pair/claim",   # peer pairing: the single-use code IS the auth
     "/oauth/google/callback",   # OAuth redirects: the state is the auth
     "/oauth/outlook/callback",  # (browser arrives with no LAN token)
+    "/oauth/github/callback",
+    "/oauth/linear/callback",
+    "/oauth/hubspot/callback",
+    "/oauth/notion/callback",
+    "/oauth/slack/callback",
     # Remote MCP (services/remote_mcp.py): every one checks its own
     # credentials, loopback included — a local tunnel daemon makes public
     # requests look local. /oauth/mcp/authorize stays under CSRF.
