@@ -28,6 +28,22 @@ from .perception import render_observation, scan_delta, signature
 from .provider_tips import tips_for_url
 
 
+def _browser_enabled() -> bool:
+    """`QUILL_BROWSER=0` turns off the agent browser (web search and browsing).
+
+    Routed web goals are answered from memory instead; anything that still
+    reaches Playwright is refused. Mirrors `QUILL_DESKTOP=0`.
+    """
+    import os
+    return os.environ.get("QUILL_BROWSER", "1") not in ("0", "false", "False")
+
+
+_BROWSER_OFF_NOTE = (
+    "\n\n[Note: web browsing and web search are turned off on this "
+    "deployment. Answer from what you already know and the context above; "
+    "if the request needs the live web, say so plainly in one sentence.]")
+
+
 def _plan_text(plan):
     steps = plan.get("steps", [])
     lines = [
@@ -573,6 +589,9 @@ class Agent:
         """Start Playwright only when a web goal actually needs it."""
         if self._browser_started:
             return
+        if not _browser_enabled():
+            raise RuntimeError("web browsing is turned off on this deployment "
+                               "(QUILL_BROWSER=0)")
         self.driver.start()
         self._browser_started = True
         # WS2d: the perception URL read must not record the agent's own
@@ -1971,7 +1990,8 @@ class Agent:
 
             # Live failure (2026-09-25): "what's on my X feed" routed to 'none'
             # because X has no connector, and the answer said it couldn't browse.
-            if route.get("surface") == "none" and _wants_a_live_feed(goal):
+            if (route.get("surface") == "none" and _wants_a_live_feed(goal)
+                    and _browser_enabled()):
                 self._log("→ a live feed is web content; using the agent browser")
                 route = {**route, "surface": "browser", "requires_browser": True,
                          "tool": "browser_agent"}
@@ -2001,6 +2021,18 @@ class Agent:
                                    "requires_browser": False,
                                    "connector": meta["ids"]}
                 ans = self.llm.direct_answer(goal, ctx + block, mode_guidance=study_guidance)
+                self.last_distill_id = getattr(self.llm, "last_distill_id", None)
+                self.transcript.append({"goal": goal, "result": ans})
+                self.last_steps, self.last_replans = 0, 0
+                return ans, "answered_no_browser"
+
+            if not _browser_enabled():
+                self._log("→ web browsing is off (QUILL_BROWSER=0); answering directly")
+                self.last_route = {**route, "surface": "none",
+                                   "requires_browser": False,
+                                   "browser_disabled": True}
+                ans = self.llm.direct_answer(goal, ctx + _BROWSER_OFF_NOTE,
+                                             mode_guidance=study_guidance)
                 self.last_distill_id = getattr(self.llm, "last_distill_id", None)
                 self.transcript.append({"goal": goal, "result": ans})
                 self.last_steps, self.last_replans = 0, 0

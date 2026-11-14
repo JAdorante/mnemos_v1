@@ -86,6 +86,10 @@ x-env: &sparrow-env
   # draft-building all still run. Raise to "approval" (or unset) to restore
   # human-gated commits; "navigate" is stricter still (no typing or clicking).
   AGENT_DRY_RUN: draft
+  # Agent browser off (2026-11-14): no web search or browsing on the pilot.
+  # Web goals are answered from memory with a one-line "browsing is off"
+  # note; Playwright never starts. Unset (or "1") to restore.
+  QUILL_BROWSER: "0"
   # Meeting debrief (2026-10-29): after a note lands, Sparrow drafts a
   # thank-you to each person on the call; the tester picks recipients on the
   # meeting page and presses Send. This is the ONE send path on the pilot and
