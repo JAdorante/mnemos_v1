@@ -53,6 +53,10 @@ x-env: &sparrow-env
   NOTION_OAUTH_CLIENT_SECRET: "${NOTION_OAUTH_CLIENT_SECRET:-}"
   SLACK_OAUTH_CLIENT_ID: "${SLACK_OAUTH_CLIENT_ID:-}"
   SLACK_OAUTH_CLIENT_SECRET: "${SLACK_OAUTH_CLIENT_SECRET:-}"
+  # Google Drive connector: its own grant on the Google client above unless
+  # these two are set. Register .../oauth/google_drive/callback on the client.
+  GOOGLE_DRIVE_OAUTH_CLIENT_ID: "${GOOGLE_DRIVE_OAUTH_CLIENT_ID:-}"
+  GOOGLE_DRIVE_OAUTH_CLIENT_SECRET: "${GOOGLE_DRIVE_OAUTH_CLIENT_SECRET:-}"
   # The ONE redirect URI registered with Google — a stable Tailscale Funnel
   # hostname, not a quick tunnel. Whichever container the funnel points at
   # relays the code back to the seat that started the flow (the live origin

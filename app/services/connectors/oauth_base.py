@@ -1,5 +1,5 @@
 """Shared OAuth2 (authorization code) plumbing for the directory connectors
-that are not mail: GitHub, Linear, HubSpot.
+that are not mail: GitHub, Linear, HubSpot, Notion, Slack, Google Drive.
 
 Google and Outlook each carry their own copy of the redirect / loopback /
 state / refresh dance. This module is that dance once, parameterised by the

@@ -953,6 +953,7 @@ class OutlookConfig:
 
 def _oauth_connector_config(name: str, env_prefix: str, default_scopes: str):
     """OAuth-app settings for the GitHub / Linear / HubSpot / Notion / Slack connectors
+    (Google Drive has its own class below, since it falls back to the Gmail client)
     (services/connectors/oauth_base.py). Each needs a confidential client
     (id + secret); the env-token alternative (GITHUB_TOKEN, LINEAR_API_KEY,
     HUBSPOT_ACCESS_TOKEN, NOTION_TOKEN, SLACK_USER_TOKEN) is read live by the
@@ -990,6 +991,39 @@ SlackConfig = _oauth_connector_config(
     "slack", "SLACK",
     "channels:history channels:read groups:history groups:read "
     "im:history im:read mpim:history mpim:read users:read")
+
+
+def _google_drive_client(part: str) -> str:
+    """Drive's own OAuth client when set, else the Gmail + Calendar one."""
+    return (_get(f"GOOGLE_DRIVE_OAUTH_CLIENT_{part}", "")
+            or _get(f"GOOGLE_OAUTH_CLIENT_{part}", ""))
+
+
+@dataclass(frozen=True)
+class GoogleDriveConfig:
+    """Google Drive connector (services/connectors/google_drive.py).
+
+    Its own grant and token file, but by default the same Google OAuth client
+    as the Gmail + Calendar connector: GOOGLE_DRIVE_OAUTH_CLIENT_ID/SECRET
+    override GOOGLE_OAUTH_CLIENT_ID/SECRET when Drive should live on a
+    separate client. The default scope reads file text (Docs, Sheets,
+    Slides exports); GOOGLE_DRIVE_OAUTH_SCOPES=.../drive.metadata.readonly
+    narrows it to names, owners and edit times.
+    """
+    client_id: str = _google_drive_client("ID")
+    client_secret: str = _google_drive_client("SECRET")
+    scopes: str = _get("GOOGLE_DRIVE_OAUTH_SCOPES",
+                       "https://www.googleapis.com/auth/drive.readonly")
+
+    @property
+    def token_path(self) -> str:
+        return _get(
+            "QUILL_GOOGLE_DRIVE_TOKEN_PATH",
+            f"{_get('QUILL_DATA_DIR', 'data')}/connectors/google_drive/token.json")
+
+    @property
+    def oauth_state_path(self) -> str:
+        return f"{_get('QUILL_DATA_DIR', 'data')}/connectors/google_drive/oauth_state.json"
 
 
 @dataclass(frozen=True)
@@ -1860,6 +1894,7 @@ class Settings:
     hubspot: HubspotConfig = HubspotConfig()
     notion: NotionConfig = NotionConfig()
     slack: SlackConfig = SlackConfig()
+    google_drive: GoogleDriveConfig = GoogleDriveConfig()
     mcp: McpConfig = McpConfig()
     external_capture: ExternalCaptureConfig = ExternalCaptureConfig()
     onboarding: OnboardingConfig = OnboardingConfig()

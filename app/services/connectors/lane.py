@@ -35,11 +35,16 @@ _HOSTS: dict[str, tuple[str, ...]] = {
     "hubspot": ("app.hubspot.com", "hubspot.com", "www.hubspot.com"),
     "notion": ("notion.so", "www.notion.so", "notion.site"),
     "slack": ("slack.com", "app.slack.com"),
+    "google_drive": ("drive.google.com", "docs.google.com", "sheets.google.com",
+                     "slides.google.com"),
 }
 
 # Router `site` values that name a provider (the router prompt suggests
 # "gmail" / "calendar" / "crm" / "web"; models also write the brand).
 _SITE_TO_CONNECTOR = (
+    # Before the Gmail row: "google drive" contains "google".
+    (("google drive", "gdrive", "google docs", "google sheets", "google slides",
+      "drive.google", "docs.google"), "google_drive"),
     (("gmail", "google mail", "google calendar", "gcal", "google"), "google"),
     (("outlook", "office365", "office 365", "microsoft", "o365", "hotmail",
       "live.com", "exchange"), "outlook"),

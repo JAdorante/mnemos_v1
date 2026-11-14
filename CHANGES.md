@@ -1,3 +1,11 @@
+# Google Drive connector, November 12 2026
+
+A Google Drive card in the connector directory, on the shared OAuth base (`app/services/connectors/google_drive.py`). It is a second grant on the Google client already used for Gmail + Calendar (`GOOGLE_DRIVE_OAUTH_CLIENT_ID/SECRET` move it to its own client), with its own token file, because the Gmail connector's scope guard refuses anything wider than mail metadata + calendar; disconnecting one leaves the other. Default scope `drive.readonly`; `GOOGLE_DRIVE_OAUTH_SCOPES` can narrow it to `drive.metadata.readonly`, and then no file text is read. A grant carrying any other scope is refused.
+
+Every ten minutes it lists files modified or newly shared with the user since the cursor (shared drives included, folders and shortcuts skipped) and lands Docs, Sheets and Slides as `google_drive.document` with the top 1500 characters of their text export (at most `QUILL_GOOGLE_DRIVE_MAX_BODIES`, 50, per check), and everything else as `google_drive.file` by name, type, owner and last editor, each with its Drive link. Items are text-only (SYSTEM modality), the same as Notion pages, so no body consent applies. The lane map knows the Drive, Docs, Sheets and Slides hosts, so a wall on one of them names the connector.
+
+Not exercised against live Google from this box; the HTTP layer is covered with fakes. Deploying: register `/oauth/google_drive/callback` on the funnel and on the Google client, and enable the Drive API in that project (`deploy/hosted/gb10/README.md`, "Google Drive"). Tests: `tests/test_google_drive_connector.py`.
+
 # GitHub, Linear, HubSpot, Notion and Slack connectors, November 11 2026
 
 Every card that read Planned in the connector directory now connects, and the planned list is empty.

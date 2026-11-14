@@ -1,5 +1,6 @@
 """Connector registry — every directory connector is ready (google,
-outlook, imessage, github, linear, hubspot, notion, slack); PLANNED stays
+outlook, imessage, github, linear, hubspot, notion, slack, google_drive);
+PLANNED stays
 as the seam for the next one; custom MCP overlays."""
 from __future__ import annotations
 
@@ -9,6 +10,7 @@ from app.services.connectors import catalog
 from app.services.connectors.base import Connector
 from app.services.connectors.github import github
 from app.services.connectors.google import google
+from app.services.connectors.google_drive import google_drive
 from app.services.connectors.hubspot import hubspot
 from app.services.connectors.imessage import imessage
 from app.services.connectors.linear import linear
@@ -22,7 +24,8 @@ def _builtins() -> dict[str, Connector]:
     reg: dict[str, Connector] = {google.id: google, outlook.id: outlook,
                                  imessage.id: imessage, github.id: github,
                                  linear.id: linear, hubspot.id: hubspot,
-                                 notion.id: notion, slack.id: slack}
+                                 notion.id: notion, slack.id: slack,
+                                 google_drive.id: google_drive}
     for stub in PLANNED:
         reg[stub.id] = stub
     return reg

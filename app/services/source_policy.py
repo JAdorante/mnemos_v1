@@ -263,7 +263,7 @@ def _connector_ids() -> frozenset[str]:
     """Registered connector ids (cached; the registry is static per process
     apart from custom MCP rows, which carry an `mcp-` prefix)."""
     ids = {"google", "slack", "outlook", "hubspot", "salesforce", "notion",
-           "github", "jira", "linear"}
+           "github", "jira", "linear", "google_drive"}
     try:
         from app.services.connectors import registry
         ids |= {c.id for c in registry.all()}

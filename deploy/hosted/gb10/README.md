@@ -231,6 +231,40 @@ Same base, two more paths (`notion.py`, `slack.py`), funnel paths
   machine on its own. `QUILL_SLACK_MAX_CONVERSATIONS` (60) bounds the
   history calls per check.
 
+### Google Drive
+
+Same base again (`google_drive.py`), funnel path
+`/oauth/google_drive/callback`. It is a **second grant on the Google client
+already used for Gmail + Calendar**: the Gmail connector's scope guard refuses
+a grant wider than mail metadata + calendar, so Drive gets its own token at
+`data/connectors/google_drive/token.json` and the two can be connected or
+disconnected apart. Set `GOOGLE_DRIVE_OAUTH_CLIENT_ID/SECRET` only when Drive
+should live on a separate Google client.
+
+```bash
+sudo tailscale funnel --bg --set-path=/oauth/google_drive/callback \
+     http://127.0.0.1:8001/oauth/google_drive/callback
+```
+
+1. In the Google Cloud project of the existing client: enable the **Google
+   Drive API**, add `https://gb10.<tailnet>.ts.net/oauth/google_drive/callback`
+   as a redirect URI, and add the scope
+   `https://www.googleapis.com/auth/drive.readonly` to the OAuth consent
+   screen. It is a *restricted* scope: while the app is in Testing, each user
+   must be a listed test user, and publishing needs Google's verification.
+   `GOOGLE_DRIVE_OAUTH_SCOPES=https://www.googleapis.com/auth/drive.metadata.readonly`
+   asks for names, owners and dates only (not restricted), and the connector
+   then lands no file text.
+2. Rebuild, then Privacy → Connections → **Connect** on Google Drive. A grant
+   wider than those two scopes is refused.
+
+What lands, every ten minutes: files modified or newly shared since the last
+check (shared drives included; folders skipped), as `google_drive.document`
+for Docs, Sheets and Slides with the top 1500 characters of their export
+(`QUILL_GOOGLE_DRIVE_MAX_BODIES`, 50 per check), and `google_drive.file` for
+everything else by name, type, owner and last editor. Desktop installs use
+the usual `http://127.0.0.1:<any port>/` loopback.
+
 Users who come in through the gateway (`sparrow.ravenry.us`) arrive with
 `X-Forwarded-Host` set, so their seat mints the redirect from *that* origin
 unless `SPARROW_OAUTH_REDIRECT_BASE` is set. With the funnel anchor set, every

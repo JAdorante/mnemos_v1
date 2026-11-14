@@ -116,6 +116,21 @@ DIRECTORY: dict[str, dict[str, Any]] = {
         "auth": "oauth",
         "scopes_blurb": "no scopes — read capabilities set on the integration; you choose the pages",
     },
+    "google_drive": {
+        "category": "productivity",
+        "description": (
+            "Read-only files in your Google Drive and files shared with you: "
+            "names, who edited them, and the text of Docs, Sheets and Slides. "
+            "A separate Google sign-in from Gmail, so you can keep one and not the other."
+        ),
+        "capabilities": (
+            "Remember Docs, Sheets and Slides as they change",
+            "Track files shared with you and who edited them",
+            "Find a file by what it says, not just its name",
+        ),
+        "auth": "oauth",
+        "scopes_blurb": "drive.readonly (or drive.metadata.readonly for names and dates only)",
+    },
     "github": {
         "category": "dev",
         "description": (

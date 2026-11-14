@@ -65,6 +65,7 @@ _EXACT_EXEMPT = frozenset({
     "/oauth/hubspot/callback",
     "/oauth/notion/callback",
     "/oauth/slack/callback",
+    "/oauth/google_drive/callback",
     # Remote MCP (services/remote_mcp.py): every one checks its own
     # credentials, loopback included — a local tunnel daemon makes public
     # requests look local. /oauth/mcp/authorize stays under CSRF.

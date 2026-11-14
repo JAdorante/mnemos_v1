@@ -519,7 +519,8 @@ def oauth_callback(provider: str, request: Request,
                    state: str | None = None,
                    error: str | None = None):
     """Web-redirect landing for an OAuth connector (google, outlook, github,
-    linear, hubspot, notion, slack) — also the relay for the other seats.
+    linear, hubspot, notion, slack, google_drive) — also the relay for the
+    other seats.
 
     One redirect URI per provider is registered (``QUILL_OAUTH_REDIRECT_BASE``,
     a stable hostname). Whichever instance it routes to lands here. If this

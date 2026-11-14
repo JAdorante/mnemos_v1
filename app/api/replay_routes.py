@@ -28,7 +28,8 @@ from pydantic import BaseModel, Field
 
 router = APIRouter()
 
-REPLAY_CONNECTORS = frozenset({"google", "slack", "outlook", "notion"})
+REPLAY_CONNECTORS = frozenset({"google", "slack", "outlook", "notion",
+                               "google_drive"})
 MAX_ITEMS = 500
 
 
