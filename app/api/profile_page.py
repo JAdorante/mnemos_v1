@@ -110,6 +110,31 @@ body{margin:0;min-height:100vh;font:var(--fs-body)/var(--lh-body) var(--font);co
 .pfield button:hover{background:var(--panel-2);border-color:var(--line-strong)}
 .plabel{font:600 13px/1.2 var(--sans);letter-spacing:var(--track-caps);
   color:var(--mut);margin-top:var(--sp-5)}
+.ekinds{display:flex;flex-wrap:wrap;gap:var(--sp-1);margin-top:var(--sp-3)}
+.ekinds button,.erare-toggle{border:1px solid var(--hairline);border-radius:var(--radius-full);
+  background:var(--panel-2);font:12px/1.2 var(--sans);color:var(--mut);cursor:pointer;padding:5px 11px}
+.ekinds button:hover,.erare-toggle:hover{color:var(--navy);border-color:var(--line-strong)}
+.ekinds button.on{color:var(--navy);background:var(--ink-06);border-color:var(--line-strong)}
+.elist{border:1px solid var(--line);border-radius:var(--radius);background:var(--panel);
+  margin-top:var(--sp-2);box-shadow:var(--shadow-workspace);overflow:hidden}
+.erow{display:flex;align-items:center;gap:var(--sp-3);padding:7px var(--sp-4);cursor:pointer;
+  border-top:1px solid var(--hairline);transition:background var(--dur-fast) var(--ease-io)}
+.erow:first-child{border-top:0}
+.erow:hover,.erow.open{background:var(--panel-2)}
+.erow .main{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.erow .nm{font:500 var(--fs-sub)/1.3 var(--font);color:var(--navy)}
+.erow .chip{margin:0 0 0 var(--sp-2);padding:2px 8px}
+.erow .in,.erow .dots,.erow .seen,.erow .chev{color:var(--mut);font-size:var(--fs-caption);
+  flex-shrink:0;white-space:nowrap}
+.erow .in{width:140px;overflow:hidden;text-overflow:ellipsis}
+.erow .dots{width:48px}
+.erow .seen{width:72px;text-align:right}
+.erow .echeck{accent-color:var(--navy);cursor:pointer;margin:0;flex-shrink:0}
+.elist .pdetail{margin:0;border-width:1px 0 0 3px;border-radius:0;box-shadow:none}
+.erare-head{display:flex;align-items:center;gap:var(--sp-3);flex-wrap:wrap;margin-top:var(--sp-6)}
+.erare-head .lead{margin:0}
+.erare-head label{font:var(--fs-caption)/1.3 var(--font);color:var(--mut);cursor:pointer;
+  display:inline-flex;align-items:center;gap:var(--sp-2);margin-left:auto}
 .forget-person{margin-top:var(--sp-4);border:1px solid var(--line);border-radius:var(--radius-sm);
   background:var(--panel);font:500 var(--fs-caption)/1.2 var(--font);
   letter-spacing:var(--track-snug);color:var(--danger);
@@ -146,9 +171,10 @@ body{margin:0;min-height:100vh;font:var(--fs-body)/var(--lh-body) var(--font);co
   .tabs{flex-wrap:wrap;gap:var(--sp-1)}
   .tabs button{padding:6px 12px;font-size:var(--fs-caption)}
   .work-bar{bottom:var(--sp-2);margin-left:-2px;margin-right:-2px}
+  .erow .in{display:none}
 }
 @media(prefers-reduced-motion:reduce){
-  .card,.prow{transition:none}
+  .card,.prow,.erow{transition:none}
 }
 </style>
 </head>
@@ -251,10 +277,16 @@ body{margin:0;min-height:100vh;font:var(--fs-body)/var(--lh-body) var(--font);co
   <div id="tabEntities" hidden>
     <section class="section">
       <h2>Orgs, projects, tools &amp; places</h2>
-      <p class="lead">Everything else in your world. Click one to fix its name or
+      <p class="lead">Everything else in your world, by kind. Click one to fix its name or
       category, add aliases and notes, review its facts — or remove noise.</p>
       <input class="psearch" id="eSearch" placeholder="filter by name…">
+      <div class="ekinds" id="eKinds"></div>
       <div id="entityList"><div class="empty">Loading…</div></div>
+      <div class="work-bar" id="entBar">
+        <span class="count" id="entSelCount">0 selected</span>
+        <button type="button" class="warn" data-ebulk="forget">Forget selected…</button>
+        <button type="button" data-ebulk="clear">Clear</button>
+      </div>
     </section>
   </div>
 </div>
@@ -602,71 +634,145 @@ function entityBusy(){
     && (ae.tagName==='INPUT'||ae.tagName==='TEXTAREA'));
 }
 
+// Sections are by kind; weak rows nobody has touched in a month fold into
+// "Rarely seen" at the bottom, where they can be selected and forgotten in bulk.
+const E_GROUPS=[['org','Orgs'],['project','Projects'],['tool','Tools'],
+                ['place','Places'],['idea','Topics'],['other','Other']];
+const E_RARE_WEIGHT=5, E_RARE_DAYS=30;
+let entityKind='all', entityRareOpen=false;
+const entitySel=new Set();
+
+function entityGroup(k){
+  if(k==='company'||k==='organization') return 'org';
+  return ['org','project','tool','place','idea'].includes(k)?k:'other';
+}
+function entityRare(x){
+  const age=x.last_seen?(Date.now()/1000-x.last_seen)/86400:Infinity;
+  return x.weight<E_RARE_WEIGHT && age>E_RARE_DAYS;
+}
+
 async function loadEntities(force){
   const d=await (await fetch('/entities/list')).json();
   const sig=JSON.stringify(d.entities||[]);
   if(!force && sig===entitySig) return;
   entitySig=sig;
   entityCache=d.entities||[];
+  const live=new Set(entityCache.map(x=>x.id));
+  [...entitySel].forEach(id=>{ if(!live.has(id)) entitySel.delete(id); });
   renderEntityList();
 }
 
-function entityRowHtml(x){
-  const brief=(x.kind==='org'||x.kind==='company'||x.kind==='organization')
-    ?' <a class="chip" href="/org/'+x.id+'" onclick="event.stopPropagation()">brief</a>':'';
-  const row='<div class="prow" data-eid="'+x.id+'">'
-    +'<div style="flex:1"><span class="nm">'+MnemosEsc(x.name)+'</span>'
-    +' <span class="chip">'+MnemosEsc(x.kind)+'</span>'+brief
-    +'<div class="meta"><span title="connection strength (score '+x.weight.toFixed(1)+')">'
-    +'●'.repeat(Math.min(1+(x.weight>=5)+(x.weight>=15)+(x.weight>=40),4))
-    +'○'.repeat(4-Math.min(1+(x.weight>=5)+(x.weight>=15)+(x.weight>=40),4))+'</span>'
-    +' · '+fmtSeen(x.last_seen)+'</div></div>'
-    +'<span class="meta">'+(openEntityId===x.id?'▾':'▸')+'</span></div>';
-  return row+(openEntityId===x.id?'<div class="pdetail" id="eDetail"><div class="lead">Loading…</div></div>':'');
+function entityRowHtml(x, pick){
+  const g=entityGroup(x.kind), open=openEntityId===x.id;
+  const dots=Math.min(1+(x.weight>=5)+(x.weight>=15)+(x.weight>=40),4);
+  const home=x.project&&x.project.name&&x.project.name!==x.name?x.project.name:'';
+  const row='<div class="erow'+(open?' open':'')+'" data-eid="'+x.id+'">'
+    +(pick?'<input type="checkbox" class="echeck" value="'+x.id+'"'
+      +(entitySel.has(x.id)?' checked':'')+' title="Select">':'')
+    +'<span class="main"><span class="nm">'+MnemosEsc(x.name)+'</span>'
+    +(g==='other'||pick?'<span class="chip">'+MnemosEsc(x.kind)+'</span>':'')
+    +(g==='org'?'<a class="chip" href="/org/'+x.id+'" title="Open living brief">brief</a>':'')
+    +'</span>'
+    +'<span class="in" title="'+(home?'Mostly comes up with '+MnemosEsc(home):'')+'">'+MnemosEsc(home)+'</span>'
+    +'<span class="dots" title="connection strength (score '+x.weight.toFixed(1)+')">'
+    +'●'.repeat(dots)+'○'.repeat(4-dots)+'</span>'
+    +'<span class="seen">'+fmtSeen(x.last_seen).replace(/^seen | seen$/,'')+'</span>'
+    +'<span class="chev">'+(open?'▾':'▸')+'</span></div>';
+  return row+(open?'<div class="pdetail" id="eDetail"><div class="lead">Loading…</div></div>':'');
+}
+
+function syncEntBar(){
+  document.getElementById('entBar').classList.toggle('on', entitySel.size>0);
+  document.getElementById('entSelCount').textContent=entitySel.size+' selected';
 }
 
 function renderEntityList(){
   const q=(document.getElementById('eSearch').value||'').toLowerCase();
   const el=document.getElementById('entityList');
-  const rows=entityCache.filter(x=>!q||x.name.toLowerCase().includes(q));
-  if(!rows.length){el.innerHTML='<div class="empty">Nothing yet — mention orgs, projects, and tools in chat or speech.</div>';return;}
-  // Group by home project (the rollup's associated_project edge). A project's
-  // own row leads its section; entities with no dominant project land in
-  // "Everything else" at the bottom.
-  const groups=new Map(), loose=[];
-  rows.forEach(x=>{
-    const p=x.project&&x.project.name;
-    if(p){ if(!groups.has(p)) groups.set(p,{rows:[],w:0});
-      const g=groups.get(p); g.rows.push(x); g.w+=x.weight; }
-    else loose.push(x);
-  });
-  // Pull each section's project row out of the loose list so it heads its group.
-  const looseRest=[];
-  loose.forEach(x=>{
-    const g=groups.get(x.name);
-    if(g){ g.rows.unshift(x); g.w+=x.weight; } else looseRest.push(x);
-  });
-  const names=[...groups.keys()].sort((a,b)=>groups.get(b).w-groups.get(a).w);
+  const kinds=document.getElementById('eKinds');
+  const matched=entityCache.filter(x=>!q||x.name.toLowerCase().includes(q));
+  const counts={};
+  matched.forEach(x=>{ const g=entityGroup(x.kind); counts[g]=(counts[g]||0)+1; });
+  if(entityKind!=='all' && !counts[entityKind]) entityKind='all';
+  kinds.innerHTML=entityCache.length
+    ? [['all','All']].concat(E_GROUPS.filter(([k])=>counts[k])).map(([k,label])=>
+        '<button type="button" data-ekind="'+k+'"'+(entityKind===k?' class="on"':'')+'>'
+        +label+' '+(k==='all'?matched.length:counts[k])+'</button>').join('')
+    : '';
+  const rows=matched.filter(x=>entityKind==='all'||entityGroup(x.kind)===entityKind);
+  if(!rows.length){
+    el.innerHTML='<div class="empty">'+(entityCache.length?'Nothing matches.'
+      :'Nothing yet — mention orgs, projects, and tools in chat or speech.')+'</div>';
+    syncEntBar();return;
+  }
+  const rare=rows.filter(entityRare), main=rows.filter(x=>!entityRare(x));
   let h='';
-  names.forEach(n=>{
-    h+='<div class="plabel">'+MnemosEsc(n)+'</div>'
-      +groups.get(n).rows.map(entityRowHtml).join('');
+  E_GROUPS.forEach(([k,label])=>{
+    const g=main.filter(x=>entityGroup(x.kind)===k);
+    if(!g.length) return;
+    h+='<div class="plabel">'+label+' · '+g.length+'</div>'
+      +'<div class="elist">'+g.map(x=>entityRowHtml(x,false)).join('')+'</div>';
   });
-  if(looseRest.length)
-    h+=(names.length?'<div class="plabel">Everything else</div>':'')
-      +looseRest.map(entityRowHtml).join('');
+  if(rare.length){
+    // A search hit or an open row must never hide behind the fold.
+    const open=entityRareOpen||!!q||rare.some(x=>x.id===openEntityId);
+    h+='<div class="erare-head">'
+      +'<button type="button" class="erare-toggle" data-etoggle="rare">'
+      +(open?'▾':'▸')+' Rarely seen · '+rare.length+'</button>'
+      +'<span class="lead">Weak evidence and not seen in '+E_RARE_DAYS+'+ days.</span>'
+      +(open?'<label><input type="checkbox" id="eSelRare"'
+        +(rare.every(x=>entitySel.has(x.id))?' checked':'')+'> Select all</label>':'')
+      +'</div>';
+    if(open) h+='<div class="elist">'+rare.map(x=>entityRowHtml(x,true)).join('')+'</div>';
+  }
   el.innerHTML=h;
+  syncEntBar();
   if(openEntityId!==null) loadEntityDetail(openEntityId);
 }
 
 document.getElementById('eSearch').addEventListener('input', renderEntityList);
 
 document.addEventListener('click', e=>{
-  if(e.target.closest('button')) return;
-  const row=e.target.closest('.prow[data-eid]'); if(!row) return;
+  const kb=e.target.closest('button[data-ekind]');
+  if(kb){ entityKind=kb.dataset.ekind; renderEntityList(); return; }
+  if(e.target.closest('button[data-etoggle]')){
+    entityRareOpen=!entityRareOpen; renderEntityList(); return; }
+  if(e.target.closest('button,a,input')) return;
+  const row=e.target.closest('.erow[data-eid]'); if(!row) return;
   const eid=parseInt(row.dataset.eid,10);
   openEntityId = (openEntityId===eid)?null:eid;
   renderEntityList();
+});
+
+document.addEventListener('change', e=>{
+  const t=e.target;
+  if(t.id==='eSelRare'){
+    document.querySelectorAll('#entityList input.echeck').forEach(c=>{
+      const id=parseInt(c.value,10);
+      if(t.checked) entitySel.add(id); else entitySel.delete(id);
+    });
+    renderEntityList();
+  }else if(t.classList&&t.classList.contains('echeck')){
+    const id=parseInt(t.value,10);
+    if(t.checked) entitySel.add(id); else entitySel.delete(id);
+    const all=document.getElementById('eSelRare');
+    if(all) all.checked=[...document.querySelectorAll('#entityList input.echeck')].every(c=>c.checked);
+    syncEntBar();
+  }
+});
+
+document.addEventListener('click', async e=>{
+  const b=e.target.closest('button[data-ebulk]'); if(!b) return;
+  if(b.dataset.ebulk==='forget'){
+    const ids=[...entitySel];
+    if(!ids.length) return;
+    if(!confirm('Forget '+ids.length+' item'+(ids.length===1?'':'s')
+      +'? Their nodes and connections are removed; facts stay but are detached.')) return;
+    for(const id of ids) await fetch('/entities/'+id+'/forget',{method:'POST'});
+    if(ids.includes(openEntityId)) openEntityId=null;
+  }
+  entitySel.clear();
+  loadEntities(true);
 });
 
 async function loadEntityDetail(eid){
