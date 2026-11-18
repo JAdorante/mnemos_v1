@@ -4,9 +4,10 @@ The graph knows which facts each entity appears in (fact→entity `about` edges
 from the rebuild's text match and context_attribution's room stamping), but
 nothing ever rolls that up into "LanceDB belongs to Sparrow" — so the entities
 page is a flat list where tools and ideas float free. This computes, for each
-non-project entity, how its facts co-attribute across project entities and
-mints a single entity→project `associated_project` edge when one project
-dominates.
+entity that is not itself a home, how its facts co-attribute across the
+homes (`homes`: the filing targets when there are any, else the
+QUILL_ROLLUP_HOME_KINDS rows) and mints a single entity→project
+`associated_project` edge when one home dominates. Homes are never subjects.
 
 Design constraints:
   * single-home or none: an entity that spreads across projects (Claude, AWS,
@@ -61,6 +62,32 @@ def _home_kinds() -> frozenset[str]:
     return frozenset(k.strip().lower() for k in raw.split(",") if k.strip())
 
 
+def _filed_homes_enabled() -> bool:
+    """QUILL_ROLLUP_FILED_HOMES (default on). Off: homes are the
+    QUILL_ROLLUP_HOME_KINDS rows, as before."""
+    return os.getenv("QUILL_ROLLUP_FILED_HOMES", "1") not in (
+        "0", "false", "False")
+
+
+def homes(store, entities: dict[int, dict]) -> set[int]:
+    """The entities that can be a home. When the user has filed notes under
+    anything, those filing targets are the homes, whatever their kind: a
+    client company filed as an org ("Volvo AB") is a home like a project.
+    Otherwise every row of a QUILL_ROLLUP_HOME_KINDS kind, as before."""
+    if _filed_homes_enabled():
+        try:
+            from app.services import projects as _projects
+            filed = _projects.filed_target_ids(entities.values())
+        except Exception as exc:
+            print(f"[project_rollup] filed homes skipped ({exc}).")
+            filed = set()
+        if filed:
+            return filed
+    kinds = _home_kinds()
+    return {eid for eid, e in entities.items()
+            if (e.get("kind") or "").lower() in kinds}
+
+
 def compute(store) -> list[dict]:
     """Score fact co-attribution and return the dominant associations.
 
@@ -69,9 +96,7 @@ def compute(store) -> list[dict]:
     (>= _min_facts shared facts with the winner, winner share >= _dominance).
     """
     entities = {int(e["id"]): e for e in store.all_entities()}
-    home = _home_kinds()
-    projects = {eid for eid, e in entities.items()
-                if (e.get("kind") or "").lower() in home}
+    projects = homes(store, entities)
     if not projects:
         return []
 
@@ -84,6 +109,9 @@ def compute(store) -> list[dict]:
                 (eid, (r.get("origin") or "")))
 
     # score[entity][project] — context-boosted co-occurrence; count = #facts.
+    # A home is never a subject: two homes that share facts would otherwise
+    # home each other (a 2-cycle that can file the real project under a
+    # noisy one), and a home never needs one.
     score: dict[int, dict[int, float]] = {}
     count: dict[int, dict[int, int]] = {}
     for pairs in by_fact.values():
@@ -91,6 +119,8 @@ def compute(store) -> list[dict]:
         if not fact_projects:
             continue
         for eid, e_org in pairs:
+            if eid in projects:
+                continue
             for pid, p_org in fact_projects:
                 if eid == pid:
                     continue

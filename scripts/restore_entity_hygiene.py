@@ -76,7 +76,7 @@ def main() -> int:
         n_u += 1
     for e in flip_to_person:
         eid = int(e["id"])
-        store.set_entity_hidden(eid, hidden=True)
+        store.set_entity_hidden(eid, hidden=True, source="rule")
         try:
             store.resolve_person(e["name"])
         except Exception:

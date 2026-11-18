@@ -579,11 +579,20 @@ def create_and_link_person(peer_id: str, name: str | None = None) -> dict:
             return {"ok": False, "error": "unknown peer"}
         display = (name or rec.get("name") or "").strip()
     from app.services.name_quality import is_plausible_person, normalize_person_name
-    if not is_plausible_person(display):
-        return {"ok": False, "error": "name fails person-quality gate"}
     try:
         from app.services.memory import memory
         store = memory._ensure_store()
+    except Exception as exc:
+        return {"ok": False, "error": f"could not create person ({exc})"}
+    # The user confirmed this name as a person: a learned "not a person" on
+    # it no longer stands. The rest of the gate still applies.
+    try:
+        store.user_named_person(display)
+    except Exception:
+        pass
+    if not is_plausible_person(display, store=store):
+        return {"ok": False, "error": "name fails person-quality gate"}
+    try:
         canon = normalize_person_name(display) or display
         pid = int(store.insert_person(canon))
     except Exception as exc:

@@ -64,13 +64,23 @@ def enabled() -> bool:
     return os.getenv("QUILL_SCREEN_EXTRACT", "1") not in ("0", "false", "False")
 
 
+def system_prompt() -> str:
+    """`_SYSTEM` plus the entity-kind definitions the shared schema offers
+    (none with QUILL_EXTRACT_ENTITY_V2=0, which gives back `_SYSTEM` as is).
+    Screen text only ever binds entities, but what it says a name is still
+    counts, a little, in the kind vote."""
+    from app.services.extractor import entity_kind_rules
+    rules = entity_kind_rules()
+    return f"{_SYSTEM}\n{rules}" if rules else _SYSTEM
+
+
 def _extract(text: str) -> dict:
-    from app.services.extractor import _SCHEMA, EXTRACTOR_MODEL
+    from app.services.extractor import EXTRACTOR_MODEL, base_schema
     from app.services.model_router import router
     out = router.complete_json(
-        "extract", system=_SYSTEM,
+        "extract", system=system_prompt(),
         messages=[{"role": "user", "content": f"Screen text:\n\n{text}"}],
-        schema=_SCHEMA, max_tokens=1024, model=EXTRACTOR_MODEL)
+        schema=base_schema(), max_tokens=1024, model=EXTRACTOR_MODEL)
     return out or {}
 
 

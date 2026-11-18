@@ -511,10 +511,29 @@ def manual_split(store, *, node_type: str, node_id: int, new_name: str,
     if not new_name or node_type not in ("person", "entity"):
         return {"ok": False, "error": "bad_request"}
     if node_type == "person":
-        new_id = store.resolve_person(new_name, ts=now)
+        # A user split names a person: a learned "not a person" on the
+        # name is lifted for the user only, as a tombstone is below.
+        new_id = store.resolve_person(new_name, ts=now,
+                                      by_user=decided_by == "user")
     else:
         old = store.get_entity(int(node_id)) or {}
-        new_id = store.resolve_entity(new_name, old.get("kind"), ts=now)
+        if store.find_entity_exact(new_name):
+            # Splitting into a node that already exists: bind, and leave
+            # its kind to whoever set it.
+            new_id = store.resolve_entity(new_name, ts=now)
+        else:
+            # Only the user may bring a forgotten name back. The kind is
+            # inherited from the old node and so is its source, which can
+            # be "user": that inherited rank must never be what lifts the
+            # tombstone, so anyone else is refused here, before the mint.
+            if store.is_entity_tombstoned(new_name):
+                if decided_by != "user":
+                    return {"ok": False, "error": "name_forgotten"}
+                store.clear_entity_tombstone(new_name)
+            new_id = store.resolve_entity(
+                new_name, old.get("kind"), ts=now,
+                kind_source=old.get("kind_source"),
+                kind_confidence=old.get("kind_confidence"))
     if not new_id or int(new_id) == int(node_id):
         return {"ok": False, "error": "target_is_source"}
     moved: list[int] = []

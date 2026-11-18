@@ -1095,6 +1095,11 @@ def people_confirm(person_id: int, body: ConfirmIn | None = None) -> dict:
     if state not in ("contact", "candidate", "archived"):
         raise HTTPException(400, "state must be contact|candidate|archived")
     store.set_person_promotion(person_id, state)
+    if state == "contact":
+        # The user confirmed a person: a learned "not a person" on the
+        # name no longer stands.
+        store.user_named_person((store.get_person(person_id) or {})
+                                .get("name") or "")
     return {"ok": True, "person_id": person_id, "promotion_state": state}
 
 

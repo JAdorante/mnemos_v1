@@ -99,7 +99,8 @@ def self_person_id(store=None) -> int | None:
         from app.services.identity import user_identity
         name = (user_identity(st).get("name") or "").strip()
         if name:
-            pid = st.resolve_person(name, ts=time.time())
+            # The user's own name, as they typed it in Setup.
+            pid = st.resolve_person(name, ts=time.time(), by_user=True)
     except Exception as exc:
         print(f"[self_profile] self node unavailable ({exc}).")
         return None  # don't cache a transient failure

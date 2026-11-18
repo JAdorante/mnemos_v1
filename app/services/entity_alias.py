@@ -147,6 +147,14 @@ def resolve(name: str, *, store: Store | None = None, ts: float | None = None,
                         confirmed=True, ts=now)
             return int(e["id"])
 
+    # A name the user forgot must not come back as an alias of whatever it
+    # happens to sit near in embedding space (forgotten "k9" -> "k8").
+    try:
+        if store.is_entity_tombstoned(key):
+            return None
+    except Exception:
+        pass
+
     # 4) embedding cosine — proposal only, recurrence-gated auto-confirm.
     cos_min, autoconfirm_n = _cfg()
     qv = _embed(norm)

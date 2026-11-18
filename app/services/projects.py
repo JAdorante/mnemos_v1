@@ -84,7 +84,7 @@ def _looks_like_project(store, name: str) -> bool:
         return False
     try:
         from app.services.name_quality import is_person_shaped_entity_name
-        if is_person_shaped_entity_name(name):
+        if is_person_shaped_entity_name(name, store=store):
             return False
         if store.find_person_exact(name) is not None:
             return False
@@ -106,6 +106,94 @@ def _filed_counts() -> dict[str, tuple[str, int]]:
         prior = out.get(key)
         out[key] = (prior[0] if prior else name,
                     (prior[1] if prior else 0) + int(r["n"]))
+    return out
+
+
+# `filed_keys` is read by the kind vote on every bound sighting. It reads the
+# membership file and opens the assistant database, so it is cached for
+# _FILED_TTL_S, keyed on the database path and the size and mtime of the
+# files it reads (a write by any connection shows), and dropped by
+# `ensure_filed` and `invalidate_filed_keys`.
+_FILED_TTL_S = 60.0
+_filed_cache: tuple | None = None
+
+
+def _file_sig(p) -> tuple:
+    try:
+        st = os.stat(p)
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return (None, None)
+
+
+def _filed_sig() -> tuple:
+    from app.services.remote_mcp import db_path
+    p = db_path()
+    try:
+        from app.services.records import org_client
+        member = _file_sig(org_client._path())
+    except Exception:
+        member = (None, None)
+    return (str(p), _file_sig(p), _file_sig(f"{p}-wal"), member)
+
+
+def invalidate_filed_keys() -> None:
+    """Drop the cached `filed_keys`: a project was just filed or shared."""
+    global _filed_cache
+    _filed_cache = None
+
+
+def filed_keys() -> frozenset[str]:
+    """`norm` keys of the projects the user (or their team) actually filed:
+    the `shared` and `filed` tiers of `registry()`. Never the `known` tier,
+    which is only "entities the extractor called a project": as evidence
+    that a name is a project it would be circular.
+
+    Cached (see `_FILED_TTL_S`): one extraction pass opens the assistant
+    database once, not once per sighting. Reads no store, and does not
+    create the assistant database when this seat has never accepted a
+    note."""
+    global _filed_cache
+    try:
+        sig = _filed_sig()
+    except Exception:
+        sig = None
+    now = time.monotonic()
+    hit = _filed_cache
+    if sig is not None and hit is not None and hit[0] == sig \
+            and now - hit[1] < _FILED_TTL_S:
+        return hit[2]
+    out = _read_filed_keys()
+    if sig is not None:
+        _filed_cache = (sig, now, out)
+    return out
+
+
+def _read_filed_keys() -> frozenset[str]:
+    keys: set[str] = set()
+    for s in _scopes():
+        if s.get("kind") == "project" and norm(s.get("name")):
+            keys.add(norm(s.get("name")))
+    try:
+        from app.services.remote_mcp import db_path
+        if db_path().exists():
+            keys.update(_filed_counts())
+    except Exception as exc:
+        print(f"[projects] filed notes skipped ({exc}).")
+    return frozenset(k for k in keys if k and k not in _GENERIC)
+
+
+def filed_target_ids(entities) -> set[int]:
+    """Ids of the entities the user files under, whatever their kind: a name
+    in the shared or filed tier (`filed_keys`), a row a filing made, or a
+    project the user made. Never the `known` tier."""
+    keys = filed_keys()
+    out: set[int] = set()
+    for e in entities:
+        src = (e.get("kind_source") or "").strip().lower()
+        if norm(e.get("name")) in keys or src == "filing" or (
+                src == "user" and (e.get("kind") or "") == "project"):
+            out.add(int(e["id"]))
     return out
 
 
@@ -294,18 +382,80 @@ def classify(text: str, *, title: str = "", reg: list[dict] | None = None,
     return misc
 
 
-def ensure_filed(project: str, *, store=None, now: float | None = None) -> int:
+def ensure_filed(project: str, *, store=None, now: float | None = None,
+                 user_accept: bool = False) -> int:
     """Make a project real once a note is accepted into it: it becomes a graph
     entity, so the extractor's facts can link to it. Miscellaneous does not,
-    or every unrelated note would connect through one node."""
+    or every unrelated note would connect through one node.
+
+    Filing outranks the model and the cleanup rules, so a name the user files
+    under becomes kind `project` even when extraction first called it a tool;
+    a kind the user set by hand stands. A company is the exception: a name
+    that is an org by evidence (a legal form such as "Acme LLC", or a known
+    person's email domain) is filed as an `org`. It is a filing target all
+    the same: the registry lists it and its notes are stamped with it.
+
+    The first filing decides the kind; later saves under the same name
+    change nothing and write nothing: a row a filing or the user already
+    vouches for is returned as it is, whatever the legal-form or
+    email-domain evidence says by then.
+
+    `user_accept=True` is the accept the user just performed: it brings back
+    a project they had forgotten. Every other call (the extraction job that
+    stamps the accepted note's facts) leaves a tombstone alone and returns 0.
+    """
     if not project or is_misc(project):
         return 0
+    invalidate_filed_keys()
     try:
-        return int(_store(store).resolve_entity(
-            project, kind="project", ts=now or time.time()) or 0)
+        st = _store(store)
+        held = _filed_row(st, project)
+        if held:
+            return held
+        if user_accept:
+            st.clear_entity_tombstone(project)
+        kind = "org" if _org_by_evidence(st, project) else "project"
+        eid = int(st.resolve_entity(
+            project, kind=kind, ts=now or time.time(),
+            kind_source="filing", kind_confidence=1.0) or 0)
     except Exception as exc:
         print(f"[projects] entity for {project!r} skipped ({exc}).")
         return 0
+    invalidate_filed_keys()
+    return eid
+
+
+def _filed_row(store, project: str) -> int:
+    """The id of a visible row under this exact name whose kind a filing or
+    the user already set (a repeat save: nothing to do), else 0."""
+    try:
+        eid = store.find_entity_exact(project)
+        if not eid:
+            return 0
+        row = store.get_entity(int(eid)) or {}
+        if (row.get("kind_source") or "") not in ("filing", "user") \
+                or store.entity_is_hidden(int(eid)):
+            return 0
+        return int(eid)
+    except Exception:
+        return 0
+
+
+def _org_by_evidence(store, project: str) -> bool:
+    """Is the name the user files under a company? Its own spelling and the
+    confirmed aliases of the row it names are read, as the kind vote reads
+    them."""
+    try:
+        from app.services import entity_typing
+        names = [project]
+        eid = store.find_entity_exact(project)
+        if eid:
+            names.extend(r["alias"] for r in store.list_entity_aliases(
+                entity_id=int(eid), confirmed=True, limit=50))
+        return entity_typing.org_by_evidence(store, names) is not None
+    except Exception as exc:
+        print(f"[projects] company check for {project!r} skipped ({exc}).")
+        return False
 
 
 def stamp_event_facts(store, event_id: int, project: str) -> int:

@@ -185,6 +185,23 @@ def _drop_speaker_self(facts: dict) -> dict:
     return out
 
 
+def _event_meta(raw_ev) -> dict:
+    """The stored event's meta as a dict. `Store.get_event` hands back the
+    row, where meta is the JSON text it was saved as; an Event object or a
+    test double may carry a dict already."""
+    try:
+        meta = raw_ev.get("meta") if raw_ev else None
+    except Exception:
+        meta = None
+    if isinstance(meta, str):
+        try:
+            import json
+            meta = json.loads(meta)
+        except ValueError:
+            meta = None
+    return meta if isinstance(meta, dict) else {}
+
+
 def run_job(payload: dict) -> None:
     """Job handler: mine one stored chat turn for facts (same extractor, same
     hygiene gate as speech), then chain a graph rebuild so the constellation's
@@ -221,12 +238,8 @@ def run_job(payload: dict) -> None:
     # Queries must never be mined — defensive if an old job is still queued.
     if event_source == "chat.query":
         return
-    try:
-        meta = (raw_ev or {}).get("meta") or {}
-        if isinstance(meta, dict) and meta.get("kind") == "query":
-            return
-    except Exception:
-        pass
+    if _event_meta(raw_ev).get("kind") == "query":
+        return
     if event_source.startswith("assistant."):
         # A cloud assistant wrote this note, not the user: label it as the
         # assistant so its first person ("I'll draft it") is not read as the
@@ -250,9 +263,11 @@ def run_job(payload: dict) -> None:
         # to it even when no sentence names it.
         try:
             from app.services import projects
-            meta = (raw_ev or {}).get("meta") or {}
-            if isinstance(meta, dict) and meta.get("project"):
-                projects.stamp_event_facts(store, int(anchor), meta["project"])
+            # The row's meta is JSON text; read as a dict it never matched
+            # and no accepted note was ever linked to its project.
+            project = _event_meta(raw_ev).get("project")
+            if project:
+                projects.stamp_event_facts(store, int(anchor), project)
         except Exception as exc:
             print(f"[chat_ingest] project link skipped ({exc}).")
     try:

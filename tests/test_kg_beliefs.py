@@ -184,6 +184,10 @@ class StructuredClaimBeliefTests(unittest.TestCase):
                         return_value=[])
         patcher.start()
         self.addCleanup(patcher.stop)
+        # About claim -> belief, not the candidate gate: mint at first sight.
+        env = patch.dict("os.environ", {"QUILL_ENTITY_CANDIDATES": "0"})
+        env.start()
+        self.addCleanup(env.stop)
 
     def test_david_said_49_queryable_by_speaker(self):
         from app.services import kg_beliefs

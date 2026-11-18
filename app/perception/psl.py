@@ -128,6 +128,18 @@ def public_suffix(host: str) -> str | None:
     return ".".join(labels[n - best:])
 
 
+def is_listed_suffix(suffix: str) -> bool:
+    """True when `suffix` ("co.uk", "io") is a public suffix by a rule of
+    the list itself, not only by the default rule (any rightmost label):
+    "config" in "app.config" is not one."""
+    s = (suffix or "").strip().strip(".").lower()
+    if not s:
+        return False
+    _load()
+    parent = s.split(".", 1)[1] if "." in s else ""
+    return s in (_normal or ()) or bool(parent and parent in _wild)
+
+
 def registrable_domain(url_or_host: str) -> str | None:
     """Public suffix plus one label — "bbc.co.uk", "owner.github.io".
 

@@ -900,7 +900,7 @@ def apply_stats(
             # "Google" and "Matt" became people). Respect the resolver's
             # verdict and require a real, plausible display name.
             if (not named or (res is not None and res.decision == "reject")
-                    or not nq.is_plausible_person(name)):
+                    or not nq.is_plausible_person(name, store=store)):
                 continue
             try:
                 pid = store.insert_person(name, ts=st.get("last_seen") or ts,
@@ -938,15 +938,19 @@ def apply_stats(
         if org_name:
             pred = "member_of" if pp.is_academic_domain(email) else "works_at"
             try:
-                eid = store.resolve_entity(org_name, "org", ts=ts)
-                store.add_relation(
-                    "person", int(pid), pred, "entity", int(eid),
-                    origin="asserted", ts=ts,
-                    source_event_id=gmail_eid,
-                    quote=f"{name} <{email}>", source_class="exhaust")
-                n_org += 1
-                ledger.setdefault("relations", []).append(
-                    ["person", int(pid), pred, "entity", int(eid)])
+                # An org read off an email domain is a rule, not a model
+                # guess. 0 means the user forgot this org: no edge to it.
+                eid = store.resolve_entity(org_name, "org", ts=ts,
+                                           kind_source="rule")
+                if eid:
+                    store.add_relation(
+                        "person", int(pid), pred, "entity", int(eid),
+                        origin="asserted", ts=ts,
+                        source_event_id=gmail_eid,
+                        quote=f"{name} <{email}>", source_class="exhaust")
+                    n_org += 1
+                    ledger.setdefault("relations", []).append(
+                        ["person", int(pid), pred, "entity", int(eid)])
             except Exception:
                 pass
         ledger.setdefault("people", []).append(int(pid))

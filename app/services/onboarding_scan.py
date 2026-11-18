@@ -579,7 +579,11 @@ def enrich(sources=None, store=None) -> dict:
             name = proj.get("name") or ""
             if not name or not fresh("project", name):
                 continue
-            store.resolve_entity(name, "project", ts=now)
+            # A folder with a build marker is a rule-level signal. 0 means
+            # the user forgot this project: no node, and no claim naming it.
+            if not store.resolve_entity(name, "project", ts=now,
+                                        kind_source="rule"):
+                continue
             claim(f"The user has a code project named '{name}' on their computer.",
                   "projects")
             counts["projects"] += 1
@@ -594,8 +598,9 @@ def enrich(sources=None, store=None) -> dict:
         tools = _merge_tools(tool_names)
         for t in tools:
             if fresh("tool", t):
-                store.resolve_entity(t, "tool", ts=now)
-                counts["tools"] += 1
+                if store.resolve_entity(t, "tool", ts=now,
+                                        kind_source="rule"):
+                    counts["tools"] += 1
         if tools and fresh("tools_summary", tools[:_ENRICH_MAX_TOOL_NAMES]):
             named = ", ".join(tools[:_ENRICH_MAX_TOOL_NAMES])
             claim(f"Tools and apps the user actively uses include: {named}.",
@@ -703,7 +708,8 @@ def seed_bindings(sources=None, store=None, ts: float | None = None) -> dict:
             if not name:
                 continue
             try:
-                eid = store.resolve_entity(name, "project", ts=now)
+                eid = store.resolve_entity(name, "project", ts=now,
+                                           kind_source="rule")
             except Exception as exc:
                 print(f"[onboarding_scan] entity skipped {name!r} ({exc}).")
                 continue
@@ -726,7 +732,8 @@ def seed_bindings(sources=None, store=None, ts: float | None = None) -> dict:
         domains = _tool_domains()
         for tool in bookmark_tools():
             try:
-                eid = store.resolve_entity(tool, "tool", ts=now)
+                eid = store.resolve_entity(tool, "tool", ts=now,
+                                           kind_source="rule")
             except Exception as exc:
                 print(f"[onboarding_scan] entity skipped {tool!r} ({exc}).")
                 continue

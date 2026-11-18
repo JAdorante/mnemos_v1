@@ -9,6 +9,7 @@ with check_same_thread=False and guarded by a lock.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import re
@@ -1480,6 +1481,7 @@ class Store:
         self._migrate_records()
         self._migrate_pipeline()
         self._migrate_decisions()
+        self._migrate_entity_model()
 
     # Stage timers added after the table shipped. Additive only, and the type is
     # part of the tuple so a new column never needs a second lookup elsewhere.
@@ -1535,6 +1537,1868 @@ class Store:
                 "CREATE INDEX IF NOT EXISTS idx_events_sha "
                 "ON events(content_sha1) WHERE content_sha1 IS NOT NULL")
             self._conn.commit()
+
+    # Entity model, Phase 0. Where a kind came from, so a hand-set kind is
+    # never overwritten by automation, plus the Phase 3 scope columns (added
+    # now so the entity column lists change once).
+    _ENTITIES_MODEL_ADDED = (
+        ("kind_source", "TEXT"),      # model | rule | filing | user; NULL = model
+        ("kind_confidence", "REAL"),
+        ("updated_at", "REAL"),       # rename/hide/alias/kind/parent writes
+        ("parent_id", "INTEGER"),     # Phase 3: the project a label lives in
+        ("parent_source", "TEXT"),
+    )
+
+    def _migrate_entity_model(self) -> None:
+        """Kind provenance columns on `entities` and the tombstone table.
+
+        A tombstone is the sha256 of a forgotten name's key
+        (`kg_keys.entity_name_key`), never the name: forgetting something
+        must not leave its name behind. `resolve_entity` refuses to re-mint a
+        tombstoned name unless the user asks for it."""
+        with self._lock:
+            cols = {r["name"] for r in self._conn.execute(
+                "PRAGMA table_info(entities)").fetchall()}
+            if cols:
+                for name, typ in self._ENTITIES_MODEL_ADDED:
+                    if name not in cols:
+                        self._conn.execute(
+                            f"ALTER TABLE entities ADD COLUMN {name} {typ}")
+                # Phase 5: who hid the row (`set_entity_hidden`). Kept out of
+                # `_ENTITIES_MODEL_ADDED`, so a read-only store migrated
+                # before it still reads as having the provenance columns.
+                if "hidden_source" not in cols:
+                    self._conn.execute(
+                        "ALTER TABLE entities ADD COLUMN hidden_source TEXT")
+                self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_entities_parent "
+                    "ON entities(parent_id) WHERE parent_id IS NOT NULL")
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS entity_tombstones ("
+                " name_hash TEXT PRIMARY KEY,"
+                " kind TEXT,"
+                " created_at REAL,"
+                " reason TEXT,"
+                " actor TEXT)")
+            # Candidate ledger (Phase 1): one row per (name, event) sighting
+            # of a non-person name, whether or not it is an entity yet.
+            # `status` is pending (no entity) or bound (`entity_id` set).
+            # `observed_at` is the event's own time (what sessions are
+            # counted on); `created_at` is when the row was written (what
+            # expiry runs on, so an import of old mail is not expired on
+            # arrival). `typed`: the user wrote the name in their own chat.
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS entity_mentions ("
+                " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " name TEXT NOT NULL,"
+                " name_key TEXT NOT NULL,"
+                " proposed_kind TEXT,"
+                " confidence REAL,"
+                " source_class TEXT,"
+                " event_source TEXT,"
+                " event_id INTEGER,"
+                " span TEXT,"
+                " filing_project TEXT,"
+                " parent TEXT,"
+                " observed_at REAL,"
+                " entity_id INTEGER,"
+                " status TEXT NOT NULL DEFAULT 'pending',"
+                " weak INTEGER NOT NULL DEFAULT 0,"
+                " typed INTEGER NOT NULL DEFAULT 0,"
+                " created_at REAL)")
+            self._conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_mentions_event "
+                "ON entity_mentions(name_key, event_id) "
+                "WHERE event_id IS NOT NULL")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_entity_mentions_key "
+                "ON entity_mentions(name_key)")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_entity_mentions_entity "
+                "ON entity_mentions(entity_id)")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_entity_mentions_status "
+                "ON entity_mentions(status)")
+            # The kind vote reads an entity's newest sightings and the cap
+            # keeps the newest (`_cap_bound_mentions_unlocked`): both walk
+            # this index instead of sorting every row of a busy entity. The
+            # partial one finds bound spans past the TTL
+            # (`prune_entity_mentions`) without a scan.
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_entity_mentions_entity_seen "
+                "ON entity_mentions(entity_id, observed_at)")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_entity_mentions_span_age "
+                "ON entity_mentions(created_at) "
+                "WHERE span IS NOT NULL AND status = 'bound'")
+            # Asserted relations waiting for an endpoint that is still a
+            # candidate. An endpoint that already resolved carries its id;
+            # a candidate endpoint carries its name key and a NULL id.
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS entity_pending_relations ("
+                " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " subj_kind TEXT NOT NULL,"
+                " subj_id INTEGER,"
+                " subj_name TEXT,"
+                " subj_key TEXT,"
+                " predicate TEXT NOT NULL,"
+                " obj_kind TEXT NOT NULL,"
+                " obj_id INTEGER,"
+                " obj_name TEXT,"
+                " obj_key TEXT,"
+                " confidence REAL,"
+                " quote TEXT,"
+                " source_class TEXT,"
+                " source_event_id INTEGER,"
+                " ts REAL,"
+                " status TEXT NOT NULL DEFAULT 'pending',"
+                " created_at REAL)")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_entity_pending_rel_subj "
+                "ON entity_pending_relations(subj_key)")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_entity_pending_rel_obj "
+                "ON entity_pending_relations(obj_key)")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_entity_pending_rel_status "
+                "ON entity_pending_relations(status)")
+            # What a candidate's expired sightings added up to, with no
+            # text: keyed by the sha256 of the name key (as tombstones are),
+            # counts, source-class and kind ids, and a hash of the filing
+            # project. See entity_candidates._fold.
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS entity_candidate_summaries ("
+                " name_hash TEXT PRIMARY KEY,"
+                " mentions INTEGER NOT NULL DEFAULT 0,"
+                " sessions INTEGER NOT NULL DEFAULT 0,"
+                " source_classes TEXT,"
+                " first_seen REAL,"
+                " last_seen REAL,"
+                " typed_sessions INTEGER NOT NULL DEFAULT 0,"
+                " typed_last REAL,"
+                " weak INTEGER NOT NULL DEFAULT 1,"
+                " scope TEXT,"
+                " kinds TEXT,"
+                " updated_at REAL)")
+            # `typed_last`, the latest typed sighting folded in (so a later
+            # fold from the same sitting is not a second typed session), came
+            # after the table.
+            scols = {r["name"] for r in self._conn.execute(
+                "PRAGMA table_info(entity_candidate_summaries)").fetchall()}
+            if "typed_last" not in scols:
+                self._conn.execute(
+                    "ALTER TABLE entity_candidate_summaries "
+                    "ADD COLUMN typed_last REAL")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_entity_cand_summary_updated "
+                "ON entity_candidate_summaries(updated_at)")
+            # This seat's own name vocabulary (`seat_vocab`): words that mark
+            # a name as no person on THIS seat, and exact names its user said
+            # are no person. The code's lists hold generic words only; see
+            # `seat_vocab()`.
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS seat_vocab ("
+                " term TEXT NOT NULL,"
+                " role TEXT NOT NULL,"
+                " source TEXT,"
+                " created_at REAL,"
+                " PRIMARY KEY (term, role))")
+            # Phase 4: one row per entity merge (`merge_entities`): who
+            # absorbed whom, the absorbed row's names and kind, how many
+            # rows of each table moved.
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS entity_merges ("
+                " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " survivor_id INTEGER NOT NULL,"
+                " survivor_name TEXT,"
+                " absorbed_id INTEGER NOT NULL,"
+                " absorbed_name TEXT,"
+                " absorbed_kind TEXT,"
+                " absorbed_aliases TEXT,"
+                " actor TEXT,"
+                " reason TEXT,"
+                " counts TEXT,"
+                " created_at REAL)")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_entity_merges_survivor "
+                "ON entity_merges(survivor_id)")
+            # Phase 4 repair (services/entity_repair.py): a run, every field
+            # it changed with the value before and after (what undo reads),
+            # and the changes it left for the user to decide in the Inbox.
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS entity_repair_runs ("
+                " run_id TEXT PRIMARY KEY,"
+                " mode TEXT NOT NULL,"
+                " rules_version TEXT,"
+                " started_at REAL,"
+                " finished_at REAL,"
+                " backup TEXT,"
+                " summary TEXT,"
+                " undone_at REAL)")
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS entity_repair_log ("
+                " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " run_id TEXT NOT NULL,"
+                " entity_id INTEGER,"
+                " canonical_id TEXT,"
+                " name TEXT,"
+                " action TEXT NOT NULL,"
+                " rule TEXT,"
+                " field TEXT NOT NULL,"
+                " before TEXT,"
+                " after TEXT,"
+                " created_at REAL,"
+                " undone_at REAL,"
+                " undo_note TEXT)")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_entity_repair_log_run "
+                "ON entity_repair_log(run_id)")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_entity_repair_log_entity "
+                "ON entity_repair_log(entity_id)")
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS entity_repair_proposals ("
+                " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " run_id TEXT,"
+                " entity_id INTEGER,"
+                " canonical_id TEXT,"
+                " action TEXT NOT NULL,"
+                " rule TEXT,"
+                " dedupe_key TEXT NOT NULL,"
+                " payload TEXT,"
+                " status TEXT NOT NULL DEFAULT 'open',"
+                " created_at REAL,"
+                " decided_at REAL,"
+                " decided_by TEXT)")
+            self._conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_entity_repair_proposal "
+                "ON entity_repair_proposals(dedupe_key)")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_entity_repair_proposal_status "
+                "ON entity_repair_proposals(status)")
+            # Phase 5 (`entity_metrics`): when candidates became entities and
+            # when sightings expired, as counts only. No name, key or event.
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS entity_candidate_log ("
+                " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " at REAL NOT NULL,"
+                " event TEXT NOT NULL,"
+                " names INTEGER NOT NULL DEFAULT 0,"
+                " sightings INTEGER NOT NULL DEFAULT 0)")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_entity_candidate_log_at "
+                "ON entity_candidate_log(at)")
+            self._migrate_alias_confirmed_by_unlocked()
+            self._conn.commit()
+
+    def _migrate_alias_confirmed_by_unlocked(self) -> None:
+        """`entity_aliases.confirmed_by`: who confirmed an alias, `user` (the
+        user tied the name to the row: confirmed it, merged it, typed it) or
+        `auto` (recurrence, a normalized match, a merge nobody asked for).
+        A forget tombstones the user's aliases only (`delete_entity`).
+
+        Rows confirmed before the column existed count as `auto`, unless the
+        store shows a user decision for them: an `entities.alias` approval
+        naming the alias row, a row the user's merge wrote (the absorbed
+        row's name), or a row whose source is the user. Runs once, when the
+        column is added. Caller holds `_lock` and commits."""
+        cols = {r["name"] for r in self._conn.execute(
+            "PRAGMA table_info(entity_aliases)").fetchall()}
+        if not cols or "confirmed_by" in cols:
+            return
+        self._conn.execute(
+            "ALTER TABLE entity_aliases ADD COLUMN confirmed_by TEXT")
+        self._conn.execute(
+            "UPDATE entity_aliases SET confirmed_by = CASE "
+            "WHEN source = 'user' THEN 'user' ELSE 'auto' END "
+            "WHERE confirmed = 1")
+        user_ids: set[int] = set()
+        try:
+            for r in self._conn.execute(
+                    "SELECT meta_json FROM decisions "
+                    "WHERE surface = 'entities.alias' "
+                    "AND verdict = 'approved' AND actor = 'user'").fetchall():
+                try:
+                    aid = (json.loads(r["meta_json"] or "{}") or {}).get(
+                        "alias_id")
+                except Exception:
+                    aid = None
+                if aid is not None:
+                    user_ids.add(int(aid))
+        except sqlite3.OperationalError:
+            pass
+        try:
+            for r in self._conn.execute(
+                    "SELECT ea.id FROM entity_aliases ea "
+                    "JOIN entity_merges m ON m.survivor_id = ea.entity_id "
+                    "WHERE ea.source = 'merge' AND m.actor = 'user' "
+                    "AND ea.alias = m.absorbed_name COLLATE NOCASE"
+            ).fetchall():
+                user_ids.add(int(r["id"]))
+        except sqlite3.OperationalError:
+            pass
+        for aid in sorted(user_ids):
+            self._conn.execute(
+                "UPDATE entity_aliases SET confirmed_by = 'user' "
+                "WHERE id = ? AND confirmed = 1", (aid,))
+
+    # Kind source rank: a write may change an entity's kind only when its
+    # source outranks the one that set it. NULL (rows from before the
+    # provenance columns) and unknown strings rank as `model`.
+    KIND_SOURCE_RANK = {"model": 1, "rule": 2, "filing": 3, "user": 4}
+    # Labels `normalize_entity_kind` reads as "no kind stated" (-> idea).
+    _KIND_PLACEHOLDERS = frozenset({"other", "?", "unknown", "none"})
+
+    @classmethod
+    def kind_source_rank(cls, source: str | None) -> int:
+        return cls.KIND_SOURCE_RANK.get((source or "").strip().lower(), 1)
+
+    @classmethod
+    def _norm_kind_source(cls, source: str | None) -> str | None:
+        s = (source or "").strip().lower()
+        return s if s in cls.KIND_SOURCE_RANK else None
+
+    @staticmethod
+    def _norm_kind_confidence(confidence) -> float | None:
+        try:
+            return None if confidence is None else float(confidence)
+        except (TypeError, ValueError):
+            return None
+
+    def _entity_model_cols_unlocked(self) -> bool:
+        """True when `entities` carries the provenance columns. Caller holds
+        `_lock`. A read-only store skips migration, so readers ask before
+        naming the columns; once seen they cannot go away, so it is cached."""
+        if getattr(self, "_entity_model_cols", False):
+            return True
+        cols = {r["name"] for r in self._conn.execute(
+            "PRAGMA table_info(entities)").fetchall()}
+        ok = all(name in cols for name, _ in self._ENTITIES_MODEL_ADDED)
+        if ok:
+            self._entity_model_cols = True
+        return ok
+
+    # Who hid an entity row: the user, the repair (its own hide, which only
+    # its undo or a real sighting lifts) or a rule (cleanup, a value
+    # literal minted hidden). NULL: hidden before the column existed, or by
+    # a caller that did not say.
+    HIDE_SOURCES = frozenset({"user", "repair", "rule"})
+
+    def _hidden_source_col_unlocked(self) -> bool:
+        """True when `entities.hidden_source` exists (cached once seen).
+        Caller holds `_lock`."""
+        if getattr(self, "_hidden_source_col", False):
+            return True
+        cols = {r["name"] for r in self._conn.execute(
+            "PRAGMA table_info(entities)").fetchall()}
+        ok = "hidden_source" in cols
+        if ok:
+            self._hidden_source_col = True
+        return ok
+
+    @contextlib.contextmanager
+    def _rollback_on_error(self):
+        """For a locked write of more than one statement: any exception
+        rolls the open transaction back before it propagates (as
+        `merge_entities` does), so the next unrelated commit on this shared
+        connection never persists half of it. Caller holds `_lock`:
+        `with self._lock, self._rollback_on_error():`."""
+        try:
+            yield
+        except BaseException:
+            try:
+                self._conn.rollback()
+            except sqlite3.Error:
+                pass
+            raise
+
+    # --- entity tombstones ------------------------------------------------
+    @staticmethod
+    def entity_tombstone_hash(name: str | None) -> str | None:
+        """sha256 hex of the name key, or None for a name with no key."""
+        from app.services.kg_keys import entity_name_key
+        key = entity_name_key(name or "")
+        if not key:
+            return None
+        return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+    def _entity_tombstoned_unlocked(self, name_hash: str | None) -> bool:
+        if not name_hash:
+            return False
+        try:
+            row = self._conn.execute(
+                "SELECT 1 FROM entity_tombstones WHERE name_hash = ?",
+                (name_hash,)).fetchone()
+        except sqlite3.OperationalError:
+            return False        # read-only store from before the table
+        return row is not None
+
+    def is_entity_tombstoned(self, name: str) -> bool:
+        """True when the user forgot an entity under this name (or one of its
+        aliases) and has not brought it back since."""
+        h = self.entity_tombstone_hash(name)
+        if not h:
+            return False
+        with self._lock:
+            return self._entity_tombstoned_unlocked(h)
+
+    def clear_entity_tombstone(self, name: str) -> bool:
+        """Lift the tombstone on a name. Only a user act may call this: a
+        manual add, an accepted filing, a rename or alias the user typed.
+        True when a tombstone was removed."""
+        h = self.entity_tombstone_hash(name)
+        if not h:
+            return False
+        with self._lock:
+            try:
+                cur = self._conn.execute(
+                    "DELETE FROM entity_tombstones WHERE name_hash = ?", (h,))
+            except sqlite3.OperationalError:
+                return False
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def entity_tombstone_count(self) -> int:
+        with self._lock:
+            try:
+                row = self._conn.execute(
+                    "SELECT COUNT(*) AS n FROM entity_tombstones").fetchone()
+            except sqlite3.OperationalError:
+                return 0
+        return int(row["n"] or 0)
+
+    def entity_tombstone(self, name: str) -> dict | None:
+        """The tombstone row for a name ({kind, created_at, reason, actor}),
+        or None when the name was never forgotten. The name is not in it."""
+        h = self.entity_tombstone_hash(name)
+        if not h:
+            return None
+        with self._lock:
+            try:
+                row = self._conn.execute(
+                    "SELECT kind, created_at, reason, actor "
+                    "FROM entity_tombstones WHERE name_hash = ?",
+                    (h,)).fetchone()
+            except sqlite3.OperationalError:
+                return None
+        return dict(row) if row else None
+
+    def tombstone_entity_name(self, name: str, *, kind: str | None = None,
+                              reason: str | None = None,
+                              actor: str = "user") -> bool:
+        """Forget a name that never became an entity (a dismissed candidate):
+        write its tombstone and drop its pending mentions and the relations
+        pooled on it. Bound mentions stay: they belong to a live entity,
+        which `delete_entity` forgets as a whole. False for a name with no
+        key."""
+        from app.services.kg_keys import entity_name_key
+        key = entity_name_key(name or "")
+        h = self.entity_tombstone_hash(name)
+        if not key or not h:
+            return False
+        import time as _time
+        with self._lock, self._rollback_on_error():
+            self._conn.execute(
+                "INSERT OR REPLACE INTO entity_tombstones "
+                "(name_hash, kind, created_at, reason, actor) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (h, kind, _time.time(), reason, actor))
+            self._delete_entity_candidates_unlocked([key])
+            self._delete_entity_candidate_summaries_unlocked(
+                self._unshared_keys_unlocked([key]))
+            self._redact_forgotten_unlocked([name])
+            self._log_entity_candidates_unlocked("dismissed", names=1,
+                                                 sightings=0)
+            self._conn.commit()
+        self._redact_forgotten_reports([name])
+        return True
+
+    # Where an entity record keeps a name (`decisions` rows on an
+    # `entities.*` surface, repair proposals, the repair log's before/after,
+    # repair reports: a row's name, an alias, a merge's `into`, a parent, a
+    # repair proposal's target), and the fields that hold a vocabulary word
+    # rather than text. Anything else that is a string is free text.
+    _DECISION_NAME_KEYS = frozenset({"name", "alias", "into_name",
+                                     "parent_name", "survivor_name",
+                                     "absorbed_name"})
+    _DECISION_WORD_KEYS = frozenset({"kind", "to_kind", "kind_source",
+                                     "action", "rule", "mode", "status",
+                                     "proposed_by", "route", "field",
+                                     "problem", "why", "parent_source",
+                                     "canonical_id", "run_id", "db", "path",
+                                     "backup", "rules_version"})
+    _NAME_HASH = re.compile(r"^[0-9a-f]{64}$")
+
+    def _forgotten_keys(self, names) -> set[str]:
+        from app.services.kg_keys import entity_name_key
+        return {entity_name_key(n) for n in names
+                if isinstance(n, str) and n} - {""}
+
+    def _live_name_keys_unlocked(self, keys: set[str], *,
+                                 entity_id: int | None = None) -> set[str]:
+        """The name keys in `keys` that a row other than `entity_id` still
+        carries (its canonical name, a stored alias such as one the user
+        typed, or a confirmed alias-table row): that row's name, which
+        forgetting another row does not take from it. Caller holds
+        `_lock`."""
+        if not keys:
+            return set()
+        from app.services.kg_keys import entity_name_key
+        own = int(entity_id) if entity_id is not None else None
+        names: list[tuple[int, str]] = []
+        for r in self._conn.execute(
+                "SELECT id, canonical_name, aliases FROM entities").fetchall():
+            names.append((int(r["id"]), r["canonical_name"] or ""))
+            try:
+                stored = json.loads(r["aliases"] or "[]")
+            except (TypeError, ValueError):
+                stored = []
+            if isinstance(stored, list):
+                names += [(int(r["id"]), a) for a in stored
+                          if isinstance(a, str)]
+        try:
+            names += [(int(r["entity_id"]), r["alias"] or "")
+                      for r in self._conn.execute(
+                          "SELECT entity_id, alias FROM entity_aliases "
+                          "WHERE confirmed = 1").fetchall()]
+        except sqlite3.OperationalError:
+            pass                # store from before the alias table
+        return {k for i, n in names if own is None or i != own
+                for k in (entity_name_key(n),) if k in keys}
+
+    def _redact_value(self, v, keys: set[str], *, every: bool = False,
+                      own_id: int | None = None):
+        """`v` (a decoded JSON value) with the forgotten names in `keys`
+        (name keys) taken out:
+
+        - a name field (`_DECISION_NAME_KEYS`) whose WHOLE name key is one
+          of them keeps the name's hash instead (`<field>_hash`); with
+          `every` (the forgotten row's own records, and inside any dict
+          whose `entity_id` is `own_id`) every name field does;
+        - a list item that is such a name becomes its hash;
+        - a free-text field (any other string that is not a vocabulary word,
+          `_DECISION_WORD_KEYS`) that quotes one of them is cleared.
+
+        Another row's name that merely contains a forgotten one ("Acme AI
+        Cloud" when "Cloud" is forgotten) is a name, not free text: it is
+        never touched."""
+        from app.services.kg_keys import entity_name_key
+        padded = [f" {k} " for k in keys]
+
+        def quotes(text: str) -> bool:
+            t = f" {entity_name_key(text)} "
+            return any(p in t for p in padded)
+
+        def walk(x, every_: bool):
+            if isinstance(x, dict):
+                if own_id is not None and x.get("entity_id") is not None:
+                    try:
+                        every_ = every_ or int(x["entity_id"]) == int(own_id)
+                    except (TypeError, ValueError):
+                        pass
+                out = {}
+                for k, y in x.items():
+                    if isinstance(y, str) and k in self._DECISION_NAME_KEYS:
+                        if self._NAME_HASH.match(y) or not (
+                                every_ or entity_name_key(y) in keys):
+                            out[k] = y
+                        else:
+                            out[k] = None
+                            out[f"{k}_hash"] = self.entity_tombstone_hash(y)
+                    elif isinstance(y, str) \
+                            and k not in self._DECISION_WORD_KEYS \
+                            and quotes(y):
+                        out[k] = None
+                    else:
+                        out[k] = walk(y, every_)
+                return out
+            if isinstance(x, list):
+                return [self.entity_tombstone_hash(y)
+                        if isinstance(y, str) and not self._NAME_HASH.match(y)
+                        and entity_name_key(y) in keys
+                        else walk(y, every_) for y in x]
+            return x
+        return walk(v, every)
+
+    def _redact_text_name(self, value, keys: set[str], every: bool):
+        """A name column (`entity_merges.survivor_name`, the repair log's
+        `name`): its hash when it is a forgotten name (or, with `every`, any
+        name), else as it is."""
+        from app.services.kg_keys import entity_name_key
+        if not isinstance(value, str) or not value \
+                or self._NAME_HASH.match(value):
+            return value
+        if every or entity_name_key(value) in keys:
+            return self.entity_tombstone_hash(value)
+        return value
+
+    def _redact_forgotten_unlocked(self, names, *,
+                                   entity_id: int | None = None) -> int:
+        """A forgotten name leaves every record that keeps text about
+        entities: the decision trail (`entities.*` verdicts), the merge
+        audit (`entity_merges`), the repair log and the repair proposals.
+        Records whose subject is the forgotten row (`entity_id`: its
+        verdicts, a merge it survived, its repair changes and proposals)
+        keep no name at all; any other record only loses a name field whose
+        whole name key is forgotten (hashed) and free text quoting it
+        (cleared): another live row's name is never touched, neither a
+        name that merely contains a forgotten one nor one that another row
+        still answers to (`_live_name_keys_unlocked`: forgetting a topic
+        "HFP" leaves the org whose alias is "HFP" its alias decision). An
+        open repair proposal about the forgotten row, or merging into it or
+        putting something inside it, can no longer be applied and is
+        closed as stale. Caller holds `_lock` and commits. Returns the rows
+        rewritten; tables a store does not have are skipped."""
+        keys = self._forgotten_keys(names)
+        keys -= self._live_name_keys_unlocked(keys, entity_id=entity_id)
+        if not keys and entity_id is None:
+            return 0
+        eid = int(entity_id) if entity_id is not None else None
+        n = 0
+
+        def rewrite(table: str, rid, cols: dict) -> None:
+            nonlocal n
+            if cols:
+                self._conn.execute(
+                    f"UPDATE {table} SET "
+                    + ", ".join(f"{c} = ?" for c in cols) + " WHERE id = ?",
+                    (*cols.values(), rid))
+                n += 1
+
+        def json_col(raw, every: bool):
+            if not raw:
+                return raw, False
+            try:
+                val = json.loads(raw)
+            except Exception:
+                return raw, False
+            red = self._redact_value(val, keys, every=every, own_id=eid)
+            return (_json_or_none(red), True) if red != val else (raw, False)
+
+        # Repair proposals first: a decision about one names it by id.
+        own_proposals: set[str] = set()
+        try:
+            rows = self._conn.execute(
+                "SELECT id, entity_id, payload, status "
+                "FROM entity_repair_proposals").fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+        for r in rows:
+            own = eid is not None and r["entity_id"] is not None \
+                and int(r["entity_id"]) == eid
+            if own:
+                own_proposals.add(f"repair_proposal:{int(r['id'])}")
+            sets: dict = {}
+            try:
+                pay = json.loads(r["payload"] or "{}")
+            except Exception:
+                pay = {}
+            target = eid is not None and isinstance(pay, dict) and any(
+                pay.get(k) is not None and str(pay.get(k)) == str(eid)
+                for k in ("into", "parent_id"))
+            raw, changed = json_col(r["payload"], own)
+            if changed:
+                sets["payload"] = raw
+            if (own or target) and r["status"] == "open":
+                sets["status"] = "stale"
+            rewrite("entity_repair_proposals", r["id"], sets)
+        own_subject = f"entity:{eid}" if eid is not None else None
+        try:
+            rows = self._conn.execute(
+                "SELECT id, subject, shown_json, edit_json, meta_json "
+                "FROM decisions WHERE surface LIKE 'entities.%'").fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+        for r in rows:
+            own = r["subject"] == own_subject or r["subject"] in own_proposals
+            sets = {}
+            for col in ("shown_json", "edit_json", "meta_json"):
+                raw, changed = json_col(r[col], own)
+                if changed:
+                    sets[col] = raw
+            if sets:
+                self._conn.execute(
+                    "UPDATE decisions SET "
+                    + ", ".join(f"{c} = ?" for c in sets) + " WHERE id = ?",
+                    (*sets.values(), r["id"]))
+                n += 1
+        try:
+            rows = self._conn.execute(
+                "SELECT id, survivor_id, survivor_name, absorbed_name, "
+                "absorbed_aliases FROM entity_merges").fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+        for r in rows:
+            own = eid is not None and int(r["survivor_id"]) == eid
+            sets = {}
+            for col in ("survivor_name", "absorbed_name"):
+                v = self._redact_text_name(r[col], keys, own)
+                if v != r[col]:
+                    sets[col] = v
+            try:
+                al = json.loads(r["absorbed_aliases"] or "[]")
+            except Exception:
+                al = []
+            if isinstance(al, list):
+                red = [self._redact_text_name(a, keys, own) for a in al]
+                if red != al:
+                    sets["absorbed_aliases"] = json.dumps(red)
+            rewrite("entity_merges", r["id"], sets)
+        try:
+            rows = self._conn.execute(
+                "SELECT id, entity_id, name, before, after "
+                "FROM entity_repair_log").fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+        for r in rows:
+            own = eid is not None and r["entity_id"] is not None \
+                and int(r["entity_id"]) == eid
+            sets = {}
+            v = self._redact_text_name(r["name"], keys, own)
+            if v != r["name"]:
+                sets["name"] = v
+            for col in ("before", "after"):
+                raw, changed = json_col(r[col], own)
+                if changed:
+                    sets[col] = raw
+            rewrite("entity_repair_log", r["id"], sets)
+        return n
+
+    def _report_dirs(self) -> list[Path]:
+        """Where repair reports are written: the database's own directory
+        and the configured data dir (`scripts/entity_repair.py`)."""
+        import os as _os
+        out: list[Path] = []
+        for d in (Path(self.db_path).parent if getattr(self, "db_path", None)
+                  else None, _os.environ.get("QUILL_DATA_DIR")):
+            if not d:
+                continue
+            try:
+                p = Path(d).resolve()
+            except OSError:
+                continue
+            if p not in out and p.is_dir():
+                out.append(p)
+        return out
+
+    def _redact_forgotten_reports(self, names, *,
+                                  entity_id: int | None = None) -> int:
+        """The repair reports in the data dir (`entity_repair_*.json`) are
+        rewritten the same way (`_redact_value`: the forgotten row's own
+        actions keep no name, other name fields only lose a forgotten name,
+        free text quoting one is cleared, a name another row still answers
+        to is that row's and stays), in place, atomically. Backups of the
+        database keep the names: retention bounds how long
+        (`entity_repair.prune_backups`). Never raises; returns the files
+        rewritten."""
+        keys = self._forgotten_keys(names)
+        try:
+            with self._lock:
+                keys -= self._live_name_keys_unlocked(keys,
+                                                      entity_id=entity_id)
+        except sqlite3.Error:
+            pass
+        if not keys and entity_id is None:
+            return 0
+        from app.atomic_json import write_json
+        done = 0
+        for d in self._report_dirs():
+            for f in sorted(d.glob("entity_repair_*.json")):
+                try:
+                    val = json.loads(f.read_text(encoding="utf-8"))
+                    red = self._redact_value(val, keys, own_id=entity_id)
+                    if red != val:
+                        write_json(f, red)
+                        done += 1
+                except Exception as exc:
+                    print(f"[storage] report redaction skipped ({exc}).")
+        return done
+
+    # --- seat vocabulary --------------------------------------------------
+    # `name_quality`'s word lists are generic vocabulary any seat meets
+    # ("project", "calendar", "university"). A seat's own words (a brand on
+    # its user's desktop, a coined project name) live here, in that seat's
+    # store, with the list they extend:
+    #   never_person_token  a word no person's name holds (the
+    #                       `_NEVER_PERSON_TOKENS` role)
+    #   nonperson_token     a word that keeps a two-word name from reading
+    #                       as a person's (`_NONPERSON_TOKENS`)
+    #   corp_word           an organisation word, same effect
+    #                       (`_CORP_SUFFIXES`)
+    #   nonperson_name      an exact name the user said is no person; the
+    #                       term is the sha256 of its name key, as a
+    #                       tombstone is, so a junk name that was forgotten
+    #                       leaves no text behind
+    #   junk_entity_name    an exact entity name this seat's cleanup hides
+    #                       on sight when nothing links to the row
+    #                       (`ambient_cleanup`); a whole name, lowercase,
+    #                       one or more words
+    #   heading_junk_name   an exact node name a page heading (a VLM title)
+    #                       never names on this seat (`context.surfaces`,
+    #                       the `_VLM_JUNK_NAMES` role); a whole name
+    #   containment_stop_name  a node name too generic on this seat to be
+    #                       found inside a longer title segment
+    #                       (`context.surfaces`, the `_NO_CONTAINMENT`
+    #                       role); a whole name
+    # Words enter by migration (scripts/seed_seat_vocab.py) or from the user;
+    # names from the user's corrections. One correction never teaches a
+    # word: that would over-generalise.
+    SEAT_VOCAB_TOKEN_ROLES = ("never_person_token", "nonperson_token",
+                              "corp_word")
+    # Roles whose term is a whole lowercase name of one or more words.
+    SEAT_VOCAB_NAME_ROLES = ("junk_entity_name", "heading_junk_name",
+                             "containment_stop_name")
+    # What the seed script may write: the token roles and the whole names.
+    SEAT_VOCAB_SEED_ROLES = SEAT_VOCAB_TOKEN_ROLES + SEAT_VOCAB_NAME_ROLES
+    SEAT_VOCAB_ROLES = SEAT_VOCAB_SEED_ROLES + ("nonperson_name",)
+    _SEAT_VOCAB_SOURCES = {
+        **{r: ("migration", "user") for r in SEAT_VOCAB_SEED_ROLES},
+        "nonperson_name": ("correction", "user"),
+    }
+    _SEAT_JUNK_NAME_MAX_WORDS = 6
+    # `name_quality` reads the vocabulary on every name, so it is cached per
+    # store and dropped by this store's own writes. Another process (the seed
+    # script on a running seat) or another Store on the same file is seen
+    # within SEAT_VOCAB_TTL_S.
+    SEAT_VOCAB_TTL_S = 30.0
+    SEAT_VOCAB_MAX_ROWS = 50_000
+
+    def seat_vocab(self) -> dict[str, frozenset[str]]:
+        """{role: frozenset(term)} for every role, cached. Empty sets for a
+        store without the table (a read-only store from before it)."""
+        import time as _time
+        now = _time.monotonic()
+        hit = getattr(self, "_seat_vocab_cache", None)
+        gen = getattr(self, "_seat_vocab_gen", 0)
+        if hit is not None and hit[1] == gen \
+                and now - hit[0] < self.SEAT_VOCAB_TTL_S:
+            return hit[2]
+        terms: dict[str, set[str]] = {r: set() for r in self.SEAT_VOCAB_ROLES}
+        with self._lock:
+            try:
+                rows = self._conn.execute(
+                    "SELECT term, role FROM seat_vocab LIMIT ?",
+                    (self.SEAT_VOCAB_MAX_ROWS,)).fetchall()
+            except sqlite3.OperationalError:
+                rows = []
+        for r in rows:
+            if r["role"] in terms and r["term"]:
+                terms[r["role"]].add(r["term"])
+        out = {r: frozenset(v) for r, v in terms.items()}
+        # A write that landed while this read ran keeps its fresh result.
+        if getattr(self, "_seat_vocab_gen", 0) == gen:
+            self._seat_vocab_cache = (now, gen, out)
+        return out
+
+    def _seat_vocab_changed(self) -> None:
+        self._seat_vocab_gen = getattr(self, "_seat_vocab_gen", 0) + 1
+        self._seat_vocab_cache = None
+
+    @classmethod
+    def seat_vocab_term(cls, term: str | None, role: str) -> str | None:
+        """The stored form of a term: one lowercase word for a token role,
+        the whole lowercase name for a name role (`SEAT_VOCAB_NAME_ROLES`),
+        the name-key hash for `nonperson_name`. None when it has none."""
+        if role == "nonperson_name":
+            return cls.entity_tombstone_hash(term)
+        if role in cls.SEAT_VOCAB_NAME_ROLES:
+            words = (term or "").lower().split()
+            if not words or len(words) > cls._SEAT_JUNK_NAME_MAX_WORDS:
+                return None
+            return " ".join(words)
+        t = (term or "").strip().lower()
+        if not t or len(t.split()) != 1:
+            return None
+        return t
+
+    def add_seat_vocab(self, term: str, role: str, *,
+                       source: str) -> bool:
+        """Add one term. True when a row was written; False when it was
+        already there, the role or source is not allowed (`ValueError`), or
+        the store is read-only."""
+        if role not in self.SEAT_VOCAB_ROLES:
+            raise ValueError(f"unknown seat vocabulary role: {role}")
+        if source not in self._SEAT_VOCAB_SOURCES[role]:
+            raise ValueError(f"{role} terms cannot come from {source}")
+        t = self.seat_vocab_term(term, role)
+        if not t:
+            return False
+        import time as _time
+        with self._lock:
+            try:
+                cur = self._conn.execute(
+                    "INSERT OR IGNORE INTO seat_vocab "
+                    "(term, role, source, created_at) VALUES (?, ?, ?, ?)",
+                    (t, role, source, _time.time()))
+                self._conn.commit()
+            except sqlite3.OperationalError:
+                self._conn.rollback()
+                return False
+            added = cur.rowcount > 0
+        if added:
+            self._seat_vocab_changed()
+        return added
+
+    def add_seat_vocab_many(self, terms, *, source: str) -> int:
+        """Add every (role, term) in one transaction: all of them or, on any
+        error, none (the error propagates, so a seeding script can say the
+        seat was not seeded rather than leave it half seeded). Returns the
+        rows written (terms already there are not counted)."""
+        rows = []
+        for role, term in terms:
+            if role not in self.SEAT_VOCAB_ROLES:
+                raise ValueError(f"unknown seat vocabulary role: {role}")
+            if source not in self._SEAT_VOCAB_SOURCES[role]:
+                raise ValueError(f"{role} terms cannot come from {source}")
+            t = self.seat_vocab_term(term, role)
+            if t:
+                rows.append((t, role))
+        if not rows:
+            return 0
+        import time as _time
+        now = _time.time()
+        added = 0
+        with self._lock, self._rollback_on_error():
+            for t, role in rows:
+                added += int(self._conn.execute(
+                    "INSERT OR IGNORE INTO seat_vocab "
+                    "(term, role, source, created_at) VALUES (?, ?, ?, ?)",
+                    (t, role, source, now)).rowcount or 0)
+            self._conn.commit()
+        if added:
+            self._seat_vocab_changed()
+        return added
+
+    def remove_seat_vocab(self, term: str, role: str) -> bool:
+        """Drop one term. True when a row was removed."""
+        t = self.seat_vocab_term(term, role)
+        if not t:
+            return False
+        with self._lock:
+            try:
+                cur = self._conn.execute(
+                    "DELETE FROM seat_vocab WHERE term = ? AND role = ?",
+                    (t, role))
+                self._conn.commit()
+            except sqlite3.OperationalError:
+                self._conn.rollback()
+                return False
+            gone = cur.rowcount > 0
+        if gone:
+            self._seat_vocab_changed()
+        return gone
+
+    def list_seat_vocab(self) -> list[dict]:
+        """Every row ({term, role, source, created_at}), oldest first. A
+        `nonperson_name` term is a hash, never the name."""
+        with self._lock:
+            try:
+                rows = self._conn.execute(
+                    "SELECT term, role, source, created_at FROM seat_vocab "
+                    "ORDER BY created_at, role, term").fetchall()
+            except sqlite3.OperationalError:
+                return []
+        return [dict(r) for r in rows]
+
+    def record_not_person(self, name: str, *,
+                          source: str = "correction") -> bool:
+        """The user said this exact name is no person (they turned the
+        person into an entity, or forgot it as not a person): it is never
+        proposed as a person again. Only the exact name (its name key), never
+        its words."""
+        return self.add_seat_vocab(name, "nonperson_name", source=source)
+
+    def forget_not_person(self, name: str) -> bool:
+        """The user said this name IS a person after all."""
+        return self.remove_seat_vocab(name, "nonperson_name")
+
+    def is_seat_nonperson_name(self, name: str) -> bool:
+        names = self.seat_vocab().get("nonperson_name")
+        if not names:
+            return False
+        t = self.entity_tombstone_hash(name)
+        return bool(t) and t in names
+
+    def user_named_person(self, name: str) -> bool:
+        """The user just named `name` as a person (labelled a speaker,
+        assigned a task to them, answered onboarding, split a node, linked a
+        peer, renamed or aliased a person, confirmed one): a learned "not a
+        person" on that exact name no longer stands, the way a user mint
+        lifts a tombstone. Automated proposals never call this, so they stay
+        blocked. True when a learned name was lifted; writes nothing (not
+        even an empty delete) when there was none."""
+        if not (name or "").strip() or not self.is_seat_nonperson_name(name):
+            return False
+        return self.forget_not_person(name)
+
+    def entity_has_support(self, entity_id: int | None, name: str) -> bool:
+        """Does anything stand behind this entity row besides its name: a
+        sighting bound to it in the ledger, or an active fact (not
+        dismissed, not superseded) whose text holds the name as a whole
+        word? Cleanup asks before it hides a row whose name alone looks
+        like junk. Unknown (no id, or a store without the ledger) is
+        treated as supported."""
+        n = " ".join((name or "").split())
+        if not entity_id or not n:
+            return True
+        import re as _re
+        word = _re.compile(r"(?<![\w])" + _re.escape(n.lower()) + r"(?![\w])")
+        with self._lock:
+            try:
+                if self._conn.execute(
+                        "SELECT 1 FROM entity_mentions WHERE entity_id = ? "
+                        "LIMIT 1", (int(entity_id),)).fetchone():
+                    return True
+            except sqlite3.OperationalError:
+                return True
+            # Every substring hit is read until a whole-word one: a cap
+            # could stop on "captured"s and miss the fact that says
+            # "Capture".
+            cur = self._conn.execute(
+                "SELECT text FROM facts WHERE text LIKE ? "
+                "AND COALESCE(state, 'active') != 'superseded' "
+                "AND COALESCE(review, '') != 'dismissed'", (f"%{n}%",))
+            return any(word.search((r["text"] or "").lower()) for r in cur)
+
+    # --- entity candidate ledger -----------------------------------------
+    # Every sighting of a non-person name lands in `entity_mentions`. A name
+    # with no entity yet is `pending`; the candidate gate
+    # (services/entity_candidates.py) decides when pending sightings add up
+    # to a node. Readers tolerate a read-only store from before the tables.
+    _ENTITY_MENTION_COLS = (
+        "id, name, name_key, proposed_kind, confidence, source_class, "
+        "event_source, event_id, span, filing_project, parent, observed_at, "
+        "entity_id, status, weak, typed, created_at")
+
+    def record_entity_mention(
+            self, name: str, *, proposed_kind: str | None = None,
+            confidence: float | None = None,
+            source_class: str | None = None,
+            event_source: str | None = None, event_id: int | None = None,
+            span: str | None = None, filing_project: str | None = None,
+            parent: str | None = None, observed_at: float | None = None,
+            entity_id: int | None = None, weak: bool = False,
+            typed: bool = False) -> int:
+        """Write one sighting of `name`. Returns the ledger row id (0 for a
+        name with no key).
+
+        `entity_id` set means the name resolved: the row is `bound`.
+        Otherwise it is `pending`. One row per (name key, event): extracting
+        the same event again updates the row, it never adds a second one,
+        and it never takes a bound row back to pending or erases a kind,
+        span or project the first pass recorded. A sighting with no event id
+        has nothing to dedupe on and always adds a row."""
+        from app.services.kg_keys import entity_name_key
+        nm = (name or "").strip()
+        key = entity_name_key(nm)
+        if not nm or not key:
+            return 0
+        kind = (proposed_kind or "").strip().lower() or None
+        conf = self._norm_kind_confidence(confidence)
+        eid = int(entity_id) if entity_id else None
+        ev = int(event_id) if event_id is not None else None
+        import time as _time
+        wall = _time.time()
+        seen = float(observed_at) if observed_at is not None else wall
+        cap = self._bound_mention_cap()
+        with self._lock, self._rollback_on_error():
+            row = None
+            if ev is not None:
+                row = self._conn.execute(
+                    "SELECT id, name, entity_id, weak, typed "
+                    "FROM entity_mentions "
+                    "WHERE name_key = ? AND event_id = ?", (key, ev)).fetchone()
+            want = eid or (row["entity_id"] if row is not None else None)
+            if want and self._conn.execute(
+                    "SELECT 1 FROM entities WHERE id = ?",
+                    (int(want),)).fetchone() is None:
+                # The row was merged or deleted after the caller resolved
+                # the name (a request thread forgot it mid-extraction): a
+                # forgotten name writes nothing, anything else waits as a
+                # candidate again rather than binding to a dead id.
+                if self._entity_tombstoned_unlocked(
+                        self.entity_tombstone_hash(nm)):
+                    return 0
+                eid = None
+                if row is not None and row["entity_id"] \
+                        and int(row["entity_id"]) == int(want):
+                    row = dict(row)
+                    row["entity_id"] = None
+            if row is not None:
+                bound_to = eid or row["entity_id"]
+                # A proper-name spelling outranks a lowercase one for the
+                # same event ("Pet Groomers" in the entity list, "pet groomers"
+                # as a relation endpoint).
+                keep_old_name = bool(weak) and not row["weak"]
+                self._conn.execute(
+                    "UPDATE entity_mentions SET "
+                    "name = ?, "
+                    "proposed_kind = COALESCE(?, proposed_kind), "
+                    "confidence = COALESCE(?, confidence), "
+                    "source_class = COALESCE(?, source_class), "
+                    "event_source = COALESCE(?, event_source), "
+                    "span = COALESCE(?, span), "
+                    "filing_project = COALESCE(?, filing_project), "
+                    "parent = COALESCE(?, parent), "
+                    "observed_at = COALESCE(observed_at, ?), "
+                    "entity_id = ?, status = ?, weak = ?, typed = ? "
+                    "WHERE id = ?",
+                    (row["name"] if keep_old_name else nm, kind, conf,
+                     source_class or None, event_source or None,
+                     span or None, filing_project or None, parent or None,
+                     seen, bound_to, "bound" if bound_to else "pending",
+                     1 if (weak and row["weak"]) else 0,
+                     1 if (typed or row["typed"]) else 0, row["id"]))
+                mid = int(row["id"])
+            else:
+                cur = self._conn.execute(
+                    "INSERT INTO entity_mentions (name, name_key, "
+                    "proposed_kind, confidence, source_class, event_source, "
+                    "event_id, span, filing_project, parent, observed_at, "
+                    "entity_id, status, weak, typed, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (nm, key, kind, conf, source_class or None,
+                     event_source or None, ev, span or None,
+                     filing_project or None, parent or None, seen, eid,
+                     "bound" if eid else "pending", 1 if weak else 0,
+                     1 if typed else 0, wall))
+                mid = int(cur.lastrowid)
+                bound_to = eid
+            if bound_to:
+                self._cap_bound_mentions_unlocked(int(bound_to), cap)
+            self._conn.commit()
+        return mid
+
+    @staticmethod
+    def _bound_mention_cap() -> int:
+        """Bound sightings kept per entity (`entity_candidates.bound_cap`)."""
+        try:
+            from app.services.entity_candidates import bound_cap
+            return int(bound_cap())
+        except Exception:
+            return 500
+
+    # Beyond the newest `cap` sightings of an entity, the newest few of each
+    # kind of evidence stay too: the repair and the scope rule read what
+    # kinds of sightings a row has (any mint-eligible one, one per filing
+    # project, a typed one), and a flood of one kind (the name on screen
+    # all day, a stream of notes) must not evict the mail that made it.
+    _CAP_KEEP_PER_GROUP = 2
+
+    def _cap_bound_mentions_unlocked(self, entity_id: int, cap: int) -> int:
+        """Keep the newest `cap` sightings bound to one entity, and the
+        newest `_CAP_KEEP_PER_GROUP` of every group of sightings alike in
+        source class, event source, filing project, parent, kind and typed
+        flag; delete the rest (the `(entity_id, observed_at)` index serves
+        it). The kind vote reads the newest `cap` only, so it sees what it
+        saw before. Caller holds `_lock` and commits. Returns the rows
+        deleted."""
+        args = (int(entity_id), max(1, int(cap)), self._CAP_KEEP_PER_GROUP)
+        try:
+            return int(self._conn.execute(
+                "DELETE FROM entity_mentions WHERE id IN ("
+                " SELECT id FROM (SELECT id,"
+                "  ROW_NUMBER() OVER (ORDER BY observed_at DESC, id DESC)"
+                "   AS n,"
+                "  ROW_NUMBER() OVER (PARTITION BY COALESCE(source_class, ''),"
+                "   COALESCE(event_source, ''), COALESCE(filing_project, ''),"
+                "   COALESCE(parent, ''), COALESCE(proposed_kind, ''), typed"
+                "   ORDER BY observed_at DESC, id DESC) AS g"
+                "  FROM entity_mentions"
+                "  WHERE entity_id = ? AND status = 'bound')"
+                " WHERE n > ? AND g > ?)", args).rowcount or 0)
+        except sqlite3.OperationalError:
+            pass                # no window functions (SQLite before 3.25)
+        try:
+            return int(self._conn.execute(
+                "DELETE FROM entity_mentions WHERE id IN ("
+                " SELECT id FROM entity_mentions"
+                " WHERE entity_id = ? AND status = 'bound'"
+                " ORDER BY observed_at DESC, id DESC LIMIT -1 OFFSET ?)",
+                args[:2]).rowcount or 0)
+        except sqlite3.OperationalError:
+            return 0
+
+    def prune_entity_mentions(self, *, cap: int,
+                              span_cutoff: float | None = None) -> dict:
+        """Bound the ledger (the graph job's sweep): delete sightings bound
+        to a row that no longer exists, keep the newest `cap` sightings
+        bound to each entity and the newest of each kind of evidence
+        (`_cap_bound_mentions_unlocked`), and clear the span (the quoted
+        text) of bound sightings written before `span_cutoff`. What the
+        kind vote, the scope rule and the repair read (name key, kind,
+        source, event, filing project, parent, time) stays on every row
+        that is kept. Returns {orphans, capped, spans}."""
+        out = {"orphans": 0, "capped": 0, "spans": 0}
+        if self._readonly:
+            return out
+        with self._lock, self._rollback_on_error():
+            try:
+                out["orphans"] = int(self._conn.execute(
+                    "DELETE FROM entity_mentions WHERE status = 'bound' "
+                    "AND entity_id IS NOT NULL AND NOT EXISTS ("
+                    " SELECT 1 FROM entities e"
+                    " WHERE e.id = entity_mentions.entity_id)").rowcount or 0)
+                over = [int(r["entity_id"]) for r in self._conn.execute(
+                    "SELECT entity_id FROM entity_mentions "
+                    "WHERE status = 'bound' AND entity_id IS NOT NULL "
+                    "GROUP BY entity_id HAVING COUNT(*) > ?",
+                    (max(1, int(cap)),)).fetchall()]
+                for eid in over:
+                    out["capped"] += self._cap_bound_mentions_unlocked(eid, cap)
+                if span_cutoff is not None:
+                    out["spans"] = int(self._conn.execute(
+                        "UPDATE entity_mentions SET span = NULL "
+                        "WHERE status = 'bound' AND span IS NOT NULL "
+                        "AND created_at < ?",
+                        (float(span_cutoff),)).rowcount or 0)
+            except sqlite3.OperationalError:
+                pass            # store from before the ledger tables
+            self._conn.commit()
+        return out
+
+    def entity_mentions(self, *, name_key: str | None = None,
+                        entity_id: int | None = None,
+                        status: str | None = None,
+                        limit: int | None = None,
+                        newest_first: bool = False) -> list[dict]:
+        """Ledger rows, oldest sighting first (newest first with
+        `newest_first`, so a `limit` keeps the latest), filtered by any of
+        name key, entity id and status."""
+        where: list[str] = []
+        args: list = []
+        if name_key is not None:
+            where.append("name_key = ?")
+            args.append(name_key)
+        if entity_id is not None:
+            where.append("entity_id = ?")
+            args.append(int(entity_id))
+        if status is not None:
+            where.append("status = ?")
+            args.append(status)
+        sql = ("SELECT " + self._ENTITY_MENTION_COLS + " FROM entity_mentions"
+               + (" WHERE " + " AND ".join(where) if where else "")
+               + (" ORDER BY observed_at DESC, id DESC" if newest_first
+                  else " ORDER BY observed_at, id"))
+        if limit:
+            sql += " LIMIT ?"
+            args.append(int(limit))
+        with self._lock:
+            try:
+                rows = self._conn.execute(sql, args).fetchall()
+            except sqlite3.OperationalError:
+                return []       # read-only store from before the table
+        return [dict(r) for r in rows]
+
+    def entity_mention_counts(self) -> dict:
+        """{status: rows} over the whole ledger."""
+        with self._lock:
+            try:
+                rows = self._conn.execute(
+                    "SELECT status, COUNT(*) AS n FROM entity_mentions "
+                    "GROUP BY status").fetchall()
+            except sqlite3.OperationalError:
+                return {}
+        return {r["status"]: int(r["n"]) for r in rows}
+
+    def contact_points_mark(self) -> int:
+        """The newest contact point id (0 for none): a cheap way for a cache
+        built from known people's addresses to see that one was added."""
+        with self._lock:
+            try:
+                row = self._conn.execute(
+                    "SELECT MAX(contact_point_id) AS m "
+                    "FROM person_contact_points").fetchone()
+            except sqlite3.OperationalError:
+                return 0        # store from before the contact table
+        return int(row["m"] or 0) if row else 0
+
+    def contact_email_domains(self) -> list[str]:
+        """Every distinct domain of a known person's email address, lower
+        case. The kind vote's email-domain prior is built from these once
+        and cached (`entity_typing.email_domain_org_keys`)."""
+        with self._lock:
+            try:
+                rows = self._conn.execute(
+                    "SELECT DISTINCT lower(trim(substr(value_normalized, "
+                    "instr(value_normalized, '@') + 1))) AS d "
+                    "FROM person_contact_points "
+                    "WHERE type = 'email' "
+                    "AND instr(value_normalized, '@') > 0").fetchall()
+            except sqlite3.OperationalError:
+                return []       # store from before the contact table
+        return [str(r["d"]) for r in rows if r["d"]]
+
+    def adopt_entity_candidates(self, name_key: str, entity_id: int, *,
+                                ts: float | None = None) -> dict:
+        """A name became `entity_id`: everything that was waiting under its
+        key now belongs to that row. Pending sightings are bound, each other
+        spelling is kept as an alias, and pooled relations that now have
+        both endpoints are written as the extractor would have written them.
+
+        `resolve_entity` calls this whenever it creates a visible row, so a
+        filing, an email-domain org and a manual add adopt as a promotion
+        does. Returns {adopted, relations}."""
+        out = {"adopted": 0, "relations": 0}
+        if not name_key or not entity_id:
+            return out
+        eid = int(entity_id)
+        cap = self._bound_mention_cap()
+        with self._lock, self._rollback_on_error():
+            # Merged or deleted since the caller resolved it: nothing binds
+            # to a dead id (the sightings keep waiting under the name).
+            if self._conn.execute("SELECT 1 FROM entities WHERE id = ?",
+                                  (eid,)).fetchone() is None:
+                return out
+            try:
+                rows = self._conn.execute(
+                    "SELECT id, name FROM entity_mentions "
+                    "WHERE name_key = ? AND status = 'pending' "
+                    "ORDER BY observed_at, id", (name_key,)).fetchall()
+                waiting = self._conn.execute(
+                    "SELECT 1 FROM entity_pending_relations "
+                    "WHERE status = 'pending' AND ("
+                    "(subj_kind = 'entity' AND subj_key = ? "
+                    " AND subj_id IS NULL) OR "
+                    "(obj_kind = 'entity' AND obj_key = ? "
+                    " AND obj_id IS NULL)) LIMIT 1",
+                    (name_key, name_key)).fetchone()
+                if not rows and waiting is None:
+                    return out  # nothing was waiting: the usual case
+                if rows:
+                    # Counted as "promoted" only when the candidate gate
+                    # made the row (`entity_candidates.consider_new`), not
+                    # when a filing, an email domain or a manual add did.
+                    self._conn.execute(
+                        "UPDATE entity_mentions SET entity_id = ?, "
+                        "status = 'bound' "
+                        "WHERE name_key = ? AND status = 'pending'",
+                        (eid, name_key))
+                    self._cap_bound_mentions_unlocked(eid, cap)
+                self._conn.execute(
+                    "UPDATE entity_pending_relations SET subj_id = ? "
+                    "WHERE status = 'pending' AND subj_kind = 'entity' "
+                    "AND subj_key = ? AND subj_id IS NULL", (eid, name_key))
+                self._conn.execute(
+                    "UPDATE entity_pending_relations SET obj_id = ? "
+                    "WHERE status = 'pending' AND obj_kind = 'entity' "
+                    "AND obj_key = ? AND obj_id IS NULL", (eid, name_key))
+                ready = [dict(r) for r in self._conn.execute(
+                    "SELECT " + self._ENTITY_PENDING_REL_COLS
+                    + " FROM entity_pending_relations "
+                    "WHERE status = 'pending' "
+                    "AND subj_id IS NOT NULL AND obj_id IS NOT NULL "
+                    "AND ((subj_kind = 'entity' AND subj_id = ?) "
+                    "OR (obj_kind = 'entity' AND obj_id = ?)) "
+                    "ORDER BY ts, id", (eid, eid)).fetchall()]
+            except sqlite3.OperationalError:
+                # A store from before the ledger tables: undo whatever ran.
+                self._conn.rollback()
+                return out
+            ent = self._conn.execute(
+                "SELECT canonical_name FROM entities WHERE id = ?",
+                (eid,)).fetchone()
+            self._conn.commit()
+        out["adopted"] = len(rows)
+        # Everything below takes `_lock` itself.
+        if ent is not None:
+            canonical = (ent["canonical_name"] or "").strip().lower()
+            import time as _time
+            # `touch_entity` writes last_seen as given: never hand it None.
+            when = ts if ts is not None else _time.time()
+            for spelling in dict.fromkeys(r["name"] for r in rows):
+                if spelling.strip().lower() != canonical:
+                    self.touch_entity(eid, when, alias=spelling)
+        done: list[int] = []
+        for r in ready:
+            ends = []
+            for kind, nid in ((r["subj_kind"], r["subj_id"]),
+                              (r["obj_kind"], r["obj_id"])):
+                alive = (self.get_entity(int(nid)) if kind == "entity"
+                         else self.get_person(int(nid)) if kind == "person"
+                         else None)
+                ends.append((kind, int(nid)) if alive else None)
+            if ends[0] and ends[1] and ends[0] != ends[1]:
+                self.add_relation(
+                    ends[0][0], ends[0][1], r["predicate"],
+                    ends[1][0], ends[1][1], origin="asserted",
+                    source_event_id=r["source_event_id"],
+                    confidence=r["confidence"], ts=r["ts"],
+                    quote=r["quote"] or None,
+                    source_class=r["source_class"])
+                out["relations"] += 1
+            # Written, or an endpoint is gone (or both ends are one node):
+            # either way the row has nothing left to wait for.
+            done.append(int(r["id"]))
+        if done:
+            ph = ",".join("?" for _ in done)
+            with self._lock:
+                self._conn.execute(
+                    f"DELETE FROM entity_pending_relations "
+                    f"WHERE id IN ({ph})", done)
+                self._conn.commit()
+        return out
+
+    def expire_entity_candidates(self, cutoff_ts: float, *,
+                                 summary_cutoff: float | None = None) -> dict:
+        """Delete pending sightings written before `cutoff_ts` and the
+        relations pooled on them: a pooled relation goes when it is that old
+        itself, or when a candidate it waits for has no pending sighting
+        left. A name that never recurred leaves no text behind (the
+        candidate gate folds what its sightings added up to into a summary
+        first, `fold_entity_candidates`). Bound rows are evidence for a live
+        entity and are kept. With `summary_cutoff`, summaries last updated
+        before it go too.
+
+        Age is when the row was written (`created_at`), not when the event
+        happened: an import of last year's mail is new to the ledger."""
+        cutoff = float(cutoff_ts)
+        with self._lock, self._rollback_on_error():
+            if summary_cutoff is not None:
+                try:
+                    # Runs on every extracted event: written so the
+                    # updated_at index serves it, not a table scan.
+                    self._conn.execute(
+                        "DELETE FROM entity_candidate_summaries "
+                        "WHERE updated_at < ? OR updated_at IS NULL",
+                        (float(summary_cutoff),))
+                except sqlite3.OperationalError:
+                    pass        # store from before the summary table
+            try:
+                m = self._conn.execute(
+                    "DELETE FROM entity_mentions WHERE status = 'pending' "
+                    "AND COALESCE(created_at, observed_at) < ?", (cutoff,))
+                r = self._conn.execute(
+                    "DELETE FROM entity_pending_relations "
+                    "WHERE status = 'pending' AND ("
+                    " COALESCE(created_at, ts) < ?"
+                    " OR (subj_kind = 'entity' AND subj_id IS NULL"
+                    "     AND NOT EXISTS (SELECT 1 FROM entity_mentions m"
+                    "       WHERE m.name_key = entity_pending_relations.subj_key"
+                    "       AND m.status = 'pending'))"
+                    " OR (obj_kind = 'entity' AND obj_id IS NULL"
+                    "     AND NOT EXISTS (SELECT 1 FROM entity_mentions m"
+                    "       WHERE m.name_key = entity_pending_relations.obj_key"
+                    "       AND m.status = 'pending')))", (cutoff,))
+            except sqlite3.OperationalError:
+                self._conn.commit()     # the summary delete above, if any
+                return {"mentions": 0, "relations": 0}
+            gone = {"mentions": int(m.rowcount or 0),
+                    "relations": int(r.rowcount or 0)}
+            # Always: a DELETE that matched nothing has still opened a write
+            # transaction, and this runs on every extracted event. Left open
+            # it would hold the database's write lock against other
+            # connections until some later write here happened to commit.
+            self._conn.commit()
+            return gone
+
+    # --- candidate log (counts for `entity_metrics`) ----------------------
+    # `promoted`: the candidate gate made a row; `expired`: sightings left
+    # the ledger at the TTL; `forgotten` / `repair_dropped` / `dismissed`:
+    # one row the user forgot, the repair deleted, or one candidate the user
+    # dismissed. One count per act, never per tombstone, and a later re-add
+    # does not take it back.
+    CANDIDATE_LOG_EVENTS = ("promoted", "expired", "forgotten",
+                            "repair_dropped", "dismissed")
+
+    def _log_entity_candidates_unlocked(self, event: str, *, names: int,
+                                        sightings: int,
+                                        at: float | None = None) -> None:
+        """One count row: `names` candidates (and their `sightings`) were
+        promoted or expired just now. Caller holds `_lock` and commits.
+        Silently nothing for a store from before the table."""
+        import time as _time
+        try:
+            self._conn.execute(
+                "INSERT INTO entity_candidate_log (at, event, names, "
+                "sightings) VALUES (?, ?, ?, ?)",
+                (float(at if at is not None else _time.time()), str(event),
+                 int(names), int(sightings)))
+        except sqlite3.OperationalError:
+            pass
+
+    def log_entity_candidates(self, event: str, *, names: int,
+                              sightings: int,
+                              at: float | None = None) -> None:
+        """`_log_entity_candidates_unlocked` as its own write (the expiry
+        sweep's count, after its fold and delete)."""
+        if event not in self.CANDIDATE_LOG_EVENTS or (not names
+                                                      and not sightings):
+            return
+        if self._readonly:
+            return
+        with self._lock:
+            self._log_entity_candidates_unlocked(
+                event, names=names, sightings=sightings, at=at)
+            self._conn.commit()
+
+    def entity_candidate_log_counts(self, *, since: float | None = None,
+                                    until: float | None = None) -> dict:
+        """{event: {"names", "sightings"}} summed over the log rows written
+        in [since, until)."""
+        sql = ("SELECT event, SUM(names) AS names, SUM(sightings) AS s "
+               "FROM entity_candidate_log WHERE 1 = 1")
+        args: list = []
+        if since is not None:
+            sql += " AND at >= ?"
+            args.append(float(since))
+        if until is not None:
+            sql += " AND at < ?"
+            args.append(float(until))
+        sql += " GROUP BY event"
+        with self._lock:
+            try:
+                rows = self._conn.execute(sql, args).fetchall()
+            except sqlite3.OperationalError:
+                return {}       # store from before the table
+        return {r["event"]: {"names": int(r["names"] or 0),
+                             "sightings": int(r["s"] or 0)} for r in rows}
+
+    def entity_metric_counts(self, *, since: float | None = None,
+                             until: float | None = None) -> dict:
+        """The store-side counts `entity_metrics` reads, no text: visible
+        and hidden rows, rows first seen in [since, until), tombstones
+        written then by reason and actor, names with pending sightings now,
+        and the user's kind corrections then (distinct `entities.kind`
+        decisions that changed a kind). Tables a store does not have read
+        as zero."""
+        lo = float(since) if since is not None else float("-inf")
+        hi = float(until) if until is not None else float("inf")
+        out: dict = {"visible": 0, "hidden": 0, "created": 0,
+                     "tombstones": {}, "pending_names": 0,
+                     "kind_corrections": 0}
+        with self._lock:
+            cols = {r["name"] for r in self._conn.execute(
+                "PRAGMA table_info(entities)").fetchall()}
+            hid = "COALESCE(hidden, 0)" if "hidden" in cols else "0"
+            r = self._conn.execute(
+                f"SELECT SUM({hid} = 0) AS v, SUM({hid} != 0) AS h, "
+                "SUM(first_seen >= ? AND first_seen < ?) AS c "
+                "FROM entities", (lo, hi)).fetchone()
+            out["visible"] = int(r["v"] or 0)
+            out["hidden"] = int(r["h"] or 0)
+            out["created"] = int(r["c"] or 0)
+            try:
+                for t in self._conn.execute(
+                        "SELECT COALESCE(reason, '') AS reason, "
+                        "COALESCE(actor, '') AS actor, COUNT(*) AS n "
+                        "FROM entity_tombstones WHERE created_at >= ? "
+                        "AND created_at < ? GROUP BY reason, actor",
+                        (lo, hi)).fetchall():
+                    out["tombstones"][f"{t['reason']}|{t['actor']}"] = \
+                        int(t["n"])
+            except sqlite3.OperationalError:
+                pass
+            try:
+                p = self._conn.execute(
+                    "SELECT COUNT(DISTINCT name_key) AS n "
+                    "FROM entity_mentions WHERE status = 'pending'"
+                ).fetchone()
+                out["pending_names"] = int(p["n"] or 0)
+            except sqlite3.OperationalError:
+                pass
+            try:
+                k = self._conn.execute(
+                    "SELECT COUNT(DISTINCT subject) AS n FROM decisions "
+                    "WHERE surface = 'entities.kind' AND verdict = 'edited' "
+                    "AND decided_at >= ? AND decided_at < ?",
+                    (lo, hi)).fetchone()
+                out["kind_corrections"] = int(k["n"] or 0)
+            except sqlite3.OperationalError:
+                pass
+        return out
+
+    def latest_event_time(self) -> float | None:
+        """The newest event's own time, or None for an empty store."""
+        with self._lock:
+            try:
+                r = self._conn.execute(
+                    "SELECT MAX(time) AS t FROM events").fetchone()
+            except sqlite3.OperationalError:
+                return None
+        return float(r["t"]) if r and r["t"] is not None else None
+
+    def _delete_entity_candidates_unlocked(
+            self, name_keys, *, entity_id: int | None = None) -> dict:
+        """Drop the PENDING sightings filed under these name keys and the
+        relations pooled on them, and, with `entity_id`, everything bound to
+        that entity. A bound sighting under the same key belongs to the row
+        it is bound to ("Brannock-Hale" and "Brannock Hale" share a key) and
+        is left alone, and so is a pooled relation whose end under the key
+        already resolved to another row. Caller holds `_lock` and commits."""
+        keys = sorted({k for k in (name_keys or ()) if k})
+        out = {"mentions": 0, "relations": 0}
+        own = int(entity_id) if entity_id is not None else -1
+        try:
+            for k in keys:
+                out["mentions"] += int(self._conn.execute(
+                    "DELETE FROM entity_mentions WHERE name_key = ? "
+                    "AND status = 'pending'", (k,)).rowcount or 0)
+                out["relations"] += int(self._conn.execute(
+                    "DELETE FROM entity_pending_relations WHERE "
+                    "(subj_kind = 'entity' AND subj_key = ? "
+                    " AND (subj_id IS NULL OR subj_id = ?)) "
+                    "OR (obj_kind = 'entity' AND obj_key = ? "
+                    " AND (obj_id IS NULL OR obj_id = ?))",
+                    (k, own, k, own)).rowcount or 0)
+            if entity_id is not None:
+                out["mentions"] += int(self._conn.execute(
+                    "DELETE FROM entity_mentions WHERE entity_id = ?",
+                    (int(entity_id),)).rowcount or 0)
+                out["relations"] += int(self._conn.execute(
+                    "DELETE FROM entity_pending_relations WHERE "
+                    "(subj_kind = 'entity' AND subj_id = ?) "
+                    "OR (obj_kind = 'entity' AND obj_id = ?)",
+                    (int(entity_id), int(entity_id))).rowcount or 0)
+        except sqlite3.OperationalError:
+            pass                # store from before the ledger tables
+        return out
+
+    def _unshared_keys_unlocked(self, name_keys, *,
+                                entity_id: int | None = None) -> list[str]:
+        """The name keys no other entity row's canonical name has. A
+        candidate summary under a shared key ("Brannock-Hale" forgotten,
+        "Brannock Hale" live) is the live row's kind evidence, and stays.
+        Caller holds `_lock`."""
+        keys = {k for k in (name_keys or ()) if k}
+        if not keys:
+            return []
+        from app.services.kg_keys import entity_name_key
+        shared = {entity_name_key(r["canonical_name"] or "")
+                  for r in self._conn.execute(
+                      "SELECT id, canonical_name FROM entities").fetchall()
+                  if entity_id is None or int(r["id"]) != int(entity_id)}
+        return sorted(keys - shared)
+
+    def add_pending_entity_relation(
+            self, *, subj_kind: str, subj_name: str,
+            subj_id: int | None = None, predicate: str,
+            obj_kind: str, obj_name: str, obj_id: int | None = None,
+            confidence: float | None = None, quote: str | None = None,
+            source_class: str | None = None,
+            source_event_id: int | None = None,
+            ts: float | None = None) -> int:
+        """Park an asserted relation whose endpoint is still a candidate.
+        An endpoint that already resolved passes its id; a candidate passes
+        none and is found again by name key. The same relation from the same
+        event is stored once. Returns the row id (0 when nothing is
+        missing an endpoint or a name has no key)."""
+        from app.services.kg_keys import entity_name_key
+        pred = (predicate or "").strip()
+        skey = entity_name_key(subj_name or "")
+        okey = entity_name_key(obj_name or "")
+        if not pred or not skey or not okey:
+            return 0
+        sid = int(subj_id) if subj_id else None
+        oid = int(obj_id) if obj_id else None
+        if sid and oid:
+            return 0            # nothing pending: the caller adds the edge
+        ev = int(source_event_id) if source_event_id is not None else None
+        import time as _time
+        wall = _time.time()
+        when = float(ts) if ts is not None else wall
+        with self._lock:
+            if ev is not None:
+                row = self._conn.execute(
+                    "SELECT id FROM entity_pending_relations "
+                    "WHERE source_event_id = ? AND subj_kind = ? "
+                    "AND subj_key = ? AND predicate = ? AND obj_kind = ? "
+                    "AND obj_key = ?",
+                    (ev, subj_kind, skey, pred, obj_kind, okey)).fetchone()
+                if row is not None:
+                    return int(row["id"])
+            cur = self._conn.execute(
+                "INSERT INTO entity_pending_relations (subj_kind, subj_id, "
+                "subj_name, subj_key, predicate, obj_kind, obj_id, obj_name, "
+                "obj_key, confidence, quote, source_class, source_event_id, "
+                "ts, status, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                "'pending', ?)",
+                (subj_kind, sid, (subj_name or "").strip(), skey, pred,
+                 obj_kind, oid, (obj_name or "").strip(), okey,
+                 self._norm_kind_confidence(confidence), quote or None,
+                 source_class or None, ev, when, wall))
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    _ENTITY_PENDING_REL_COLS = (
+        "id, subj_kind, subj_id, subj_name, subj_key, predicate, obj_kind, "
+        "obj_id, obj_name, obj_key, confidence, quote, source_class, "
+        "source_event_id, ts, status, created_at")
+
+    def pending_entity_relations(self, *, name_key: str | None = None,
+                                 status: str | None = "pending") -> list[dict]:
+        """Pooled relations, oldest first; `name_key` keeps the ones with
+        that candidate on either end."""
+        where: list[str] = []
+        args: list = []
+        if status is not None:
+            where.append("status = ?")
+            args.append(status)
+        if name_key is not None:
+            where.append("((subj_kind = 'entity' AND subj_key = ?) "
+                         "OR (obj_kind = 'entity' AND obj_key = ?))")
+            args.extend((name_key, name_key))
+        sql = ("SELECT " + self._ENTITY_PENDING_REL_COLS
+               + " FROM entity_pending_relations"
+               + (" WHERE " + " AND ".join(where) if where else "")
+               + " ORDER BY ts, id")
+        with self._lock:
+            try:
+                rows = self._conn.execute(sql, args).fetchall()
+            except sqlite3.OperationalError:
+                return []
+        return [dict(r) for r in rows]
+
+    # --- candidate summaries (what expired sightings added up to) ---------
+    @staticmethod
+    def entity_key_hash(name_key: str | None) -> str | None:
+        """sha256 hex of a name key (`kg_keys.entity_name_key`): how a
+        candidate summary, like a tombstone, names a name without keeping
+        it."""
+        key = (name_key or "").strip()
+        if not key:
+            return None
+        return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+    _SUMMARY_JSON = ("source_classes", "kinds")
+
+    def entity_candidate_summary(self, name_key: str) -> dict | None:
+        """The summary kept for a name key's expired sightings, or None.
+        {mentions, sessions, source_classes, first_seen, last_seen,
+        typed_sessions, typed_last, weak, scope, kinds, updated_at}; no
+        text."""
+        h = self.entity_key_hash(name_key)
+        if not h:
+            return None
+        with self._lock:
+            try:
+                row = self._conn.execute(
+                    "SELECT mentions, sessions, source_classes, first_seen, "
+                    "last_seen, typed_sessions, typed_last, weak, scope, "
+                    "kinds, updated_at FROM entity_candidate_summaries "
+                    "WHERE name_hash = ?", (h,)).fetchone()
+            except sqlite3.OperationalError:
+                return None     # read-only store from before the table
+        if row is None:
+            return None
+        out = dict(row)
+        for col in self._SUMMARY_JSON:
+            try:
+                out[col] = json.loads(out[col]) if out[col] else None
+            except ValueError:
+                out[col] = None
+        out["source_classes"] = list(out["source_classes"] or [])
+        out["kinds"] = dict(out["kinds"] or {})
+        out["weak"] = bool(out["weak"])
+        return out
+
+    def entity_candidate_summary_count(self) -> int:
+        with self._lock:
+            try:
+                row = self._conn.execute(
+                    "SELECT COUNT(*) AS n FROM entity_candidate_summaries"
+                ).fetchone()
+            except sqlite3.OperationalError:
+                return 0
+        return int(row["n"] or 0)
+
+    def expiring_entity_candidates(self, cutoff_ts: float) -> list[dict]:
+        """Pending sightings written before `cutoff_ts` (what
+        `expire_entity_candidates` would delete), oldest first."""
+        with self._lock:
+            try:
+                rows = self._conn.execute(
+                    "SELECT " + self._ENTITY_MENTION_COLS
+                    + " FROM entity_mentions WHERE status = 'pending' "
+                    "AND COALESCE(created_at, observed_at) < ? "
+                    "ORDER BY observed_at, id", (float(cutoff_ts),)
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return []
+        return [dict(r) for r in rows]
+
+    def fold_entity_candidates(self, summaries: dict, mention_ids, *,
+                               now: float | None = None) -> int:
+        """Replace each name key's summary with the one given and delete the
+        pending sightings it was folded from, in one transaction. A sighting
+        that was bound in the meantime is left alone, and so is the summary
+        of a key none of whose sightings was still pending. Returns the
+        sightings deleted."""
+        ids = sorted({int(i) for i in (mention_ids or ())})
+        if not ids:
+            return 0
+        import time as _time
+        when = float(now if now is not None else _time.time())
+        with self._lock, self._rollback_on_error():
+            try:
+                keys = {}
+                for i in range(0, len(ids), 500):
+                    chunk = ids[i:i + 500]
+                    ph = ",".join("?" for _ in chunk)
+                    for r in self._conn.execute(
+                            f"SELECT name_key, COUNT(*) AS n "
+                            f"FROM entity_mentions WHERE id IN ({ph}) "
+                            f"AND status = 'pending' GROUP BY name_key",
+                            chunk).fetchall():
+                        keys[r["name_key"]] = keys.get(r["name_key"], 0) \
+                            + int(r["n"])
+                gone = 0
+                for i in range(0, len(ids), 500):
+                    chunk = ids[i:i + 500]
+                    ph = ",".join("?" for _ in chunk)
+                    gone += int(self._conn.execute(
+                        f"DELETE FROM entity_mentions WHERE id IN ({ph}) "
+                        f"AND status = 'pending'", chunk).rowcount or 0)
+                for key, s in (summaries or {}).items():
+                    h = self.entity_key_hash(key)
+                    if not h or key not in keys:
+                        continue
+                    self._conn.execute(
+                        "INSERT OR REPLACE INTO entity_candidate_summaries "
+                        "(name_hash, mentions, sessions, source_classes, "
+                        "first_seen, last_seen, typed_sessions, typed_last, "
+                        "weak, scope, kinds, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (h, int(s.get("mentions") or 0),
+                         int(s.get("sessions") or 0),
+                         json.dumps(sorted(s.get("source_classes") or [])),
+                         s.get("first_seen"), s.get("last_seen"),
+                         int(s.get("typed_sessions") or 0),
+                         s.get("typed_last"),
+                         1 if s.get("weak", True) else 0,
+                         s.get("scope") or "",
+                         json.dumps(s.get("kinds") or {}, sort_keys=True),
+                         when))
+            except sqlite3.OperationalError:
+                # A store from before the ledger tables, or a write that
+                # failed half way: undo any delete, so no sighting is lost
+                # without its summary.
+                self._conn.rollback()
+                return 0
+            self._conn.commit()
+        return gone
+
+    def _delete_entity_candidate_summaries_unlocked(self, name_keys) -> int:
+        """Drop the summaries of these name keys. Caller holds `_lock` and
+        commits. Reads first, so the common case (no summary) writes
+        nothing."""
+        hashes = sorted({h for h in (self.entity_key_hash(k)
+                                     for k in (name_keys or ())) if h})
+        if not hashes:
+            return 0
+        ph = ",".join("?" for _ in hashes)
+        try:
+            row = self._conn.execute(
+                f"SELECT COUNT(*) AS n FROM entity_candidate_summaries "
+                f"WHERE name_hash IN ({ph})", hashes).fetchone()
+            if not row or not int(row["n"] or 0):
+                return 0
+            return int(self._conn.execute(
+                f"DELETE FROM entity_candidate_summaries "
+                f"WHERE name_hash IN ({ph})", hashes).rowcount or 0)
+        except sqlite3.OperationalError:
+            return 0            # store from before the summary table
 
     @staticmethod
     def text_sha1(text: str | None) -> str | None:
@@ -3668,15 +5532,22 @@ class Store:
                 "facts": n_facts, "relations": n_rel}
 
     # ------------------------------ people / entities --------------------
-    def resolve_person(self, name: str, *, ts: float | None = None) -> int:
+    def resolve_person(self, name: str, *, ts: float | None = None,
+                       by_user: bool = False) -> int:
         """Exact-name resolution: return the existing person id or insert one.
 
         Embedding-based fuzzy resolution ("Chris" == "Christopher") lands in
         step 3; step 1 collapses only exact (case-insensitive) name matches.
+
+        `by_user=True`: the user named this person, which lifts a learned
+        "not a person" on the name (`user_named_person`); otherwise every
+        later mention of the person would be refused.
         """
         key = (name or "").strip()
         if not key:
             return 0
+        if by_user:
+            self.user_named_person(key)
         created = False
         with self._lock:
             row = self._conn.execute(
@@ -3707,7 +5578,9 @@ class Store:
         return pid
 
     def find_entity_exact(self, name: str) -> int | None:
-        """Exact canonical-name match — bind-only path when minting is denied."""
+        """Exact canonical-name match — bind-only path when minting is denied.
+        A confirmed alias answers too, after the canonical names: a name
+        merged into another row keeps finding the survivor."""
         key = (name or "").strip()
         if not key:
             return None
@@ -3716,7 +5589,23 @@ class Store:
                 "SELECT id FROM entities WHERE canonical_name = ? COLLATE NOCASE",
                 (key,),
             ).fetchone()
+            if row is None:
+                row = self._confirmed_alias_row_unlocked(key, "e.id")
         return int(row["id"]) if row else None
+
+    def _confirmed_alias_row_unlocked(self, key: str, cols: str):
+        """The entity row (`cols`, aliased `e`) whose CONFIRMED alias is
+        exactly `key` (case aside), the most-seen one when several are;
+        None when none is, or for a store without the alias table. Caller
+        holds `_lock`."""
+        try:
+            return self._conn.execute(
+                f"SELECT {cols} FROM entity_aliases ea "
+                "JOIN entities e ON e.id = ea.entity_id "
+                "WHERE ea.alias = ? COLLATE NOCASE AND ea.confirmed = 1 "
+                "ORDER BY ea.seen_count DESC, e.id LIMIT 1", (key,)).fetchone()
+        except sqlite3.OperationalError:
+            return None
 
     def find_entity_matching_name(
             self, name: str,
@@ -3757,34 +5646,147 @@ class Store:
                 "canonical_name": row["canonical_name"]}
 
     def resolve_entity(self, name: str, kind: str | None = None,
-                       *, ts: float | None = None) -> int:
+                       *, ts: float | None = None,
+                       kind_source: str | None = None,
+                       kind_confidence: float | None = None,
+                       hidden: bool = False) -> int:
+        """Exact-match-or-create: the one place an entity row is minted.
+
+        `kind_source` (model | rule | filing | user) says who is vouching for
+        `kind`. A new row stores it. An existing row changes kind only when a
+        kind was passed and the source outranks the one on the row; a
+        same-kind call from a higher rank upgrades the source alone. Equal or
+        lower rank leaves the row's kind as it is.
+
+        A name is matched to a row by its canonical name first, then by a
+        confirmed alias (`entity_aliases.confirmed`, which a merge writes for
+        every name the absorbed row had), before anything is inserted.
+
+        Returns 0 without inserting when the name was forgotten by the user
+        (`entity_tombstones`), unless `kind_source` is "user": then the
+        tombstone is lifted and the row is minted. Callers must treat 0 as
+        "no entity", never as an id.
+
+        `hidden` applies to a newly minted row only (value-literal nodes such
+        as a price, which carry a belief but never belong on the tab).
+        """
         key = (name or "").strip()
         if not key:
             return 0
+        kind_given = isinstance(kind, str) and bool(kind.strip())
         try:
             from app.services.name_quality import normalize_entity_kind
+            # A label that is not a kind ("client", "other") still mints a
+            # new row as an idea, as it always did, but it is no vote on a
+            # row that has a kind: at user rank it would overwrite a filed
+            # project with "idea" and lock it there.
+            kind_given = (kind_given
+                          and kind.strip().lower() not in self._KIND_PLACEHOLDERS
+                          and normalize_entity_kind(kind, unknown=None)
+                          is not None)
             kind = normalize_entity_kind(kind)
         except Exception:
             kind = (kind or "").strip().lower() or "idea"
+        source = self._norm_kind_source(kind_source)
+        conf = self._norm_kind_confidence(kind_confidence)
+        import time as _time
+        wall = _time.time()
         created = False
-        with self._lock:
+        with self._lock, self._rollback_on_error():
+            has_model = self._entity_model_cols_unlocked()
             row = self._conn.execute(
-                "SELECT id FROM entities WHERE canonical_name = ? COLLATE NOCASE",
+                "SELECT id, kind" + (", kind_source, hidden" if has_model else "")
+                + " FROM entities WHERE canonical_name = ? COLLATE NOCASE",
                 (key,),
             ).fetchone()
+            if row is None:
+                # No row under that name: a row that confirmed it as an
+                # alias (the user said so, or a merge absorbed it) is the
+                # thing it names, so "Acme Robotics Inc" keeps binding the
+                # survivor of a merge instead of minting a second row.
+                row = self._confirmed_alias_row_unlocked(
+                    key, "e.id, e.kind"
+                    + (", e.kind_source, e.hidden" if has_model else ""))
+                # Except a HIDDEN row (a merge into a hidden survivor): when
+                # the user files under the old name or adds it by hand, that
+                # name is a thing of its own again and gets its own row;
+                # unhiding the survivor would put a row the user never named
+                # back on the tab. Extraction keeps binding the hidden row.
+                if row is not None and has_model and row["hidden"] \
+                        and source in ("filing", "user"):
+                    row = None
             if row is not None:
+                sets: list[str] = []
+                args: list = []
                 if ts is not None:
+                    sets.append("last_seen = ?")
+                    args.append(ts)
+                rekind = (kind_given and has_model
+                          and self.kind_source_rank(source)
+                          > self.kind_source_rank(row["kind_source"]))
+                if rekind:
+                    sets.extend(("kind = ?", "kind_source = ?",
+                                 "kind_confidence = ?"))
+                    args.extend((kind, source, conf))
+                # A hidden row is a value literal ("Friday" as a claim value)
+                # or something the user hid. When the user files under that
+                # name or adds it by hand, it is a real thing now: the row
+                # comes back instead of swallowing it. Extraction (model and
+                # rule rank) never unhides.
+                unhide = (has_model and bool(row["hidden"])
+                          and source in ("filing", "user"))
+                if unhide:
+                    sets.append("hidden = 0")
+                    if self._hidden_source_col_unlocked():
+                        sets.append("hidden_source = NULL")
+                if rekind or unhide:
+                    sets.append("updated_at = ?")
+                    args.append(wall)
+                if sets:
                     self._conn.execute(
-                        "UPDATE entities SET last_seen = ? WHERE id = ?", (ts, row["id"]))
+                        "UPDATE entities SET " + ", ".join(sets)
+                        + " WHERE id = ?", (*args, row["id"]))
                     self._conn.commit()
                 eid = int(row["id"])
             else:
-                cur = self._conn.execute(
-                    "INSERT INTO entities (canonical_name, kind, aliases, "
-                    "first_seen, last_seen, canonical_id) "
-                    "VALUES (?, ?, ?, ?, ?, lower(hex(randomblob(16))))",
-                    (key, kind, json.dumps([key]), ts, ts),
-                )
+                name_hash = self.entity_tombstone_hash(key)
+                if self._entity_tombstoned_unlocked(name_hash):
+                    if source != "user":
+                        return 0
+                    self._conn.execute(
+                        "DELETE FROM entity_tombstones WHERE name_hash = ?",
+                        (name_hash,))
+                if has_model and self._hidden_source_col_unlocked():
+                    # A row minted hidden (a claim's value) is hidden by
+                    # rule.
+                    cur = self._conn.execute(
+                        "INSERT INTO entities (canonical_name, kind, aliases, "
+                        "first_seen, last_seen, canonical_id, hidden, "
+                        "hidden_source, kind_source, kind_confidence, "
+                        "updated_at) "
+                        "VALUES (?, ?, ?, ?, ?, lower(hex(randomblob(16))), "
+                        "?, ?, ?, ?, ?)",
+                        (key, kind, json.dumps([key]), ts, ts,
+                         1 if hidden else 0, "rule" if hidden else None,
+                         source, conf, wall),
+                    )
+                elif has_model:
+                    cur = self._conn.execute(
+                        "INSERT INTO entities (canonical_name, kind, aliases, "
+                        "first_seen, last_seen, canonical_id, hidden, "
+                        "kind_source, kind_confidence, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?, lower(hex(randomblob(16))), "
+                        "?, ?, ?, ?)",
+                        (key, kind, json.dumps([key]), ts, ts,
+                         1 if hidden else 0, source, conf, wall),
+                    )
+                else:
+                    cur = self._conn.execute(
+                        "INSERT INTO entities (canonical_name, kind, aliases, "
+                        "first_seen, last_seen, canonical_id) "
+                        "VALUES (?, ?, ?, ?, ?, lower(hex(randomblob(16))))",
+                        (key, kind, json.dumps([key]), ts, ts),
+                    )
                 self._conn.commit()
                 eid = int(cur.lastrowid)
                 created = True
@@ -3792,6 +5794,12 @@ class Store:
         # non-reentrant Lock and deadlocks if called while holding it.
         if created:
             self.add_node_keys("entity", eid, key, ts=ts)
+            if not hidden:
+                # The name is a node now, whoever made it: sightings and
+                # relations that were waiting for it are its own. A hidden
+                # value literal ("Friday") adopts nothing.
+                from app.services.kg_keys import entity_name_key
+                self.adopt_entity_candidates(entity_name_key(key), eid, ts=ts)
         self.mark_graph_dirty("entity", eid, ts=ts)
         return eid
 
@@ -5879,9 +7887,14 @@ class Store:
             cols = {r["name"] for r in
                     self._conn.execute("PRAGMA table_info(entities)").fetchall()}
             has_hidden = "hidden" in cols
+            # Provenance + scope columns: absent on a read-only store opened
+            # before the entity-model migration, so they are optional here.
+            has_model = all(n in cols for n, _ in self._ENTITIES_MODEL_ADDED)
             sql = "SELECT id, canonical_name, kind, aliases, last_seen"
             if has_hidden:
                 sql += ", hidden"
+            if has_model:
+                sql += ", kind_source, kind_confidence, parent_id, parent_source"
             sql += " FROM entities"
             if has_hidden and not include_hidden:
                 sql += " WHERE COALESCE(hidden, 0) = 0"
@@ -5904,7 +7917,12 @@ class Store:
                     seen.add(a.lower())
             d = {"id": int(r["id"]), "name": r["canonical_name"], "kind": r["kind"],
                  "aliases": aliases,
-                 "last_seen": r["last_seen"]}
+                 "last_seen": r["last_seen"],
+                 "kind_source": r["kind_source"] if has_model else None,
+                 "kind_confidence": (r["kind_confidence"]
+                                     if has_model else None),
+                 "parent_id": r["parent_id"] if has_model else None,
+                 "parent_source": r["parent_source"] if has_model else None}
             if has_hidden:
                 d["hidden"] = bool(r["hidden"] or 0)
             out.append(d)
@@ -5930,28 +7948,65 @@ class Store:
                  1 if hidden else 0, ts, int(person_id)))
             self._conn.commit()
 
-    def set_entity_hidden(self, entity_id: int, *, hidden: bool = True) -> None:
-        """Soft-hide an org/tool from constellation (reversible)."""
+    def entity_is_hidden(self, entity_id: int) -> bool:
+        """True when the row exists and is hidden (a value literal, or an
+        entity the user hid). False for a store without the column."""
         with self._lock:
+            try:
+                row = self._conn.execute(
+                    "SELECT hidden FROM entities WHERE id = ?",
+                    (int(entity_id),)).fetchone()
+            except sqlite3.OperationalError:
+                return False
+        return bool(row and row["hidden"])
+
+    def set_entity_hidden(self, entity_id: int, *, hidden: bool = True,
+                          source: str | None = None) -> None:
+        """Soft-hide an org/tool from constellation (reversible). `source`
+        says who hid it (`HIDE_SOURCES`; anything else is stored as not
+        said), so the repair's undo can tell its own hide from a later one
+        and leave the later one alone. Showing a row again clears it."""
+        with self._lock, self._rollback_on_error():
             cols = {r["name"] for r in
                     self._conn.execute("PRAGMA table_info(entities)").fetchall()}
             if "hidden" not in cols:
                 return
-            self._conn.execute(
-                "UPDATE entities SET hidden = ? WHERE id = ?",
-                (1 if hidden else 0, int(entity_id)))
+            if "hidden_source" in cols:
+                src = source if hidden and source in self.HIDE_SOURCES \
+                    else None
+                self._conn.execute(
+                    "UPDATE entities SET hidden = ?, hidden_source = ? "
+                    "WHERE id = ?", (1 if hidden else 0, src, int(entity_id)))
+            else:
+                self._conn.execute(
+                    "UPDATE entities SET hidden = ? WHERE id = ?",
+                    (1 if hidden else 0, int(entity_id)))
+            self._bump_entity_updated_unlocked(int(entity_id))
             self._conn.commit()
 
+    def _bump_entity_updated_unlocked(self, entity_id: int) -> None:
+        """Stamp `entities.updated_at` so `memory_version()` moves and the
+        Orgs & tools tab refetches. Caller holds `_lock` and commits. Always
+        wall-clock: callers' `ts` can be an old event time."""
+        if not self._entity_model_cols_unlocked():
+            return
+        import time as _time
+        self._conn.execute(
+            "UPDATE entities SET updated_at = ? WHERE id = ?",
+            (_time.time(), int(entity_id)))
+
     def touch_entity(self, eid: int, ts: float | None = None,
-                     alias: str | None = None) -> None:
+                     alias: str | None = None) -> bool:
         """Bump last_seen and record a new spelling as an alias — the entity twin
         of touch_person, so a corrected mis-hearing ('Dell Capitol') stays
-        inspectable on the canonical row and re-pulls future variants."""
-        with self._lock:
+        inspectable on the canonical row and re-pulls future variants.
+        False when the row is gone (merged or deleted since the caller
+        resolved it): the resolver then resolves the name again."""
+        with self._lock, self._rollback_on_error():
             row = self._conn.execute(
                 "SELECT aliases FROM entities WHERE id = ?", (eid,)).fetchone()
             if row is None:
-                return
+                return False
             aliases = json.loads(row["aliases"] or "[]")
             a = (alias or "").strip()
             if a and a.lower() not in {x.lower() for x in aliases}:
@@ -5959,10 +8014,14 @@ class Store:
                 self._conn.execute(
                     "UPDATE entities SET last_seen = ?, aliases = ? WHERE id = ?",
                     (ts, json.dumps(aliases), eid))
+                # A new alias changes what the tab shows; a bare touch with
+                # ts=None would not move memory_version on its own.
+                self._bump_entity_updated_unlocked(int(eid))
             else:
                 self._conn.execute(
                     "UPDATE entities SET last_seen = ? WHERE id = ?", (ts, eid))
             self._conn.commit()
+        return True
 
     # --- entity aliases (ambient-context WS1c) ---------------------------
     @staticmethod
@@ -5980,17 +8039,24 @@ class Store:
     def upsert_entity_alias(self, entity_id: int, alias: str, alias_norm: str,
                             *, source: str = "", confirmed: bool = False,
                             ts: float | None = None,
-                            day: str | None = None) -> dict | None:
+                            day: str | None = None,
+                            confirmed_by: str | None = None) -> dict | None:
         """Insert or bump one (entity, alias) proposal. Recurrence evidence:
         `seen_count` increments per call; `day` (YYYY-MM-DD) is added to the
         distinct-days set. An already-confirmed row never demotes. Returns the
         row dict after the write (so the caller can apply auto-confirm
-        policy), or None on an empty alias."""
+        policy), or None on an empty alias.
+
+        A confirmation records who made it (`confirmed_by`: `user` when the
+        caller says so or the source is the user, else `auto`); once the
+        user confirmed a row it stays theirs."""
         a = (alias or "").strip()
         norm = (alias_norm or "").strip()
         if not a or not norm or not entity_id:
             return None
-        with self._lock:
+        by = "user" if (confirmed_by == "user" or source == "user") else "auto"
+        with self._lock, self._rollback_on_error():
+            has_by = self._alias_confirmed_by_col_unlocked()
             row = self._conn.execute(
                 "SELECT * FROM entity_aliases WHERE entity_id = ? "
                 "AND alias_norm = ?", (int(entity_id), norm)).fetchone()
@@ -6001,6 +8067,7 @@ class Store:
                     "updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)",
                     (int(entity_id), a, norm, source, 1 if confirmed else 0,
                      json.dumps([day] if day else []), ts, ts))
+                became_confirmed = bool(confirmed)
             else:
                 days = json.loads(row["seen_days"] or "[]")
                 if day and day not in days:
@@ -6011,27 +8078,84 @@ class Store:
                     "updated_at = ? WHERE id = ?",
                     (json.dumps(days), 1 if confirmed else 0, ts,
                      int(row["id"])))
+                became_confirmed = bool(confirmed) and not row["confirmed"]
+            if confirmed and has_by:
+                self._conn.execute(
+                    "UPDATE entity_aliases SET confirmed_by = CASE "
+                    "WHEN confirmed_by = 'user' THEN 'user' ELSE ? END "
+                    "WHERE entity_id = ? AND alias_norm = ?",
+                    (by, int(entity_id), norm))
+            # Only a confirmed alias is visible (all_entities merges those);
+            # bumping on every proposal sighting would churn the UI token.
+            if became_confirmed:
+                self._bump_entity_updated_unlocked(int(entity_id))
             self._conn.commit()
             out = self._conn.execute(
                 "SELECT * FROM entity_aliases WHERE entity_id = ? "
                 "AND alias_norm = ?", (int(entity_id), norm)).fetchone()
         return self._alias_row(out) if out else None
 
-    def confirm_entity_alias(self, alias_id: int,
-                             confirmed: bool = True) -> bool:
-        with self._lock:
+    def confirm_entity_alias(self, alias_id: int, confirmed: bool = True, *,
+                             by: str = "auto") -> bool:
+        """Confirm (or un-confirm) one alias row. `by` is who confirmed it:
+        `user` for the user's own yes (the alias route, the Inbox), `auto`
+        for recurrence; only the user's aliases are tombstoned with their
+        row when it is forgotten."""
+        with self._lock, self._rollback_on_error():
+            owner = self._conn.execute(
+                "SELECT entity_id FROM entity_aliases WHERE id = ?",
+                (int(alias_id),)).fetchone()
             cur = self._conn.execute(
                 "UPDATE entity_aliases SET confirmed = ? WHERE id = ?",
                 (1 if confirmed else 0, int(alias_id)))
+            if self._alias_confirmed_by_col_unlocked():
+                self._conn.execute(
+                    "UPDATE entity_aliases SET confirmed_by = ? WHERE id = ?",
+                    (("user" if by == "user" else "auto") if confirmed
+                     else None, int(alias_id)))
+            if owner is not None:
+                self._bump_entity_updated_unlocked(int(owner["entity_id"]))
             self._conn.commit()
             return cur.rowcount > 0
 
+    def _alias_confirmed_by_col_unlocked(self) -> bool:
+        """True when `entity_aliases.confirmed_by` exists (cached once
+        seen; a read-only store from before it has none). Caller holds
+        `_lock`."""
+        if getattr(self, "_alias_by_col", False):
+            return True
+        try:
+            cols = {r["name"] for r in self._conn.execute(
+                "PRAGMA table_info(entity_aliases)").fetchall()}
+        except sqlite3.OperationalError:
+            return False
+        ok = "confirmed_by" in cols
+        if ok:
+            self._alias_by_col = True
+        return ok
+
     def delete_entity_alias(self, alias_id: int) -> bool:
-        with self._lock:
+        with self._lock, self._rollback_on_error():
+            owner = self._conn.execute(
+                "SELECT entity_id FROM entity_aliases WHERE id = ?",
+                (int(alias_id),)).fetchone()
             cur = self._conn.execute(
                 "DELETE FROM entity_aliases WHERE id = ?", (int(alias_id),))
+            if owner is not None:
+                self._bump_entity_updated_unlocked(int(owner["entity_id"]))
             self._conn.commit()
             return cur.rowcount > 0
+
+    def get_entity_alias(self, alias_id: int) -> dict | None:
+        """One alias-table row (a proposal or a confirmed alias), or None."""
+        with self._lock:
+            try:
+                row = self._conn.execute(
+                    "SELECT * FROM entity_aliases WHERE id = ?",
+                    (int(alias_id),)).fetchone()
+            except sqlite3.OperationalError:
+                return None     # store from before the alias table
+        return dict(row) if row else None
 
     def list_entity_aliases(self, *, entity_id: int | None = None,
                             confirmed: bool | None = None,
@@ -7437,8 +9561,15 @@ class Store:
     def delete_person(self, person_id: int) -> dict:
         """Remove a person node + its graph edges, DETACHING (not deleting) any
         facts it owned — a junk owner shouldn't take a real task with it. Returns
-        the deleted row (for a cleanup backup). Used by graph hygiene tooling."""
-        with self._lock:
+        the deleted row (for a cleanup backup). Used by graph hygiene tooling.
+
+        The lookups that answer with a person id go too (contact points,
+        alias rules, blocking keys, node attributes): a deleted person, or a
+        name the user said is no person, is never returned again, so the
+        next mail from the same address proposes a new person (or nobody,
+        while "not a person" stands) instead of writing edges to a dead id.
+        One transaction."""
+        with self._lock, self._rollback_on_error():
             row = self._conn.execute(
                 "SELECT id, canonical_name, aliases FROM people WHERE id = ?",
                 (person_id,)).fetchone()
@@ -7461,6 +9592,27 @@ class Store:
                 (person_id,))
             self._conn.execute(
                 "DELETE FROM person_attrs WHERE person_id=?", (person_id,))
+            try:
+                # A relation pooled for a candidate entity names this person
+                # on its other end: it must not outlive them.
+                self._conn.execute(
+                    "DELETE FROM entity_pending_relations WHERE "
+                    "(subj_kind='person' AND subj_id=?) "
+                    "OR (obj_kind='person' AND obj_id=?)",
+                    (person_id, person_id))
+            except sqlite3.OperationalError:
+                pass            # store from before the ledger tables
+            for sql in (
+                    "DELETE FROM person_contact_points WHERE person_id=?",
+                    "DELETE FROM alias_rules WHERE person_id=?",
+                    "DELETE FROM kg_node_keys WHERE node_type='person' "
+                    "AND node_id=?",
+                    "DELETE FROM kg_node_attrs WHERE node_type='person' "
+                    "AND node_id=?"):
+                try:
+                    self._conn.execute(sql, (person_id,))
+                except sqlite3.OperationalError:
+                    pass        # a table this store does not have
             self._conn.execute("DELETE FROM people WHERE id=?", (person_id,))
             self._conn.commit()
             return dict(row)
@@ -7468,10 +9620,13 @@ class Store:
     def get_entity(self, entity_id: int) -> dict | None:
         """One entity row with parsed aliases — the Orgs & tools tab detail."""
         with self._lock:
+            has_model = self._entity_model_cols_unlocked()
             row = self._conn.execute(
                 "SELECT id, canonical_name, kind, aliases, first_seen, "
-                "last_seen, canonical_id "
-                "FROM entities WHERE id = ?", (entity_id,)).fetchone()
+                "last_seen, canonical_id"
+                + (", kind_source, kind_confidence, parent_id, parent_source"
+                   if has_model else "")
+                + " FROM entities WHERE id = ?", (entity_id,)).fetchone()
         if row is None:
             return None
         try:
@@ -7481,7 +9636,12 @@ class Store:
         return {"id": int(row["id"]), "name": row["canonical_name"],
                 "kind": row["kind"], "aliases": aliases,
                 "first_seen": row["first_seen"], "last_seen": row["last_seen"],
-                "canonical_id": row["canonical_id"]}
+                "canonical_id": row["canonical_id"],
+                "kind_source": row["kind_source"] if has_model else None,
+                "kind_confidence": (row["kind_confidence"]
+                                    if has_model else None),
+                "parent_id": row["parent_id"] if has_model else None,
+                "parent_source": row["parent_source"] if has_model else None}
 
     def rename_entity(self, entity_id: int, name: str) -> bool:
         """Correct an entity's canonical name; the old spelling becomes an
@@ -7490,7 +9650,7 @@ class Store:
         name = (name or "").strip()
         if not name:
             return False
-        with self._lock:
+        with self._lock, self._rollback_on_error():
             row = self._conn.execute(
                 "SELECT canonical_name, aliases FROM entities WHERE id = ?",
                 (entity_id,)).fetchone()
@@ -7512,28 +9672,145 @@ class Store:
             self._conn.execute(
                 "UPDATE entities SET canonical_name = ?, aliases = ? WHERE id = ?",
                 (name, json.dumps(aliases), entity_id))
+            self._bump_entity_updated_unlocked(int(entity_id))
+            # A rename is the user naming this entity. If they once forgot
+            # something under the new name, that tombstone must not outlive
+            # the name being in use again (it would block nothing while the
+            # row exists, then silently block a re-mint after a later delete).
+            name_hash = self.entity_tombstone_hash(name)
+            if self._entity_tombstoned_unlocked(name_hash):
+                self._conn.execute(
+                    "DELETE FROM entity_tombstones WHERE name_hash = ?",
+                    (name_hash,))
             self._conn.commit()
             return True
 
-    def delete_entity(self, entity_id: int) -> dict:
-        """Remove an entity node + its graph edges. Returns the deleted row."""
-        with self._lock:
+    def delete_entity(self, entity_id: int, *, tombstone: bool = False,
+                      reason: str | None = None, actor: str = "user") -> dict:
+        """Remove an entity node + its graph edges. Returns the deleted row.
+
+        `tombstone=True` is "forget": the canonical name and every name the
+        USER tied to the row (`_user_tied_names_unlocked`: an alias they
+        typed or confirmed, the name they renamed it from, a name their
+        merge folded into it) are written to `entity_tombstones` as hashes,
+        so extraction cannot mint the same thing again, and every record
+        that keeps text about entities keeps those names as hashes too
+        (`_redact_forgotten_unlocked`; the repair reports in the data dir,
+        `_redact_forgotten_reports`). A spelling the resolver folded in, or
+        an alias confirmed by recurrence, is not the user's word: it may be
+        something else, and it is not tombstoned. The default leaves no
+        tombstone (cleanup scripts delete junk that should be free to come
+        back if it is real).
+
+        Either way the rows that pointed at the node go with it: alias-table
+        rows, blocking keys, node attributes, the parent link on any child
+        entity, and the ledger sightings bound to it (pending ones under a
+        forgotten name too; another row's sightings under the same name key
+        stay). A user's forget (reason `forget`) and a repair deletion
+        (reason `repair:*`) are each counted once in the metric log, however
+        many names they tombstone. All in one transaction: a failure part
+        way leaves the store as it was."""
+        import time as _time
+        from app.services.kg_keys import entity_name_key
+        now = _time.time()
+        eid = int(entity_id)
+        with self._lock, self._rollback_on_error():
             row = self._conn.execute(
                 "SELECT id, canonical_name, kind, aliases FROM entities WHERE id = ?",
-                (entity_id,)).fetchone()
+                (eid,)).fetchone()
             if row is None:
                 return {}
+            names = [row["canonical_name"] or ""]
+            if tombstone:
+                names.extend(self._user_tied_names_unlocked(eid))
+                for h in {self.entity_tombstone_hash(n) for n in names}:
+                    if not h:
+                        continue
+                    self._conn.execute(
+                        "INSERT OR REPLACE INTO entity_tombstones "
+                        "(name_hash, kind, created_at, reason, actor) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (h, row["kind"], now, reason, actor))
+                # Nor does any record of what was done to it keep them.
+                self._redact_forgotten_unlocked(names, entity_id=eid)
             self._conn.execute(
                 "DELETE FROM relations WHERE (subj_type='entity' AND subj_id=?) "
-                "OR (obj_type='entity' AND obj_id=?)", (entity_id, entity_id))
+                "OR (obj_type='entity' AND obj_id=?)", (eid, eid))
             self._retract_kg_beliefs_unlocked(
                 "(subj_type='entity' AND subj_id=?) "
-                "OR (obj_type='entity' AND obj_id=?)", [entity_id, entity_id])
+                "OR (obj_type='entity' AND obj_id=?)", [eid, eid])
             self._conn.execute(
-                "DELETE FROM entity_attrs WHERE entity_id=?", (entity_id,))
-            self._conn.execute("DELETE FROM entities WHERE id=?", (entity_id,))
+                "DELETE FROM entity_attrs WHERE entity_id=?", (eid,))
+            self._conn.execute(
+                "DELETE FROM entity_aliases WHERE entity_id=?", (eid,))
+            self._conn.execute(
+                "DELETE FROM kg_node_keys WHERE node_type='entity' "
+                "AND node_id=?", (eid,))
+            self._conn.execute(
+                "DELETE FROM kg_node_attrs WHERE node_type='entity' "
+                "AND node_id=?", (eid,))
+            if self._entity_model_cols_unlocked():
+                self._conn.execute(
+                    "UPDATE entities SET parent_id = NULL, parent_source = NULL, "
+                    "updated_at = ? WHERE parent_id = ?", (now, eid))
+            # The candidate ledger keeps names and quotes: every sighting
+            # bound to this node goes, and so does anything still waiting
+            # under a name it was forgotten by (the canonical name for a
+            # plain delete), with the relations pooled on those names. A
+            # forgotten name leaves nothing to promote. A summary under a
+            # name key another row still has is that row's evidence.
+            keys = [entity_name_key(n) for n in names if n]
+            self._delete_entity_candidates_unlocked(keys, entity_id=eid)
+            self._delete_entity_candidate_summaries_unlocked(
+                self._unshared_keys_unlocked(keys, entity_id=eid))
+            if tombstone and reason == "forget" and actor == "user":
+                self._log_entity_candidates_unlocked(
+                    "forgotten", names=1, sightings=0, at=now)
+            if (reason or "").startswith("repair:"):
+                self._log_entity_candidates_unlocked(
+                    "repair_dropped", names=1, sightings=0, at=now)
+            self._conn.execute("DELETE FROM entities WHERE id=?", (eid,))
             self._conn.commit()
-            return dict(row)
+        if tombstone:
+            self._redact_forgotten_reports(names, entity_id=eid)
+        return dict(row)
+
+    def _user_tied_names_unlocked(self, entity_id: int) -> list[str]:
+        """The names the USER tied to an entity row, besides its canonical
+        name: alias-table rows they confirmed (`confirmed_by` 'user': the
+        alias route, the Inbox, their merge's absorbed names), and from the
+        decision trail on the row (`entity:<id>`, actor user) an alias they
+        typed (`entities.alias` edit) and the names they renamed it from
+        and to (`entities.rename`). Spellings the resolver folded in and
+        aliases confirmed by recurrence are not here. Caller holds
+        `_lock`."""
+        out: list[str] = []
+        if self._alias_confirmed_by_col_unlocked():
+            out.extend(r["alias"] for r in self._conn.execute(
+                "SELECT alias FROM entity_aliases WHERE entity_id = ? "
+                "AND confirmed = 1 AND confirmed_by = 'user'",
+                (int(entity_id),)).fetchall() if r["alias"])
+        try:
+            rows = self._conn.execute(
+                "SELECT surface, shown_json, edit_json FROM decisions "
+                "WHERE subject = ? AND actor = 'user' AND verdict = 'edited' "
+                "AND surface IN ('entities.alias', 'entities.rename')",
+                (f"entity:{int(entity_id)}",)).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+        for r in rows:
+            try:
+                shown = json.loads(r["shown_json"] or "{}") or {}
+                edit = json.loads(r["edit_json"] or "{}") or {}
+            except Exception:
+                continue
+            if r["surface"] == "entities.alias":
+                vals = [edit.get("alias")]
+            else:
+                vals = [shown.get("name"), edit.get("name")]
+            out.extend(v for v in vals if isinstance(v, str) and v.strip()
+                       and not self._NAME_HASH.match(v))
+        return list(dict.fromkeys(out))
 
     def purge_source(self, source: str) -> dict:
         """Delete every event from `source` plus the facts extracted from them
@@ -7932,7 +10209,10 @@ class Store:
                                   if offer_closed else None),
         }
 
-    def set_entity_kind(self, entity_id: int, kind: str) -> bool:
+    @staticmethod
+    def canonical_entity_kind(kind: str | None) -> str | None:
+        """The stored spelling of a settable kind ("software" -> "tool"), or
+        None for a label that is not a kind at all ("wizard")."""
         try:
             from app.services.name_quality import normalize_entity_kind
             # Strict: reject garbage labels (wizard) instead of collapsing to idea.
@@ -7945,15 +10225,1397 @@ class Store:
                 kind = "tool"
             if kind in ("location", "venue"):
                 kind = "place"
-            if kind in ("", "other", "?"):
+            if kind in ("", "other", "?", "topic"):
                 kind = "idea"
-        if kind not in ("project", "org", "idea", "thing", "place", "tool"):
+        if kind not in ("project", "org", "idea", "thing", "place", "tool",
+                        "label"):
+            return None
+        return kind
+
+    def set_entity_kind(self, entity_id: int, kind: str, *,
+                        source: str = "user",
+                        confidence: float | None = 1.0) -> bool:
+        """Set an entity's kind on behalf of `source` (user | filing | rule |
+        model). Refuses, with no write, when `source` ranks below whoever set
+        the kind already: a cleanup rule may not undo a kind the user chose.
+        False for an unknown kind, an unknown entity, or a refused write."""
+        kind = self.canonical_entity_kind(kind)
+        if kind is None:
             return False
+        src = self._norm_kind_source(source) or "model"
+        conf = self._norm_kind_confidence(confidence)
+        import time as _time
         with self._lock:
+            if not self._entity_model_cols_unlocked():
+                cur = self._conn.execute(
+                    "UPDATE entities SET kind = ? WHERE id = ?",
+                    (kind, entity_id))
+                self._conn.commit()
+                return cur.rowcount > 0
+            row = self._conn.execute(
+                "SELECT kind_source FROM entities WHERE id = ?",
+                (entity_id,)).fetchone()
+            if row is None:
+                return False
+            if self.kind_source_rank(src) < self.kind_source_rank(
+                    row["kind_source"]):
+                return False
             cur = self._conn.execute(
-                "UPDATE entities SET kind = ? WHERE id = ?", (kind, entity_id))
+                "UPDATE entities SET kind = ?, kind_source = ?, "
+                "kind_confidence = ?, updated_at = ? WHERE id = ?",
+                (kind, src, conf, _time.time(), entity_id))
             self._conn.commit()
             return cur.rowcount > 0
+
+    # --- entity scope (Phase 3) -------------------------------------------
+    # A label, a topic or an unfiled "project" that only ever comes up inside
+    # one filed project belongs to it: `parent_id` / `parent_source` hold the
+    # link and are the truth; one `entity -part_of-> entity` relation with
+    # origin `context` mirrors it for the graph. Sources rank as kind
+    # sources do (model < rule < filing < user), with "never set" below all.
+    # A user who removes a parent leaves parent_source = 'user' and no
+    # parent, so the scope rule does not put it back.
+    PARENT_PREDICATE = "part_of"
+    PARENT_ORIGIN = "context"
+    # Orgs, tools and places are never children: they keep the rollup's
+    # home-project column instead.
+    UNSCOPED_KINDS = frozenset({"org", "tool", "place"})
+    _PARENT_CHAIN_MAX = 32
+
+    @classmethod
+    def parent_source_rank(cls, source: str | None) -> int:
+        s = (source or "").strip().lower()
+        return cls.KIND_SOURCE_RANK.get(s, 0) if s else 0
+
+    def set_entity_parent(self, entity_id: int, parent_id: int | None, *,
+                          source: str = "rule") -> bool:
+        """Put an entity inside another (`parent_id`), or take it out
+        (None), on behalf of `source` (user | filing | rule | model).
+
+        Refused (False, nothing written): an unknown entity; a parent that
+        is the entity itself, unknown, hidden, or would close a cycle; a
+        child of kind org, tool or place; a source that ranks below the one
+        that set the current parent (a user parent is never overwritten by
+        the rule). True when the row now holds that parent, whether this
+        call wrote it or it was already so.
+
+        The mirrored `part_of` relation (origin `context`) moves with it:
+        the edge to the old parent is deleted (only the mirror: an edge the
+        extractor asserted stays), the new one is added after the lock.
+        Setting the parent a row already has writes nothing, unless the
+        mirror edge is missing: then only the edge is put back."""
+        src = self._norm_kind_source(source) or "model"
+        try:
+            eid = int(entity_id)
+            pid = int(parent_id) if parent_id is not None else None
+        except (TypeError, ValueError):
+            return False
+        if pid is not None and pid == eid:
+            return False
+        import time as _time
+        now = _time.time()
+        old_parent = None
+        with self._lock, self._rollback_on_error():
+            if not self._entity_model_cols_unlocked():
+                return False
+            row = self._conn.execute(
+                "SELECT kind, parent_id, parent_source FROM entities "
+                "WHERE id = ?", (eid,)).fetchone()
+            if row is None:
+                return False
+            cur_parent = row["parent_id"]
+            cur_src = row["parent_source"]
+            if pid is not None:
+                from app.services.name_quality import normalize_entity_kind
+                if normalize_entity_kind(row["kind"]) in self.UNSCOPED_KINDS:
+                    return False
+                prow = self._conn.execute(
+                    "SELECT id, COALESCE(hidden, 0) AS hidden FROM entities "
+                    "WHERE id = ?", (pid,)).fetchone()
+                if prow is None or prow["hidden"]:
+                    return False
+                # Walk up from the new parent: meeting the child is a cycle.
+                seen, up = set(), pid
+                while up is not None and len(seen) < self._PARENT_CHAIN_MAX:
+                    if up == eid:
+                        return False
+                    seen.add(up)
+                    r = self._conn.execute(
+                        "SELECT parent_id FROM entities WHERE id = ?",
+                        (up,)).fetchone()
+                    up = int(r["parent_id"]) if r and r["parent_id"] else None
+                    if up in seen:
+                        break
+            if self.parent_source_rank(src) < self.parent_source_rank(cur_src):
+                return False
+            # A rule or model taking a parent away leaves no source behind
+            # (the rule may set one again); a filing or the user removing it
+            # keeps theirs, so nothing lower puts it back.
+            new_src = src if (pid is not None or self.parent_source_rank(src)
+                              > self.KIND_SOURCE_RANK["rule"]) else None
+            same_parent = (cur_parent is None and pid is None) or (
+                cur_parent is not None and pid is not None
+                and int(cur_parent) == pid)
+            # The same parent again: the row already says so, but the mirror
+            # edge may have gone (a cleanup or a rebuild that cleared
+            # `context` edges). Put it back; write nothing else.
+            mirror_missing = same_parent and pid is not None and \
+                self._conn.execute(
+                    "SELECT 1 FROM relations WHERE subj_type = 'entity' "
+                    "AND subj_id = ? AND predicate = ? "
+                    "AND obj_type = 'entity' AND obj_id = ?",
+                    (eid, self.PARENT_PREDICATE, pid)).fetchone() is None
+            restore_only = same_parent and (cur_src or None) == new_src
+            if restore_only and not mirror_missing:
+                return True
+            try:
+                if not restore_only:
+                    self._conn.execute(
+                        "UPDATE entities SET parent_id = ?, "
+                        "parent_source = ?, updated_at = ? WHERE id = ?",
+                        (pid, new_src, now, eid))
+                if cur_parent is not None and not same_parent:
+                    old_parent = int(cur_parent)
+                    self._conn.execute(
+                        "DELETE FROM relations WHERE subj_type = 'entity' "
+                        "AND subj_id = ? AND predicate = ? "
+                        "AND obj_type = 'entity' AND obj_id = ? "
+                        "AND origin = ?",
+                        (eid, self.PARENT_PREDICATE, old_parent,
+                         self.PARENT_ORIGIN))
+                self._conn.commit()
+            except sqlite3.OperationalError:
+                self._conn.rollback()
+                return False
+        if same_parent and not mirror_missing:
+            return True                 # only the source moved up
+        if pid is not None:
+            self.add_relation("entity", eid, self.PARENT_PREDICATE,
+                              "entity", pid, weight=1.0,
+                              origin=self.PARENT_ORIGIN, confidence=1.0,
+                              ts=now)
+        self.mark_graph_dirty("entity", eid, ts=now)
+        return True
+
+    def entity_scope_evidence(self) -> dict[str, list[dict]]:
+        """What the scope rule reads, in two queries, with no fact text:
+
+        `facts`: one row per (entity, source event) of every fact `about`
+        an entity (not superseded, not dismissed), with the event's source
+        and the project it was filed under (`events.meta.project`), and
+        whether the event still exists (`has_event`: a purged source leaves
+        the fact behind);
+        `mentions`: one row per ledger sighting bound to an entity, with
+        its event, source, filing project and the model's `parent`;
+        `affiliated`: the ids of entities a person works at, belongs to or
+        founded (an affiliation edge from a person), which makes them orgs
+        whatever their kind says;
+        `created`: the event whose extraction minted the row (`creation_
+        events`), the one sighting a row from before the ledger keeps.
+        A store from before the ledger has no `mentions`."""
+        created = self.creation_events()
+        with self._lock:
+            facts = [dict(r) for r in self._conn.execute(
+                """
+                SELECT DISTINCT r.obj_id AS entity_id,
+                       f.source_event_id AS event_id,
+                       ev.id IS NOT NULL AS has_event,
+                       ev.source AS event_source,
+                       CASE WHEN json_valid(ev.meta)
+                            THEN json_extract(ev.meta, '$.project') END
+                           AS filing_project
+                FROM relations r
+                JOIN facts f ON f.id = r.subj_id
+                LEFT JOIN events ev ON ev.id = f.source_event_id
+                WHERE r.subj_type = 'fact' AND r.predicate = 'about'
+                  AND r.obj_type = 'entity'
+                  AND COALESCE(f.state, 'active') != 'superseded'
+                  AND COALESCE(f.review, '') != 'dismissed'
+                """).fetchall()]
+            try:
+                mentions = [dict(r) for r in self._conn.execute(
+                    "SELECT entity_id, event_id, event_source, "
+                    "filing_project, parent FROM entity_mentions "
+                    "WHERE entity_id IS NOT NULL AND status = 'bound'"
+                ).fetchall()]
+            except sqlite3.OperationalError:
+                mentions = []
+            affiliated = [int(r["obj_id"]) for r in self._conn.execute(
+                "SELECT DISTINCT obj_id FROM relations "
+                "WHERE subj_type = 'person' AND obj_type = 'entity' "
+                "AND predicate IN ('works_at', 'member_of', 'founded', "
+                "'affiliated_with')").fetchall()]
+        return {"facts": facts, "mentions": mentions,
+                "affiliated": affiliated, "created": created}
+
+    def creation_events(self) -> list[dict]:
+        """{entity_id, event_id, event_source, filing_project, batch, mixed}
+        for the event whose extraction minted each entity row: the extractor
+        stamps a new row's `first_seen` with the same clock value it stamps
+        the event's `extracted_at`, so the two are equal. At most ONE row
+        per entity: an extraction pass stamps every event it read with one
+        clock value (the utterances of a turn, a batch of items; up to 79
+        events on the measured stores), and the row was minted from one of
+        them, not from all. A batch whose events agree on source and filing
+        project is that one sighting (its first event stands for it;
+        `batch` says how many shared the value). One whose events disagree
+        is one sighting of unknown source and project (`mixed`, with
+        `event_source` and `filing_project` None): it is a sighting, so a
+        row with it is not "only ever named in notes", but it places the
+        name in no project. A row minted any other way (a filing, an email
+        domain, a manual add), or whose event was re-extracted since,
+        matches nothing."""
+        with self._lock:
+            try:
+                rows = self._conn.execute(
+                    """
+                    SELECT e.id AS entity_id, v.id AS event_id,
+                           v.source AS event_source,
+                           CASE WHEN json_valid(v.meta)
+                                THEN json_extract(v.meta, '$.project') END
+                               AS filing_project
+                    FROM entities e
+                    JOIN events v ON v.extracted_at = e.first_seen
+                    WHERE e.first_seen IS NOT NULL
+                    ORDER BY e.id, v.id
+                    """).fetchall()
+            except sqlite3.OperationalError:
+                return []
+        by_entity: dict[int, list[dict]] = {}
+        for r in rows:
+            by_entity.setdefault(int(r["entity_id"]), []).append(dict(r))
+
+        def where(d: dict) -> tuple:
+            fp = d.get("filing_project")
+            return (d.get("event_source") or "",
+                    fp.strip() if isinstance(fp, str) and fp.strip() else None)
+        out = []
+        for evs in by_entity.values():
+            if len({where(d) for d in evs}) > 1:
+                # A mixed batch: which event minted the row is unknown.
+                out.append({**evs[0], "event_source": None,
+                            "filing_project": None, "batch": len(evs),
+                            "mixed": True})
+                continue
+            out.append({**evs[0], "batch": len(evs), "mixed": False})
+        return out
+
+    # --- entity merge (Phase 4) -------------------------------------------
+    # A merge re-points everything that names the absorbed row, then deletes
+    # it. Tables that point at a node as (<x>_type, <x>_id) are found by
+    # walking the schema, so a table added later is not left pointing at a
+    # deleted row; `relations` and `kg_predicates` have their own rules
+    # (unique edges, beliefs). History tables are never re-pointed: they
+    # record what happened to the absorbed row.
+    _MERGE_HISTORY_TABLES = frozenset({
+        "entity_merges", "entity_repair_log", "entity_repair_proposals",
+        "decisions", "kg_adjudications", "node_audit_log"})
+    # Columns that hold an entity id under another name (no `<x>_type`
+    # beside them, no declared foreign key): the schema says so only in a
+    # comment. `entities.parent_id` has its own rule.
+    _MERGE_ENTITY_ID_COLUMNS = (("agent_runs", "project_id"),)
+    _EDGE_ORIGIN_RANK = {"user": 3, "asserted": 2, "context": 1}
+
+    def _merge_ref_columns_unlocked(self) -> tuple[list, list]:
+        """([(table, type_col, id_col)], [(table, id_col)]): every typed
+        node reference outside `relations` / `kg_predicates`, and every
+        plain entity id column (an `entity_id`, a declared foreign key to
+        `entities`, `_MERGE_ENTITY_ID_COLUMNS`) outside the history, alias
+        and entity tables."""
+        typed, plain = [], []
+        tables = [r["name"] for r in self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name NOT LIKE 'sqlite_%'").fetchall()]
+        named = {}
+        for t, c in self._MERGE_ENTITY_ID_COLUMNS:
+            named.setdefault(t, set()).add(c)
+        for t in tables:
+            if t in self._MERGE_HISTORY_TABLES or t.startswith("_") \
+                    or t in ("entities", "entity_aliases"):
+                continue
+            cols = [r["name"] for r in self._conn.execute(
+                f'PRAGMA table_info("{t}")').fetchall()]
+            if t not in ("relations", "kg_predicates"):
+                for c in cols:
+                    if c.endswith("_type") and c[:-5] + "_id" in cols:
+                        typed.append((t, c, c[:-5] + "_id"))
+            ids = set()
+            if "entity_id" in cols:
+                ids.add("entity_id")
+            ids |= {c for c in named.get(t, ()) if c in cols}
+            for fk in self._conn.execute(
+                    f'PRAGMA foreign_key_list("{t}")').fetchall():
+                if fk["table"] == "entities" and fk["from"] in cols:
+                    ids.add(fk["from"])
+            plain += [(t, c) for c in sorted(ids)]
+        return typed, plain
+
+    def merge_entities(self, survivor_id: int, absorbed_id: int, *,
+                       reason: str | None = None,
+                       actor: str = "user") -> dict:
+        """Fold entity `absorbed_id` into `survivor_id` and delete it.
+
+        Everything that pointed at the absorbed row points at the survivor:
+        relations on both sides (an edge the survivor already has keeps the
+        stronger origin and the larger weight; one that would join the
+        survivor to itself is dropped), beliefs (`kg_predicates`; a belief
+        the survivor already holds takes the evidence and the copy is
+        retracted, a self-loop is retracted), node keys and attributes (the
+        survivor's own win on a clash), entity details (survivor wins),
+        aliases, ledger sightings, pooled relations, children, and every
+        other table that references the node by type and id. The absorbed
+        row's canonical name and aliases become CONFIRMED aliases of the
+        survivor, so the old name keeps resolving to it. A kind set at a
+        higher rank on the absorbed row (the user's) moves to the survivor;
+        so does its parent when the survivor has none. One audit row goes
+        to `entity_merges`.
+
+        Returns {merge_id, survivor_id, survivor_name, absorbed_id,
+        absorbed_name, counts}, or {} when either row is missing, the ids
+        are the same, or the store is read-only."""
+        try:
+            sid, aid = int(survivor_id), int(absorbed_id)
+        except (TypeError, ValueError):
+            return {}
+        if sid == aid or self._readonly:
+            return {}
+        import time as _time
+        from app.services.entity_alias import normalize as alias_norm
+        now = _time.time()
+        counts: dict[str, int] = {}
+
+        def n(key: str, cur) -> None:
+            k = int(cur.rowcount or 0)
+            if k > 0:
+                counts[key] = counts.get(key, 0) + k
+
+        with self._lock:
+            has_model = self._entity_model_cols_unlocked()
+            cols = ("id, canonical_name, kind, aliases, first_seen, last_seen"
+                    + (", kind_source, kind_confidence, parent_id, "
+                       "parent_source, hidden" if has_model else ""))
+            srow = self._conn.execute(
+                f"SELECT {cols} FROM entities WHERE id = ?", (sid,)).fetchone()
+            arow = self._conn.execute(
+                f"SELECT {cols} FROM entities WHERE id = ?", (aid,)).fetchone()
+            if srow is None or arow is None:
+                return {}
+            try:
+                # Relations, row by row: the edge index is unique.
+                rows = self._conn.execute(
+                    "SELECT * FROM relations WHERE (subj_type = 'entity' "
+                    "AND subj_id = ?) OR (obj_type = 'entity' "
+                    "AND obj_id = ?)", (aid, aid)).fetchall()
+                for r in rows:
+                    st, si = r["subj_type"], int(r["subj_id"])
+                    ot, oi = r["obj_type"], int(r["obj_id"])
+                    if st == "entity" and si == aid:
+                        si = sid
+                    if ot == "entity" and oi == aid:
+                        oi = sid
+                    if (st, si) == (ot, oi):
+                        n("relations.self_loop_dropped", self._conn.execute(
+                            "DELETE FROM relations WHERE id = ?", (r["id"],)))
+                        continue
+                    have = self._conn.execute(
+                        "SELECT id, origin, weight, confidence, "
+                        "source_event_id FROM relations WHERE subj_type = ? "
+                        "AND subj_id = ? AND predicate = ? AND obj_type = ? "
+                        "AND obj_id = ?",
+                        (st, si, r["predicate"], ot, oi)).fetchone()
+                    if have is None:
+                        n("relations", self._conn.execute(
+                            "UPDATE relations SET subj_type = ?, subj_id = ?, "
+                            "obj_type = ?, obj_id = ? WHERE id = ?",
+                            (st, si, ot, oi, r["id"])))
+                        continue
+                    stronger = (self._EDGE_ORIGIN_RANK.get(r["origin"], 0)
+                                > self._EDGE_ORIGIN_RANK.get(have["origin"], 0))
+                    self._conn.execute(
+                        "UPDATE relations SET origin = ?, confidence = ?, "
+                        "weight = MAX(COALESCE(weight, 0), ?), "
+                        "source_event_id = COALESCE(source_event_id, ?) "
+                        "WHERE id = ?",
+                        (r["origin"] if stronger else have["origin"],
+                         r["confidence"] if stronger else have["confidence"],
+                         float(r["weight"] or 0), r["source_event_id"],
+                         have["id"]))
+                    n("relations.duplicate_folded", self._conn.execute(
+                        "DELETE FROM relations WHERE id = ?", (r["id"],)))
+                # Beliefs: re-point, then fold duplicates and self-loops.
+                moved = [int(r["id"]) for r in self._conn.execute(
+                    "SELECT id FROM kg_predicates WHERE (subj_type = 'entity' "
+                    "AND subj_id = ?) OR (obj_type = 'entity' AND obj_id = ?)",
+                    (aid, aid)).fetchall()]
+                for col_t, col_i in (("subj_type", "subj_id"),
+                                     ("obj_type", "obj_id")):
+                    n("kg_predicates", self._conn.execute(
+                        f"UPDATE kg_predicates SET {col_i} = ?, updated_at = ? "
+                        f"WHERE {col_t} = 'entity' AND {col_i} = ?",
+                        (sid, now, aid)))
+                for pid in moved:
+                    p = self._conn.execute(
+                        "SELECT subj_type, subj_id, predicate, obj_type, "
+                        "obj_id, status FROM kg_predicates WHERE id = ?",
+                        (pid,)).fetchone()
+                    if p is None or p["status"] not in ("active", "superseded"):
+                        continue
+                    if (p["subj_type"], p["subj_id"]) == (p["obj_type"],
+                                                          p["obj_id"]):
+                        n("kg_predicates.self_loop_retracted",
+                          self._conn.execute(
+                              "UPDATE kg_predicates SET status = 'retracted', "
+                              "updated_at = ? WHERE id = ?", (now, pid)))
+                        continue
+                    keep = self._conn.execute(
+                        "SELECT id FROM kg_predicates WHERE id != ? "
+                        "AND subj_type = ? AND subj_id = ? AND predicate = ? "
+                        "AND obj_type = ? AND obj_id = ? AND status = ? "
+                        "ORDER BY id LIMIT 1",
+                        (pid, p["subj_type"], p["subj_id"], p["predicate"],
+                         p["obj_type"], p["obj_id"], p["status"])).fetchone()
+                    if keep is None:
+                        continue
+                    n("kg_evidence", self._conn.execute(
+                        "UPDATE OR IGNORE kg_evidence SET predicate_id = ? "
+                        "WHERE predicate_id = ?", (int(keep["id"]), pid)))
+                    n("kg_predicates.duplicate_retracted", self._conn.execute(
+                        "UPDATE kg_predicates SET status = 'retracted', "
+                        "superseded_by = ?, updated_at = ? WHERE id = ?",
+                        (int(keep["id"]), now, pid)))
+                # Aliases: the absorbed row's alias-table rows, then every
+                # name it answered to, as confirmed aliases of the survivor.
+                # Who confirmed each (`confirmed_by`) travels with it: the
+                # absorbed row's own name is the user's when the user merged,
+                # and a spelling the user had tied to the absorbed row stays
+                # theirs; the rest (fuzzy folds, recurrence) is `auto`, and a
+                # later forget of the survivor does not tombstone it.
+                has_by = self._alias_confirmed_by_col_unlocked()
+                tied = {x.lower() for x in self._user_tied_names_unlocked(aid)}
+                if actor == "user" and arow["canonical_name"]:
+                    tied.add(arow["canonical_name"].lower())
+                for r in self._conn.execute(
+                        "SELECT * FROM entity_aliases WHERE entity_id = ?",
+                        (aid,)).fetchall():
+                    have = self._conn.execute(
+                        "SELECT id FROM entity_aliases WHERE entity_id = ? "
+                        "AND alias_norm = ?", (sid, r["alias_norm"])).fetchone()
+                    if have is None:
+                        n("entity_aliases", self._conn.execute(
+                            "UPDATE entity_aliases SET entity_id = ? "
+                            "WHERE id = ?", (sid, r["id"])))
+                    else:
+                        self._conn.execute(
+                            "UPDATE entity_aliases SET confirmed = MAX("
+                            "confirmed, ?), seen_count = seen_count + ? "
+                            "WHERE id = ?", (int(r["confirmed"] or 0),
+                                             int(r["seen_count"] or 0),
+                                             have["id"]))
+                        if has_by and r["confirmed"] \
+                                and r["confirmed_by"] == "user":
+                            self._conn.execute(
+                                "UPDATE entity_aliases SET confirmed_by = "
+                                "'user' WHERE id = ?", (have["id"],))
+                        n("entity_aliases.folded", self._conn.execute(
+                            "DELETE FROM entity_aliases WHERE id = ?",
+                            (r["id"],)))
+                try:
+                    a_aliases = [str(x) for x in json.loads(
+                        arow["aliases"] or "[]") if x]
+                except Exception:
+                    a_aliases = []
+                try:
+                    s_aliases = [str(x) for x in json.loads(
+                        srow["aliases"] or "[]") if x]
+                except Exception:
+                    s_aliases = []
+                taken = {srow["canonical_name"].lower()}
+                names = []
+                for nm in [arow["canonical_name"], *a_aliases]:
+                    nm = (nm or "").strip()
+                    if nm and nm.lower() not in taken:
+                        taken.add(nm.lower())
+                        names.append(nm)
+                # A spelling the user forgot (another row's name or alias,
+                # tombstoned when that row was forgotten) never becomes a
+                # confirmed alias or a blocking key: a confirmed alias binds
+                # before the tombstone is read, so the merge would bring the
+                # forgotten name back. It stays in the display list only.
+                bound = [nm for nm in names if not self._entity_tombstoned_unlocked(
+                    self.entity_tombstone_hash(nm))]
+                if len(bound) != len(names):
+                    counts["entity_aliases.tombstoned_skipped"] = \
+                        len(names) - len(bound)
+                for nm in bound:
+                    norm = alias_norm(nm)
+                    if not norm:
+                        continue
+                    n("entity_aliases.confirmed", self._conn.execute(
+                        "INSERT INTO entity_aliases (entity_id, alias, "
+                        "alias_norm, source, confirmed, seen_count, seen_days, "
+                        "created_at, updated_at) VALUES (?, ?, ?, 'merge', 1, "
+                        "1, '[]', ?, ?) ON CONFLICT(entity_id, alias_norm) "
+                        "DO UPDATE SET confirmed = 1, updated_at = excluded."
+                        "updated_at", (sid, nm, norm, now, now)))
+                    if has_by:
+                        self._conn.execute(
+                            "UPDATE entity_aliases SET confirmed_by = CASE "
+                            "WHEN confirmed_by = 'user' OR ? THEN 'user' "
+                            "ELSE 'auto' END "
+                            "WHERE entity_id = ? AND alias_norm = ?",
+                            (1 if nm.lower() in tied else 0, sid, norm))
+                merged_aliases = list(s_aliases)
+                low = {x.lower() for x in merged_aliases}
+                for nm in names:
+                    if nm.lower() not in low:
+                        merged_aliases.append(nm)
+                        low.add(nm.lower())
+                # Every other reference, found in the schema. On a unique
+                # clash the survivor's own row stands and the absorbed
+                # row's copy is dropped.
+                typed, plain = self._merge_ref_columns_unlocked()
+                for t, ct, ci in typed:
+                    n(f"{t}.{ci}", self._conn.execute(
+                        f'UPDATE OR IGNORE "{t}" SET {ci} = ? '
+                        f"WHERE {ct} = 'entity' AND {ci} = ?", (sid, aid)))
+                    n(f"{t}.{ci}.dropped", self._conn.execute(
+                        f'DELETE FROM "{t}" WHERE {ct} = \'entity\' '
+                        f"AND {ci} = ?", (aid,)))
+                for t, ci in plain:
+                    n(f"{t}.{ci}", self._conn.execute(
+                        f'UPDATE OR IGNORE "{t}" SET {ci} = ? WHERE {ci} = ?',
+                        (sid, aid)))
+                    n(f"{t}.{ci}.dropped", self._conn.execute(
+                        f'DELETE FROM "{t}" WHERE {ci} = ?', (aid,)))
+                # Pooled relations name their endpoints by kind and id.
+                for side in ("subj", "obj"):
+                    try:
+                        n(f"entity_pending_relations.{side}_id",
+                          self._conn.execute(
+                              f"UPDATE entity_pending_relations SET "
+                              f"{side}_id = ? WHERE {side}_kind = 'entity' "
+                              f"AND {side}_id = ?", (sid, aid)))
+                    except sqlite3.OperationalError:
+                        pass
+                # Kind, parent and dates of the survivor.
+                sets, args = [], []
+                if has_model:
+                    if (self.kind_source_rank(arow["kind_source"])
+                            > self.kind_source_rank(srow["kind_source"])):
+                        sets += ["kind = ?", "kind_source = ?",
+                                 "kind_confidence = ?"]
+                        args += [arow["kind"], arow["kind_source"],
+                                 arow["kind_confidence"]]
+                    s_parent = srow["parent_id"]
+                    if s_parent is not None and int(s_parent) == aid:
+                        sets += ["parent_id = NULL", "parent_source = NULL"]
+                        s_parent = None
+                    if (s_parent is None and srow["parent_source"] is None
+                            and arow["parent_id"] is not None
+                            and int(arow["parent_id"]) != sid
+                            and not self._parent_chain_has_unlocked(
+                                int(arow["parent_id"]), sid)):
+                        sets += ["parent_id = ?", "parent_source = ?"]
+                        args += [int(arow["parent_id"]), arow["parent_source"]]
+                    n("entities.parent_id", self._conn.execute(
+                        "UPDATE entities SET parent_id = ?, updated_at = ? "
+                        "WHERE parent_id = ? AND id != ?",
+                        (sid, now, aid, sid)))
+                    # A child of the absorbed row that sat above the survivor
+                    # ("S inside K inside A") is now the survivor's child
+                    # and its parent: the survivor comes out instead.
+                    if s_parent is not None and \
+                            self._parent_chain_has_unlocked(int(s_parent), sid):
+                        sets += ["parent_id = NULL", "parent_source = NULL"]
+                        counts["entities.parent_cycle_cleared"] = 1
+                firsts = [x for x in (srow["first_seen"], arow["first_seen"])
+                          if x is not None]
+                lasts = [x for x in (srow["last_seen"], arow["last_seen"])
+                         if x is not None]
+                sets += ["aliases = ?", "first_seen = ?", "last_seen = ?"]
+                args += [json.dumps(merged_aliases),
+                         min(firsts) if firsts else None,
+                         max(lasts) if lasts else None]
+                if has_model:
+                    sets.append("updated_at = ?")
+                    args.append(now)
+                self._conn.execute(
+                    "UPDATE entities SET " + ", ".join(sets) + " WHERE id = ?",
+                    (*args, sid))
+                self._conn.execute("DELETE FROM entities WHERE id = ?", (aid,))
+                cur = self._conn.execute(
+                    "INSERT INTO entity_merges (survivor_id, survivor_name, "
+                    "absorbed_id, absorbed_name, absorbed_kind, "
+                    "absorbed_aliases, actor, reason, counts, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (sid, srow["canonical_name"], aid, arow["canonical_name"],
+                     arow["kind"], json.dumps(a_aliases), actor, reason,
+                     json.dumps(counts, sort_keys=True), now))
+                merge_id = int(cur.lastrowid)
+                # The mirror of the survivor's own parent is the only
+                # `part_of` context edge it may carry; one the absorbed row
+                # brought along (to its old parent) goes, unless that parent
+                # is now its own. Same transaction as the merge.
+                final = self._conn.execute(
+                    "SELECT parent_id FROM entities WHERE id = ?",
+                    (sid,)).fetchone() if has_model else None
+                pid_now = int(final["parent_id"]) if final and \
+                    final["parent_id"] is not None else None
+                stray = self._conn.execute(
+                    "DELETE FROM relations WHERE subj_type = 'entity' "
+                    "AND subj_id = ? AND predicate = ? AND origin = ? "
+                    "AND obj_type = 'entity' AND obj_id IS NOT ?",
+                    (sid, self.PARENT_PREDICATE, self.PARENT_ORIGIN, pid_now))
+                if stray.rowcount:
+                    counts["relations.stray_part_of_dropped"] = \
+                        int(stray.rowcount)
+                    self._conn.execute(
+                        "UPDATE entity_merges SET counts = ? WHERE id = ?",
+                        (json.dumps(counts, sort_keys=True), merge_id))
+                self._conn.commit()
+            except Exception:
+                # Any failure part way (not only SQLite's): nothing of the
+                # merge is left for a later commit to persist.
+                self._conn.rollback()
+                raise
+        if pid_now is not None:
+            self.add_relation("entity", sid, self.PARENT_PREDICATE, "entity",
+                              pid_now, weight=1.0, origin=self.PARENT_ORIGIN,
+                              confidence=1.0, ts=now)
+        for nm in bound:
+            self.add_node_keys("entity", sid, nm, ts=now)
+        self.mark_graph_dirty("entity", sid, ts=now)
+        return {"merge_id": merge_id, "survivor_id": sid,
+                "survivor_name": srow["canonical_name"], "absorbed_id": aid,
+                "absorbed_name": arow["canonical_name"], "counts": counts}
+
+    def _parent_chain_has_unlocked(self, start: int, target: int) -> bool:
+        """Is `target` `start` itself or above it in the parent chain?"""
+        seen, up = set(), start
+        while up is not None and len(seen) < self._PARENT_CHAIN_MAX:
+            if up == target:
+                return True
+            seen.add(up)
+            r = self._conn.execute(
+                "SELECT parent_id FROM entities WHERE id = ?", (up,)).fetchone()
+            up = int(r["parent_id"]) if r and r["parent_id"] else None
+            if up in seen:
+                break
+        return False
+
+    def entity_merges(self, *, entity_id: int | None = None,
+                      limit: int = 200) -> list[dict]:
+        """The merge audit rows, newest first (`entity_id`: those it
+        survived)."""
+        sql = "SELECT * FROM entity_merges"
+        args: list = []
+        if entity_id is not None:
+            sql += " WHERE survivor_id = ?"
+            args.append(int(entity_id))
+        sql += " ORDER BY id DESC LIMIT ?"
+        args.append(int(limit))
+        with self._lock:
+            try:
+                rows = self._conn.execute(sql, args).fetchall()
+            except sqlite3.OperationalError:
+                return []
+        out = []
+        for r in rows:
+            d = dict(r)
+            for k in ("absorbed_aliases", "counts"):
+                try:
+                    d[k] = json.loads(d.get(k) or ("[]" if k ==
+                                                   "absorbed_aliases" else "{}"))
+                except Exception:
+                    pass
+            out.append(d)
+        return out
+
+    # --- entity repair (Phase 4) ------------------------------------------
+    # What services/entity_repair.py reads in a few queries, and where it
+    # writes its runs, its change log and its Inbox proposals. Readers
+    # tolerate a read-only store from before the tables.
+    _REPAIR_ROW_COLS = ("id", "canonical_name", "kind", "aliases",
+                        "first_seen", "last_seen", "canonical_id", "hidden",
+                        "kind_source", "kind_confidence", "parent_id",
+                        "parent_source", "updated_at")
+
+    def backup_to(self, dest) -> str:
+        """Copy the whole database to `dest` with SQLite's backup API, from
+        this store's own connection: consistent while the app keeps
+        writing, WAL included. Never overwrites a file; raises on failure
+        (a full disk, a read-only directory), leaving no partial copy."""
+        from pathlib import Path as _Path
+        dest = _Path(dest)
+        if dest.exists():
+            raise FileExistsError(str(dest))
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dst = sqlite3.connect(str(dest))
+        try:
+            with self._lock:
+                self._conn.backup(dst)
+            dst.close()
+        except Exception:
+            dst.close()
+            try:
+                dest.unlink()
+            except OSError:
+                pass
+            raise
+        return str(dest)
+
+    def entity_repair_rows(self) -> list[dict]:
+        """Every entity row, hidden ones included, with every column the
+        repair plan reads or snapshots (a column the store does not have yet
+        reads as None). `aliases` is the row's own JSON list; `confirmed` its
+        confirmed alias-table spellings."""
+        with self._lock:
+            have = {r["name"] for r in self._conn.execute(
+                "PRAGMA table_info(entities)").fetchall()}
+            cols = [c for c in self._REPAIR_ROW_COLS if c in have]
+            rows = self._conn.execute(
+                f"SELECT {', '.join(cols)} FROM entities ORDER BY id"
+            ).fetchall()
+            try:
+                conf = self._conn.execute(
+                    "SELECT entity_id, alias FROM entity_aliases "
+                    "WHERE confirmed = 1").fetchall()
+            except sqlite3.OperationalError:
+                conf = []
+        confirmed: dict[int, list[str]] = {}
+        for r in conf:
+            if r["alias"]:
+                confirmed.setdefault(int(r["entity_id"]), []).append(r["alias"])
+        out = []
+        for r in rows:
+            d = {c: (r[c] if c in r.keys() else None)
+                 for c in self._REPAIR_ROW_COLS}
+            try:
+                d["aliases"] = [str(a) for a in json.loads(d["aliases"] or "[]")
+                                if a]
+            except Exception:
+                d["aliases"] = []
+            d["id"] = int(d["id"])
+            d["name"] = d.pop("canonical_name") or ""
+            d["hidden"] = bool(d.get("hidden") or 0)
+            d["confirmed"] = confirmed.get(d["id"], [])
+            out.append(d)
+        return out
+
+    def entity_repair_evidence(self) -> dict:
+        """What stands behind each entity row, with no fact text:
+
+        `facts`: one row per (entity, fact) of every fact `about` it that the
+        user did not dismiss (superseded ones too: they were sightings), with
+        the edge origin, the fact's review stamp and state, its source event,
+        that event's source and filing project, and whether it still exists;
+        `mentions`: every ledger sighting bound to an entity;
+        `created`: `creation_events()`;
+        `edges`: the source event of every other relation touching an
+        entity, and of every piece of evidence for a belief about one
+        (active or superseded), with that event's source and project;
+        `user_edges`: {entity_id: n} edges the user drew (origin `user`);
+        `attrs`: ids of entities with a detail the user set;
+        `affiliated`: ids of entities a person works at or belongs to."""
+        created = self.creation_events()
+        with self._lock:
+            facts = [dict(r) for r in self._conn.execute(
+                """
+                SELECT r.obj_id AS entity_id, r.subj_id AS fact_id,
+                       r.origin AS origin, f.review AS review,
+                       f.state AS state, f.source_event_id AS event_id,
+                       ev.id IS NOT NULL AS has_event,
+                       ev.source AS event_source,
+                       CASE WHEN json_valid(ev.meta)
+                            THEN json_extract(ev.meta, '$.project') END
+                           AS filing_project
+                FROM relations r
+                JOIN facts f ON f.id = r.subj_id
+                LEFT JOIN events ev ON ev.id = f.source_event_id
+                WHERE r.subj_type = 'fact' AND r.predicate = 'about'
+                  AND r.obj_type = 'entity'
+                  AND COALESCE(f.review, '') != 'dismissed'
+                """).fetchall()]
+            try:
+                mentions = [dict(r) for r in self._conn.execute(
+                    "SELECT entity_id, event_id, event_source, source_class, "
+                    "filing_project, parent, proposed_kind, confidence, "
+                    "typed, observed_at, created_at FROM entity_mentions "
+                    "WHERE entity_id IS NOT NULL AND status = 'bound'"
+                ).fetchall()]
+            except sqlite3.OperationalError:
+                mentions = []
+            edges: list[dict] = []
+            for side in ("subj", "obj"):
+                edges += [dict(r) for r in self._conn.execute(
+                    f"""
+                    SELECT r.{side}_id AS entity_id,
+                           r.source_event_id AS event_id,
+                           ev.id IS NOT NULL AS has_event,
+                           ev.source AS event_source,
+                           CASE WHEN json_valid(ev.meta)
+                                THEN json_extract(ev.meta, '$.project') END
+                               AS filing_project
+                    FROM relations r
+                    LEFT JOIN events ev ON ev.id = r.source_event_id
+                    WHERE r.{side}_type = 'entity'
+                      AND r.source_event_id IS NOT NULL
+                      AND NOT (r.subj_type = 'fact' AND r.predicate = 'about')
+                    """).fetchall()]
+                try:
+                    edges += [dict(r) for r in self._conn.execute(
+                        f"""
+                        SELECT p.{side}_id AS entity_id,
+                               k.event_id AS event_id,
+                               ev.id IS NOT NULL AS has_event,
+                               ev.source AS event_source,
+                               CASE WHEN json_valid(ev.meta)
+                                    THEN json_extract(ev.meta, '$.project')
+                               END AS filing_project
+                        FROM kg_predicates p
+                        JOIN kg_evidence k ON k.predicate_id = p.id
+                        LEFT JOIN events ev ON ev.id = k.event_id
+                        WHERE p.{side}_type = 'entity'
+                          AND p.status IN ('active', 'superseded')
+                          AND k.event_id IS NOT NULL
+                        """).fetchall()]
+                except sqlite3.OperationalError:
+                    pass
+            user_edges: dict[int, int] = {}
+            for r in self._conn.execute(
+                    "SELECT subj_type, subj_id, obj_type, obj_id FROM relations "
+                    "WHERE origin = 'user' AND (subj_type = 'entity' "
+                    "OR obj_type = 'entity')").fetchall():
+                for t, i in ((r["subj_type"], r["subj_id"]),
+                             (r["obj_type"], r["obj_id"])):
+                    if t == "entity":
+                        user_edges[int(i)] = user_edges.get(int(i), 0) + 1
+            try:
+                attrs = [int(r["entity_id"]) for r in self._conn.execute(
+                    "SELECT DISTINCT entity_id FROM entity_attrs").fetchall()]
+            except sqlite3.OperationalError:
+                attrs = []
+            affiliated = [int(r["obj_id"]) for r in self._conn.execute(
+                "SELECT DISTINCT obj_id FROM relations "
+                "WHERE subj_type = 'person' AND obj_type = 'entity' "
+                "AND predicate IN ('works_at', 'member_of', 'founded', "
+                "'affiliated_with')").fetchall()]
+        return {"facts": facts, "mentions": mentions, "created": created,
+                "edges": edges, "user_edges": user_edges, "attrs": attrs,
+                "affiliated": affiliated}
+
+    def entity_user_touches(self) -> dict[int, set[str]]:
+        """{entity_id: what the user did to it} from the records the repair
+        evidence does not already read (`entity_repair_evidence` has the
+        notes, drawn edges (pins and graph hides included), details and
+        parents): every `entities.*` decision the user made on the row (a
+        rename, an alias they typed, a kind, a merge into it, an Inbox
+        answer about it) and a repair hide the user undid. A store without
+        those tables reads as nobody having touched anything."""
+        out: dict[int, set[str]] = {}
+
+        def add(eid, why: str) -> None:
+            try:
+                out.setdefault(int(eid), set()).add(why)
+            except (TypeError, ValueError):
+                pass
+        with self._lock:
+            try:
+                rows = self._conn.execute(
+                    "SELECT surface, subject, shown_json FROM decisions "
+                    "WHERE surface LIKE 'entities.%' AND actor = 'user'"
+                ).fetchall()
+            except sqlite3.OperationalError:
+                rows = []
+            try:
+                props = {int(r["id"]): r["entity_id"] for r in
+                         self._conn.execute(
+                             "SELECT id, entity_id FROM "
+                             "entity_repair_proposals").fetchall()}
+            except sqlite3.OperationalError:
+                props = {}
+            try:
+                unhid = [r["entity_id"] for r in self._conn.execute(
+                    "SELECT DISTINCT entity_id FROM entity_repair_log "
+                    "WHERE field = 'hidden' AND undone_at IS NOT NULL "
+                    "AND undo_note = 'undone' AND entity_id IS NOT NULL"
+                ).fetchall()]
+            except sqlite3.OperationalError:
+                unhid = []
+        for r in rows:
+            subject = r["subject"] or ""
+            verb = (r["surface"] or "").split(".", 1)[-1]
+            if subject.startswith("entity:"):
+                add(subject.split(":", 1)[1], verb)
+            elif subject.startswith("repair_proposal:"):
+                try:
+                    eid = props.get(int(subject.split(":", 1)[1]))
+                except ValueError:
+                    eid = None
+                if eid is not None:
+                    add(eid, "inbox_answer")
+            if verb == "merge":
+                try:
+                    into = (json.loads(r["shown_json"] or "{}") or {}).get(
+                        "into") or {}
+                    if into.get("id") is not None:
+                        add(into["id"], "merge")
+                except Exception:
+                    pass
+        for eid in unhid:
+            add(eid, "unhide")
+        return out
+
+    def entity_user_touched(self, entity_id: int) -> list[str]:
+        """What the user did to one entity row (empty: nothing): a decision
+        on it, a merge into it, an edge they drew (a pin or a graph hide
+        included), a detail, a note they approved, a parent they chose, a
+        repair hide they undid. The kind vote asks before a deterministic
+        prior re-kinds a row from before kind provenance, whose kind may be
+        the user's own choice."""
+        eid = int(entity_id)
+        checks = (
+            ("decision", "SELECT 1 FROM decisions WHERE subject = ? "
+                         "AND surface LIKE 'entities.%' AND actor = 'user' "
+                         "LIMIT 1", (f"entity:{eid}",)),
+            ("merge", "SELECT 1 FROM entity_merges WHERE survivor_id = ? "
+                      "AND actor = 'user' LIMIT 1", (eid,)),
+            ("edge", "SELECT 1 FROM relations WHERE origin = 'user' AND ("
+                     "(subj_type = 'entity' AND subj_id = ?) OR "
+                     "(obj_type = 'entity' AND obj_id = ?)) LIMIT 1",
+             (eid, eid)),
+            ("detail", "SELECT 1 FROM entity_attrs WHERE entity_id = ? "
+                       "LIMIT 1", (eid,)),
+            ("note", "SELECT 1 FROM relations r JOIN facts f "
+                     "ON f.id = r.subj_id WHERE r.subj_type = 'fact' "
+                     "AND r.predicate = 'about' AND r.obj_type = 'entity' "
+                     "AND r.obj_id = ? AND r.origin IN ('asserted', 'user') "
+                     "AND f.review IN ('approved', 'edited') LIMIT 1",
+             (eid,)),
+            ("parent", "SELECT 1 FROM entities WHERE id = ? "
+                       "AND parent_source = 'user'", (eid,)),
+            ("unhide", "SELECT 1 FROM entity_repair_log WHERE entity_id = ? "
+                       "AND field = 'hidden' AND undone_at IS NOT NULL "
+                       "AND undo_note = 'undone' LIMIT 1", (eid,)),
+        )
+        out: list[str] = []
+        with self._lock:
+            for why, sql, args in checks:
+                try:
+                    if self._conn.execute(sql, args).fetchone() is not None:
+                        out.append(why)
+                except sqlite3.OperationalError:
+                    continue        # a table or column this store lacks
+        return out
+
+    def typed_chat_events(self) -> list[dict]:
+        """{id, time, raw} of every turn the user typed in their own chat
+        (`chat.user`), oldest first: on a store from before the candidate
+        ledger they are the only record of a name the user typed."""
+        with self._lock:
+            try:
+                rows = self._conn.execute(
+                    "SELECT id, time, raw FROM events WHERE source = "
+                    "'chat.user' ORDER BY time, id").fetchall()
+            except sqlite3.OperationalError:
+                return []
+        return [dict(r) for r in rows]
+
+    def entity_repair_start_run(self, run_id: str, *, mode: str,
+                                rules_version: str | None = None,
+                                backup: str | None = None,
+                                exclusive_s: float | None = None) -> bool:
+        """Record that a run starts. With `exclusive_s`, only when no other
+        run younger than that is still unfinished, in the same statement
+        (`INSERT ... WHERE NOT EXISTS`), so two processes that both saw no
+        run in flight cannot both start one: SQLite takes one writer at a
+        time and the second insert finds the first. False when refused (or
+        on a write error)."""
+        import time as _time
+        now = _time.time()
+        with self._lock:
+            try:
+                if exclusive_s is None:
+                    cur = self._conn.execute(
+                        "INSERT INTO entity_repair_runs (run_id, mode, "
+                        "rules_version, started_at, backup) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (run_id, mode, rules_version, now, backup))
+                else:
+                    cur = self._conn.execute(
+                        "INSERT INTO entity_repair_runs (run_id, mode, "
+                        "rules_version, started_at, backup) "
+                        "SELECT ?, ?, ?, ?, ? WHERE NOT EXISTS ("
+                        " SELECT 1 FROM entity_repair_runs"
+                        " WHERE finished_at IS NULL AND started_at >= ?)",
+                        (run_id, mode, rules_version, now, backup,
+                         now - float(exclusive_s)))
+                self._conn.commit()
+            except sqlite3.Error:
+                self._conn.rollback()
+                return False
+        return int(cur.rowcount or 0) > 0
+
+    def entity_repair_finish_run(self, run_id: str, summary: dict) -> None:
+        import time as _time
+        with self._lock:
+            self._conn.execute(
+                "UPDATE entity_repair_runs SET finished_at = ?, summary = ? "
+                "WHERE run_id = ?",
+                (_time.time(), json.dumps(summary, sort_keys=True), run_id))
+            self._conn.commit()
+
+    def entity_repair_runs(self, *, mode: str | None = None,
+                           limit: int = 50) -> list[dict]:
+        """Repair runs, newest first, each with how many changes it logged
+        and how many of those were undone."""
+        sql = ("SELECT r.*, (SELECT COUNT(*) FROM entity_repair_log l "
+               "WHERE l.run_id = r.run_id) AS changes, "
+               "(SELECT COUNT(*) FROM entity_repair_log l "
+               "WHERE l.run_id = r.run_id AND l.undone_at IS NOT NULL) "
+               "AS undone FROM entity_repair_runs r")
+        args: list = []
+        if mode:
+            sql += " WHERE r.mode = ?"
+            args.append(mode)
+        sql += " ORDER BY r.started_at DESC LIMIT ?"
+        args.append(int(limit))
+        with self._lock:
+            try:
+                rows = self._conn.execute(sql, args).fetchall()
+            except sqlite3.OperationalError:
+                return []
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["summary"] = json.loads(d.get("summary") or "{}")
+            except Exception:
+                d["summary"] = {}
+            out.append(d)
+        return out
+
+    def entity_repair_log_change(self, run_id: str, *, entity_id: int | None,
+                                 canonical_id: str | None, name: str | None,
+                                 action: str, rule: str | None, field: str,
+                                 before, after) -> int:
+        """One changed field (or one merge / deletion) of one run, with the
+        value before and after it. Returns the log id."""
+        import time as _time
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO entity_repair_log (run_id, entity_id, "
+                "canonical_id, name, action, rule, field, before, after, "
+                "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (run_id, entity_id, canonical_id, name, action, rule, field,
+                 json.dumps(before, sort_keys=True),
+                 json.dumps(after, sort_keys=True), _time.time()))
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def entity_repair_log(self, *, run_id: str | None = None,
+                          change_id: int | None = None,
+                          entity_id: int | None = None,
+                          since: float | None = None,
+                          limit: int = 5000) -> list[dict]:
+        """Logged changes, oldest first."""
+        clauses, args = [], []
+        if run_id is not None:
+            clauses.append("l.run_id = ?")
+            args.append(run_id)
+        if change_id is not None:
+            clauses.append("l.id = ?")
+            args.append(int(change_id))
+        if entity_id is not None:
+            clauses.append("l.entity_id = ?")
+            args.append(int(entity_id))
+        if since is not None:
+            clauses.append("l.created_at >= ?")
+            args.append(float(since))
+        sql = ("SELECT l.*, r.mode AS mode FROM entity_repair_log l "
+               "LEFT JOIN entity_repair_runs r ON r.run_id = l.run_id")
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY l.id LIMIT ?"
+        args.append(int(limit))
+        with self._lock:
+            try:
+                rows = self._conn.execute(sql, args).fetchall()
+            except sqlite3.OperationalError:
+                return []
+        out = []
+        for r in rows:
+            d = dict(r)
+            for k in ("before", "after"):
+                try:
+                    d[k] = json.loads(d.get(k) or "null")
+                except Exception:
+                    d[k] = None
+            out.append(d)
+        return out
+
+    def entity_repair_mark_undone(self, change_id: int, note: str) -> None:
+        import time as _time
+        with self._lock:
+            self._conn.execute(
+                "UPDATE entity_repair_log SET undone_at = ?, undo_note = ? "
+                "WHERE id = ? AND undone_at IS NULL",
+                (_time.time(), note, int(change_id)))
+            self._conn.commit()
+
+    def entity_repair_note(self, change_id: int, note: str) -> None:
+        """Say why a change was not undone, without marking it undone."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE entity_repair_log SET undo_note = ? WHERE id = ?",
+                (note, int(change_id)))
+            self._conn.commit()
+
+    def entity_repair_mark_run_undone(self, run_id: str) -> None:
+        import time as _time
+        with self._lock:
+            self._conn.execute(
+                "UPDATE entity_repair_runs SET undone_at = ? WHERE run_id = ?",
+                (_time.time(), run_id))
+            self._conn.commit()
+
+    # The fields a logged change may put back, and the columns of each.
+    REPAIR_FIELDS = {"kind": ("kind", "kind_source", "kind_confidence"),
+                     "parent": ("parent_id", "parent_source"),
+                     "hidden": ("hidden",)}
+
+    def entity_repair_restore(self, entity_id: int, field: str, *,
+                              before: dict, expect: dict) -> tuple[bool, str]:
+        """Put one field of a row back to `before`, only when it still holds
+        what the repair wrote (`expect`). (ok, why): why not is "gone" (the
+        row was deleted or merged away), "changed_by_user" (the user set the
+        field since: a user source, a row the user unhid, or a hide the user
+        made), "changed" (some other write moved it since, a hide by a rule
+        included) or "unknown_field".
+
+        A hidden row is the repair's to show again only while its hide is
+        the repair's own (`hidden_source` 'repair', or not recorded: a hide
+        from before the column). Unhidden and hidden again by someone else,
+        it looks unchanged by value; its source says otherwise."""
+        cols = self.REPAIR_FIELDS.get(field)
+        if not cols:
+            return False, "unknown_field"
+        import time as _time
+        now = _time.time()
+        old_parent = new_parent = None
+        with self._lock, self._rollback_on_error():
+            if not self._entity_model_cols_unlocked():
+                return False, "gone"
+            has_src = field == "hidden" and self._hidden_source_col_unlocked()
+            row = self._conn.execute(
+                f"SELECT {', '.join(cols)}"
+                + (", hidden_source" if has_src else "")
+                + " FROM entities WHERE id = ?",
+                (int(entity_id),)).fetchone()
+            if row is None:
+                return False, "gone"
+            cur = {c: row[c] for c in cols}
+            if field == "hidden":
+                cur["hidden"] = bool(cur["hidden"] or 0)
+                hid_by = row["hidden_source"] if has_src else None
+                if cur["hidden"] and hid_by not in (None, "repair"):
+                    return False, ("changed_by_user" if hid_by == "user"
+                                   else "changed")
+
+            def same(a, b) -> bool:
+                if isinstance(a, float) or isinstance(b, float):
+                    try:
+                        return abs(float(a) - float(b)) < 1e-9
+                    except (TypeError, ValueError):
+                        return a == b
+                return a == b
+            if not all(same(cur.get(c), expect.get(c)) for c in cols):
+                src = cur.get("kind_source") if field == "kind" else (
+                    cur.get("parent_source") if field == "parent" else None)
+                user = (src or "") == "user" or (
+                    field == "hidden" and not cur["hidden"])
+                return False, "changed_by_user" if user else "changed"
+            vals = [before.get(c) for c in cols]
+            if field == "hidden":
+                vals = [1 if before.get("hidden") else 0]
+            if field == "parent" and before.get("parent_id") is not None \
+                    and self._conn.execute(
+                        "SELECT 1 FROM entities WHERE id = ?",
+                        (int(before["parent_id"]),)).fetchone() is None:
+                return False, "gone"        # the old parent is no more
+            self._conn.execute(
+                "UPDATE entities SET " + ", ".join(f"{c} = ?" for c in cols)
+                + (", hidden_source = NULL" if has_src else "")
+                + ", updated_at = ? WHERE id = ?",
+                (*vals, now, int(entity_id)))
+            if field == "parent":
+                old_parent = cur.get("parent_id")
+                new_parent = before.get("parent_id")
+                if old_parent is not None:
+                    self._conn.execute(
+                        "DELETE FROM relations WHERE subj_type = 'entity' "
+                        "AND subj_id = ? AND predicate = ? "
+                        "AND obj_type = 'entity' AND obj_id = ? "
+                        "AND origin = ?",
+                        (int(entity_id), self.PARENT_PREDICATE,
+                         int(old_parent), self.PARENT_ORIGIN))
+            self._conn.commit()
+        if field == "parent" and new_parent is not None:
+            self.add_relation("entity", int(entity_id), self.PARENT_PREDICATE,
+                              "entity", int(new_parent), weight=1.0,
+                              origin=self.PARENT_ORIGIN, confidence=1.0,
+                              ts=now)
+        self.mark_graph_dirty("entity", int(entity_id), ts=now)
+        return True, "undone"
+
+    def entity_repair_hold(self, entity_id: int) -> dict | None:
+        """The automatic repair's provisional hide on this row, if one
+        stands: {change_id, at, rule}. Every hide the automatic path made by
+        an evidence or shape rule (only notes or screen text named it, a
+        one-off description, ...) is hidden "until real sightings":
+        `entity_candidates` lifts it when sightings since the hide meet the
+        candidate gate's promotion rule. A value's hide is no such hold (a
+        value is never promoted), nor is a hide the user accepted in the
+        Inbox (`mode` inbox)."""
+        with self._lock:
+            try:
+                row = self._conn.execute(
+                    "SELECT l.id, l.created_at, l.rule "
+                    "FROM entity_repair_log l "
+                    "JOIN entity_repair_runs r ON r.run_id = l.run_id "
+                    "WHERE l.entity_id = ? AND l.field = 'hidden' "
+                    "AND COALESCE(l.rule, '') != 'value_literal' "
+                    "AND r.mode = 'auto' "
+                    "AND l.undone_at IS NULL ORDER BY l.id DESC LIMIT 1",
+                    (int(entity_id),)).fetchone()
+            except sqlite3.OperationalError:
+                return None
+        if row is None:
+            return None
+        return {"change_id": int(row["id"]), "at": float(row["created_at"]),
+                "rule": row["rule"]}
+
+    def entity_repair_propose(self, *, run_id: str, entity_id: int | None,
+                              canonical_id: str | None, action: str,
+                              rule: str | None, dedupe_key: str,
+                              payload: dict) -> int:
+        """Leave one change for the user to decide (the Inbox). The same
+        change proposed again refreshes an open, stale or withdrawn (its run
+        was undone, never answered) proposal and is skipped once the user
+        accepted or dismissed it. Returns the proposal id, or 0 when it was
+        skipped."""
+        import time as _time
+        now = _time.time()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, status FROM entity_repair_proposals "
+                "WHERE dedupe_key = ?", (dedupe_key,)).fetchone()
+            if row is not None and row["status"] not in ("open", "stale",
+                                                          "withdrawn"):
+                return 0
+            if row is not None:
+                self._conn.execute(
+                    "UPDATE entity_repair_proposals SET run_id = ?, "
+                    "entity_id = ?, canonical_id = ?, payload = ?, "
+                    "status = 'open' WHERE id = ?",
+                    (run_id, entity_id, canonical_id,
+                     json.dumps(payload, sort_keys=True), row["id"]))
+                self._conn.commit()
+                return int(row["id"])
+            cur = self._conn.execute(
+                "INSERT INTO entity_repair_proposals (run_id, entity_id, "
+                "canonical_id, action, rule, dedupe_key, payload, status, "
+                "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?)",
+                (run_id, entity_id, canonical_id, action, rule, dedupe_key,
+                 json.dumps(payload, sort_keys=True), now))
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def entity_repair_proposals(self, *, status: str | None = "open",
+                                proposal_id: int | None = None,
+                                limit: int = 500) -> list[dict]:
+        clauses, args = [], []
+        if status:
+            clauses.append("status = ?")
+            args.append(status)
+        if proposal_id is not None:
+            clauses.append("id = ?")
+            args.append(int(proposal_id))
+        sql = "SELECT * FROM entity_repair_proposals"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY id LIMIT ?"
+        args.append(int(limit))
+        with self._lock:
+            try:
+                rows = self._conn.execute(sql, args).fetchall()
+            except sqlite3.OperationalError:
+                return []
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["payload"] = json.loads(d.get("payload") or "{}")
+            except Exception:
+                d["payload"] = {}
+            out.append(d)
+        return out
+
+    def entity_repair_decide_proposal(self, proposal_id: int, status: str, *,
+                                      decided_by: str = "user") -> bool:
+        """Close a proposal: accepted, dismissed, stale or withdrawn."""
+        import time as _time
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE entity_repair_proposals SET status = ?, "
+                "decided_at = ?, decided_by = ? WHERE id = ?",
+                (status, _time.time(), decided_by, int(proposal_id)))
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def entity_repair_reopen_proposal(self, proposal_id: int) -> bool:
+        """Ask a closed proposal again (the Inbox's undo of an answer)."""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE entity_repair_proposals SET status = 'open', "
+                "decided_at = NULL, decided_by = NULL WHERE id = ? "
+                "AND status IN ('accepted', 'dismissed')", (int(proposal_id),))
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def entity_repair_withdraw_proposals(self, run_id: str) -> int:
+        """Withdraw the open proposals a run left in the Inbox (the run was
+        undone, so its questions go with it). Returns how many."""
+        import time as _time
+        with self._lock:
+            try:
+                cur = self._conn.execute(
+                    "UPDATE entity_repair_proposals SET status = 'withdrawn', "
+                    "decided_at = ?, decided_by = 'undo' WHERE run_id = ? "
+                    "AND status = 'open'", (_time.time(), run_id))
+            except sqlite3.OperationalError:
+                return 0
+            self._conn.commit()
+            return int(cur.rowcount or 0)
+
+    def entity_repair_active_run(self, *, max_age_s: float = 3600.0,
+                                 now: float | None = None) -> dict | None:
+        """A repair run that started and has not finished, from this or any
+        other process (the script while the app runs), at most `max_age_s`
+        old: an older unfinished run crashed and holds nothing. None when
+        no run is in flight (or on a store from before the table)."""
+        import time as _time
+        t = _time.time() if now is None else float(now)
+        with self._lock:
+            try:
+                row = self._conn.execute(
+                    "SELECT run_id, mode, started_at FROM entity_repair_runs "
+                    "WHERE finished_at IS NULL AND started_at >= ? "
+                    "ORDER BY started_at DESC LIMIT 1",
+                    (t - float(max_age_s),)).fetchone()
+            except sqlite3.OperationalError:
+                return None
+        return dict(row) if row else None
 
     def reclassify_fact_kind(self, fact_id: int, new_kind: str) -> bool:
         """Move a fact between task and commitment typed tables."""
@@ -8019,21 +11681,27 @@ class Store:
     def convert_person_to_entity(self, person_id: int, entity_kind: str) -> dict | None:
         """Recategorize a mis-tagged person as a project/org/idea entity."""
         entity_kind = (entity_kind or "").strip().lower()
-        if entity_kind in ("company", "organization"):
-            entity_kind = "org"
-        if entity_kind in ("software", "app", "service", "product", "platform"):
-            entity_kind = "tool"
-        if entity_kind not in ("project", "org", "idea", "thing", "place", "tool"):
+        # A real kind only: "other" or "" is no choice, so nothing converts.
+        if not entity_kind or entity_kind in self._KIND_PLACEHOLDERS:
+            return None
+        entity_kind = self.canonical_entity_kind(entity_kind)
+        if entity_kind is None:
             return None
         people = {p["id"]: p for p in self.all_people()}
         person = people.get(person_id)
         if not person:
             return None
-        eid = self.resolve_entity(person["name"], kind=entity_kind)
+        # The user dragged this node to a new category: user rank, which
+        # also lifts a tombstone on the name.
+        eid = self.resolve_entity(person["name"], kind=entity_kind,
+                                  kind_source="user", kind_confidence=1.0)
         if not eid:
             return None
-        self.set_entity_kind(eid, entity_kind)
+        self.set_entity_kind(eid, entity_kind, source="user")
         self.set_constellation_hidden("person", person_id, True)
+        # The user's correction is this seat's to learn: the exact name is
+        # never proposed as a person again (its words teach nothing).
+        self.record_not_person(person["name"], source="correction")
         return {"person_id": person_id, "entity_id": eid,
                 "kind": entity_kind, "name": person["name"]}
 
@@ -8217,6 +11885,11 @@ class Store:
         whenever facts, people, entities, or relations change. One cheap
         aggregate query — safe to poll every few seconds."""
         with self._lock:
+            # Rename / hide / alias / kind / parent writes stamp
+            # entities.updated_at without changing a count or last_seen; a
+            # read-only store from before the column simply leaves it out.
+            entity_edits = (" (SELECT MAX(updated_at) FROM entities),"
+                            if self._entity_model_cols_unlocked() else "")
             row = self._conn.execute(
                 "SELECT (SELECT COUNT(*) FROM facts),"
                 " (SELECT MAX(COALESCE(updated_at, extracted_at)) FROM facts),"
@@ -8226,6 +11899,7 @@ class Store:
                 " (SELECT MAX(last_seen) FROM people),"
                 " (SELECT COUNT(*) FROM entities),"
                 " (SELECT MAX(last_seen) FROM entities),"
+                + entity_edits +
                 # Brains: a recompile that changes a section or an item must
                 # move the token so the map refetches (services/brains.py).
                 " (SELECT COUNT(*) FROM brain_items),"
@@ -8429,6 +12103,20 @@ class Store:
         p50 = ages[depth // 2] if depth else 0.0
         p90 = ages[int(depth * 0.9)] if depth else 0.0
         return {"depth": depth, "age_p50_s": p50, "age_p90_s": p90}
+
+    def session_spans(self, t0: float, t1: float) -> list[tuple[float, float]]:
+        """(start, end) of the sessions intersecting [t0, t1], by start. The
+        spans only: the entity candidate gate groups sightings by them and
+        has no use for the session text."""
+        with self._lock:
+            try:
+                rows = self._conn.execute(
+                    "SELECT start, end FROM sessions "
+                    "WHERE end >= ? AND start <= ? ORDER BY start",
+                    (float(t0), float(t1))).fetchall()
+            except sqlite3.OperationalError:
+                return []
+        return [(float(r["start"]), float(r["end"])) for r in rows]
 
     def sessions_in_range(self, t0: float, t1: float) -> list[dict]:
         """Sessions whose [start, end] intersects [t0, t1] — used to group the

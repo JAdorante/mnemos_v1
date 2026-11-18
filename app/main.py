@@ -456,6 +456,41 @@ async def _startup() -> None:
                         project_rollup.run()
                 except Exception as exc:
                     print(f"[project_rollup] skipped ({exc}).")
+                # Then scope: a label or topic that only ever comes up in
+                # one filed project goes inside it. Best-effort too.
+                try:
+                    from app.services import entity_scope
+                    if entity_scope.enabled():
+                        entity_scope.run()
+                except Exception as exc:
+                    print(f"[entity_scope] skipped ({exc}).")
+                # The automatic entity repair, once per rules version and
+                # only when QUILL_ENTITY_REPAIR_AUTO=1: it backs the
+                # database up first and does nothing if that fails.
+                try:
+                    from app.services import entity_repair
+                    if entity_repair.auto_enabled():
+                        from app import storage
+                        res = entity_repair.auto_run(storage.get_store())
+                        if res.get("ran"):
+                            print(f"[entity_repair] {res['run_id']}: "
+                                  f"{res['summary']}, {res['proposed']} "
+                                  "left in the Inbox.")
+                except Exception as exc:
+                    print(f"[entity_repair] skipped ({exc}).")
+                # Candidate names nobody repeated within the TTL are dropped
+                # here as well as lazily on record, so a quiet store does
+                # not keep them; and the sightings of names that are nodes
+                # are bounded (newest per entity kept, old spans cleared,
+                # rows of deleted entities gone). Best-effort, like the
+                # rollup.
+                try:
+                    from app import storage
+                    from app.services import entity_candidates
+                    entity_candidates.sweep_expired(storage.get_store(),
+                                                    bound=True)
+                except Exception as exc:
+                    print(f"[entity_candidates] sweep skipped ({exc}).")
                 # Freshly minted candidate people get one semantic look from
                 # the model (person vs org/tool/junk) now that their edges
                 # exist. Best-effort; the job itself no-ops when nothing new.

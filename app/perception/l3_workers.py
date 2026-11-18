@@ -22,7 +22,7 @@ from app.perception.schemas import (
 from app.perception.store import PerceptionStore, get_pstore
 
 # Reuse the screen-attribution prompt from the legacy miner.
-from app.services.screen_extract import SOURCE, _SYSTEM
+from app.services.screen_extract import SOURCE
 
 
 def _store(store: PerceptionStore | None = None) -> PerceptionStore:
@@ -156,16 +156,17 @@ def _find_source_event_id(capture_id: str) -> int | None:
 
 
 def _run_llm_extract(text: str) -> dict:
-    from app.services.extractor import _SCHEMA, EXTRACTOR_MODEL
+    from app.services.extractor import EXTRACTOR_MODEL, base_schema
     from app.services.model_router import router
+    from app.services.screen_extract import system_prompt
     cleaned, _ = redact_text(text, TIER_SECRETS)
     if secret_kinds(text):
         # Prefer skip over shipping secrets to any model.
         return {}
     out = router.complete_json(
-        "extract", system=_SYSTEM,
+        "extract", system=system_prompt(),
         messages=[{"role": "user", "content": f"Screen text:\n\n{cleaned}"}],
-        schema=_SCHEMA, max_tokens=1024, model=EXTRACTOR_MODEL)
+        schema=base_schema(), max_tokens=1024, model=EXTRACTOR_MODEL)
     return out or {}
 
 

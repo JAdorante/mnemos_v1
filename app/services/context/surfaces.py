@@ -7,12 +7,12 @@ browser-centric surface is most of the time.
 A measured example. On a real 494-event corpus, 44% of events carried a window
 title and 0.2% yielded a binding key — the key grammar is repo/path/branch
 shaped and fits a Cursor-and-terminal workflow, not someone living in Outlook,
-Drive and search. But the titles were not empty of meaning:
+Drive and search. But the titles were not empty of meaning (names invented):
 
-    "Andrew Andy Karos Boostrun - Google Search - Chromium"
-    "Mail - Justin Adorante - Outlook — Mozilla Firefox"
+    "Dana Dee Whitlock Harborlight - Google Search - Chromium"
+    "Mail - Sam Okafor - Outlook — Mozilla Firefox"
 
-`Boostrun` was already an org in the graph. `Andy Karos` and `Justin Adorante`
+`Harborlight` was already an org in the graph. `Dee Whitlock` and `Sam Okafor`
 were already people. Nothing resolved, for two fixable reasons: resolution
 matched the WHOLE segment (so an org inside a search query missed), and it only
 ever consulted entities (so the single most frequent segment in the corpus, a
@@ -54,34 +54,79 @@ _SHARE_CHROME = re.compile(
     r"primary monitor"
     r")\b"
 )
-# Chat prompts and interrogatives — binding their nouns ("Project X",
-# "Venture Pulse") is self-confirmation against the UI that asked the question.
+# Chat prompts and interrogatives — binding their nouns ("the launch plan",
+# "the pricing deck") is self-confirmation against the UI that asked the
+# question.
 _QUESTION = re.compile(
     r"(?i)^(what|who|where|when|why|how|can you|could you|would you|"
     r"ask |tell |do you |is there |are there |update for )\b|\?\s*$"
 )
 # Graph nodes that are UI/news furniture or placeholders. Exact match against
-# these from a VLM heading must not name (or even vote) — they are how
-# "Your team" / "Project X" titled hours on the pilot day.
+# these from a VLM heading must not name (or even vote) — a "Your team" or
+# "Top stories" heading titled whole hours on a pilot day. Generic words
+# only: the product's own name, a news front page's furniture, a multi-user
+# slot label used as a placeholder name ("User 3": `_PLACEHOLDER_USER`, the
+# pattern `name_quality._USER_SLOT` keeps from people). A heading that is
+# junk only on one seat (a news brand its user reads, one meeting's
+# catch-phrase) is that seat's `heading_junk_name` vocabulary
+# (Store.seat_vocab).
 _VLM_JUNK_NAMES = frozenset({
-    "your team", "top stories", "project x", "up and down the org",
-    "memory", "team", "sparrow", "desktop", "code", "workspace",
-    "members", "google news", "fox news", "user 2", "unknown organization",
+    "your team", "top stories", "memory", "team", "sparrow", "desktop",
+    "code", "workspace", "members", "unknown organization",
 })
+_PLACEHOLDER_USER = re.compile(r"^(?:new\s+)?user\s*\d+$")
 
 # Names too generic to match INSIDE a longer string. An exact whole-segment
 # match against them is still fine — if a segment is literally "MVP" then the
 # entity called MVP is what it names. Containment is the dangerous direction:
-# this graph holds entities called `unknown`, `company`, `CEO` and `Boston`,
-# and `graph._STOP_NAMES` covers pronouns only.
+# a graph can hold entities called `unknown`, `company` or `CEO`, and
+# `graph._STOP_NAMES` covers pronouns only. Generic words only; a name that
+# is too generic only on one seat is its `containment_stop_name` vocabulary.
 _NO_CONTAINMENT = frozenset({
-    "unknown", "company", "ceo", "cto", "cfo", "mvp", "stage", "the pen",
+    "unknown", "company", "ceo", "cto", "cfo", "mvp", "stage",
     "team", "project", "product", "design", "research", "meeting", "notes",
     "draft", "report", "review", "plan", "spec", "doc", "docs", "test",
     "demo", "app", "api", "data", "code", "work", "home", "main", "user",
     "admin", "client", "customer", "vendor", "partner", "board", "console",
 })
 _MIN_CONTAINMENT_LEN = 5      # a 4-char name inside prose is a coincidence
+
+
+def _seat_names(store, role: str) -> frozenset[str]:
+    """This seat's own names for one surfaces role (`Store.seat_vocab`).
+    Empty with no store, a store from before the table, or any failure."""
+    if store is None:
+        return frozenset()
+    try:
+        return store.seat_vocab().get(role) or frozenset()
+    except Exception:
+        return frozenset()
+
+
+def is_heading_junk(name: str, *, store=None,
+                    seat: frozenset[str] | None = None) -> bool:
+    """A node by this name is never named from a page heading: UI or news
+    furniture, a placeholder, or a name this seat said is junk there.
+    `seat` is the seat's `heading_junk_name` set when the caller has read
+    it already."""
+    n = (name or "").strip().lower()
+    if n in _VLM_JUNK_NAMES or _PLACEHOLDER_USER.match(n):
+        return True
+    seat = _seat_names(store, "heading_junk_name") if seat is None else seat
+    return bool(seat) and " ".join(n.split()) in seat
+
+
+def may_contain(name: str, *, store=None,
+                seat: frozenset[str] | None = None) -> bool:
+    """May a node by this name be found INSIDE a longer segment? Not when
+    it is short or generic (`_NO_CONTAINMENT`, or this seat's
+    `containment_stop_name` vocabulary)."""
+    n = (name or "").strip().lower()
+    if len(n) < _MIN_CONTAINMENT_LEN or n in _NO_CONTAINMENT:
+        return False
+    seat = _seat_names(store, "containment_stop_name") if seat is None \
+        else seat
+    return not (seat and " ".join(n.split()) in seat)
 
 # How much a surface match is worth. These are NOT key strengths — a title
 # segment is not an identifier — but the design's flat "medium, always" grade
@@ -95,7 +140,9 @@ STRENGTH = {"exact": 0.80, "alias": 0.72, "contains": 0.60}
 # minutes is accurate and useless: it names what you were using, not what you
 # were using it for. Unnameable anchors still compete in the evidence field, so
 # they can lose a frame to a project, but they cannot take one.
-_UNNAMEABLE_KINDS = frozenset({"tool", "place"})
+# A label ("k9", "Phase 1") only means something inside its project: it may
+# point at the project, never stand for the stretch itself.
+_UNNAMEABLE_KINDS = frozenset({"tool", "place", "label"})
 _KIND_WEIGHT = {"tool": 0.45, "place": 0.6}
 
 
@@ -143,14 +190,18 @@ class SurfaceIndex:
                  exclude_self: bool = True):
         self._store = store
         self._ttl = float(ttl_s)
-        # The user's own name is in half their window titles — "Mail - Justin
-        # Adorante - Outlook" — and it identifies nothing they are working ON.
+        # The user's own name is in half their window titles — "Mail - Sam
+        # Okafor - Outlook" — and it identifies nothing they are working ON.
         # Left in, it wins the evidence field by sheer frequency and names a
         # third of the timeline after the person reading it.
         self._exclude_self = bool(exclude_self)
         self._built_at = 0.0
         self._entities: list[tuple[dict, list]] = []
         self._people: list[tuple[dict, list]] = []
+        # This seat's own heading-junk and containment-stop names, read
+        # with the graph (same TTL).
+        self._seat_heading: frozenset[str] = frozenset()
+        self._seat_nocontain: frozenset[str] = frozenset()
 
     def _identity_name(self) -> str:
         from app.services.identity import user_identity
@@ -200,6 +251,9 @@ class SurfaceIndex:
         self._people = [(p, _person_patterns(p)) for p in ppl
                         if not p.get("hide_from_people")
                         and not (self._exclude_self and _is_self(p))]
+        self._seat_heading = _seat_names(self._store, "heading_junk_name")
+        self._seat_nocontain = _seat_names(self._store,
+                                           "containment_stop_name")
         self._built_at = time.time()
 
     def _fresh(self) -> None:
@@ -210,10 +264,8 @@ class SurfaceIndex:
     def _name_of(node: dict) -> str:
         return str(node.get("name") or node.get("canonical_name") or "")
 
-    @staticmethod
-    def _may_contain(name: str) -> bool:
-        n = (name or "").strip().lower()
-        return len(n) >= _MIN_CONTAINMENT_LEN and n not in _NO_CONTAINMENT
+    def _may_contain(self, name: str) -> bool:
+        return may_contain(name, seat=self._seat_nocontain)
 
     @staticmethod
     def _graded(node_type, nid, name, seg, method, node) -> SurfaceHit:
@@ -235,8 +287,8 @@ class SurfaceIndex:
     def resolve(self, segment: str) -> list[SurfaceHit]:
         """Nodes named by one title segment. Never mints, never guesses.
 
-        A segment may legitimately yield TWO hits — "Andrew Andy Karos
-        Boostrun" names a person and an org — so this returns a list. That is
+        A segment may legitimately yield TWO hits — "Dana Dee Whitlock
+        Harborlight" names a person and an org — so this returns a list. That is
         multiplicity, not ambiguity: the evidence for each is independent.
         """
         seg = re.sub(r"\s+", " ", (segment or "")).strip()
@@ -294,7 +346,7 @@ class SurfaceIndex:
         """Bind-only resolution of a page heading (e.g. a VLM per-frame title).
 
         Window-title grammar requires a trailing app segment (`Foo - Chrome`);
-        a VLM heading is usually bare (`Quarterly plan`, `Boostrun launch`).
+        a VLM heading is usually bare (`Quarterly plan`, `Harborlight launch`).
         Prefer the window-title segmenter when it fires, otherwise resolve the
         whole heading as one surface string. Never mints. Refuses questions,
         share-chrome, and hits whose name is known UI/news furniture.
@@ -305,7 +357,7 @@ class SurfaceIndex:
         via_title = self.from_title(h)
         hits = via_title if via_title else self.resolve(h)
         return [hit for hit in hits
-                if hit.name.strip().lower() not in _VLM_JUNK_NAMES]
+                if not is_heading_junk(hit.name, seat=self._seat_heading)]
 
 
 def from_title(window_title: str, *, store) -> list[SurfaceHit]:
@@ -319,4 +371,5 @@ def from_heading(heading: str, *, store) -> list[SurfaceHit]:
 
 
 __all__ = ["SurfaceHit", "SurfaceIndex", "from_title", "from_heading",
-           "is_chrome", "is_vlm_heading", "CHROME", "STRENGTH"]
+           "is_chrome", "is_vlm_heading", "is_heading_junk", "may_contain",
+           "CHROME", "STRENGTH"]

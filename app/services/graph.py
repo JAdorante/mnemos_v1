@@ -743,6 +743,7 @@ def entity_constellation_kind(entity_kind: str | None) -> str:
     """Map store entity.kind → constellation visual kind.
 
     Orgs stay visually distinct from projects (companies are not diamonds).
+    Everything else (idea, label, thing) draws and decays as an idea.
     """
     ek = (entity_kind or "").strip().lower()
     if ek in _ORG_ENTITY_KINDS:
@@ -844,10 +845,13 @@ def pin_constellation_node(store: Store, node_id: str, pinned: bool = True) -> d
     return {"ok": True, "id": node_id, "pinned": bool(pinned)}
 
 
+# `label` (a name that only means something inside one project: "k9",
+# "Phase 1") is a category the user can pick, for an entity and for a person
+# node that was really a milestone id. It renders as an idea.
 _ALLOWED = {
-    "person": ["person", "project", "org", "idea", "tool"],
+    "person": ["person", "project", "org", "idea", "tool", "label"],
     "fact": ["commitment", "task"],
-    "entity": ["project", "org", "idea", "tool", "place"],
+    "entity": ["project", "org", "idea", "tool", "place", "label"],
 }
 
 
@@ -870,7 +874,7 @@ def reclassify_constellation_node(store: Store, node_id: str, new_kind: str) -> 
         return {"ok": True, "id": f"fact:{iid}", "kind": new_kind}
 
     if ntype == "entity":
-        if not store.set_entity_kind(iid, new_kind):
+        if not store.set_entity_kind(iid, new_kind, source="user"):
             return {"ok": False, "error": "could not update entity"}
         return {"ok": True, "id": f"entity:{iid}",
                 "kind": entity_constellation_kind(new_kind)}
@@ -878,6 +882,12 @@ def reclassify_constellation_node(store: Store, node_id: str, new_kind: str) -> 
     if ntype == "person":
         if new_kind == "person":
             store.set_constellation_hidden("person", iid, False)
+            # The user says it IS a person: an earlier "not a person" on
+            # this exact name no longer holds.
+            row = store.get_person(iid) or {}
+            name = row.get("canonical_name") or row.get("name")
+            if name:
+                store.forget_not_person(name)
             return {"ok": True, "id": node_id, "kind": "person"}
         res = store.convert_person_to_entity(iid, new_kind)
         if not res:

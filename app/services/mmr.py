@@ -19,7 +19,8 @@ GAMMA = 0.35
 CLUSTER_TAU = 0.70
 
 _OPEN = frozenset({"task", "commitment"})
-_ENTITY = frozenset({"project", "tool", "place", "idea", "product", "org"})
+_ENTITY = frozenset({"project", "tool", "place", "idea", "product", "org",
+                     "label"})
 
 
 def _tokens(label: str) -> set[str]:

@@ -1,7 +1,8 @@
 """One inbox — every pending decision, grouped by what is asked.
 
 Frontend spec (2026-11-06), screen "Inbox": one queue over the existing
-offer, review, alias, assistant, consent, peer-ask and dispute queues. Each
+offer, review, alias, assistant, consent, peer-ask and dispute queues, and
+the entity changes the automatic repair left for the user. Each
 kind maps to one existing backend verb; nothing new is decided here.
 
 Rules this module keeps:
@@ -139,6 +140,7 @@ def collect(store, *, worker=None, now: float | None = None) -> dict:
         ("peer", lambda: _peer_ask_items(now)),
         ("records", lambda: _claim_items(store, now)),
         ("aliases", lambda: _alias_items(store, now)),
+        ("entities", lambda: _entity_repair_items(store, now)),
         ("review", lambda: _review_items(store, now)),
         ("assistant", lambda: _assistant_items(now)),
     ):
@@ -409,6 +411,79 @@ def _alias_items(store, now: float) -> list[dict]:
     return out
 
 
+# Entity repair (services/entity_repair.py): what the automatic pass left
+# for the user. A merge is the same question as an alias ("Is X the same as
+# Y?"); every other change is a review item.
+_KIND_WORD = {"org": "an org", "project": "a project", "tool": "a tool",
+              "place": "a place", "idea": "a topic", "label": "a label",
+              "thing": "a thing"}
+
+
+def _entity_repair_items(store, now: float) -> list[dict]:
+    from app.services import entity_repair
+    out: list[dict] = []
+    for p in entity_repair.proposals(store):
+        a = p.get("payload") or {}
+        act, name = a.get("action"), a.get("name") or ""
+        kind = a.get("kind") or ""
+        if act == "merge":
+            into_kind = (a.get("into_state") or {}).get("kind") or ""
+            title = f"Is “{name}” the same as {a.get('into_name')}?"
+            if a.get("kind_conflict"):
+                # Two kinds (often one spelling): say which is which.
+                title = (f"Is “{name}” ({_KIND_WORD.get(kind, kind)}) the "
+                         f"same as {a.get('into_name')} "
+                         f"({_KIND_WORD.get(into_kind, into_kind)})?")
+            if a.get("survivor_hidden"):
+                # Merging into a hidden row takes this one off the tab too:
+                # the question says so, so a yes is never a surprise.
+                title = (f"Is “{name}” the same as {a.get('into_name')}, "
+                         "which is hidden? Merging hides it too.")
+            # A merge has no undo here (a backup is made first): say so.
+            title += " A merge cannot be undone."
+            kind_, actions = "confirm", [
+                _action("yes", "Yes, merge them", primary=True),
+                _action("no", "No, different"),
+                _action("later", "Not sure", local=True)]
+        else:
+            if act == "rekind" and a.get("to_kind") == kind:
+                # Only the kind's source moves up (a filing): it locks the
+                # kind against the model's later guesses.
+                title = (f"Keep “{name}” as {_KIND_WORD.get(kind, kind)} "
+                         "for good? You file notes under it.")
+                yes = "Keep it"
+            elif act == "rekind":
+                title = (f"Make “{name}” {_KIND_WORD.get(a.get('to_kind'), a.get('to_kind'))} "
+                         f"instead of {_KIND_WORD.get(kind, kind)}?")
+                yes = "Change it"
+            elif act == "reparent":
+                title = (f"Put “{name}” inside {a.get('parent_name')}?"
+                         if a.get("parent_id") is not None
+                         else f"Take “{name}” out of its project?")
+                yes = "Yes"
+            elif act == "drop":
+                # Accepted here, a drop hides the row (`entity_repair`,
+                # mode inbox): it leaves the tab, nothing is deleted, and
+                # the undo puts it back.
+                title = (f"Hide “{name}” from Orgs & tools? Nothing is "
+                         "deleted, and you can undo it.")
+                yes = "Hide it"
+            else:
+                title = f"Hide “{name}”?"
+                yes = "Hide"
+            kind_, actions = "review", [
+                _action("yes", yes, primary=True),
+                _action("no", "Keep as is")]
+        out.append(_item(
+            f"entityfix:{p['id']}", kind_, title, now=now,
+            entity=_entity_ref(store, kind, a.get("entity_id"), name),
+            evidence=[_evidence(str(a.get("reason") or ""),
+                                _chip("extracted", "Sparrow · repair"))],
+            created_at=p.get("created_at"), meta=str(a.get("rule") or ""),
+            actions=actions))
+    return out
+
+
 def _review_items(store, now: float) -> list[dict]:
     rows = store.list_facts(review="none", limit=300)
     out: list[dict] = []
@@ -498,6 +573,13 @@ def handled(store, *, since_s: float = 7 * 86400, now: float | None = None) -> d
             sum(1 for a in adj if a.get("decided_by") == "auto"
                 and a.get("decision") != "defer"
                 and float(a.get("created_at") or 0) >= since))
+    except Exception:
+        pass
+    try:
+        log = store.entity_repair_log(since=since)
+        add("Entities tidied on their own",
+            len({(r.get("entity_id"), r.get("run_id")) for r in log
+                 if r.get("mode") == "auto" and not r.get("undone_at")}))
     except Exception:
         pass
     try:
@@ -612,28 +694,99 @@ def _act_review(store, native, action, worker) -> dict:
     return {"ok": False, "error": f"unknown action {action!r}"}
 
 
+def _alias_trail(store, row, verdict: str) -> None:
+    """The answer goes to the decision trail, as the alias routes' do."""
+    try:
+        from app.api import routes
+        routes._alias_decision(store, row, verdict, via="inbox")
+    except Exception as exc:
+        print(f"[inbox] alias decision not recorded ({exc}).")
+
+
+def _trail_undo(store, surface: str, subject: str) -> None:
+    try:
+        from app.services import decisions
+        decisions.undo(surface=surface, subject=subject, via="inbox",
+                       store=store)
+    except Exception as exc:
+        print(f"[inbox] undo not recorded ({exc}).")
+
+
 def _act_alias(store, native, action, worker) -> dict:
     aid = int(native)
     if action == "yes":
-        if not store.confirm_entity_alias(aid, True):
+        row = store.get_entity_alias(aid)
+        if not store.confirm_entity_alias(aid, True, by="user"):
             return {"ok": False, "error": "alias not found"}
+        _alias_trail(store, row, "approved")
+
+        def _back_yes():
+            out = store.confirm_entity_alias(aid, False)
+            if row:
+                _trail_undo(store, "entities.alias",
+                            f"entity:{int(row['entity_id'])}")
+            return out
         return {"ok": True, "result": {"confirmed": True}, "label": "Same",
-                "_undo": lambda: store.confirm_entity_alias(aid, False)}
+                "_undo": _back_yes}
     if action == "no":
-        row = store.get_entity_alias(aid) if hasattr(store, "get_entity_alias") else None
+        row = store.get_entity_alias(aid)
         if row is None:
             row = next((r for r in store.list_entity_aliases(confirmed=False)
                         if int(r.get("id", -1)) == aid), None)
         if row is None or not store.delete_entity_alias(aid):
             return {"ok": False, "error": "alias not found"}
+        _alias_trail(store, row, "rejected")
 
         def _back():
-            return store.upsert_entity_alias(
+            out = store.upsert_entity_alias(
                 int(row["entity_id"]), row["alias"], row["alias_norm"],
                 source=row.get("source") or "", confirmed=False)
+            _trail_undo(store, "entities.alias",
+                        f"entity:{int(row['entity_id'])}")
+            return out
         return {"ok": True, "result": {"deleted": True}, "label": "Different",
                 "_undo": _back}
     return {"ok": False, "error": f"unknown action {action!r}"}
+
+
+def _act_entityfix(store, native, action, worker) -> dict:
+    from app.services import entity_repair
+    pid = int(native)
+    subject = f"repair_proposal:{pid}"
+    if action == "no":
+        res = entity_repair.decide(store, pid, "dismiss", via="inbox")
+        if not res.get("ok"):
+            return {"ok": False, "result": res, "error": res.get("error")}
+
+        # Undo puts the question back.
+        def _back_no():
+            out = store.entity_repair_reopen_proposal(pid)
+            _trail_undo(store, entity_repair.DECISION_SURFACE, subject)
+            return out
+        return {"ok": True, "result": res, "label": "Kept",
+                "_undo": _back_no}
+    if action != "yes":
+        return {"ok": False, "error": f"unknown action {action!r}"}
+    res = entity_repair.decide(store, pid, "accept", via="inbox")
+    if not res.get("ok"):
+        return {"ok": False, "error": res.get("error") or "not applied",
+                "result": res}
+    out = {"ok": True, "result": res, "label": "Done"}
+    # A field change has a clean reverse (the repair log), and so does a
+    # drop, which the Inbox applies as a hide; a merge does not. Undo puts
+    # the field back and the question too.
+    if all(x.get("action") in ("rekind", "reparent", "hide")
+           or x.get("as_hide") for x in res.get("applied") or ()):
+        run_id = res.get("run_id")
+
+        def _back():
+            undone = entity_repair.undo(store, run_id=run_id)
+            if undone.get("undone") and not undone.get("refused"):
+                store.entity_repair_reopen_proposal(pid)
+                _trail_undo(store, entity_repair.DECISION_SURFACE, subject)
+            return undone
+        out["_undo"] = _back
+    return out
 
 
 def _act_offer(store, native, action, worker) -> dict:
@@ -728,6 +881,7 @@ def _act_consent(store, native, action, worker) -> dict:
 
 _ACT = {
     "review": _act_review, "alias": _act_alias, "offer": _act_offer,
+    "entityfix": _act_entityfix,
     "peer": _act_peer, "assistant": _act_assistant, "conflict": _act_conflict,
     "approval": _act_approval, "consent": _act_consent,
 }

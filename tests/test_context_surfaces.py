@@ -222,8 +222,13 @@ class VlmHeadingGuardTests(unittest.TestCase):
         self.assertEqual(self.idx.from_heading(h), [])
 
     def test_junk_names_do_not_bind(self) -> None:
-        self.assertEqual(self.idx.from_heading("Project X"), [])
-        self.assertEqual(self.idx.from_heading("Your team"), [])
+        # "Project X" is one seat's junk heading: its seat vocabulary says
+        # so (Phase 4 B1); "Your team" is generic chrome, in code.
+        self.store.add_seat_vocab("project x", "heading_junk_name",
+                                  source="migration")
+        idx = sf.SurfaceIndex(self.store)
+        self.assertEqual(idx.from_heading("Project X"), [])
+        self.assertEqual(idx.from_heading("Your team"), [])
 
     def test_real_heading_still_binds(self) -> None:
         hits = self.idx.from_heading("Boostrun launch checklist")

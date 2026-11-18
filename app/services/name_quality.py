@@ -13,12 +13,20 @@ cases: a wrong reject drops a real person, so it's precision-over-recall on
 rejection (only clear junk is turned away). It's a net, not a guarantee — the
 primary defense against document-derived junk is not ingesting code/docs in the
 first place (services/documents.py).
+
+The word lists below hold generic vocabulary only: common English words and
+technical or organisational terms any seat in any industry meets. A word that
+is one seat's own (a brand on its user's desktop, a coined project name) and
+the exact names its user said are no person live in that seat's store
+(`Store.seat_vocab`), and every gate here reads them through `store=` (by
+default the process's shared store, when one is open).
 """
 from __future__ import annotations
 
 import getpass
 import os
 import re
+import sys
 from pathlib import Path
 
 # Pronouns + generic placeholders that surface as "people" but name no one.
@@ -39,6 +47,8 @@ _SPEAKER_LABEL = re.compile(r"(?i)^speaker\s*\d+$")
 # Product/system self-tokens — the assistant/product must never become a node.
 # Includes the app's OWN UI surface names (page titles): screen capture reading
 # our own dashboard minted "Memory Console" as an entity (live, July 28 2026).
+# The product's own identity (its names, its maker's, its internal ids) is
+# the same on every seat, so it belongs here; it is no one seat's data.
 _SELF_TOKENS = frozenset({
     "Sparrow", "sparrow", "Ravenry", "ravenry",
     "Mnemos", "mnemos",  # legacy product name still in old captures
@@ -78,27 +88,70 @@ _SPEECH_ACT_LEAD = frozenset({
 # and never projects (onboarding speaker tags leak into the entity graph).
 _USER_SLOT = re.compile(r"(?i)^(?:new\s+)?user\s*\d+$")
 
-# Media / product / brand tokens that almost never appear in a real person's
-# name. Safer than applying the full _NONPERSON_TOKENS set to people (that
-# list includes surname collisions like "west" / "home" / "family").
+# Media / product / software / organisation words that almost never appear
+# in a real person's name. Safer than applying the full _NONPERSON_TOKENS set
+# to people (that list includes surname collisions like "west" / "home" /
+# "family"). Generic words only: a brand or coined word one seat met is that
+# seat's `never_person_token` (Store.seat_vocab). Words naming a field, a
+# product or a medium ("robotics", "computing", "quantum", "pulse",
+# "venture") stay: seats in any industry meet them in org and product names,
+# and no person's name carries them.
 _NEVER_PERSON_TOKENS = frozenset({
     "pulse", "venture", "ventures", "capital", "partners", "radar", "news",
     "feed", "feeds", "calendar", "console", "pipeline", "robotics", "service",
     "studio", "code", "project", "manager", "campaign", "agenda", "suite",
-    "sheets", "drive", "chrome", "outlook", "teams", "zoom", "insider",
-    "pocket", "eats", "lists", "robots", "omniverse", "halos", "soft",
+    "sheets", "drive", "chrome", "outlook", "teams", "zoom",
+    "lists", "robots", "soft",
     "legacy", "computing", "architecture", "technology", "tech", "sdk",
     "api", "crm", "ui", "ux", "html", "python", "java", "docs", "page",
-    "pages", "browser", "desktop", "terminal", "notepad", "iphone",
-    "google", "microsoft", "united", "agency", "procurement", "corporate",
-    "integrity", "election", "uniparty", "industrywide", "klondike",
-    "solitaire", "activities", "properties", "ownership", "contacts",
+    "pages", "browser", "desktop", "terminal", "notepad",
+    "united", "agency", "procurement", "corporate",
+    "activities", "properties", "ownership", "contacts",
     "panels", "panel", "view", "change", "terms", "cards", "discussion",
     "notes", "idea", "overview", "connection", "sso", "editor", "document",
     "interface", "setup", "nested", "decision", "loop", "issue", "symbol",
-    "activity", "portdev", "dtc", "quilk", "spacesk", "edition", "whale",
-    "uber", "gen", "fl", "win11",
+    "activity", "edition", "gen",
 })
+
+_EMPTY_VOCAB: dict[str, frozenset[str]] = {}
+
+
+def _seat_vocab(store=None) -> tuple[object | None, dict]:
+    """(store, its vocabulary) for the seat a name is judged for.
+
+    `store` is the seat's Store; None means the process's shared store when
+    one is already open (a hosted seat or the desktop app is one process
+    per seat). It is never opened from here, so a call with no store open,
+    or from a test with only its own temp store, judges by the generic
+    lists alone. Any failure reads as an empty vocabulary."""
+    if store is None:
+        mod = sys.modules.get("app.storage")
+        store = getattr(mod, "_store", None) if mod is not None else None
+        if store is None:
+            return None, _EMPTY_VOCAB
+    try:
+        vocab = store.seat_vocab()
+    except Exception:
+        return None, _EMPTY_VOCAB
+    return (store, vocab) if isinstance(vocab, dict) else (None, _EMPTY_VOCAB)
+
+
+def _seat_terms(vocab: dict, *roles: str) -> frozenset[str]:
+    out: frozenset[str] = frozenset()
+    for role in roles:
+        terms = vocab.get(role)
+        if terms:
+            out = out | terms
+    return out
+
+
+def _seat_nonperson_name(store, vocab: dict, name: str) -> bool:
+    if not vocab.get("nonperson_name") or store is None:
+        return False
+    try:
+        return bool(store.is_seat_nonperson_name(name))
+    except Exception:
+        return False
 
 
 def _tokens(name: str) -> list[str]:
@@ -165,7 +218,7 @@ def _shared_reject(n: str) -> bool:
 def normalize_person_name(name: str) -> str:
     """Title-case alphabetic ASR/OCR names so the capital gate doesn't drop them.
 
-    "justin adorante" → "Justin Adorante". Only 1–2 alphabetic tokens (first /
+    "ana ortiz" → "Ana Ortiz". Only 1–2 alphabetic tokens (first /
     first+last) — longer lowercase phrases are role/junk, not names.
     """
     n = (name or "").strip()
@@ -187,7 +240,9 @@ def _is_speech_act_phrase(name: str) -> bool:
     return bool(words) and words[0].lower().rstrip(".,!?:;") in _SPEECH_ACT_LEAD
 
 
-def is_plausible_person(name: str) -> bool:
+def is_plausible_person(name: str, *, store=None) -> bool:
+    """Could `name` be a person? `store`: the seat whose own vocabulary
+    also applies (`_seat_vocab`)."""
     n = normalize_person_name((name or "").strip())
     if len(n) < 2:
         return False
@@ -206,17 +261,26 @@ def is_plausible_person(name: str) -> bool:
         return False
     if any(w.lower() in _FUNC for w in words):   # "QA and CTO review", "set it to 0"
         return False
-    # Brand / media phrases ("Venture Pulse", "Google Calendar") — not people.
-    if any(w.lower().rstrip(".,") in _NEVER_PERSON_TOKENS for w in words):
+    # Brand / media phrases ("Deal Pulse", "Team Calendar") — not people.
+    low = [w.lower().rstrip(".,") for w in words]
+    if any(w in _NEVER_PERSON_TOKENS for w in low):
         return False
     if any(ch.isdigit() for ch in n):        # digits aren't part of a name
         return False
+    seat, vocab = _seat_vocab(store)
+    if vocab:
+        never = _seat_terms(vocab, "never_person_token")
+        if never and any(w in never for w in low):
+            return False
+        # A name this seat's user said is no person.
+        if _seat_nonperson_name(seat, vocab, n):
+            return False
     return True
 
 
 def is_plausible_entity(name: str) -> bool:
     """Deliberately permissive — an entity label can be snake_case
-    ('alpaca_market_data'), lowercase multi-word ('sync shop campaign'), or a
+    ('market_data_feed'), lowercase multi-word ('spring shop campaign'), or a
     tech token ('edge-tts'), all of which are REAL user projects/tools. So this
     rejects only the unambiguous junk: the product's own name, file paths /
     domains / code punctuation, env vars, speech-act fragments, slot labels,
@@ -235,7 +299,9 @@ def is_plausible_entity(name: str) -> bool:
     return True
 
 
-# Corporate / brand suffixes that keep a Title-Case name from looking like a person.
+# Corporate / brand suffixes that keep a Title-Case name from looking like a
+# person. Generic organisation words only (a seat's own: `corp_word` in
+# Store.seat_vocab).
 _CORP_SUFFIXES = frozenset({
     "llc", "inc", "ltd", "corp", "co", "plc", "corporation", "company",
     "party", "group", "office", "team", "lab", "labs", "ai", "dev", "app",
@@ -245,27 +311,27 @@ _CORP_SUFFIXES = frozenset({
 
 # Common second (or either) tokens that mark projects/tools/places, not people.
 # "Memory Console", "Claude Code", "Project Nexus", "United States", …
+# Generic words only (a seat's own: `nonperson_token` in Store.seat_vocab).
 _NONPERSON_TOKENS = frozenset({
     "project", "console", "code", "pipeline", "architecture", "laptop",
     "computing", "contacts", "view", "change", "panels", "panel", "manager",
     "terms", "technology", "tech", "cards", "ownership", "properties",
-    "market", "activities", "calendar", "solitaire", "studio", "exclude",
+    "market", "activities", "calendar", "studio", "exclude",
     "ghost", "screen", "link", "discussion", "notes", "idea", "overview",
     "connection", "sso", "editor", "document", "interface", "setup", "coast",
     "gen", "robotics", "states", "tool", "tools", "browser", "desktop",
     "home", "work", "design", "chat", "memory", "quantum", "safety",
-    "nested", "decision", "loop", "issue", "real", "terminal", "industrywide",
-    "election", "integrity", "uniparty", "procurement", "corporate",
-    "activity", "symbol", "browser", "agency", "portrait", "klondike",
-    "quilk", "studio", "fl", "win11", "notepad", "iphone", "west", "east",
-    "united", "google", "microsoft", "my", "the", "a", "an", "of", "and",
-    "port", "portdev", "dtc", "crm", "api", "sdk", "ui", "ux", "html",
+    "nested", "decision", "loop", "issue", "real", "terminal",
+    "procurement", "corporate",
+    "activity", "symbol", "agency", "portrait",
+    "notepad", "west", "east",
+    "united", "my", "the", "a", "an", "of", "and",
+    "port", "crm", "api", "sdk", "ui", "ux", "html",
     "python", "java", "docs", "page", "pages", "campaign", "event",
     "agenda", "suite", "watch", "radar", "sheets", "drive", "chrome",
     "edge", "outlook", "teams", "zoom", "news", "feed", "feeds",
-    "pulse", "eats", "insider", "lists", "robots", "service", "venture",
-    "pocket", "whale", "uber", "halos", "omniverse", "spacesk", "family",
-    "student", "edition", "radar", "soft", "legacy",
+    "pulse", "lists", "robots", "service", "venture",
+    "family", "student", "edition", "soft", "legacy",
 })
 
 _TOOL_KINDS = frozenset({
@@ -273,14 +339,26 @@ _TOOL_KINDS = frozenset({
 })
 _ORG_KINDS = frozenset({"company", "organization", "org"})
 _PLACE_KINDS = frozenset({"location", "venue", "place"})
-_CANON_KINDS = frozenset({"project", "org", "idea", "place", "tool", "thing"})
+# `idea` is the stored form of a topic: the tab calls the group "Topics", and
+# too much reads `idea` to rename it.
+_TOPIC_KINDS = frozenset({"topic", "concept", "theme"})
+# A short name that only means something inside one project: a milestone
+# id, a codename, an option letter, a row id.
+_LABEL_KINDS = frozenset({"label", "tag", "milestone", "codename",
+                          "identifier"})
+# Every kind an entity row may carry, in the order the UI lists them.
+ENTITY_KINDS = ("org", "project", "tool", "place", "idea", "label", "thing")
+_CANON_KINDS = frozenset(ENTITY_KINDS)
 
 
 def normalize_entity_kind(kind: str | None, *,
                           unknown: str | None = "idea") -> str | None:
     """Map extractor / legacy kind labels onto the store canonical set.
 
-    product|software|… → tool; company|organization → org; other/empty → idea.
+    product|software|… → tool; company|organization → org;
+    topic|concept|theme → idea; milestone|codename|tag|… → label;
+    other/empty → idea. Both extractor vocabularies (the one with
+    product/other and the one with tool/topic/label) map here.
     Pass unknown=None for admin APIs that must reject unrecognized labels
     (e.g. "wizard") instead of silently collapsing them to idea.
     """
@@ -291,6 +369,10 @@ def normalize_entity_kind(kind: str | None, *,
         return "org"
     if k in _PLACE_KINDS:
         return "place"
+    if k in _TOPIC_KINDS:
+        return "idea"
+    if k in _LABEL_KINDS:
+        return "label"
     if k in ("", "other", "?", "unknown", "none"):
         return "idea"
     if k in _CANON_KINDS:
@@ -298,12 +380,13 @@ def normalize_entity_kind(kind: str | None, *,
     return unknown
 
 
-def is_person_shaped_entity_name(name: str) -> bool:
+def is_person_shaped_entity_name(name: str, *, store=None) -> bool:
     """True only for clear first+last person names misfiled as entities.
 
     Conservative on purpose — false positives hide real projects (Memory
     Console, Project Nexus). Does NOT title-case lowercase phrases; those
-    are debris/projects, not people.
+    are debris/projects, not people. `store`: the seat whose own
+    vocabulary also applies (`_seat_vocab`).
     """
     raw = (name or "").strip()
     if not raw:
@@ -318,7 +401,12 @@ def is_person_shaped_entity_name(name: str) -> bool:
         return False
     if any(w.lower() in _CORP_SUFFIXES for w in words):
         return False
-    # Reject ALLCAPS tokens (NVIDIA, AWS) and mixed brand caps (iPhone).
+    _seat, vocab = _seat_vocab(store)
+    if vocab:
+        own = _seat_terms(vocab, "nonperson_token", "corp_word")
+        if own and any(w.lower() in own for w in words):
+            return False
+    # Reject ALLCAPS tokens (IBM, AWS) and mixed brand caps (eBay).
     if any(len(w) > 1 and w.isupper() for w in words):
         return False
     if any(ch.isdigit() for ch in raw):
@@ -328,16 +416,18 @@ def is_person_shaped_entity_name(name: str) -> bool:
         return False
     # Final check against the person gate (pronouns, roles, paths, …).
     # Pass the already-capitalized form — do not normalize_person_name first.
-    if not is_plausible_person(raw):
+    if not is_plausible_person(raw, store=store):
         return False
     return True
 
 
-def should_mint_as_entity(name: str, kind: str | None) -> bool:
+def should_mint_as_entity(name: str, kind: str | None, *,
+                          store=None) -> bool:
     """Write-time gate: person-shaped names must not mint as project/idea."""
     if not is_plausible_entity(name):
         return False
     nk = normalize_entity_kind(kind)
-    if is_person_shaped_entity_name(name) and nk not in ("org", "tool", "place"):
+    if is_person_shaped_entity_name(name, store=store) \
+            and nk not in ("org", "tool", "place"):
         return False
     return True

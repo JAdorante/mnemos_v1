@@ -28,6 +28,7 @@ from dataclasses import dataclass
 
 from app.services import mint_recurrence
 from app.services import name_quality as nq
+from app.services.free_mail import FREE_MAIL_DOMAINS
 from app.services import provisional_bind
 from app.services import self_profile
 from app.services import source_policy as sp
@@ -272,6 +273,71 @@ class ResolveResult:
     confidence: float = 0.0
 
 
+def entity_blocks_person(store, name: str, *,
+                         kindless: bool = False) -> dict | None:
+    """The entity that keeps `name` from becoming a NEW person, or None.
+
+    The two extraction paths used to run blind to each other, so one
+    sentence could both bump an entity AND mint a person twin of it (eval
+    2026-09-06). A name is the entity's when:
+      - an org row carries it (canonical name, stored alias or confirmed
+        alias), whoever set the kind: a company may share its founder's
+        surname, not its whole name;
+      - a visible row carries it exactly and its kind was set by the user
+        or a filing, whatever the kind (the user calling an org a place
+        does not free the name);
+      - it is a project the user or their team files under (the shared
+        and filed tiers of the registry, even before it has a row);
+      - an org the user forgot had it: forgetting must not free the name
+        to come back as a person. The tombstone keeps the kind the row
+        had, so this covers what it covered while the row was live (a
+        forgotten project or tool never blocked a person and still does
+        not). A dismissed candidate never was a row: its tombstone blocks
+        nothing here;
+      - `kindless` (a claim subject: the model gave the name no kind), any
+        visible row carries it exactly: a value claim about a thing the
+        seat already has is about that thing.
+    Shared by the people pipeline, typed chat and the person adjudicator.
+    Returns {id, kind, canonical_name}; id 0 for a tombstone or a filed
+    name with no row."""
+    display = (name or "").strip()
+    if not display:
+        return None
+    try:
+        hit = store.find_entity_matching_name(display, kinds=("org",))
+    except Exception:
+        hit = None
+    if hit is not None:
+        return hit
+    try:
+        eid = store.find_entity_exact(display)
+        row = store.get_entity(int(eid)) if eid else None
+        if row and store.entity_is_hidden(int(row["id"])):
+            row = None
+    except Exception:
+        row = None
+    if row and (kindless
+                or (row.get("kind_source") or "") in ("user", "filing")):
+        return {"id": int(row["id"]), "kind": row.get("kind"),
+                "canonical_name": row.get("name")}
+    try:
+        from app.services import projects
+        if projects.norm(display) in projects.filed_keys():
+            return {"id": 0, "kind": "project", "canonical_name": display}
+    except Exception:
+        pass
+    try:
+        tomb = store.entity_tombstone(display)
+    except Exception:
+        tomb = None
+    from app.services.entity_candidates import DISMISS_REASON
+    if tomb and tomb.get("reason") != DISMISS_REASON \
+            and nq.normalize_entity_kind(
+                tomb.get("kind"), unknown=None) == "org":
+        return {"id": 0, "kind": "org", "canonical_name": display}
+    return None
+
+
 def resolve_person_mention(
     name: str,
     *,
@@ -335,7 +401,8 @@ def resolve_person_mention(
         event_source=event_source, window=window, text=text)
     display = nq.normalize_person_name(raw) or raw
 
-    if nq.is_os_account_name(display) or not nq.is_plausible_person(display):
+    if nq.is_os_account_name(display) \
+            or not nq.is_plausible_person(display, store=store):
         mid = None
         if event_id is not None and policy.extract_mentions:
             mid = store.insert_person_mention(
@@ -354,15 +421,11 @@ def resolve_person_mention(
     if not policy.extract_mentions:
         return ResolveResult(None, "reject", confidence=0.0)
 
-    # A name the entity linker already knows as an ORG never becomes a
-    # person — the two extraction paths used to run blind to each other, so
-    # one sentence could both bump the org entity AND mint a person twin
-    # ("Boost Run", eval 2026-09-06). An existing person with the same name
-    # wins over the block: normal resolution should bind them.
-    try:
-        org_hit = store.find_entity_matching_name(display, kinds=("org",))
-    except Exception:
-        org_hit = None
+    # A name the entity side already owns never becomes a new person (see
+    # `entity_blocks_person`). An existing person with the same name wins
+    # over the block: normal resolution should bind them.
+    org_hit = entity_blocks_person(
+        store, display, kindless=(grammatical_role == "claim_subject"))
     if org_hit is not None and store.find_person_exact(display) is None:
         mid = None
         if event_id is not None:
@@ -867,11 +930,10 @@ def _sigmoid(x: float) -> float:
 
 
 # --- desktop email capture → contacts + org affiliation -------------------
-_FREE_MAIL = frozenset({
-    "gmail.com", "googlemail.com", "yahoo.com", "yahoo.co.uk", "hotmail.com",
-    "outlook.com", "live.com", "msn.com", "icloud.com", "me.com", "mac.com",
-    "aol.com", "proton.me", "protonmail.com", "mail.com", "gmx.com",
-})
+# Free-mail hosts carry no org: the one list (services/free_mail, the vendored
+# public list; a school or government domain is never in it). Also imported
+# by exhaust_ingest and meeting_debrief.
+_FREE_MAIL = FREE_MAIL_DOMAINS
 _FROM_TO_RE = re.compile(
     r"(?im)^\s*(?P<field>from|to|cc|bcc)\s*:\s*(?P<body>.+)$")
 _ANGLE_EMAIL = re.compile(
@@ -946,50 +1008,254 @@ def parse_email_parties(text: str) -> list[dict]:
 # Audit 2026-11-11: header seeding minted "Google", "Microsoft Learn" and
 # "Google Workspace Alerts" as people, named people after mailbox local-parts,
 # took the FIRST hostname label as the org ("Accounts", "Mails", "College"),
-# and asserted works_at for students at @villanova.edu / @college.harvard.edu.
+# and asserted works_at for students at university addresses
+# (@<school>.edu, @college.<school>.edu).
 _AUTOMATED_LOCAL = re.compile(
     r"^(?:no-?reply|do-?not-?reply|donotreply|notifications?|alerts?|"
     r"mailer-daemon|postmaster|bounces?|news(?:letter)?|updates?|marketing|"
     r"billing|security|support|info|hello|team)(?:[._+-].*)?$", re.I)
 _AUTOMATED_SUBDOMAINS = frozenset({
     "mail", "mails", "email", "emails", "e", "em", "news", "notify", "notifications",
-    "alerts", "accounts", "accountprotection", "marketing", "info"})
+    "alerts", "accounts", "marketing", "info"})
 _AUTOMATED_NAME = re.compile(r"\b(?:alerts?|notifications?|no-?reply|team)\b", re.I)
-_PUBLIC_SLD = frozenset({"co", "com", "ac", "edu", "org", "net", "gov"})
+# Words that name a role or a service, not a person: the role mailboxes of
+# RFC 2142, the no-reply / notification family and generic department
+# mailboxes. Read only inside the organisation's-own-mail rule
+# (`org_own_mail`), where the display name already begins with the org's
+# own name: such a word after it ("<Org> Billing") is a role, not a name.
+_ROLE_MAILBOX_WORDS = frozenset({
+    "info", "marketing", "sales", "support", "abuse", "noc", "security",
+    "postmaster", "hostmaster", "usenet", "news", "webmaster", "www", "uucp",
+    "ftp", "noreply", "donotreply", "bounce", "bounces", "notification",
+    "notifications", "notify", "alert", "alerts", "newsletter", "updates",
+    "update", "hello", "team", "billing", "accounts", "account", "admin",
+    "service", "services", "contact", "help", "feedback", "digest",
+    "system", "payments", "invoices", "orders", "receipts", "careers",
+    "jobs", "hr", "press", "media", "legal", "privacy", "compliance",
+    "events", "members", "care", "enquiries", "inquiries", "office",
+    "reception", "bookings", "reservations", "shop", "store"})
+# The mailboxes of a system that sends on its own (the no-reply family,
+# bounces, notifications), read as a whole word of the local part
+# ("payments-noreply", "ws.alerts"). Nobody writes from one in person. A
+# staffed role mailbox (office@, sales@, press@) is not one: at a small or
+# family firm it is often a person's own ("<Surname> <Given>" from
+# office@<surname>.example), so it decides nothing about the sender alone.
+_SYSTEM_MAILBOX_WORDS = frozenset({
+    "noreply", "donotreply", "bounce", "bounces", "notification",
+    "notifications", "notify", "alert", "alerts", "newsletter", "digest",
+    "updates", "update", "postmaster", "hostmaster", "system"})
+_NO_REPLY = re.compile(r"no-?reply|do-?not-?reply|mailer-?daemon")
+# What ends the name part of a display name: a title or a department after
+# a comma, a dash, a pipe, a slash or a bracket ("<Given> <Surname>, Sales
+# Manager", "<Surname> <Given> | Owner") is not part of the name.
+_NAME_SEPARATORS = frozenset({"-", "–", "—", "|", "/", "·", "•", ":"})
+# Second-level labels a registry files registrants under (acme.co.uk,
+# ox.ac.uk, moe.edu.sg, x.lea.sch.uk, dept.gov.uk, x.go.jp): a category, never
+# an org's name. Only the fallback reads them; the Public Suffix List knows
+# every registry's levels.
+_PUBLIC_SLD = frozenset({"co", "com", "ac", "edu", "org", "net", "gov",
+                         "sch", "mil", "go", "gob", "gouv", "govt"})
 
 
 def is_automated_sender(email: str, name: str = "") -> bool:
-    """A no-reply / alerts / notification mailbox — a system, not a person."""
+    """A no-reply / alerts / notification mailbox, or an organisation's own
+    mail (`org_own_mail`) — a system, not a person."""
     local, _, dom = (email or "").lower().partition("@")
     labels = dom.split(".")
     return bool(_AUTOMATED_LOCAL.match(local)
                 or (len(labels) > 2 and labels[0] in _AUTOMATED_SUBDOMAINS)
-                or _AUTOMATED_NAME.search(name or ""))
+                or _AUTOMATED_NAME.search(name or "")
+                or org_own_mail(email, name))
+
+
+def _squash(text: str) -> str:
+    """A name or a domain label as one run of letters and digits ("Acme
+    Robotics", "acme-robotics" -> "acmerobotics")."""
+    from app.services.kg_keys import entity_name_key
+    return entity_name_key(text or "").replace(" ", "")
+
+
+def _system_mailbox(local: str) -> bool:
+    low = (local or "").lower()
+    if _NO_REPLY.search(low):
+        return True
+    return any(w in _SYSTEM_MAILBOX_WORDS for w in re.findall(r"[a-z]+", low))
+
+
+def _org_lead(email: str, name: str) -> tuple[list[str], list[str]] | None:
+    """(the display name's words that spell the org label of its own
+    sending domain, the words after them), else None. A free-mail or
+    reserved domain names no org."""
+    words = (name or "").split()
+    if not words or "@" not in (email or ""):
+        return None
+    org = org_from_email_domain(email)
+    if not org:
+        return None
+    key = _squash(org)
+    if not key:
+        return None
+    lead = ""
+    for i, w in enumerate(words):
+        lead += _squash(w)
+        if lead == key:
+            return words[:i + 1], words[i + 1:]
+        if len(lead) >= len(key) or not key.startswith(lead):
+            return None
+    return None
+
+
+def _name_part(words: list[str]) -> list[str]:
+    """The words up to the first separator (`_NAME_SEPARATORS`, a word
+    ending in a comma or a semicolon, an opening bracket), punctuation
+    stripped: "Ana, Sales Manager" -> ["Ana"]."""
+    out = []
+    for w in words:
+        if w in _NAME_SEPARATORS or w[:1] in "([{<":
+            break
+        bare = w.strip(".,;:()'\"")
+        if bare:
+            out.append(bare)
+        if w[-1:] in (",", ";"):
+            break
+    return out
+
+
+def _no_given_name(words: list[str], *, styled: bool) -> bool:
+    """Do these words (the name part after the org's name) hold no
+    plausible given name? None at all; a role word ("Billing") or a word no
+    person's name holds (`name_quality._NEVER_PERSON_TOKENS`, not the wider
+    list with surnames such as "West" in it); or, when the display name is
+    capitalised at all (`styled`), nothing but lowercase words and digits
+    ("Acme account team"). An all-lowercase display name ("ana lee") says
+    nothing by its case, and a lone particle beside a capitalised word ("de"
+    in "de Rossi") is part of a name."""
+    if not words:
+        return True
+    for w in words:
+        low = w.lower()
+        if low in nq._NEVER_PERSON_TOKENS or low in _ROLE_MAILBOX_WORDS \
+                or _AUTOMATED_NAME.search(low):
+            return True
+    return styled and all(w[:1].islower() or w.isdigit() for w in words)
+
+
+def org_own_mail(email: str, name: str) -> bool:
+    """Is this sender the organisation's own mail rather than a person? Its
+    display name begins with the org label of its own sending domain
+    ("<Vendor> Cloud" from an address at <vendor>.com, "<Vendor> Workspace
+    Alerts"), and
+
+    - the name is that one word and nothing else ("<Vendor>"), or
+    - the mailbox is a system one, no-reply or notifications
+      ("cloud-noreply@", `_SYSTEM_MAILBOX_WORDS`), or
+    - the name part after the org's (up to a comma, a dash, a bracket: a
+      title is not a name) holds no given name (`_no_given_name`).
+
+    No vendor is named anywhere: the rule reads the name against the
+    address, and every doubt keeps the person (rejecting a real person is
+    the worse error). A person whose surname is their employer's label
+    ("Ana Brightfield" at brightfield.example) does not match, because the
+    label is not the first word; one whose first name is the label, or a
+    surname-first name at a family firm ("Rossi Marco" at rossi.example,
+    from office@ too), keeps a plausible name after it; and a full name
+    that is the whole domain label ("Ana Brightfield" at
+    anabrightfield.example, a sole trader's own domain) is read the same
+    way, word by word, so it stays a person unless the mailbox is a system
+    one or its words are no name ("Acme Robotics" at acmerobotics.example)."""
+    hit = _org_lead(email, name)
+    if hit is None:
+        return False
+    lead, rest = hit
+    if not rest and len(lead) == 1:
+        return True
+    local = (email or "").partition("@")[0]
+    if _system_mailbox(local):
+        return True
+    styled = any(c.isupper() for c in " ".join(lead))
+    # When the label takes several words ("Ana Brightfield" at
+    # anabrightfield.example) the name may be the label itself: the name
+    # part starts after the lead's first word, not after the lead.
+    return _no_given_name(_name_part(lead[1:] + rest), styled=styled)
 
 
 def is_academic_domain(email_or_domain: str) -> bool:
-    dom = (email_or_domain or "").lower().rpartition("@")[2]
-    return dom.endswith(".edu") or ".ac." in dom or dom.endswith(".ac")
+    """A school's address (member_of, not works_at): `free_mail.is_academic`,
+    a rule about the domain's registry labels (.edu, .edu.<cc>, .ac.<cc>,
+    .sch.<cc>, .k12.*)."""
+    from app.services.free_mail import is_academic
+    return is_academic((email_or_domain or "").lower().rpartition("@")[2])
+
+
+def _unicode_label(label: str) -> str:
+    """A punycode label in its Unicode spelling (xn--mller-kva -> müller):
+    the Public Suffix List writes internationalised suffixes that way
+    (公司.cn), and an org is named as its people read it."""
+    if label.startswith("xn--"):
+        try:
+            return label.encode("ascii").decode("idna")
+        except ValueError:
+            pass
+    return label
+
+
+def _registrant_label(domain: str) -> str | None:
+    """The label an org is named by: the one just left of the public suffix
+    (the vendored Public Suffix List, `perception/psl`), so neither a
+    subdomain nor a registry level names it: acme in mail.acme.com and
+    acme.co.uk, the school in moe.edu.sg, stmarys.lancs.sch.uk and
+    lincoln.k12.ne.us, never "Edu", "Sch" or a state code. A domain that is
+    itself a public suffix (co.uk, k12.ne.us) or an IP address has no
+    registrant: None. Punycode and Unicode spellings read alike (the list
+    holds 公司.cn, not xn--55qx5d.cn). When the list cannot be read, the
+    registry's shape decides (`_registrant_label_by_shape`)."""
+    labels = [_unicode_label(x) for x in domain.split(".") if x]
+    if len(labels) >= 2:
+        try:
+            from app.perception import psl
+            if psl.rule_count():
+                suffix = psl.public_suffix(".".join(labels)) or labels[-1]
+                n = suffix.count(".") + 1
+                if len(labels) <= n or suffix.replace(".", "").isdigit():
+                    return None
+                return labels[-n - 1]
+        except Exception:
+            pass
+    return _registrant_label_by_shape(labels)
+
+
+def _registrant_label_by_shape(labels: list[str]) -> str | None:
+    """The same answer without the list: skip a school-district `k12` level
+    and its state code, and a generic second-level label under a country
+    code (`_PUBLIC_SLD`)."""
+    if not labels:
+        return None
+    if len(labels) == 1:
+        return labels[0]
+    if "k12" in labels[:-1]:
+        i = labels.index("k12")     # lincoln.k12.ne.us -> lincoln
+        return labels[i - 1] if i > 0 else None
+    if len(labels[-1]) == 2 and labels[-2] in _PUBLIC_SLD:
+        # acme.co.uk -> acme; a bare co.uk names no one.
+        return labels[-3] if len(labels) >= 3 else None
+    return labels[-2]               # accounts.acme.com -> acme
 
 
 def org_from_email_domain(email: str) -> str | None:
     """Corporate domain → org display name; free-mail domains → None. Uses the
-    registrable label (google in accounts.google.com, harvard in
-    college.harvard.edu), not the leftmost hostname label."""
+    registrable label (`_registrant_label`: acme in accounts.acme.com,
+    the school in college.<school>.edu or <school>.edu.sg), not the leftmost
+    hostname label."""
     try:
-        domain = (email or "").split("@", 1)[1].lower().strip()
+        # A trailing dot ("gmail.com.") names the same host; an address
+        # literal ("[10.0.0.7]") is an IP.
+        domain = (email or "").split("@", 1)[1].lower().strip().strip("[].")
     except IndexError:
         return None
     if not domain or domain in _FREE_MAIL or domain.endswith(".example.com") \
             or domain == "example.com":
         return None
-    labels = [x for x in domain.split(".") if x]
-    if len(labels) >= 3 and len(labels[-1]) == 2 and labels[-2] in _PUBLIC_SLD:
-        label = labels[-3]          # acme.co.uk -> acme
-    elif len(labels) >= 2:
-        label = labels[-2]          # accounts.google.com -> google
-    else:
-        label = labels[0] if labels else ""
+    label = _registrant_label(domain)
     if not label or len(label) < 2:
         return None
     return label.replace("-", " ").title()
@@ -1035,7 +1301,7 @@ def ingest_email_network(
         except Exception:
             pid = None
         if not pid and name and not party.get("name_from_local") \
-                and nq.is_plausible_person(name):
+                and nq.is_plausible_person(name, store=store):
             res = resolve_person_mention(
                 name, store=store, event_id=event_id,
                 event_source=event_source, window=window, text=text,
@@ -1064,19 +1330,23 @@ def ingest_email_network(
             # A university address says "member", not "employee".
             pred = "member_of" if is_academic_domain(email) else "works_at"
             try:
-                eid = store.resolve_entity(org_name, "org", ts=ts)
-                store.add_relation(
-                    "person", int(pid), pred, "entity", int(eid),
-                    origin="asserted", ts=ts,
-                    quote=f"{name} <{email}>", source_class="email")
-                from app.services import kg_beliefs
-                kg_beliefs.record_from_relation(
-                    store, subj_type="person", subj_id=int(pid),
-                    predicate=pred, obj_type="entity", obj_id=int(eid),
-                    origin="asserted", source_event_id=event_id,
-                    confidence=0.7, ts=ts,
-                    quote=f"{name} <{email}>", source_class="email")
-                affiliations += 1
+                # Signature line or email domain: a rule, not a model guess.
+                # 0 means the user forgot this org: no edge, no belief.
+                eid = store.resolve_entity(org_name, "org", ts=ts,
+                                           kind_source="rule")
+                if eid:
+                    store.add_relation(
+                        "person", int(pid), pred, "entity", int(eid),
+                        origin="asserted", ts=ts,
+                        quote=f"{name} <{email}>", source_class="email")
+                    from app.services import kg_beliefs
+                    kg_beliefs.record_from_relation(
+                        store, subj_type="person", subj_id=int(pid),
+                        predicate=pred, obj_type="entity", obj_id=int(eid),
+                        origin="asserted", source_event_id=event_id,
+                        confidence=0.7, ts=ts,
+                        quote=f"{name} <{email}>", source_class="email")
+                    affiliations += 1
             except Exception:
                 pass
     return {"ok": True, "parties": len(parties), "contacts": written,

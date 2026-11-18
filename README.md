@@ -1304,6 +1304,7 @@ scripts/                 download_models (resumable) · uninstall · restore_bac
 python -m pytest tests -q               # ~2,400 tests
 make eval                               # golden harness (hard thresholds)
 make eval-people                        # people entity-resolution goldens
+make eval-entity-typing                 # entity kinds on labelled seats (per-seat project precision)
 make eval-people-live                   # smoke against local quill.db (no LLM)
 make eval-asr                           # ASR WER/latency against the fixture manifest
 make asr-calibrate                      # fit per-engine ingest thresholds
@@ -1323,7 +1324,7 @@ python scripts/diagnose_today.py             # against a live server: the /today
 | Suite | What it covers |
 |---|---|
 | **Unit suite** | Approval binding, source policies, commitment lifecycle, meeting layer, ranking snapshots, escalate log, local routing, few-shot, grounding, LoRA gate, peer channel, people pipeline, ASR engine seam + calibration, latency spans, classifier heads, pixel actions — hermetic (no network). |
-| **Golden evals** | Commitment ownership, entity resolution, contact attribution with CI-able exit codes. |
+| **Golden evals** | Commitment ownership, entity resolution, contact attribution, entity typing (`scripts/eval_entity_typing.py`: labelled sightings from synthetic seats in unrelated industries through the real entity path; project precision gated per seat) with CI-able exit codes. |
 | **ASR evals** | `scripts/eval_asr.py` over `tests/fixtures/asr_eval/` — WER + latency per engine, so a swap is measured. Audio itself is git-ignored; the manifest is checked in. |
 | **Desktop agent** | `tests/test_desktop_guards.py` — path jail, hard blocks, default-deny, autonomy ladder. `test_desktop_a11y_linux.py` / `test_ghost_desktop_linux.py` cover the Linux body. |
 | **Browser pixel** | `tests/test_browser_pixel.py` — live headless Chromium against a canvas game and an iframe-embedded one, plus the out-of-bounds refusal. |

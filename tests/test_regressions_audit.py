@@ -23,6 +23,11 @@ def _fresh_store(tmp):
 # ---------------------------------------------------------------- Pattern A (tests/test_kg_beliefs.py)
 class UploadBriefGateTests(unittest.TestCase):
     """ev292 'Comau acquired Invent Smart Intralogistics Solutions' / ev199 'EU CBAM' / 'ycombinator. com'."""
+    def setUp(self):
+        # About which edges and kinds a brief may assert, not the candidate gate: mint at first sight.
+        env = patch.dict(os.environ, {"QUILL_ENTITY_CANDIDATES": "0"})
+        env.start(); self.addCleanup(env.stop)
+
     def test_brief_upload_asserts_no_part_of_no_project_no_domain(self):
         from app.services.extractor import Extractor
         from app.services import resolution

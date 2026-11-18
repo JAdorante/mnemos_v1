@@ -22,6 +22,20 @@ class NormalizeEntityKindTests(unittest.TestCase):
         self.assertEqual(normalize_entity_kind("project"), "project")
         self.assertEqual(normalize_entity_kind("org"), "org")
 
+    def test_entity_model_kinds(self):
+        # Entity model, Phase 2: the extractor offers topic and label. A
+        # topic is stored as `idea`; `label` is a kind of its own.
+        from app.services.name_quality import normalize_entity_kind
+
+        for k in ("topic", "concept", "theme"):
+            self.assertEqual(normalize_entity_kind(k), "idea", k)
+        for k in ("label", "tag", "milestone", "codename", "identifier"):
+            self.assertEqual(normalize_entity_kind(k), "label", k)
+        self.assertEqual(normalize_entity_kind("Topic"), "idea")
+        self.assertEqual(normalize_entity_kind("label", unknown=None),
+                         "label")
+        self.assertIsNone(normalize_entity_kind("wizard", unknown=None))
+
 
 class PersonShapedGateTests(unittest.TestCase):
     def test_person_shaped_detection(self):
@@ -61,12 +75,16 @@ class PersonShapedGateTests(unittest.TestCase):
             store = Store(Path(td) / "t.db")
             try:
                 r = Resolver(store=store)
+                # Fix pass B: the shape alone no longer sends a name to
+                # people; a person the seat already knows does.
+                pid = store.insert_person("Bill Clinton", ts=time.time())
                 eid = r.resolve_entity("Bill Clinton", "project", ts=time.time())
                 self.assertEqual(eid, 0)
                 people = store.all_people()
                 names = {(p.get("name") or p.get("canonical_name") or "").lower()
                          for p in people}
                 self.assertIn("bill clinton", names)
+                self.assertEqual([p["id"] for p in people], [pid])
             finally:
                 store.close()
 

@@ -306,7 +306,8 @@ class _Ingestor:
                 print(f"[onboarding] fact index skipped ({exc}).")
 
     def person(self, name: str, aliases: list[str]) -> int:
-        pid = self.store.resolve_person(name, ts=self.now)
+        # The user's own answer: a person, whatever this seat learned.
+        pid = self.store.resolve_person(name, ts=self.now, by_user=True)
         for a in aliases or []:
             if _clip(a):
                 self.store.touch_person(pid, ts=self.now, alias=_clip(a))
@@ -320,12 +321,20 @@ class _Ingestor:
         return pid
 
     def entity(self, name: str, kind: str, aliases: list[str]) -> int:
-        eid = self.store.resolve_entity(name, kind or "project", ts=self.now)
+        # The user's own onboarding answer: user rank (their kind stands
+        # against later automation, and it brings back a forgotten name).
+        eid = self.store.resolve_entity(name, kind or "project", ts=self.now,
+                                        kind_source="user",
+                                        kind_confidence=1.0)
+        if not eid:
+            return 0
         for a in aliases or []:
             if _clip(a):
+                # An alias the user typed is theirs too: a name they once
+                # forgot is no longer forgotten once they attach it here.
+                self.store.clear_entity_tombstone(_clip(a))
                 self.store.touch_entity(eid, ts=self.now, alias=_clip(a))
-        if eid:
-            self.counts["entities"] += 1
+        self.counts["entities"] += 1
         return eid
 
     def relation(self, subj: tuple[str, int], predicate: str,
@@ -374,7 +383,7 @@ def ingest(profile: dict | None = None, store: Store | None = None) -> dict:
     user_name = _clip(ident.get("name") if isinstance(ident, dict) else "")
     user_pid = 0
     if user_name:
-        user_pid = store.resolve_person(user_name, ts=ing.now)
+        user_pid = store.resolve_person(user_name, ts=ing.now, by_user=True)
         if user_pid:
             try:
                 store.set_person_promotion(user_pid, "active", ts=ing.now)

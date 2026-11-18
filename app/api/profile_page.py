@@ -115,6 +115,19 @@ body{margin:0;min-height:100vh;font:var(--fs-body)/var(--lh-body) var(--font);co
   background:var(--panel-2);font:12px/1.2 var(--sans);color:var(--mut);cursor:pointer;padding:5px 11px}
 .ekinds button:hover,.erare-toggle:hover{color:var(--navy);border-color:var(--line-strong)}
 .ekinds button.on{color:var(--navy);background:var(--ink-06);border-color:var(--line-strong)}
+.eadd{align-items:center;flex-wrap:wrap}
+.eadd input{min-width:180px}
+.eadd select{min-height:36px;padding:7px 10px;border:1px solid var(--line);
+  border-radius:var(--radius-sm);background:var(--panel);
+  font:var(--fs-sub)/1.4 var(--font);color:var(--text)}
+.eadd-msg{flex-basis:100%;font:var(--fs-caption)/1.3 var(--font);color:var(--mut)}
+.eadd-msg:empty{display:none}
+.pnotice{display:flex;align-items:center;gap:var(--sp-3);flex-wrap:wrap;margin:0 0 var(--sp-2);
+  font:var(--fs-caption)/1.3 var(--font);color:var(--mut)}
+.pnotice:empty{display:none}
+.pnotice button{border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--panel);
+  font:500 var(--fs-caption)/1.2 var(--font);color:var(--navy);cursor:pointer;padding:5px 10px}
+.pnotice button:hover{background:var(--panel-2);border-color:var(--line-strong)}
 .elist{border:1px solid var(--line);border-radius:var(--radius);background:var(--panel);
   margin-top:var(--sp-2);box-shadow:var(--shadow-workspace);overflow:hidden}
 .erow{display:flex;align-items:center;gap:var(--sp-3);padding:7px var(--sp-4);cursor:pointer;
@@ -130,7 +143,25 @@ body{margin:0;min-height:100vh;font:var(--fs-body)/var(--lh-body) var(--font);co
 .erow .dots{width:48px}
 .erow .seen{width:72px;text-align:right}
 .erow .echeck{accent-color:var(--navy);cursor:pointer;margin:0;flex-shrink:0}
+.erow.child{padding-left:calc(var(--sp-4) + 18px * var(--depth,1));background:var(--paper)}
+.erow.child:hover,.erow.child.open{background:var(--panel-2)}
+.erow .efold{margin-left:var(--sp-2);border:1px solid var(--hairline);border-radius:var(--radius-full);
+  background:var(--panel-2);font:12px/1.2 var(--sans);color:var(--mut);cursor:pointer;padding:2px 9px}
+.erow .efold:hover{color:var(--navy);border-color:var(--line-strong)}
+.escope{align-self:center;font:var(--fs-sub)/1.3 var(--font);color:var(--navy)}
+.pfield select#eParentSel{min-height:36px;padding:7px 10px;border:1px solid var(--line);
+  border-radius:var(--radius-sm);background:var(--panel);font:var(--fs-sub)/1.4 var(--font);
+  color:var(--text);max-width:100%}
 .elist .pdetail{margin:0;border-width:1px 0 0 3px;border-radius:0;box-shadow:none}
+.emerge-list{display:flex;flex-direction:column;gap:2px;margin-top:var(--sp-1);max-height:220px;overflow-y:auto}
+.emerge-list:empty{display:none}
+.emerge-list button{display:flex;align-items:center;gap:var(--sp-2);text-align:left;
+  border:1px solid var(--hairline);border-radius:var(--radius-sm);background:var(--panel);
+  font:var(--fs-sub)/1.3 var(--font);color:var(--navy);cursor:pointer;padding:6px 10px}
+.emerge-list button:hover,.emerge-list button:focus{background:var(--panel-2);border-color:var(--line-strong);outline:none}
+.emerge-list .chip{margin:0}
+.emerge-msg{font:var(--fs-caption)/1.3 var(--font);color:var(--mut);margin-top:var(--sp-1)}
+.emerge-msg:empty{display:none}
 .erare-head{display:flex;align-items:center;gap:var(--sp-3);flex-wrap:wrap;margin-top:var(--sp-6)}
 .erare-head .lead{margin:0}
 .erare-head label{font:var(--fs-caption)/1.3 var(--font);color:var(--mut);cursor:pointer;
@@ -232,6 +263,7 @@ body{margin:0;min-height:100vh;font:var(--fs-body)/var(--lh-body) var(--font);co
         </label>
       </div>
       <div id="exhaustSeed" class="empty" hidden style="margin-top:8px"></div>
+      <div class="pnotice" id="pNotice" role="status"></div>
       <div id="peopleList"><div class="empty">Loading…</div></div>
     </section>
   </div>
@@ -281,6 +313,19 @@ body{margin:0;min-height:100vh;font:var(--fs-body)/var(--lh-body) var(--font);co
       category, add aliases and notes, review its facts — or remove noise.</p>
       <input class="psearch" id="eSearch" placeholder="filter by name…">
       <div class="ekinds" id="eKinds"></div>
+      <form class="pfield eadd" id="eAdd" autocomplete="off">
+        <input id="eAddName" maxlength="200" placeholder="add one by name…" aria-label="Name to add">
+        <select id="eAddKind" aria-label="Kind">
+          <option value="org">Org</option>
+          <option value="project">Project</option>
+          <option value="tool">Tool</option>
+          <option value="place">Place</option>
+          <option value="idea">Topic</option>
+          <option value="label">Label</option>
+        </select>
+        <button type="submit">Add</button>
+        <span class="eadd-msg" id="eAddMsg" role="status"></span>
+      </form>
       <div id="entityList"><div class="empty">Loading…</div></div>
       <div class="work-bar" id="entBar">
         <span class="count" id="entSelCount">0 selected</span>
@@ -555,6 +600,7 @@ async function loadPersonDetail(pid){
       +'<button data-pact="confirm">Confirm</button>'
       +'<button data-pact="merge">Merge…</button>'
       +'<button class="forget-person" data-pact="forget">Forget this person…</button>'
+      +'<button class="forget-person" data-pact="notperson" title="Remove it and never suggest this name as a person again">Not a person…</button>'
       +'</div>';
   }
   host.innerHTML=h;
@@ -609,9 +655,41 @@ async function personAct(pid, act, key, ref, value){
     if(!confirm('Forget '+(p?p.name:'this person')+'? Their node and connections are removed; facts stay but are detached.')) return;
     await fetch('/people/'+pid+'/forget',{method:'POST'});
     openPersonId=null;
+  }else if(act==='notperson'){
+    const p=peopleCache.find(x=>x.id===pid);
+    if(!confirm((p?p.name:'This')+' is not a person? The node is removed and this name is never suggested as a person again; facts stay but are detached.')) return;
+    const r=await fetch('/people/'+pid+'/forget',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({not_a_person:true})});
+    const d=r.ok?await r.json():{};
+    openPersonId=null;
+    if(d.learned&&d.deleted) notPersonNotice(d.deleted);
   }
   loadPeople(true);   // re-render roster; an open card refetches its detail
 }
+
+// "Not a person…" can be taken back: the notice keeps the name (the seat
+// stores only its hash) and Undo lets it be suggested as a person again.
+let pUndoName='';
+function notPersonNotice(name){
+  const el=document.getElementById('pNotice'); if(!el) return;
+  pUndoName=name;
+  el.innerHTML='<span>'+MnemosEsc(name)+' will not be suggested as a person again.</span>'
+    +'<button type="button" data-pundo="1">Undo</button>';
+}
+document.addEventListener('click', async e=>{
+  const b=e.target.closest('button[data-pundo]'); if(!b) return;
+  e.stopPropagation();
+  const name=pUndoName, el=document.getElementById('pNotice');
+  if(!name||!el) return;
+  let ok=false;
+  try{
+    const r=await fetch('/people/not-a-person/undo',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
+    ok=r.ok;
+  }catch(err){ ok=false; }
+  pUndoName='';
+  el.textContent=ok?name+' may be suggested as a person again.':'Could not undo that.';
+});
 
 document.addEventListener('click', e=>{
   const b=e.target.closest('button[data-pact]'); if(!b) return;
@@ -623,7 +701,7 @@ document.addEventListener('click', e=>{
 
 // ---- Orgs & tools tab -----------------------------------------------------
 let entityCache=[], openEntityId=null, entitySig='';
-const ENTITY_KINDS=['org','project','tool','place','idea','thing'];
+const ENTITY_KINDS=['org','project','tool','place','idea','label','thing'];
 const E_DETAIL_FIELDS=[['status','Status'],['owner','Owner'],
                        ['url','Website'],['location','Location']];
 
@@ -636,15 +714,19 @@ function entityBusy(){
 
 // Sections are by kind; weak rows nobody has touched in a month fold into
 // "Rarely seen" at the bottom, where they can be selected and forgotten in bulk.
+// Labels ("k9", "Phase 1": names that only mean something inside a project)
+// get their own section.
 const E_GROUPS=[['org','Orgs'],['project','Projects'],['tool','Tools'],
-                ['place','Places'],['idea','Topics'],['other','Other']];
+                ['place','Places'],['idea','Topics'],['label','Labels'],
+                ['other','Other']];
 const E_RARE_WEIGHT=5, E_RARE_DAYS=30;
 let entityKind='all', entityRareOpen=false;
 const entitySel=new Set();
 
 function entityGroup(k){
   if(k==='company'||k==='organization') return 'org';
-  return ['org','project','tool','place','idea'].includes(k)?k:'other';
+  if(k==='topic') return 'idea';
+  return ['org','project','tool','place','idea','label'].includes(k)?k:'other';
 }
 function entityRare(x){
   const age=x.last_seen?(Date.now()/1000-x.last_seen)/86400:Infinity;
@@ -662,23 +744,55 @@ async function loadEntities(force){
   renderEntityList();
 }
 
-function entityRowHtml(x, pick){
+// Scope: a row that lives inside a project (x.parent) nests under that
+// project's row as a fold ("3 labels"), not at top level. A filter or a
+// search that leaves the project out shows the row flat, marked "in …".
+const E_KIND_WORDS={label:['label','labels'],idea:['topic','topics'],
+  thing:['thing','things'],project:['project','projects']};
+const entityFolds=new Set(), entityAutoOpen=new Set();
+function foldOpen(id){ return entityFolds.has(id)||entityAutoOpen.has(id); }
+
+function kidsSummary(kids){
+  const n={};
+  kids.forEach(k=>{ const g=E_KIND_WORDS[k.kind]?k.kind:'thing'; n[g]=(n[g]||0)+1; });
+  return Object.keys(n).sort((a,b)=>n[b]-n[a]).map(g=>
+    n[g]+' '+E_KIND_WORDS[g][n[g]===1?0:1]).join(', ');
+}
+
+function entityRowHtml(x, pick, depth, kids){
   const g=entityGroup(x.kind), open=openEntityId===x.id;
   const dots=Math.min(1+(x.weight>=5)+(x.weight>=15)+(x.weight>=40),4);
-  const home=x.project&&x.project.name&&x.project.name!==x.name?x.project.name:'';
-  const row='<div class="erow'+(open?' open':'')+'" data-eid="'+x.id+'">'
+  const flatChild=!depth&&x.parent&&x.parent.name;
+  const home=flatChild?'in '+x.parent.name
+    :(x.project&&x.project.name&&x.project.name!==x.name?x.project.name:'');
+  const homeTip=flatChild?'Part of '+x.parent.name:(home?'Mostly comes up with '+home:'');
+  const folded=kids&&kids.length?!foldOpen(x.id):false;
+  const row='<div class="erow'+(open?' open':'')+(depth?' child':'')+'" data-eid="'+x.id+'"'
+    +(depth?' style="--depth:'+depth+'"':'')+'>'
     +(pick?'<input type="checkbox" class="echeck" value="'+x.id+'"'
       +(entitySel.has(x.id)?' checked':'')+' title="Select">':'')
     +'<span class="main"><span class="nm">'+MnemosEsc(x.name)+'</span>'
-    +(g==='other'||pick?'<span class="chip">'+MnemosEsc(x.kind)+'</span>':'')
+    +(g==='other'||pick||depth?'<span class="chip">'+MnemosEsc(x.kind)+'</span>':'')
     +(g==='org'?'<a class="chip" href="/org/'+x.id+'" title="Open living brief">brief</a>':'')
+    +(kids&&kids.length?'<button type="button" class="efold" data-efold="'+x.id+'"'
+      +' title="'+(folded?'Show':'Hide')+' what is part of it">'
+      +(folded?'▸ ':'▾ ')+kidsSummary(kids)+'</button>':'')
     +'</span>'
-    +'<span class="in" title="'+(home?'Mostly comes up with '+MnemosEsc(home):'')+'">'+MnemosEsc(home)+'</span>'
+    +'<span class="in" title="'+MnemosEsc(homeTip)+'">'+MnemosEsc(home)+'</span>'
     +'<span class="dots" title="connection strength (score '+x.weight.toFixed(1)+')">'
     +'●'.repeat(dots)+'○'.repeat(4-dots)+'</span>'
     +'<span class="seen">'+fmtSeen(x.last_seen).replace(/^seen | seen$/,'')+'</span>'
     +'<span class="chev">'+(open?'▾':'▸')+'</span></div>';
   return row+(open?'<div class="pdetail" id="eDetail"><div class="lead">Loading…</div></div>':'');
+}
+
+// One row and, when its fold is open, everything inside it (recursively).
+function entityTreeHtml(x, pick, depth, kidsOf){
+  const kids=kidsOf[x.id]||[];
+  let h=entityRowHtml(x, pick, depth, kids);
+  if(kids.length&&foldOpen(x.id))
+    h+=kids.map(k=>entityTreeHtml(k, pick, depth+1, kidsOf)).join('');
+  return h;
 }
 
 function syncEntBar(){
@@ -705,17 +819,46 @@ function renderEntityList(){
       :'Nothing yet — mention orgs, projects, and tools in chat or speech.')+'</div>';
     syncEntBar();return;
   }
-  const rare=rows.filter(entityRare), main=rows.filter(x=>!entityRare(x));
+  // Nest a row under its project when the project is shown too; the rest
+  // are top level. A search hit or the open row is never left folded away.
+  const byId={}; entityCache.forEach(x=>{ byId[x.id]=x; });
+  const shown=new Set(rows.map(x=>x.id)), kidsOf={};
+  const upFrom=x=>{ const out=[]; let p=x.parent;
+    while(p&&byId[p.id]&&out.length<16){
+      if(p.id===x.id||out.includes(p.id)) return null;     // a loop: no nesting
+      out.push(p.id); p=byId[p.id].parent; }
+    return out; };
+  const nested=new Set();
+  rows.forEach(x=>{
+    if(!x.parent||!shown.has(x.parent.id)||upFrom(x)===null) return;
+    nested.add(x.id);
+    (kidsOf[x.parent.id]=kidsOf[x.parent.id]||[]).push(x);
+  });
+  Object.values(kidsOf).forEach(ks=>ks.sort((a,b)=>b.weight-a.weight
+    ||a.name.toLowerCase().localeCompare(b.name.toLowerCase())));
+  const top=rows.filter(x=>!nested.has(x.id));
+  entityAutoOpen.clear();
+  rows.forEach(x=>{
+    if(nested.has(x.id)&&(q||x.id===openEntityId))
+      (upFrom(x)||[]).forEach(id=>entityAutoOpen.add(id));
+  });
+  // A row folds into "Rarely seen" only when all that is nested under it is
+  // rarely seen too: a label in use must not hide behind its quiet project.
+  const rareTree=x=>entityRare(x)&&(kidsOf[x.id]||[]).every(rareTree);
+  const rare=top.filter(rareTree), main=top.filter(x=>!rareTree(x));
   let h='';
   E_GROUPS.forEach(([k,label])=>{
     const g=main.filter(x=>entityGroup(x.kind)===k);
     if(!g.length) return;
     h+='<div class="plabel">'+label+' · '+g.length+'</div>'
-      +'<div class="elist">'+g.map(x=>entityRowHtml(x,false)).join('')+'</div>';
+      +'<div class="elist">'+g.map(x=>entityTreeHtml(x,false,0,kidsOf)).join('')+'</div>';
   });
   if(rare.length){
     // A search hit or an open row must never hide behind the fold.
-    const open=entityRareOpen||!!q||rare.some(x=>x.id===openEntityId);
+    const inRare=id=>{ const x=byId[id]; if(!x) return false;
+      if(rare.includes(x)) return true;
+      return nested.has(id)&&(upFrom(x)||[]).some(p=>rare.includes(byId[p])); };
+    const open=entityRareOpen||!!q||(openEntityId!==null&&inRare(openEntityId));
     h+='<div class="erare-head">'
       +'<button type="button" class="erare-toggle" data-etoggle="rare">'
       +(open?'▾':'▸')+' Rarely seen · '+rare.length+'</button>'
@@ -723,7 +866,7 @@ function renderEntityList(){
       +(open?'<label><input type="checkbox" id="eSelRare"'
         +(rare.every(x=>entitySel.has(x.id))?' checked':'')+'> Select all</label>':'')
       +'</div>';
-    if(open) h+='<div class="elist">'+rare.map(x=>entityRowHtml(x,true)).join('')+'</div>';
+    if(open) h+='<div class="elist">'+rare.map(x=>entityTreeHtml(x,true,0,kidsOf)).join('')+'</div>';
   }
   el.innerHTML=h;
   syncEntBar();
@@ -732,11 +875,43 @@ function renderEntityList(){
 
 document.getElementById('eSearch').addEventListener('input', renderEntityList);
 
+// Add one by hand. It is made at once with the kind chosen here, and what
+// extraction had waiting under the name becomes its history. Names that are
+// still waiting are never listed on this tab.
+document.getElementById('eAdd').addEventListener('submit', async e=>{
+  e.preventDefault();
+  const nameEl=document.getElementById('eAddName'), msg=document.getElementById('eAddMsg');
+  const name=nameEl.value.trim(); if(!name) return;
+  const kind=document.getElementById('eAddKind').value;
+  msg.textContent='';
+  let r, d={};
+  try{
+    r=await fetch('/entities',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({name,kind})});
+    d=await r.json();
+  }catch(err){ msg.textContent='Could not add that.'; return; }
+  if(!r.ok){
+    msg.textContent=(typeof d.detail==='string'&&d.detail)||'Could not add that.';
+    return;
+  }
+  nameEl.value='';
+  msg.textContent=d.created?'Added '+d.name+'.'
+    :d.name+' is already here, as '+d.kind+'.';
+  loadEntities(true);
+});
+
 document.addEventListener('click', e=>{
   const kb=e.target.closest('button[data-ekind]');
   if(kb){ entityKind=kb.dataset.ekind; renderEntityList(); return; }
   if(e.target.closest('button[data-etoggle]')){
     entityRareOpen=!entityRareOpen; renderEntityList(); return; }
+  const fb=e.target.closest('button[data-efold]');
+  if(fb){
+    const id=parseInt(fb.dataset.efold,10);
+    if(foldOpen(id)){ entityFolds.delete(id); entityAutoOpen.delete(id); }
+    else entityFolds.add(id);
+    renderEntityList(); return;
+  }
   if(e.target.closest('button,a,input')) return;
   const row=e.target.closest('.erow[data-eid]'); if(!row) return;
   const eid=parseInt(row.dataset.eid,10);
@@ -787,6 +962,7 @@ async function loadEntityDetail(eid){
     +ENTITY_KINDS.map(k=>'<button class="chip" style="cursor:pointer'
       +(x.kind===k?';color:var(--navy);border-color:var(--navy)':'')
       +'" data-eact="kind" data-kind="'+k+'">'+k+'</button>').join(' ')+'</div>';
+  h+=entityScopeHtml(x, eid);
   h+='<div class="plabel">Details — from memory; edit anything, Save with an empty box to forget your edit</div>';
   E_DETAIL_FIELDS.forEach(([k,label])=>{
     const d=(x.details||{})[k]||{};
@@ -817,13 +993,116 @@ async function loadEntityDetail(eid){
   }else{
     h+='<div class="empty">No facts yet — the note box above is the fastest way to teach me.</div>';
   }
+  h+='<div class="plabel">Same thing as another row?</div>'
+    +'<div class="pfield"><input id="eMergeQ" autocomplete="off" role="combobox"'
+    +' aria-controls="eMergeList" aria-label="Merge into"'
+    +' placeholder="Merge into… type a name to search"></div>'
+    +'<div id="eMergeList" class="emerge-list" role="listbox"></div>'
+    +'<div id="eMergeMsg" class="emerge-msg"></div>';
   h+='<button class="forget-person" data-eact="forget">Forget this…</button>';
   host.innerHTML=h;
   host.dataset.eid=eid;
 }
 
+// "Merge into…": a searchable list of the other rows on the tab, never a
+// numeric prompt. Picking one folds this row into it: its facts, links and
+// names move there, and its name becomes an alias of the one picked.
+const E_MERGE_MAX=8;
+function mergeChoices(eid, q){
+  q=(q||'').trim().toLowerCase();
+  if(!q) return [];
+  return entityCache.filter(v=>v.id!==eid&&v.name.toLowerCase().includes(q))
+    .sort((a,b)=>(a.name.toLowerCase().indexOf(q)-b.name.toLowerCase().indexOf(q))
+      ||b.weight-a.weight||a.name.toLowerCase().localeCompare(b.name.toLowerCase()))
+    .slice(0,E_MERGE_MAX);
+}
+function renderMergeList(eid){
+  const q=document.getElementById('eMergeQ'), list=document.getElementById('eMergeList');
+  if(!q||!list) return;
+  const hits=mergeChoices(eid, q.value);
+  list.innerHTML=hits.map(v=>'<button type="button" role="option" data-emerge="'+v.id+'">'
+    +'<span>'+MnemosEsc(v.name)+'</span><span class="chip">'+MnemosEsc(v.kind||'')+'</span></button>').join('');
+  const msg=document.getElementById('eMergeMsg');
+  if(msg) msg.textContent=q.value.trim()&&!hits.length?'No other row matches.':'';
+}
+document.addEventListener('input', e=>{
+  if(e.target&&e.target.id==='eMergeQ'){
+    const host=e.target.closest('.pdetail');
+    renderMergeList(parseInt((host&&host.dataset.eid)||openEntityId,10));
+  }
+});
+document.addEventListener('click', async e=>{
+  const b=e.target.closest('button[data-emerge]'); if(!b) return;
+  e.stopPropagation();
+  const host=b.closest('.pdetail');
+  const eid=parseInt((host&&host.dataset.eid)||openEntityId,10);
+  const into=parseInt(b.dataset.emerge,10);
+  const x=entityCache.find(v=>v.id===eid), y=entityCache.find(v=>v.id===into);
+  if(!x||!y) return;
+  if(!confirm('Merge '+x.name+' into '+y.name+'? Its facts, links and names move to '
+    +y.name+', and "'+x.name+'" becomes one of its aliases. A merge cannot be undone.')) return;
+  const r=await fetch('/entities/'+eid+'/merge',{method:'POST',
+    headers:{'Content-Type':'application/json'},body:JSON.stringify({into})});
+  if(!r.ok){
+    const d=await r.json().catch(()=>({}));
+    const msg=document.getElementById('eMergeMsg');
+    if(msg) msg.textContent=(typeof d.detail==='string'&&d.detail)||'Could not merge those.';
+    return;
+  }
+  openEntityId=into;
+  loadEntities(true);
+});
+
+// "Part of <project>": the projects (and names filed under) it can go
+// inside, never itself or anything inside it.
+const E_NESTABLE=['label','idea','thing','project'];
+function parentChoices(eid){
+  const below=new Set([eid]); let grew=true;
+  while(grew){
+    grew=false;
+    entityCache.forEach(v=>{
+      if(v.parent&&below.has(v.parent.id)&&!below.has(v.id)){ below.add(v.id); grew=true; }
+    });
+  }
+  return entityCache.filter(v=>!below.has(v.id)&&(v.kind==='project'||v.filed))
+    .sort((a,b)=>a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+}
+function entityScopeHtml(x, eid){
+  let h='';
+  if(x.children&&x.children.length)
+    h+='<div class="plabel">Part of it</div><div>'
+      +x.children.map(k=>'<span class="chip">'+MnemosEsc(k.name)+'</span>').join('')+'</div>';
+  if(!E_NESTABLE.includes(x.kind)) return h;
+  const choices=parentChoices(eid);
+  const opts=choices.map(v=>'<option value="'+v.id+'"'
+    +(x.parent&&x.parent.id===v.id?' selected':'')+'>'+MnemosEsc(v.name)+'</option>').join('');
+  if(x.parent){
+    h+='<div class="plabel">Part of</div><div class="pfield">'
+      +'<span class="escope">'+MnemosEsc(x.parent.name)+'</span>'
+      +(x.parent.source==='user'?'<span class="chip" style="align-self:center" title="You set this">you</span>':'')
+      +(choices.length>1?'<select id="eParentSel" aria-label="Move it to">'+opts+'</select>'
+        +'<button data-eact="parent-set">Move</button>':'')
+      +'<button data-eact="parent-remove">Remove</button></div>';
+  }else if(choices.length){
+    h+='<div class="plabel">Part of a project?</div><div class="pfield">'
+      +'<select id="eParentSel" aria-label="Project">'+opts+'</select>'
+      +'<button data-eact="parent-set">Put it there</button></div>';
+  }
+  return h;
+}
+
 async function entityAct(eid, act, kind, key){
-  if(act==='detail'){
+  if(act==='parent-set'||act==='parent-remove'){
+    const sel=document.getElementById('eParentSel');
+    const pid=act==='parent-set'?parseInt((sel&&sel.value)||'',10):null;
+    if(act==='parent-set'&&!pid) return;
+    const r=await fetch('/entities/'+eid+'/parent',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({parent_id:pid})});
+    if(!r.ok){
+      const d=await r.json().catch(()=>({}));
+      alert((typeof d.detail==='string'&&d.detail)||'could not change that');return;
+    }
+  }else if(act==='detail'){
     const v=document.getElementById('ed_'+key).value.trim();
     const r=await fetch('/entities/'+eid+'/detail',{method:'POST',
       headers:{'Content-Type':'application/json'},body:JSON.stringify({key,value:v})});

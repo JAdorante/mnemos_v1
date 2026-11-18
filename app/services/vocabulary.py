@@ -115,6 +115,10 @@ class VocabularyProvider:
                 kind = (e.get("kind") or "").lower()
                 if kind == "org":
                     orgs.append(e["name"])
+                elif kind == "label":
+                    # "k9", "Phase 1": a short code is no spelling hint, and
+                    # biasing the decoder toward it makes it hear one.
+                    continue
                 else:                         # project | product | thing | unknown
                     projects.append(e["name"])
         except Exception as exc:

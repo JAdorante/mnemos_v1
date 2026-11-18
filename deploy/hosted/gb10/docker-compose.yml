@@ -32,6 +32,13 @@ x-env: &sparrow-env
   # 2.84 vs 2.63 for 7B (better on 28 rows, worse on 10), fact coverage
   # 42% vs 35%, at ~2x latency (p50 4.0s vs 1.8s). Rollback = 7b-instruct.
   QUILL_TEXT_LOCAL_MODEL: qwen2.5:14b-instruct
+  # Extraction prompt (entity model): keep the earlier prompt, schema and
+  # version stamps on this box. The LoRA seat was trained on that prompt, and
+  # the Sparrow 1.0 round-3 captures are pinned to it (the entity-model
+  # build's check D, option A: deploy with the flag off now, re-pin with it
+  # still off before grading resumes, turn it on in round 4). Unset or "1"
+  # gives the entity-kind prompt.
+  QUILL_EXTRACT_ENTITY_V2: "0"
   # Google connector (Gmail + Calendar metadata).
   GOOGLE_OAUTH_CLIENT_ID: "${GOOGLE_OAUTH_CLIENT_ID:-}"
   GOOGLE_OAUTH_CLIENT_SECRET: "${GOOGLE_OAUTH_CLIENT_SECRET:-}"

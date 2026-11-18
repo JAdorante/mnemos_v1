@@ -368,7 +368,11 @@ def _store_event(item: dict[str, Any]) -> int:
     from app.services.worker import worker
     from app.storage import get_store
 
-    projects.ensure_filed(item.get("project") or "", store=get_store())
+    # Reached only from accept(), which is always the user's own click (the
+    # assistants route or the inbox one-click); there is no automatic accept.
+    # So this filing may bring back a project the user had forgotten.
+    projects.ensure_filed(item.get("project") or "", store=get_store(),
+                          user_accept=True)
     assistant = item.get("assistant") or "other"
     text = _event_text(item)
     ev = Event(

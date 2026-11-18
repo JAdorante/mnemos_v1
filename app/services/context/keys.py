@@ -36,6 +36,9 @@ import re
 from dataclasses import dataclass, replace
 from urllib.parse import urlsplit
 
+# Stdlib-only as well: one json file, read on first use.
+from app.services.free_mail import FREE_MAIL_DOMAINS
+
 # --- tiers (CAL §3.2) -------------------------------------------------------
 # STRONG      may bind a node on its own.
 # MEDIUM      binds only with corroboration from another medium-or-better key.
@@ -170,11 +173,9 @@ GENERIC_DOMAINS = frozenset({
 })
 # Consumer mail hosts — generic as DOMAINS, never as person keys (see
 # `is_generic`); `domain()` of an address at one of these carries no org signal.
-GENERIC_EMAIL_DOMAINS = frozenset({
-    "gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com",
-    "yahoo.com", "icloud.com", "me.com", "aol.com", "proton.me",
-    "protonmail.com", "fastmail.com", "gmx.com", "mail.com", "qq.com",
-})
+# The one free-mail list (services/free_mail): the vendored public list and
+# every host this set named before it; a school or government domain never.
+GENERIC_EMAIL_DOMAINS = FREE_MAIL_DOMAINS
 GENERIC_PATH_LEAVES = frozenset({
     "downloads", "desktop", "documents", "tmp", "temp", "home", "users",
     "pictures", "videos", "music", "public", "appdata", "library",

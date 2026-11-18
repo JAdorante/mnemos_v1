@@ -417,6 +417,16 @@ async def speakers_enroll_web(request: Request,
     pcm = np.frombuffer(body, dtype="<i2").astype(np.float32) / 32768.0
     from app.services.speakers import speakers as spk
     spk.enroll(name, pcm, sr)
+    # The user named a person's voice: a learned "not a person" on the
+    # name would refuse every turn they speak. Only the seat's store when
+    # it is open (the running app opens it at boot, with its first job);
+    # this never opens one in the data dir.
+    try:
+        from app import storage
+        if storage._store is not None:
+            storage._store.user_named_person(name)
+    except Exception as exc:
+        print(f"[speakers] not-a-person lift skipped ({exc}).")
     return {"ok": True, "seconds": round(seconds, 1),
             "enrolled": spk.enrolled_names()}
 

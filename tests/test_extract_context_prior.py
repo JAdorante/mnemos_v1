@@ -112,8 +112,10 @@ class ContextPriorTests(unittest.TestCase):
         self.assertEqual(off, base)
         self.assertEqual(on, f"{base}-ctx")
         self.assertNotEqual(on, off)
+        # facts-schema-v5 is the entity-kind schema (entity model, Phase 2),
+        # which keeps the ideas array of v4.
         with patch.dict(os.environ, {"QUILL_EXTRACT_IDEAS": "1"}):
-            self.assertEqual(effective_schema_version(), "facts-schema-v4")
+            self.assertEqual(effective_schema_version(), "facts-schema-v5")
 
     def test_ctx_stamp_survives_a_base_version_bump(self):
         """The regression itself: bump the base and the suffix must follow."""

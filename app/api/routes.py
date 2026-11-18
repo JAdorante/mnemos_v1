@@ -1845,10 +1845,23 @@ def graph_constellation_reclassify(body: GraphReclassifyBody) -> dict:
     from app.services import graph
     from app.services.attention_ledger import attention_ledger
 
-    res = graph.reclassify_constellation_node(
-        memory._ensure_store(), body.id.strip(), body.kind.strip())
+    store = memory._ensure_store()
+    node = body.id.strip()
+    eid = None
+    if node.startswith("entity:"):
+        try:
+            eid = int(node.split(":", 1)[1])
+        except ValueError:
+            eid = None
+    before = (store.get_entity(eid) or {}) if eid is not None else {}
+    res = graph.reclassify_constellation_node(store, node, body.kind.strip())
     if not res.get("ok"):
         raise HTTPException(status_code=400, detail=res.get("error") or "reclassify failed")
+    if eid is not None and before:
+        # An entity node's kind set on the map is the same verdict as the
+        # Orgs & tools tab's kind menu.
+        _kind_decision(store, eid, before, store.get_entity(eid) or {},
+                       via="constellation")
     attention_ledger.outcome(body.id.strip(), "reclassify",
                              detail={"kind": body.kind.strip()},
                              store=memory._ensure_store())
@@ -3774,6 +3787,9 @@ def person_rename(person_id: int, body: PersonName) -> dict:
             status_code=400,
             detail="empty name, unknown person, or that name already belongs "
                    "to someone else alive in People (use Merge for duplicates)")
+    # The user just named a person: a learned "not a person" on that name
+    # would otherwise refuse every later mention of them.
+    store.user_named_person(body.name.strip())
     from app.services import self_profile
     self_profile.reset()   # cached self node may have been renamed
     return {"ok": True, "id": person_id, "name": body.name.strip()}
@@ -3789,6 +3805,7 @@ def person_alias(person_id: int, body: PersonAlias) -> dict:
     if not alias:
         raise HTTPException(status_code=400, detail="alias required")
     store.touch_person(person_id, _time.time(), alias=alias)
+    store.user_named_person(alias)     # the user says it names a person
     return {"ok": True, "id": person_id, "alias": alias}
 
 
@@ -3870,7 +3887,21 @@ def _add_detail_side_effects(store, person_id: int, key: str, value: str,
     elif key in ("org", "team"):
         kind = "org"
         predicate = "works_at" if key == "org" else "member_of"
-        eid = store.resolve_entity(value, kind, ts=now)
+        # The user typed this org/team: user rank (it brings a forgotten
+        # name back). The kind is another matter. "org" here is this code's
+        # default, and a team is often a project's name, so an existing row
+        # is re-kinded only when the user called it an org and nothing
+        # stronger than a model or a rule had kinded it: putting someone on
+        # the Sparrow team never turns the Sparrow project into an org.
+        existing = store.find_entity_exact(value)
+        held = (store.get_entity(existing) or {}).get("kind_source") \
+            if existing else None
+        if existing and (key == "team" or held in ("filing", "user")):
+            eid = store.resolve_entity(value, ts=now)
+        else:
+            eid = store.resolve_entity(value, kind, ts=now,
+                                       kind_source="user",
+                                       kind_confidence=1.0)
         if eid:
             store.add_relation("person", person_id, predicate, "entity", eid,
                                origin="asserted", confidence=1.0, ts=now)
@@ -3981,11 +4012,45 @@ def person_detail_set(person_id: int, body: PersonDetailField) -> dict:
     return {"ok": True, "key": key, "value": value, "fact_id": fid}
 
 
+class PersonForgetBody(BaseModel):
+    # The user says the name is not a person at all (speech noise, a
+    # product), not just someone to forget: this seat never proposes that
+    # exact name as a person again.
+    not_a_person: bool = False
+
+
+class NotAPersonUndo(BaseModel):
+    name: str
+
+
+@router.post("/people/not-a-person/undo")
+def person_not_a_person_undo(body: NotAPersonUndo) -> dict:
+    """Undo "Not a person…": the name may be proposed as a person again.
+    The learned name is stored as a hash, so the caller (the notice the
+    page shows after the click) sends the name back. The deleted node does
+    not return; the next mention proposes the person afresh. No
+    `/people/{person_id}/undo` route exists to shadow this path."""
+    from app.services import decisions
+    store = memory._ensure_store()
+    name = " ".join((body.name or "").split())
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+    unlearned = store.forget_not_person(name)
+    if unlearned:
+        # Nothing was learned under that name: no verdict to take back.
+        decisions.undo(
+            surface="people.not_a_person",
+            subject=f"person_name:{store.entity_tombstone_hash(name)}",
+            via="route", meta={"unlearned": True}, store=store)
+    return {"ok": True, "name": name, "unlearned": unlearned}
+
+
 @router.post("/people/{person_id}/forget")
-def person_forget(person_id: int) -> dict:
+def person_forget(person_id: int, body: PersonForgetBody | None = None) -> dict:
     """Delete a person node (junk from speech noise, or someone the user wants
     gone). Facts they owned are detached, never deleted. The self node is
-    protected — that's what Setup is for."""
+    protected — that's what Setup is for. `not_a_person` also records the
+    exact name in the seat's vocabulary (`Store.record_not_person`)."""
     from app.services import self_profile
     store = memory._ensure_store()
     if store.get_person(person_id) is None:
@@ -3994,7 +4059,26 @@ def person_forget(person_id: int) -> dict:
         raise HTTPException(status_code=400,
                             detail="that's you — edit identity in Setup instead")
     gone = store.delete_person(person_id)
-    return {"ok": True, "deleted": gone.get("canonical_name")}
+    learned = already = False
+    if body is not None and body.not_a_person and gone.get("canonical_name"):
+        name = gone["canonical_name"]
+        learned = store.record_not_person(name, source="correction")
+        # A second "Not a person…" on a name already learned (another node
+        # under the same name) writes nothing, but the name IS learned, so
+        # the page still offers its Undo.
+        if not learned and store.is_seat_nonperson_name(name):
+            learned = already = True
+        # The seat keeps the learned name as a hash; so does the trail.
+        name_hash = store.entity_tombstone_hash(name)
+        _entity_decision(store, "people.not_a_person", "rejected",
+                         subject=f"person_name:{name_hash}",
+                         shown={"name_hash": name_hash},
+                         options=["not a person"],
+                         meta={"learned": bool(learned),
+                               "already_learned": bool(already)})
+    return {"ok": True, "deleted": gone.get("canonical_name"),
+            "not_a_person": bool(body and body.not_a_person),
+            "learned": learned, "already_learned": already}
 
 
 class SoftMergeBody(BaseModel):
@@ -4044,6 +4128,63 @@ class EntityKind(BaseModel):
     kind: str
 
 
+# --- the decision trail for entities ----------------------------------------
+# Every entity route that changes a row records the user's verdict once
+# (`decisions.record`): surface `entities.<verb>`, subject `entity:<id>`,
+# with the row's name and kind as it was shown. A name the user forgot is
+# not kept here either: a forget keeps the kind and the name's hash only.
+def _entity_shown(e: dict | None, **extra) -> dict:
+    e = e or {}
+    return {"name": e.get("name"), "kind": e.get("kind"), **extra}
+
+
+def _entity_decision(store, surface: str, verdict: str, *,
+                     entity_id: int | None = None, subject: str | None = None,
+                     shown: dict | None = None, edit=None, options=None,
+                     meta: dict | None = None, via: str = "route") -> None:
+    from app.services import decisions
+    decisions.record(
+        surface=surface, verdict=verdict,
+        subject=subject or f"entity:{int(entity_id)}", shown=shown,
+        edit=edit, options=options, meta=meta, via=via, store=store)
+
+
+def _forgotten_shown(store, name: str | None, kind: str | None) -> dict:
+    """What a decision keeps of a name the user forgot: its kind and the
+    name's hash (`Store.entity_tombstone_hash`, the tombstone's own key)."""
+    return {"kind": kind, "name_hash": store.entity_tombstone_hash(name)}
+
+
+def _kind_decision(store, entity_id: int, before: dict, after: dict, *,
+                   via: str) -> None:
+    """The user set a row's kind: `edited` when the kind changed (a kind
+    correction), `approved` when they confirmed the kind it had (only its
+    source moved up to theirs), nothing when neither moved."""
+    changed = (before.get("kind") or "") != (after.get("kind") or "")
+    if not changed and (before.get("kind_source") or "") \
+            == (after.get("kind_source") or ""):
+        return
+    _entity_decision(
+        store, "entities.kind", "edited" if changed else "approved",
+        entity_id=entity_id,
+        shown=_entity_shown(before, kind_source=before.get("kind_source")),
+        edit={"kind": after.get("kind")} if changed else None, via=via)
+
+
+def _alias_decision(store, row: dict | None, verdict: str, *,
+                    via: str) -> None:
+    """The user confirmed (`approved`) or rejected a proposed alias."""
+    if not row:
+        return
+    eid = int(row["entity_id"])
+    _entity_decision(
+        store, "entities.alias", verdict, entity_id=eid,
+        shown=_entity_shown(store.get_entity(eid), alias=row.get("alias"),
+                            proposed_by=row.get("source") or None),
+        options=["confirm", "reject"], meta={"alias_id": int(row["id"])},
+        via=via)
+
+
 @router.get("/entities/list")
 def entities_list() -> dict:
     """Every org / project / tool / place in memory, evidence-ranked —
@@ -4058,16 +4199,203 @@ def entities_list() -> dict:
         homes = project_rollup.current(store)
     except Exception:
         homes = {}
+    rows = store.all_entities()
+    by_id = {int(e["id"]): e for e in rows}
+    # Scope (Phase 3): the project a row lives inside, how many visible
+    # rows live inside it, and whether it is a filing target (what the
+    # detail panel offers as a parent).
+    children: dict[int, int] = {}
+    for e in rows:
+        pid = e.get("parent_id")
+        if pid is not None and int(pid) in by_id:
+            children[int(pid)] = children.get(int(pid), 0) + 1
+    try:
+        from app.services import projects
+        filed = projects.filed_target_ids(rows)
+    except Exception:
+        filed = set()
     out = []
-    for e in store.all_entities():
+    for e in rows:
         rel = store.relations_of("entity", e["id"])
         score = entity_score(rel.get("in") or [], e.get("last_seen"), now)
+        pid = e.get("parent_id")
+        parent = by_id.get(int(pid)) if pid is not None else None
         out.append({"id": e["id"], "name": e["name"],
                     "kind": e.get("kind") or "idea",
+                    "kind_source": e.get("kind_source"),
                     "weight": round(score, 1), "last_seen": e.get("last_seen"),
-                    "project": homes.get(int(e["id"]))})
+                    "project": homes.get(int(e["id"])),
+                    "parent": ({"id": int(parent["id"]),
+                                "name": parent["name"],
+                                "source": e.get("parent_source")}
+                               if parent else None),
+                    "children": children.get(int(e["id"]), 0),
+                    "filed": int(e["id"]) in filed})
     out.sort(key=lambda x: (-x["weight"], x["name"].lower()))
     return {"entities": out}
+
+
+class EntityAdd(BaseModel):
+    name: str
+    kind: str
+
+
+class EntityCandidateName(BaseModel):
+    name: str
+
+
+@router.get("/entities/candidates")
+def entity_candidates_list(limit: int = 200) -> dict:
+    """Names extraction has seen but not made into entities yet: each with
+    the kinds proposed for it and how often, where and when it was seen;
+    the newest `limit` (default 200; `pending` says how many wait in all).
+    Declared before `/entities/{entity_id}`, which would read "candidates"
+    as an id. These never render on the Orgs & tools tab."""
+    from app.services import entity_candidates
+
+    store = memory._ensure_store()
+    totals: dict = {}
+    rows = entity_candidates.list_candidates(
+        store, limit=max(0, min(int(limit), 5000)), totals=totals)
+    return {"candidates": rows, "pending": totals.get("pending", len(rows)),
+            "limit": max(0, min(int(limit), 5000)),
+            "enabled": entity_candidates.enabled(),
+            "min_sessions": entity_candidates.min_sessions(),
+            "ttl_days": entity_candidates.ttl_days()}
+
+
+@router.post("/entities/candidates/dismiss")
+def entity_candidate_dismiss(body: EntityCandidateName) -> dict:
+    """The user says a pending name is nothing: its sightings and pooled
+    relations are deleted and the name is tombstoned, so extraction does
+    not bring it back."""
+    from app.services import entity_candidates
+
+    store = memory._ensure_store()
+    res = entity_candidates.dismiss(store, body.name)
+    if not res.get("ok"):
+        err = res.get("error")
+        if err == "is_entity":
+            raise HTTPException(
+                status_code=409,
+                detail="that name is an entity; forget it from its own row")
+        if err == "not_pending":
+            raise HTTPException(status_code=404, detail="no such candidate")
+        raise HTTPException(status_code=400, detail="name is required")
+    # Dismissed means forgotten: the trail keeps the hash, not the name, and
+    # the kind the tombstone keeps (the vote's).
+    name_hash = store.entity_tombstone_hash(body.name)
+    kind = (store.entity_tombstone(body.name) or {}).get("kind")
+    _entity_decision(store, "entities.forget", "dismissed",
+                     subject=f"candidate:{name_hash}",
+                     shown=_forgotten_shown(store, body.name, kind),
+                     options=["dismiss"],
+                     meta={"candidate": True,
+                           "sightings": res.get("dismissed")})
+    return res
+
+
+@router.post("/entities")
+def entity_add(body: EntityAdd) -> dict:
+    """Add an org / project / tool / place by hand. The user is the highest
+    rank there is: the row is made at once with the kind they chose, a name
+    they forgot earlier comes back, a hidden row under the name is shown
+    again, and whatever extraction had pending under the name is adopted."""
+    from app.services import entity_candidates
+
+    store = memory._ensure_store()
+    name = " ".join((body.name or "").split())
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+    if len(name) > 200:
+        raise HTTPException(status_code=400, detail="name is too long")
+    if store.canonical_entity_kind(body.kind) is None:
+        raise HTTPException(status_code=400, detail="invalid kind")
+
+    def state(eid) -> tuple | None:
+        row = store.get_entity(int(eid)) if eid else None
+        return ((row.get("kind"), row.get("kind_source"),
+                 store.entity_is_hidden(int(eid))) if row else None)
+    was = state(store.find_entity_exact(name))
+    forgotten = store.is_entity_tombstoned(name)
+    res = entity_candidates.add_manual(store, name, body.kind)
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail="could not add that name")
+    e = store.get_entity(int(res["id"])) or {}
+    out = {"ok": True, "id": int(res["id"]), "created": bool(res["created"]),
+           "name": e.get("name") or name,
+           "kind": e.get("kind"), "kind_source": e.get("kind_source")}
+    if not res["created"] and not forgotten and state(res["id"]) == was:
+        # Added again as it already is (same kind, already the user's,
+        # visible): nothing changed, nothing is recorded.
+        return {**out, "unchanged": True}
+    _entity_decision(store, "entities.add", "approved",
+                     entity_id=int(res["id"]),
+                     shown={"name": name, "kind": body.kind},
+                     meta={"created": bool(res["created"]),
+                           "kind": e.get("kind")})
+    return out
+
+
+class EntityRepairUndo(BaseModel):
+    run_id: str | None = None
+    change_id: int | None = None
+
+
+@router.get("/entities/repair/plan")
+def entity_repair_plan(note_only: str | None = None) -> dict:
+    """The repair diff for this seat, computed now and written nowhere
+    (`entity_repair.plan`): what the reviewed path would apply and which
+    part the automatic path would apply on its own."""
+    from app.services import entity_repair
+    store = memory._ensure_store()
+    return entity_repair.plan(store, note_only=note_only)
+
+
+@router.get("/entities/repair/runs")
+def entity_repair_runs(run_id: str | None = None) -> dict:
+    """Repair runs, newest first; with `run_id`, that run's change log
+    (each field with its value before and after)."""
+    store = memory._ensure_store()
+    out: dict = {"runs": store.entity_repair_runs(limit=50)}
+    if run_id:
+        out["changes"] = store.entity_repair_log(run_id=run_id)
+    return out
+
+
+@router.post("/entities/repair/undo")
+def entity_repair_undo(body: EntityRepairUndo) -> dict:
+    """Undo one repair run (`run_id`) or one change (`change_id`). A field
+    the user changed since stays as the user left it and is listed under
+    `refused`; so is a merge or a deletion (restore those from the run's
+    backup)."""
+    from app.services import entity_repair
+    if not body.run_id and body.change_id is None:
+        raise HTTPException(status_code=400,
+                            detail="run_id or change_id is required")
+    store = memory._ensure_store()
+    res = entity_repair.undo(store, run_id=body.run_id,
+                             change_id=body.change_id)
+    if res.get("busy"):
+        raise HTTPException(status_code=409, detail=res["error"])
+    if not res["undone"] and not res["refused"]:
+        raise HTTPException(status_code=404, detail="nothing to undo there")
+    entity_repair.record_undo(store, run_id=body.run_id,
+                              change_id=body.change_id, result=res,
+                              via="route")
+    return {"ok": True, **res}
+
+
+@router.get("/entities/metrics")
+def entity_metrics_view(days: float = 7.0) -> dict:
+    """This seat's entity metrics over the last `days` (0: all time): the
+    forget rate, the kind-correction rate, the share of rows never seen
+    twice, and candidates pending / promoted / expired / dismissed
+    (`entity_metrics.compute`). Declared before `/entities/{entity_id}`,
+    which would read "metrics" as an id."""
+    from app.services import entity_metrics
+    store = memory._ensure_store()
+    return entity_metrics.compute(store, days=max(0.0, float(days)))
 
 
 @router.get("/entities/{entity_id}")
@@ -4100,17 +4428,36 @@ def entity_detail(entity_id: int) -> dict:
               for pid in dict.fromkeys(person_ids) if pid in pmap]
     mined = entity_details.mine(e["name"], e.get("aliases") or [], facts)
     details = entity_details.merge(mined, store.entity_attrs(entity_id))
-    return {**e, "facts": facts[:30], "people": people[:8], "details": details}
+    # Scope: the project it is part of, and what is part of it.
+    visible = {int(x["id"]): x for x in store.all_entities()}
+    pid = e.get("parent_id")
+    parent = visible.get(int(pid)) if pid is not None else None
+    kids = [{"id": int(x["id"]), "name": x["name"], "kind": x.get("kind")}
+            for x in visible.values() if x.get("parent_id") is not None
+            and int(x["parent_id"]) == int(entity_id)]
+    kids.sort(key=lambda x: x["name"].lower())
+    return {**e, "facts": facts[:30], "people": people[:8], "details": details,
+            "parent": ({"id": int(parent["id"]), "name": parent["name"],
+                        "source": e.get("parent_source")} if parent else None),
+            "children": kids}
 
 
 @router.post("/entities/{entity_id}/rename")
 def entity_rename(entity_id: int, body: PersonName) -> dict:
     store = memory._ensure_store()
+    before = store.get_entity(entity_id)
+    if before is not None and (body.name or "").strip() == before.get("name"):
+        # The name it already has: nothing changes, nothing is recorded.
+        return {"ok": True, "id": entity_id, "name": before.get("name"),
+                "unchanged": True}
     if not store.rename_entity(entity_id, body.name):
         raise HTTPException(
             status_code=400,
             detail="empty name, unknown entity, or the name already belongs "
                    "to another entity (that would be a merge)")
+    _entity_decision(store, "entities.rename", "edited", entity_id=entity_id,
+                     shown=_entity_shown(before),
+                     edit={"name": body.name.strip()})
     return {"ok": True, "id": entity_id, "name": body.name.strip()}
 
 
@@ -4118,12 +4465,28 @@ def entity_rename(entity_id: int, body: PersonName) -> dict:
 def entity_alias(entity_id: int, body: PersonAlias) -> dict:
     import time as _time
     store = memory._ensure_store()
-    if store.get_entity(entity_id) is None:
+    e = store.get_entity(entity_id)
+    if e is None:
         raise HTTPException(status_code=404, detail="no such entity")
     alias = (body.alias or "").strip()
     if not alias:
         raise HTTPException(status_code=400, detail="alias required")
-    store.touch_entity(entity_id, _time.time(), alias=alias)
+    known = {(e.get("name") or "").lower()} | {
+        str(a).lower() for a in e.get("aliases") or ()}
+    new = alias.lower() not in known
+    if new:
+        store.touch_entity(entity_id, _time.time(), alias=alias)
+    # The user just said this name belongs to a live entity, so an older
+    # "forget" of the same name no longer stands.
+    lifted = store.clear_entity_tombstone(alias)
+    if not (new or lifted):
+        # A name the row already answers to: nothing changed, nothing is
+        # recorded.
+        return {"ok": True, "id": entity_id, "alias": alias,
+                "unchanged": True}
+    _entity_decision(store, "entities.alias", "edited", entity_id=entity_id,
+                     shown=_entity_shown(store.get_entity(entity_id)),
+                     edit={"alias": alias})
     return {"ok": True, "id": entity_id, "alias": alias}
 
 
@@ -4139,8 +4502,10 @@ def entity_alias_proposals(limit: int = 200) -> dict:
 @router.post("/entities/aliases/{alias_id}/confirm")
 def entity_alias_confirm(alias_id: int) -> dict:
     store = memory._ensure_store()
-    if not store.confirm_entity_alias(alias_id, True):
+    row = store.get_entity_alias(alias_id)
+    if not store.confirm_entity_alias(alias_id, True, by="user"):
         raise HTTPException(status_code=404, detail="no such alias")
+    _alias_decision(store, row, "approved", via="route")
     return {"ok": True, "id": alias_id, "confirmed": True}
 
 
@@ -4149,8 +4514,10 @@ def entity_alias_reject(alias_id: int) -> dict:
     """Reject (delete) a proposal — it can re-propose later only by earning
     fresh recurrence evidence."""
     store = memory._ensure_store()
+    row = store.get_entity_alias(alias_id)
     if not store.delete_entity_alias(alias_id):
         raise HTTPException(status_code=404, detail="no such alias")
+    _alias_decision(store, row, "rejected", via="route")
     return {"ok": True, "id": alias_id, "deleted": True}
 
 
@@ -4159,9 +4526,84 @@ def entity_kind(entity_id: int, body: EntityKind) -> dict:
     store = memory._ensure_store()
     if store.get_entity(entity_id) is None:
         raise HTTPException(status_code=404, detail="no such entity")
-    if not store.set_entity_kind(entity_id, body.kind):
+    if store.canonical_entity_kind(body.kind) is None:
         raise HTTPException(status_code=400, detail="invalid kind")
-    return {"ok": True, "id": entity_id, "kind": (body.kind or "").strip().lower()}
+    before = store.get_entity(entity_id) or {}
+    wrote = store.set_entity_kind(entity_id, body.kind, source="user")
+    now_e = store.get_entity(entity_id) or {}
+    if not wrote:
+        # A valid kind the store would not write: the kind on the row was
+        # set by something that outranks this request. Say so, with what
+        # is stored, rather than echoing the request back as if it took.
+        raise HTTPException(status_code=409, detail={
+            "refused": True, "id": entity_id,
+            "kind": now_e.get("kind"),
+            "kind_source": now_e.get("kind_source"),
+            "reason": "the kind was set by a higher-ranked source"})
+    _kind_decision(store, entity_id, before, now_e, via="route")
+    return {"ok": True, "id": entity_id, "kind": now_e.get("kind"),
+            "kind_source": now_e.get("kind_source")}
+
+
+class EntityParent(BaseModel):
+    parent_id: int | None = None
+
+
+@router.post("/entities/{entity_id}/parent")
+def entity_parent(entity_id: int, body: EntityParent) -> dict:
+    """The user puts an entity inside a project ("Part of …"), moves it to
+    another, or takes it out (`parent_id: null`). The user's word stands:
+    the scope rule never changes a parent the user set or removed. The
+    parent must be a project row or a name the user files under; orgs,
+    tools and places are never part of one."""
+    from app.services import projects
+    from app.services.name_quality import normalize_entity_kind
+
+    store = memory._ensure_store()
+    e = store.get_entity(entity_id)
+    if e is None:
+        raise HTTPException(status_code=404, detail="no such entity")
+    old = store.get_entity(int(e["parent_id"])) \
+        if e.get("parent_id") is not None else None
+    pid = body.parent_id
+    if pid is not None:
+        if normalize_entity_kind(e.get("kind")) in store.UNSCOPED_KINDS:
+            raise HTTPException(
+                status_code=400,
+                detail="orgs, tools and places are never part of a project")
+        visible = {int(x["id"]): x for x in store.all_entities()}
+        p = visible.get(int(pid))
+        if p is None:
+            raise HTTPException(status_code=404, detail="no such project")
+        try:
+            filed = projects.filed_target_ids([p])
+        except Exception:
+            filed = set()
+        if (p.get("kind") or "") != "project" and int(pid) not in filed:
+            raise HTTPException(
+                status_code=400,
+                detail="the parent must be a project or a name you file under")
+    if not store.set_entity_parent(entity_id, pid, source="user"):
+        raise HTTPException(
+            status_code=409,
+            detail="that would put it inside itself")
+    now_e = store.get_entity(entity_id) or {}
+    parent = store.get_entity(int(now_e["parent_id"])) \
+        if now_e.get("parent_id") is not None else None
+
+    def ref(p):
+        return {"id": int(p["id"]), "name": p.get("name")} if p else None
+    if (e.get("parent_id"), e.get("parent_source")) \
+            != (now_e.get("parent_id"), now_e.get("parent_source")):
+        # Setting the parent the user had already set changes nothing.
+        _entity_decision(store, "entities.parent", "edited",
+                         entity_id=entity_id,
+                         shown=_entity_shown(e, parent=ref(old)),
+                         edit={"parent": ref(parent)})
+    return {"ok": True, "id": entity_id,
+            "parent": ({"id": int(parent["id"]), "name": parent["name"]}
+                       if parent else None),
+            "parent_source": now_e.get("parent_source")}
 
 
 @router.post("/entities/{entity_id}/note")
@@ -4194,6 +4636,9 @@ def entity_note(entity_id: int, body: PersonNote) -> dict:
         memory.index_fact(fid, "claim", text, now)
     except Exception:
         pass
+    # The note itself is the fact; the trail points at it.
+    _entity_decision(store, "entities.note", "edited", entity_id=entity_id,
+                     shown=_entity_shown(e), meta={"fact_id": fid})
     return {"ok": True, "fact_id": fid, "text": text}
 
 
@@ -4219,9 +4664,17 @@ def entity_detail_set(entity_id: int, body: PersonDetailField) -> dict:
     now = _time.time()
     value = (body.value or "").strip()
     if not value:
+        if key not in (store.entity_attrs(entity_id) or {}):
+            # Nothing was set: clearing it changes nothing and records
+            # nothing.
+            return {"ok": True, "key": key, "cleared": True,
+                    "unchanged": True}
         old_fid = store.clear_entity_attr(entity_id, key)
         if old_fid:
             store.archive_fact(old_fid, now)
+        _entity_decision(store, "entities.detail", "edited",
+                         entity_id=entity_id, shown=_entity_shown(e, key=key),
+                         edit={key: None})
         return {"ok": True, "key": key, "cleared": True}
     text = entity_details.claim_text(key, e["name"], value)
     fid = store.add_claim(text, confidence=1.0, extracted_at=now)
@@ -4235,16 +4688,65 @@ def entity_detail_set(entity_id: int, body: PersonDetailField) -> dict:
         memory.index_fact(fid, "claim", text, now)
     except Exception:
         pass
+    _entity_decision(store, "entities.detail", "edited", entity_id=entity_id,
+                     shown=_entity_shown(e, key=key), edit={key: value},
+                     meta={"fact_id": fid})
     return {"ok": True, "key": key, "value": value, "fact_id": fid}
+
+
+class EntityMerge(BaseModel):
+    into: int
+
+
+@router.post("/entities/{entity_id}/merge")
+def entity_merge(entity_id: int, body: EntityMerge) -> dict:
+    """The user says this row is the same thing as `into`: everything that
+    pointed at it (facts, links, beliefs, details, aliases, children) moves
+    to `into`, its names become `into`'s confirmed aliases (so they keep
+    resolving there), and the row goes. Audited in `entity_merges`."""
+    store = memory._ensure_store()
+    absorbed = store.get_entity(entity_id)
+    into = store.get_entity(body.into)
+    if absorbed is None or into is None:
+        raise HTTPException(status_code=404, detail="no such entity")
+    if int(entity_id) == int(body.into):
+        raise HTTPException(status_code=400,
+                            detail="cannot merge an entity into itself")
+    res = store.merge_entities(int(body.into), int(entity_id),
+                               reason="user merge", actor="user")
+    if not res:
+        raise HTTPException(status_code=409, detail="the merge was refused")
+    _entity_decision(store, "entities.merge", "approved", entity_id=entity_id,
+                     shown=_entity_shown(absorbed, into={
+                         "id": int(body.into), "name": into.get("name"),
+                         "kind": into.get("kind")}),
+                     meta={"merge_id": res.get("merge_id")})
+    survivor = store.get_entity(int(body.into)) or {}
+    return {"ok": True, "merge_id": res["merge_id"],
+            "survivor": {"id": int(body.into), "name": survivor.get("name"),
+                         "kind": survivor.get("kind"),
+                         "aliases": survivor.get("aliases") or []},
+            "absorbed": {"id": int(entity_id), "name": res["absorbed_name"]},
+            "counts": res["counts"]}
 
 
 @router.post("/entities/{entity_id}/forget")
 def entity_forget(entity_id: int) -> dict:
-    """Delete an entity node (mis-extractions, noise). Facts stay, detached."""
+    """Delete an entity node (mis-extractions, noise). Facts stay, detached.
+
+    Forgetting is lasting: the name and its aliases are tombstoned, so the
+    next extraction that sees the same name does not mint it again. Only the
+    user brings it back (manual add, an accepted filing, a person's org)."""
     store = memory._ensure_store()
-    if store.get_entity(entity_id) is None:
+    e = store.get_entity(entity_id)
+    if e is None:
         raise HTTPException(status_code=404, detail="no such entity")
-    gone = store.delete_entity(entity_id)
+    gone = store.delete_entity(entity_id, tombstone=True, reason="forget",
+                               actor="user")
+    _entity_decision(store, "entities.forget", "dismissed",
+                     entity_id=entity_id,
+                     shown=_forgotten_shown(store, e.get("name"), e.get("kind")),
+                     options=["forget"])
     return {"ok": True, "deleted": gone.get("canonical_name")}
 
 
@@ -4318,9 +4820,10 @@ def work_add(body: WorkAdd) -> dict:
     owner = (body.owner or "").strip()
     pid = None
     if owner:
+        # The user named the owner: a person, whatever was learned before.
         pid = (self_profile.self_person_id(store)
                if self_profile.is_self_name(owner)
-               else store.resolve_person(owner, ts=now))
+               else store.resolve_person(owner, ts=now, by_user=True))
     if kind == "task":
         fid = store.add_task(text, owner_person_id=pid, due=due,
                              confidence=1.0, extracted_at=now)
@@ -7148,6 +7651,12 @@ def speakers_enroll(body: EnrollIn) -> dict:
             return {"ok": False, "error": f"WAV must be {settings.audio.sample_rate} Hz"}
         pcm = np.frombuffer(wf.readframes(wf.getnframes()), dtype="<i2")
     spk.enroll(body.name, pcm.astype(np.float32) / 32768.0, settings.audio.sample_rate)
+    # The user named a person's voice: a learned "not a person" on the
+    # name would refuse every turn they speak.
+    try:
+        memory._ensure_store().user_named_person(body.name)
+    except Exception as exc:
+        print(f"[speakers] not-a-person lift skipped ({exc}).")
     return {"ok": True, "enrolled": spk.enrolled_names()}
 
 

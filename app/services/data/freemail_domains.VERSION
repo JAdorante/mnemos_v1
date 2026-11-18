@@ -1,0 +1,13 @@
+source: https://github.com/microlinkhq/free-email-domains (npm package free-email-domains)
+version: 1.16.6
+tarball: https://registry.npmjs.org/free-email-domains/-/free-email-domains-1.16.6.tgz
+tarball sha1: a8e19ef52d32da59a953f61ddadace2b6a87632e
+file: package/domains.json, verbatim (30,768 domains)
+file sha256: dd381cc128cc07635f9891772398a8f5c7b10ea0f9f570c777d81dfb498e0296
+license: MIT (freemail_domains.LICENSE, the package's LICENSE.md verbatim)
+vendored: 2026-11-16
+read by: app/services/free_mail.py, which never treats a school or government
+  domain (.edu, .edu.<cc>, .ac.<cc>, .gov, .gov.<cc>, .go.<cc>, .gob.<cc>,
+  .gouv.<cc>, .govt.<cc>, .mil, .k12.*, .sch.<cc>) as free mail even when the
+  list has it (108 entries in this version)
+refresh: replace the json and update this file; nothing fetches it at run time

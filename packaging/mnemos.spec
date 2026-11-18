@@ -70,6 +70,10 @@ datas = [
     # missing entry here fails at first browser URL parse on the tester's
     # machine, not at build time.
     (str(ROOT / "app" / "perception" / "data"), "app/perception/data"),
+    # The vendored free-mail list (services/free_mail.py). Missing, the build
+    # falls back to a handful of built-in hosts and every other free-mail
+    # address reads as an employer.
+    (str(ROOT / "app" / "services" / "data"), "app/services/data"),
     # Records layer: claim kind JSON Schemas. claim_schemas reads them off
     # disk; missing, every claim build fails validation at first use.
     (str(ROOT / "app" / "schemas"), "app/schemas"),

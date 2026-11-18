@@ -23,6 +23,7 @@ ModelRouter can route this boundary without touching the extractor.
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -43,10 +44,39 @@ EXTRACTOR_MODEL = os.environ.get("QUILL_EXTRACT_MODEL", "claude-haiku-4-5")
 # Stamped on every fact_candidates row (plan 1.1) so goldens / replay can pin
 # which prompt+schema produced the LLM output. Bump when _SYSTEM or _SCHEMA
 # changes in a way that should invalidate prior candidates.
+# v4 / facts-schema-v5: the entity kinds (org, project, tool, place, topic,
+# label) with a definition each, and an optional `parent` (entity model,
+# Phase 2). QUILL_EXTRACT_ENTITY_V2=0 puts back the v3 prompt, the
+# facts-schema-v4 entity enum and both of their stamps.
 EXTRACT_PROMPT_VERSION = os.environ.get(
-    "QUILL_EXTRACT_PROMPT_VERSION", "extract-v3")
+    "QUILL_EXTRACT_PROMPT_VERSION", "extract-v4")
 EXTRACT_SCHEMA_VERSION = os.environ.get(
-    "QUILL_EXTRACT_SCHEMA_VERSION", "facts-schema-v4")
+    "QUILL_EXTRACT_SCHEMA_VERSION", "facts-schema-v5")
+_LEGACY_PROMPT_VERSION = "extract-v3"
+_LEGACY_SCHEMA_VERSION = "facts-schema-v4"
+
+
+def entity_v2_enabled() -> bool:
+    """The entity-kind prompt and schema of the entity model (Phase 2)? On
+    by default. QUILL_EXTRACT_ENTITY_V2=0 restores the earlier prompt text,
+    entity enum and version stamps exactly: the hosted LoRA seat was trained
+    on that prompt. Kinds from either vocabulary are stored the same way
+    (`name_quality.normalize_entity_kind`)."""
+    return os.environ.get("QUILL_EXTRACT_ENTITY_V2", "1") not in ("0", "false", "False")
+
+
+def _base_prompt_version() -> str:
+    if entity_v2_enabled():
+        return EXTRACT_PROMPT_VERSION
+    # An operator-pinned stamp still wins; otherwise the stamp the earlier
+    # prompt carried.
+    return os.environ.get("QUILL_EXTRACT_PROMPT_VERSION", _LEGACY_PROMPT_VERSION)
+
+
+def _base_schema_version() -> str:
+    if entity_v2_enabled():
+        return EXTRACT_SCHEMA_VERSION
+    return os.environ.get("QUILL_EXTRACT_SCHEMA_VERSION", _LEGACY_SCHEMA_VERSION)
 
 # LLM output arrays written to fact_candidates (kind → facts dict key).
 # "idea" only ever arrives when QUILL_EXTRACT_IDEAS is on (schema-gated);
@@ -138,7 +168,7 @@ def effective_prompt_version() -> str:
     context-on and context-off stamp the same string for ten days — the exact
     ambiguity the stamp exists to prevent, and no test noticed because the
     tests pinned the literals too."""
-    v = EXTRACT_PROMPT_VERSION
+    v = _base_prompt_version()
     if _extract_context_enabled():
         return f"{v}-ctx"
     return v
@@ -146,8 +176,10 @@ def effective_prompt_version() -> str:
 
 def effective_schema_version() -> str:
     """Schema version actually stamped: the ideas array is a schema change
-    (facts-schema-v4 when enabled)."""
-    v = EXTRACT_SCHEMA_VERSION
+    (facts-schema-v4 when enabled, and every later version has it), and so
+    is the entity-kind schema (facts-schema-v5; facts-schema-v4 again with
+    QUILL_EXTRACT_ENTITY_V2=0)."""
+    v = _base_schema_version()
     if _extract_ideas_enabled() and v == "facts-schema-v3":
         return "facts-schema-v4"
     return v
@@ -200,7 +232,9 @@ _ASSERTION_PROP = {
     "auto-accepted.",
 }
 
-_SCHEMA = {
+# The schema before the entity model (facts-schema-v4); `_SCHEMA` below is
+# this with the entity kinds of Phase 2.
+_SCHEMA_V1 = {
     "type": "object",
     "properties": {
         "tasks": {
@@ -377,7 +411,117 @@ _SCHEMA = {
     "additionalProperties": False,
 }
 
-_SYSTEM = (
+# Entity model, Phase 2: the kinds the model may propose, each defined in
+# the prompt (`_ENTITY_RULES`). `topic` is stored as `idea`; `label` is a name
+# that only means something inside one project. `parent` is the project the
+# text says the name belongs to. What a name finally is, is decided by the
+# vote over all its sightings (services/entity_typing.py), not by one answer.
+ENTITY_KINDS_V2 = ("org", "project", "tool", "place", "topic", "label")
+_ENTITIES_V2 = {
+    "type": "array",
+    "description": "Named non-person things referenced: organizations, "
+    "projects, tools, places, named topics, and labels. NOT people, NOT "
+    "generic noun phrases, NOT values (prices, dates, numbers). Only ones "
+    "explicitly named.",
+    "items": {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": f"The canonical name ('{_EX['company']}', '{_EX['project']}')."},
+            "kind": {"type": "string", "enum": list(ENTITY_KINDS_V2)},
+            "parent": {"type": "string",
+                       "description": "The named project this belongs to, "
+                       "when the text says so (a milestone of a project, a "
+                       "codename inside it). Empty or omitted otherwise."},
+            "confidence": {"type": "number"},
+            "source_span": {"type": "string", "description": "Verbatim substring this came from."},
+        },
+        "required": ["name", "kind", "confidence", "source_span"],
+        "additionalProperties": False,
+    },
+}
+_SCHEMA = copy.deepcopy(_SCHEMA_V1)
+_SCHEMA["properties"]["entities"] = _ENTITIES_V2
+# The earlier schema's example names are real names on some seats (a
+# contact's first name, the product's own name as a meeting topic). The
+# entity-model schema carries invented ones instead; `_SCHEMA_V1` keeps its
+# text byte for byte for the kill switch.
+_EXAMPLES_V2 = (
+    (("commitments",), "description",
+     "('I have a meeting with Andy at 8:30', 'make note of my call with Sam')",
+     "('I have a meeting with Odalys at 8:30', 'make note of my call with "
+     "Teodor')"),
+    (("commitments", "text"), "description", "'Send Sarah the deck'",
+     "'Send Odalys the deck'"),
+    (("commitments", "topic"), "description", "('Sparrow', 'pricing')",
+     "('Nimbus', 'pricing')"),
+    (("claims", "speaker_is_source"), "description", "('David said it's $49')",
+     "('Teodor said it's $49')"),
+)
+for _path, _field, _old, _new in _EXAMPLES_V2:
+    _node = _SCHEMA["properties"][_path[0]]
+    if len(_path) > 1:
+        _node = _node["items"]["properties"][_path[1]]
+    assert _old in _node[_field], _old
+    _node[_field] = _node[_field].replace(_old, _new)
+del _path, _field, _old, _new, _node
+
+
+def base_schema() -> dict:
+    """The extraction schema before the eval-gated additions: the entity-kind
+    schema, or the earlier one with QUILL_EXTRACT_ENTITY_V2=0. The screen
+    extractors use this too."""
+    return _SCHEMA if entity_v2_enabled() else _SCHEMA_V1
+
+
+# The one sentence about entities in the earlier prompt (extract-v3). Kept
+# verbatim: QUILL_EXTRACT_ENTITY_V2=0 must give back that exact prompt.
+_ENTITY_RULES_V1 = (
+    "- An ENTITY is a named non-person thing: a company/org, a project/product, or "
+    "a place. A RELATION is an explicitly stated link between two named things "
+    "(a person and an org, a project and a company). Only emit a relation when it "
+    "is clearly stated — never infer an affiliation from mere co-mention.\n"
+)
+# The kinds, one line each, with what is not an entity. Every example is
+# invented: a prompt must not carry one seat's names (a real milestone id,
+# a junk phrase from someone's store) to every other seat.
+ENTITY_KIND_LINES = (
+    "  - org: a company, institution, agency, team or other organization.\n"
+    "  - project: a named effort with a goal and an owner that someone is "
+    "working on. Not a topic of conversation, and not a milestone, phase or "
+    "option inside a project.\n"
+    "  - tool: a product, app, service, library, model or platform that "
+    "someone uses or builds with.\n"
+    "  - place: a named location (a city, a venue, a building, a region).\n"
+    "  - topic: a named subject, field, standard or concept being "
+    "discussed that nobody owns as work (a regulation, a market, a method).\n"
+    "  - label: a short name that only means something inside one project: "
+    "a milestone or phase id ('Wave 4', 'Sprint 9'), a codename, an option "
+    "letter or row id ('option F', 'row 27'), a ticket number. A milestone "
+    "id is a label, not a project. Set `parent` to the project when the "
+    "text names it.\n"
+    "  Not entities: a generic noun phrase ('the pet groomers', 'a bowling "
+    "alley', 'commercial beekeeping'), and values (a price, a date, a "
+    "number); those stay in the fact text. When unsure whether something "
+    "is an entity, or which kind it is, leave it out.\n"
+)
+_ENTITY_RULES = (
+    "- An ENTITY is a named non-person thing, of one of these kinds:\n"
+    + ENTITY_KIND_LINES
+    + "- A RELATION is an explicitly stated link between two named things "
+    "(a person and an org, a project and a company). Only emit a relation when it "
+    "is clearly stated — never infer an affiliation from mere co-mention.\n"
+)
+
+
+def entity_kind_rules() -> str:
+    """The entity-kind definitions for a prompt of another extractor that
+    shares the schema (screen text), or "" with QUILL_EXTRACT_ENTITY_V2=0."""
+    if not entity_v2_enabled():
+        return ""
+    return "Entity kinds:\n" + ENTITY_KIND_LINES
+
+
+_SYSTEM_V1 = (
     "You are Sparrow's fact extractor. You receive a short passage of transcribed "
     "speech (one conversational turn) labeled with who spoke, and pull out the "
     "structured facts it contains: tasks, commitments, notable claims, and open "
@@ -406,10 +550,7 @@ _SYSTEM = (
     "('I'll send…', 'my task'). Do NOT use 'me' for a different person mentioned "
     "in the turn — use their name. If the label is 'unknown speaker', still use "
     "'me' for first-person self-reference in the speech.\n"
-    "- An ENTITY is a named non-person thing: a company/org, a project/product, or "
-    "a place. A RELATION is an explicitly stated link between two named things "
-    "(a person and an org, a project and a company). Only emit a relation when it "
-    "is clearly stated — never infer an affiliation from mere co-mention.\n"
+    + _ENTITY_RULES_V1 +
     "- `source_span` MUST be a verbatim substring of the spoken text AFTER the "
     "`]: ` label — never include the `[Speaker]:` prefix in source_span.\n"
     "- Prefer precision over recall: when in doubt, leave it out.\n"
@@ -443,6 +584,14 @@ _SYSTEM = (
     "and claims the note points at — but `source_span` MUST still be a "
     "verbatim substring of the spoken transcript, never of the note text."
 )
+# The prompt of the entity model: the same, with the entity kinds defined.
+_SYSTEM = _SYSTEM_V1.replace(_ENTITY_RULES_V1, _ENTITY_RULES)
+
+
+def base_system() -> str:
+    """The extraction system prompt before per-call blocks: the entity-kind
+    prompt, or the earlier one (byte for byte) with QUILL_EXTRACT_ENTITY_V2=0."""
+    return _SYSTEM if entity_v2_enabled() else _SYSTEM_V1
 
 # WS1 (attribution stage, rides QUILL_EXTRACT_CONTEXT): transcript-supported
 # project attribution. The context block is a hint; the relation must still
@@ -509,12 +658,11 @@ _IDEAS_SCHEMA = {
 def _schema() -> dict:
     """The JSON schema for this call, honoring the eval-gated flags: ideas
     (facts-schema-v4) and the about_project relation (context builds).
-    Flags off → byte-identical to _SCHEMA."""
+    Flags off → byte-identical to `base_schema()`."""
     if not (_extract_ideas_enabled() or _extract_context_enabled()
             or _extract_section_hint_enabled()):
-        return _SCHEMA
-    import copy
-    schema = copy.deepcopy(_SCHEMA)
+        return base_schema()
+    schema = copy.deepcopy(base_schema())
     if _extract_section_hint_enabled():
         items = schema["properties"]["claims"]["items"]
         items["properties"]["section_hint"] = copy.deepcopy(_SECTION_HINT_PROP)
@@ -561,7 +709,7 @@ class Extractor:
             label = (speaker or "").strip() or "unknown speaker"
             labeled = f"[{label}]: {text.strip()}"
 
-        system = _SYSTEM
+        system = base_system()
         # Local clock so "Friday" / "tomorrow" resolve to absolute dues the
         # ranking / fulfillment layers can actually use (ISO only).
         try:
@@ -827,6 +975,26 @@ class Extractor:
     _STRUCTURAL_PREDICATES = frozenset({"works_at", "part_of", "member_of",
                                         "located_in"})
 
+    @staticmethod
+    def _entity_mint_gate(*, event_source: str = "", window: str = "",
+                          text: str = "") -> tuple[bool, str]:
+        """(mint_ok, source_class) — may this event mint a NEW entity?
+
+        One rule for every extractor path that can create an entity row
+        (model entities, relation endpoints, claim subjects): the source
+        class must allow `knowledge_entities`, and the event must not be
+        screen OCR. Screen OCR is seen, not said: it may BIND existing
+        entities but never mint (audit 2026-11-11: inbox sender lists became
+        places, misreads like "notes.example.us" became nodes). Same rule
+        as identifier_rollup. When false the caller binds existing rows only.
+        """
+        from app.services import kg_beliefs
+        mint_ok, source_class = kg_beliefs.allow_entity_mint(
+            event_source=event_source, window=window, text=text)
+        if (event_source or "").lower().startswith("desktop.screen"):
+            mint_ok = False
+        return mint_ok, source_class
+
     def _persist_entities(self, facts: dict[str, Any], anchor: int | None,
                           now: float, *, event_source: str = "",
                           window: str = "", text: str = "",
@@ -846,15 +1014,8 @@ class Extractor:
         store = self._ensure_store()
         ne = nr = 0
         from app.services.resolution import resolver
-        from app.services import kg_beliefs
-        mint_ok, source_class = kg_beliefs.allow_entity_mint(
+        mint_ok, source_class = self._entity_mint_gate(
             event_source=event_source, window=window, text=text)
-        # Screen OCR is seen, not said: it may BIND existing entities but
-        # never mint (audit 2026-11-11: inbox sender lists became places,
-        # misreads like "sparrow.raventry.us" became nodes). Same rule as
-        # identifier_rollup.
-        if (event_source or "").lower().startswith("desktop.screen"):
-            mint_ok = False
         # Audit 2026-11-11: four uploaded market briefs asserted ~55 bogus
         # structural edges and projects (acquirer part_of acquiree, "EU CBAM"
         # as a project). A document can name things and say what it is
@@ -865,27 +1026,39 @@ class Extractor:
             rel_ok = bool(_pol.relationship_evidence) or not event_source
         except Exception:
             rel_ok = True
-        doc_class = source_class in ("user_authored_document", "shared_document")
+        # Candidates before nodes (entity model, Phase 1): a name the model
+        # read is a sighting in the ledger first. It binds to a row that
+        # exists; a new name waits until it recurs, unless the user typed
+        # it (services/entity_candidates.py). Its kind is a vote over its
+        # sightings (services/entity_typing.py), where a model "project" is
+        # never a project, from a document or anywhere else: only a filing,
+        # the user or the project registry make one.
+        from app.services import entity_candidates as _cand
+        _ctx_box: list = []
+
+        def _ctx():
+            # Built on first use: an event with no entity or relation never
+            # reads its anchor row.
+            if not _ctx_box:
+                _ctx_box.append(_cand.context(
+                    store, anchor=anchor, now=now, event_source=event_source,
+                    source_class=source_class, mint_ok=mint_ok,
+                    text=text or turn_text))
+            return _ctx_box[0]
 
         for e in facts.get("entities", []):
             name = (e.get("name") or "").strip()
             if not name:
                 continue
-            kind = e.get("kind")
-            if doc_class and (kind or "").strip().lower() == "project":
-                kind = "idea"
-            if mint_ok:
-                resolver.resolve_entity(name, kind, ts=now)
+            seen = _cand.observe(
+                store, resolver, name, e.get("kind"), ctx=_ctx(),
+                confidence=e.get("confidence"), span=e.get("source_span"),
+                parent=e.get("parent"))
+            # A mint-eligible source counts every name it read (0 for a
+            # rejected, forgotten or still-pending name is simply not an
+            # entity); a bind-only one counts what it bound.
+            if mint_ok or seen.entity_id:
                 ne += 1
-            else:
-                # Bind-only: still touch last_seen if the org/tool already exists.
-                eid = store.find_entity_exact(name)
-                if eid:
-                    try:
-                        store.touch_entity(eid, now, alias=name)
-                    except Exception:
-                        pass
-                    ne += 1
 
         def _node(name: str, kind: str):
             nm = (name or "").strip()
@@ -921,11 +1094,17 @@ class Extractor:
                     window=window, text=text,
                     grammatical_role="relation", relationship_boost=boost)
                 return ("person", pid) if pid else None
-            if mint_ok:
-                eid = resolver.resolve_entity(nm, ts=now)
-                return ("entity", eid) if eid else None
-            eid = store.find_entity_exact(nm)
-            return ("entity", eid) if eid else None
+            # An endpoint is a sighting like any other: it binds to a row
+            # that exists (exact name only for a bind-only source), and a
+            # new name is never minted here. While it is still a candidate
+            # the edge is pooled and written when the name becomes a node.
+            seen = _cand.observe(store, resolver, nm, ctx=_ctx(),
+                                 touch_alias=False)
+            if seen.entity_id:
+                return ("entity", seen.entity_id)
+            if seen.pending:
+                return ("pending", _cand.entity_name_key(seen.name), seen.name)
+            return None
 
         for r in facts.get("relations", []):
             pred = r.get("predicate")
@@ -967,8 +1146,26 @@ class Extractor:
                 continue
             subj = _node(r.get("subject", ""), r.get("subject_kind"))
             obj = _node(r.get("object", ""), r.get("object_kind"))
-            if subj and obj and pred and subj != obj:
+            if subj and obj and pred and subj[:2] != obj[:2]:
                 span = (r.get("source_span") or "")[:400]
+                if subj[0] == "pending" or obj[0] == "pending":
+                    # Not an edge yet, so not counted: it is replayed with
+                    # these same values when the candidate is promoted, and
+                    # dropped if the name expires first.
+                    ends = {}
+                    for side, node in (("subj", subj), ("obj", obj)):
+                        waiting = node[0] == "pending"
+                        ends[side + "_kind"] = "entity" if waiting else node[0]
+                        ends[side + "_id"] = None if waiting else node[1]
+                        ends[side + "_name"] = (
+                            node[2] if waiting
+                            else (r.get("subject" if side == "subj"
+                                        else "object") or ""))
+                    store.add_pending_entity_relation(
+                        predicate=pred, confidence=r.get("confidence"),
+                        quote=span or None, source_class=source_class,
+                        source_event_id=anchor, ts=now, **ends)
+                    continue
                 store.add_relation(subj[0], subj[1], pred, obj[0], obj[1],
                                    origin="asserted", source_event_id=anchor,
                                    confidence=r.get("confidence"), ts=now,
@@ -1749,7 +1946,7 @@ class Extractor:
         # extractor omitted them as from/to (common for "meeting with X").
         # Not for an uploaded document, which merely contains names.
         if "chat" in src and src not in _LANE_UPLOAD_SOURCES:
-            for name in _chat_people_names(turn.text or ""):
+            for name in _chat_people_names(turn.text or "", store=store):
                 if _person(name, role="relation", boost=0.75).person_id:
                     n += 1
         # Pilot ledger (WS-A): how many facts this turn actually materialized —
@@ -1803,8 +2000,41 @@ class Extractor:
             )
             eid = store.find_entity_exact(subj)
             if not eid and is_plausible_entity(subj) \
-                    and should_mint_as_entity(subj, "idea"):
-                eid = store.resolve_entity(subj, "other", ts=now)
+                    and should_mint_as_entity(subj, "idea", store=store):
+                # Same gate as _persist_entities: a bind-only source
+                # (assistant notes, news, screen OCR) may attach a claim to
+                # a subject that already exists, never mint one for it.
+                mint_ok, _cls = self._entity_mint_gate(
+                    event_source=event_source, window=window,
+                    text=turn.text or "")
+                if mint_ok and not store.is_entity_tombstoned(subj):
+                    # And the same candidate gate: a claim subject is a
+                    # name the model read, so a new one is a sighting in
+                    # the ledger and becomes a node only when it recurs or
+                    # the user typed it. Until then the claim stays a flat
+                    # fact, as it does for a bind-only source.
+                    from app.services import entity_candidates as _cand
+
+                    def _mint(name, kind, conf, src="model"):
+                        return store.resolve_entity(
+                            name, kind or "other", ts=now,
+                            kind_source=src, kind_confidence=conf)
+
+                    ctx = _cand.context(
+                        store, anchor=anchor, now=now,
+                        event_source=event_source, source_class=_cls,
+                        mint_ok=True, text=turn.text or "")
+                    if _cand.enabled():
+                        eid = _cand.consider_new(
+                            store, subj, ctx, confidence=cl.get("confidence"),
+                            span=cl.get("source_span"), mint=_mint)
+                    else:
+                        eid = _mint(subj, None, cl.get("confidence"))
+                        if eid:
+                            _cand.record_bound(
+                                store, subj, eid, ctx,
+                                confidence=cl.get("confidence"),
+                                span=cl.get("source_span"))
             if not eid:
                 return
             subj_type, subj_id = "entity", int(eid)
@@ -1812,8 +2042,13 @@ class Extractor:
         # Object: literal money/date value node. Bypass name_quality entity
         # gates — "$49" is rejected as punctuation by is_plausible_entity,
         # but is a valid belief object for costs/priced_at/due_on.
+        # Every claim predicate takes a value, so a new object row is a
+        # value literal by construction: minted hidden, kind `thing`, by
+        # rule, so the belief has an endpoint and the tab never lists "$49".
+        # Not subject to the mint gate (nothing visible is created); a name
+        # the user forgot still returns 0 and the claim stays a flat fact.
         obj_id = store.find_entity_exact(obj) or store.resolve_entity(
-            obj, "other", ts=now)
+            obj, "thing", ts=now, kind_source="rule", hidden=True)
         if not obj_id:
             return
 
@@ -2147,7 +2382,7 @@ def _source_me_is_user(src: str) -> bool:
     return True
 
 
-def _chat_people_names(text: str) -> list[str]:
+def _chat_people_names(text: str, *, store=None) -> list[str]:
     """Multi-word proper names in typed chat worth minting as people.
 
     The extractor often parks a meeting as a commitment/claim with empty or
@@ -2159,15 +2394,22 @@ def _chat_people_names(text: str) -> list[str]:
     from app.services.answer_check import extract_name_tokens
     from app.services import name_quality as nq
     from app.services import self_profile
+    from app.services.people_pipeline import entity_blocks_person
 
     out: list[str] = []
     seen: set[str] = set()
     for tok in extract_name_tokens(text or ""):
         if " " not in (tok or ""):
             continue
-        if not nq.is_plausible_person(tok):
+        if not nq.is_plausible_person(tok, store=store):
             continue
         if self_profile.is_self_name(tok):
+            continue
+        # A name the entity side owns (an org, a row the user or a filing
+        # kinded, a filed project, a forgotten org) is not a new person,
+        # whichever people path runs next.
+        if store is not None and entity_blocks_person(store, tok) \
+                and store.find_person_exact(tok) is None:
             continue
         key = tok.lower()
         if key in seen:

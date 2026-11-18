@@ -83,7 +83,9 @@ def label_speaker(store, label: str, name: str, *, actor: str = "user",
     track = store.open_speaker_track(label)
     if track is None:
         return {"ok": False, "error": f"no open track for {label!r}"}
-    pid = store.resolve_person(name, ts=now)
+    # The user labelling a voice names a person (lifts a learned "not a
+    # person" on the name); an automated caller does not.
+    pid = store.resolve_person(name, ts=now, by_user=actor == "user")
     if not pid:
         return {"ok": False, "error": f"could not resolve person {name!r}"}
     if not store.bind_speaker_track(int(track["id"]), int(pid), ts=now):

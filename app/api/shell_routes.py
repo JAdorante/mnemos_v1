@@ -91,6 +91,15 @@ INSPECT_GROUPS = (
     {"title": "Knowledge", "links": [
         {"href": "/kg/parity", "label": "Parity", "note": "JSON"},
         {"href": "/kg/adjudications", "label": "Adjudications", "note": "JSON"},
+        {"href": "/entities/candidates", "label": "Entity candidates",
+         "note": "names seen but not yet made into entities, JSON"},
+        {"href": "/entities/repair/plan", "label": "Entity repair plan",
+         "note": "what the repair would change now, JSON"},
+        {"href": "/entities/repair/runs", "label": "Entity repair runs",
+         "note": "what each run changed, with undo, JSON"},
+        {"href": "/entities/metrics?days=7", "label": "Entity metrics",
+         "note": "this seat's forget and kind-correction rates, rows seen "
+                 "once, candidates, JSON"},
         {"href": "/field/state", "label": "Field state", "note": "JSON"},
         {"href": "/graph/stats", "label": "Graph stats", "note": "JSON"},
     ]},

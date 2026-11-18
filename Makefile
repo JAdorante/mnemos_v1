@@ -6,16 +6,24 @@ PYTHON ?= python
 .PHONY: eval-asr eval-asr-check eval-asr-smoke eval-asr-bootstrap eval-asr-baseline
 .PHONY: listen-idle listen-idle-baseline
 .PHONY: asr-calibrate asr-calibration
-.PHONY: eval eval-live eval-people eval-people-live eval-grounding eval-planner eval-peer eval-peer-live eval-noise eval-context eval-ideas golden-commitments golden-entity-resolution golden-contact-attribution
+.PHONY: eval eval-live eval-people eval-people-live eval-grounding eval-planner eval-peer eval-peer-live eval-noise eval-context eval-ideas eval-entity-typing golden-commitments golden-entity-resolution golden-contact-attribution
 
 # Plan 2.2 + 2.3 + 2.4 + 3.3 + 5.2: golden thresholds (offline, no API key).
-eval: golden-commitments golden-entity-resolution golden-contact-attribution
+eval: golden-commitments golden-entity-resolution golden-contact-attribution eval-entity-typing
 	$(PYTHON) scripts/eval_commitments_ownership.py
 	$(PYTHON) scripts/eval_entity_resolution.py
 	$(PYTHON) scripts/eval_contact_attribution.py
 	$(PYTHON) scripts/eval_grounding.py
 	$(PYTHON) scripts/eval_planner_routing.py
 	$(PYTHON) scripts/eval_people_noise.py
+
+# Entity model: labelled sightings from synthetic seats in unrelated
+# industries (plus the source plan's own examples) through the real entity
+# path. Fails when project precision drops under 0.95 overall or in any one
+# seat, accuracy under 0.95, or a case one deterministic rule decides comes
+# out wrong. Offline: no model, no network.
+eval-entity-typing:
+	$(PYTHON) scripts/eval_entity_typing.py --gate
 
 # People v3 WS-G — noise metrics on the noisy corpus. Report-only in `eval`
 # (P0: numbers before knobs); run with --gate once P3/P4 flags are on.

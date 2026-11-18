@@ -84,7 +84,8 @@ def main() -> int:
     for alias in new_aliases:
         store.touch_entity(int(surv["id"]), ts=now, alias=alias)
     for v in victims:
-        store.set_entity_hidden(int(v["id"]), hidden=True)
+        # Hidden by this script's rule: a repair undo leaves it hidden.
+        store.set_entity_hidden(int(v["id"]), hidden=True, source="rule")
     print(f"\nmerged {len(victims)} entities into "
           f"{surv['name']!r} (+{len(new_aliases)} aliases).")
 

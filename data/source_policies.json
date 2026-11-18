@@ -1,5 +1,5 @@
 {
-  "version": "2.0",
+  "version": "2.1",
   "classes": {
     "private_conversation": {
       "extract_mentions": true,
@@ -331,7 +331,7 @@
       "create_claims": true,
       "update_people": false,
       "identity_evidence": false,
-      "knowledge_entities": true
+      "knowledge_entities": false
     }
   }
 }

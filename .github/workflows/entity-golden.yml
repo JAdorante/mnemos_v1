@@ -1,0 +1,175 @@
+# Entity model check: the entity typing golden gate and the entity model's
+# unit tests.
+#
+# The failures these catch are quiet. A model "project" that becomes a
+# project again, a forgotten name that comes back, a company sent to People:
+# none of them raises, they change what the Orgs & tools tab and the People
+# tab show. Changes land on main directly as often as through a pull request,
+# so this runs on both. No model, no audio, no network beyond pip: the golden
+# replay runs the real extractor entity path with the name embedder off.
+name: entity-golden
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/services/entity_*.py"
+      - "app/services/extractor.py"
+      - "app/services/resolution.py"
+      - "app/services/name_quality.py"
+      - "app/services/people_pipeline.py"
+      - "app/services/person_adjudicator.py"
+      - "app/services/ambient_cleanup.py"
+      - "app/services/projects.py"
+      - "app/services/project_rollup.py"
+      - "app/services/kg_keys.py"
+      - "app/services/kg_beliefs.py"
+      - "app/services/source_policy.py"
+      - "app/services/mint_recurrence.py"
+      - "app/services/free_mail.py"
+      - "app/services/inbox.py"
+      - "app/services/context/surfaces.py"
+      - "app/services/context/keys.py"
+      - "app/services/chat_ingest.py"
+      - "app/services/graph.py"
+      - "app/services/vocabulary.py"
+      - "app/services/screen_extract.py"
+      - "app/services/exhaust_ingest.py"
+      - "app/services/meeting_debrief.py"
+      - "app/services/onboarding.py"
+      - "app/services/onboarding_scan.py"
+      - "app/services/self_profile.py"
+      - "app/services/people_escrow.py"
+      - "app/services/peer_channel.py"
+      - "app/services/assistant_inbox.py"
+      - "app/services/mmr.py"
+      - "app/perception/l3_workers.py"
+      - "app/api/adoption.py"
+      - "app/api/profile_page.py"
+      - "app/api/shell_routes.py"
+      - "app/api/web_ingest.py"
+      - "app/main.py"
+      - "app/services/data/freemail_domains.json"
+      - "app/perception/psl.py"
+      - "app/perception/data/public_suffix_list.dat"
+      - "app/storage.py"
+      - "app/api/routes.py"
+      - "data/source_policies.json"
+      - "scripts/eval_entity_typing.py"
+      - "scripts/entity_repair.py"
+      - "scripts/seed_seat_vocab.py"
+      - "scripts/entity_metrics.py"
+      - "tests/fixtures/goldens/entity_typing.jsonl"
+      - "tests/test_entity_*.py"
+      - "tests/test_seat_vocab.py"
+      - "tests/test_free_mail.py"
+      - "tests/test_email_domain_orgs.py"
+      - "tests/test_assistant_bind_only.py"
+      - "requirements.txt"
+      - ".github/workflows/entity-golden.yml"
+  pull_request:
+    paths:
+      - "app/services/entity_*.py"
+      - "app/services/extractor.py"
+      - "app/services/resolution.py"
+      - "app/services/name_quality.py"
+      - "app/services/people_pipeline.py"
+      - "app/services/person_adjudicator.py"
+      - "app/services/ambient_cleanup.py"
+      - "app/services/projects.py"
+      - "app/services/project_rollup.py"
+      - "app/services/kg_keys.py"
+      - "app/services/kg_beliefs.py"
+      - "app/services/source_policy.py"
+      - "app/services/mint_recurrence.py"
+      - "app/services/free_mail.py"
+      - "app/services/inbox.py"
+      - "app/services/context/surfaces.py"
+      - "app/services/context/keys.py"
+      - "app/services/chat_ingest.py"
+      - "app/services/graph.py"
+      - "app/services/vocabulary.py"
+      - "app/services/screen_extract.py"
+      - "app/services/exhaust_ingest.py"
+      - "app/services/meeting_debrief.py"
+      - "app/services/onboarding.py"
+      - "app/services/onboarding_scan.py"
+      - "app/services/self_profile.py"
+      - "app/services/people_escrow.py"
+      - "app/services/peer_channel.py"
+      - "app/services/assistant_inbox.py"
+      - "app/services/mmr.py"
+      - "app/perception/l3_workers.py"
+      - "app/api/adoption.py"
+      - "app/api/profile_page.py"
+      - "app/api/shell_routes.py"
+      - "app/api/web_ingest.py"
+      - "app/main.py"
+      - "app/services/data/freemail_domains.json"
+      - "app/perception/psl.py"
+      - "app/perception/data/public_suffix_list.dat"
+      - "app/storage.py"
+      - "app/api/routes.py"
+      - "data/source_policies.json"
+      - "scripts/eval_entity_typing.py"
+      - "scripts/entity_repair.py"
+      - "scripts/seed_seat_vocab.py"
+      - "scripts/entity_metrics.py"
+      - "tests/fixtures/goldens/entity_typing.jsonl"
+      - "tests/test_entity_*.py"
+      - "tests/test_seat_vocab.py"
+      - "tests/test_free_mail.py"
+      - "tests/test_email_domain_orgs.py"
+      - "tests/test_assistant_bind_only.py"
+      - "requirements.txt"
+      - ".github/workflows/entity-golden.yml"
+  workflow_dispatch:
+
+jobs:
+  entity:
+    name: entity golden gate and unit tests (linux)
+    runs-on: ubuntu-latest
+    env:
+      # The hosted seats run Python 3.12; the tests need no model, no
+      # extraction heads, no speech and no Hugging Face download.
+      QUILL_HEADS: "off"
+      QUILL_USAGE_LEDGER: "0"
+      QUILL_TTS: "off"
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install -U pip
+          pip install -r requirements.txt
+      - name: Golden gate and entity model tests
+        run: |
+          export QUILL_DATA_DIR="$(mktemp -d)"
+          python -m unittest -v \
+            tests.test_entity_typing_golden \
+            tests.test_entity_candidates \
+            tests.test_entity_typing \
+            tests.test_entity_decisions \
+            tests.test_entity_tombstones \
+            tests.test_entity_kind_provenance \
+            tests.test_entity_merge \
+            tests.test_entity_scope \
+            tests.test_entity_repair \
+            tests.test_entity_metrics \
+            tests.test_entity_decision_trail \
+            tests.test_entity_carryovers \
+            tests.test_entity_carryovers_b \
+            tests.test_entity_carryovers_c \
+            tests.test_entity_fixpass_a \
+            tests.test_entity_fixpass_b \
+            tests.test_entity_fixpass_v \
+            tests.test_entity_kind_hygiene \
+            tests.test_seat_vocab \
+            tests.test_free_mail \
+            tests.test_email_domain_orgs \
+            tests.test_assistant_bind_only

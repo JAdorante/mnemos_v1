@@ -34,6 +34,28 @@ def norm_name(name: str) -> str:
     return _WS.sub(" ", s).strip()
 
 
+def entity_name_key(name: str) -> str:
+    """The one name key for entities: tombstones, the mention ledger and
+    duplicate detection all compare names through this.
+
+    It is `norm_name` (case, diacritics, punctuation and spacing folded), so
+    "Brannock-Hale", "brannock hale" and "Bránnock Hale" are one name. A name
+    with no ASCII letter or digit at all (CJK, Cyrillic) normalises to ""
+    under `norm_name`; those fall back to an NFKC casefold with collapsed
+    whitespace so they neither all collide on the empty key nor escape a
+    tombstone.
+
+    Changing this function, or `norm_name`, invalidates every stored
+    tombstone: `entity_tombstones.name_hash` is the sha256 of this key and
+    the name itself is not kept, so old rows could not be re-keyed.
+    """
+    key = norm_name(name)
+    if key:
+        return key
+    raw = unicodedata.normalize("NFKC", (name or "")).casefold()
+    return _WS.sub(" ", raw).strip()
+
+
 def phonetic(name: str) -> str:
     """Cheap phonetic-ish key: fold confusables, drop non-leading vowels,
     collapse doubles. Coarse by design — it's a *blocking* key (recall),

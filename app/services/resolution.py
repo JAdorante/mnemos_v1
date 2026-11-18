@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import threading
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -32,6 +33,19 @@ PERSON_SIM_THRESHOLD = float(os.environ.get("QUILL_PERSON_SIM_THRESHOLD", "0.82"
 _MIN_PREFIX = 3
 
 
+@dataclass(frozen=True)
+class EntityMatch:
+    """What `Resolver.match_entity` found for a name (see there)."""
+    status: str                     # existing | rejected | new
+    name: str = ""                  # the name as given, stripped
+    entity_id: int = 0              # the row, when status is `existing`
+    via: str = ""                   # how it matched, or why it was rejected
+    forgotten: bool = False         # the user forgot this name
+    person_shaped: bool = False     # rejected, and belongs in people
+    canonical: str = ""             # exact match: the row's stored name
+    kind_source: str | None = None  # exact match: who set the row's kind
+
+
 def _cos(a, b) -> float:
     # embedder returns L2-normalized vectors, so cosine == dot; guard anyway.
     if a is None or b is None:
@@ -40,19 +54,45 @@ def _cos(a, b) -> float:
     return float(np.dot(a, b) / denom)
 
 
+# What the person adjudicator writes on a row it judged not a human.
+_NOT_HUMAN_VERDICTS = frozenset({"org", "tool", "place", "junk", "entity"})
+
+
 def _is_known_person_name(store: Store, name: str) -> bool:
     """True when `name` is already a person's canonical name or alias —
     hidden/merged rows count, since a merged-away alias ("justin") is still a
-    person, not a mintable project."""
+    person, not a mintable project. A row the person adjudicator judged not
+    human ("a place", "an org") is no person: it was hidden for that.
+
+    This is also the evidence a person-shaped entity sighting needs before
+    it goes to people (`Resolver.match_entity`): two Title Case words alone
+    are not. Measured on the 24 practice worlds (fix pass B): the shape
+    alone sent 89 sightings of answer-key orgs and projects, places and
+    other non-people to people and caught 8 of answer-key people; a person
+    the seat already knew caught 7 of those 8 and none of the rest."""
     key = (name or "").strip().lower()
     if not key:
         return False
     for p in store.all_people():
+        verdict = p.get("adjudication") or {}
+        if isinstance(verdict, dict) and verdict.get("kind") in \
+                _NOT_HUMAN_VERDICTS:
+            continue
         if (p.get("name") or "").strip().lower() == key:
             return True
         if any((a or "").strip().lower() == key for a in p.get("aliases") or []):
             return True
     return False
+
+
+def _is_filed_name(name: str) -> bool:
+    """A name in the shared or filed tier of the project registry
+    (`projects.filed_keys`, never the circular `known` tier)."""
+    try:
+        from app.services import projects
+        return projects.norm(name) in projects.filed_keys()
+    except Exception:
+        return False
 
 
 def _prefix_match(a: str, b: str) -> bool:
@@ -106,7 +146,9 @@ class Resolver:
             return None
         from app.services.name_quality import is_plausible_person, normalize_person_name
         key = normalize_person_name(key)
-        if not is_plausible_person(key):
+        # The seat's own vocabulary comes with its store; a Resolver with no
+        # store yet uses the shared one only if it is already open.
+        if not is_plausible_person(key, store=self._store):
             return None
         with self._lock:
             store = self._s()
@@ -153,65 +195,276 @@ class Resolver:
             # else: a new person, remembered with its embedding
             return store.insert_person(key, embedding=emb, ts=ts)
 
+    # Entity resolution is two steps. `match_entity` asks what a name is
+    # against what is already known and writes nothing; `mint_entity` acts
+    # on that answer (touch, re-kind, or create the row). `resolve_entity`
+    # is the two run back to back under one lock. The candidate gate
+    # (services/entity_candidates.py) runs them apart, so a new name can
+    # wait in the ledger between the match and the mint.
+    def match_entity(self, name: str, kind: str | None = None) -> EntityMatch:
+        """The match step: what is `name`, against what is already known?
+
+        - `existing`: an entity row answers to it (`entity_id`). `via` says
+          how: `exact` (a visible row with that name), `hidden` (a hidden
+          row carries exactly this name, as its name or a confirmed alias),
+          `alias` (a visible row's confirmed alias), `fuzzy` (the correction
+          layer folds it into a neighbour). An exact name always wins over
+          a fuzzy neighbour.
+        - `rejected`: it can never be an entity. `via` is `empty`,
+          `implausible`, `not_entity` (a person-shaped name under a
+          project/idea label that this seat already knows as a person;
+          `person_shaped` set, so the mint step touches that person) or
+          `known_person`.
+        - `new`: nothing answers to it. `forgotten` is set when the user
+          forgot this name: only a user act may mint it then.
+
+        The lookups come before the person-shape gate: a name a row
+        already carries (visible or hidden, canonical or confirmed alias)
+        is that row, and a forgotten name (of any kind) stays forgotten,
+        whatever the name looks like. A person-shaped name goes to people
+        only on person evidence (`_is_known_person_name`) and never when it
+        is a filed project's name; otherwise it is a new name like any
+        other, and the candidate gate and the kind vote decide what it
+        becomes.
+
+        Read-only: no row is touched and nothing is created."""
+        pre, kind_n, shaped = self._entity_precheck(name, kind,
+                                                    store=self._store)
+        if pre is not None:
+            return pre
+        with self._lock:
+            return self._match_entity_unlocked((name or "").strip(), kind_n,
+                                               person_shaped=shaped)
+
+    @staticmethod
+    def _entity_precheck(name: str, kind: str | None, *, store=None):
+        """(rejection | None, normalized kind, person-shaped): the
+        name-shape gates, which read no rows (`store` only lends its seat
+        vocabulary). Shared by the match step and the composition.
+        Person-shaped: the shape alone would not mint the name under this
+        kind (`should_mint_as_entity`); the store-backed match decides
+        what that means."""
+        key = (name or "").strip()
+        if not key:
+            return EntityMatch("rejected", via="empty"), None, False
+        from app.services.name_quality import (
+            is_plausible_entity,
+            normalize_entity_kind,
+            should_mint_as_entity,
+        )
+        if not is_plausible_entity(key):
+            return (EntityMatch("rejected", name=key, via="implausible"),
+                    None, False)
+        kind_n = normalize_entity_kind(kind)
+        return None, kind_n, not should_mint_as_entity(key, kind_n,
+                                                       store=store)
+
+    def _match_entity_unlocked(self, key: str, kind_n: str, *,
+                               person_shaped: bool = False) -> EntityMatch:
+        """Store-backed half of the match. Caller holds `_lock`."""
+        store = self._s()
+        # Exact is cheap and handles the common case.
+        existing = store.all_entities()
+        exact = next((e for e in existing
+                      if (e["name"] or "").lower() == key.lower()), None)
+        if exact is not None:
+            return EntityMatch("existing", name=key,
+                               entity_id=int(exact["id"]), via="exact",
+                               canonical=exact["name"],
+                               kind_source=exact.get("kind_source"))
+        # Forgotten by the user, and no live row carries the name (a
+        # hidden row is not in `existing`, so ask the store directly).
+        # A forgotten name is not sent to people either, whatever its kind.
+        forgotten = store.is_entity_tombstoned(key)
+        exact_id = store.find_entity_exact(key)
+        if forgotten and exact_id is None:
+            return EntityMatch("new", name=key, forgotten=True)
+        # A name already living in the people table (canonical OR alias,
+        # hidden/merged rows included) must not fork into a project/idea
+        # node — that's how "Justin"[project] and "Marc"[project] happened.
+        # Orgs/tools/places stay allowed: a company can share a founder's
+        # name; a second project named "Marc" cannot.
+        # Audit 2026-11-11: OCR of an inbox re-minted five known people as
+        # kind=tool, so the guard now covers every non-org kind; only an
+        # org may legitimately share a person's name (a founder's firm).
+        def known_person() -> bool:
+            return kind_n != "org" and _is_known_person_name(store, key)
+        if exact_id is not None:
+            # A row that carries exactly this name (a hidden row's canonical
+            # name, or any row's confirmed alias) is what the sighting names,
+            # and it wins over the corrector's fuzzy neighbour: a sighting of
+            # a name the user or the repair hid must not fold into another
+            # entity (and the repair's "hidden until a real sighting" must
+            # see it). The row stays hidden; only the store's own rules (a
+            # filing or the user) show it again. A forgotten name that a
+            # hidden row still carries binds here too, as before. The
+            # known-person guard still comes first for a hidden row and for
+            # a forgotten name, as it did when this match came last.
+            hidden = store.entity_is_hidden(int(exact_id))
+            if (hidden or forgotten) and known_person():
+                return EntityMatch("rejected", name=key, via="known_person")
+            return EntityMatch("existing", name=key,
+                               entity_id=int(exact_id),
+                               via="hidden" if hidden else "alias",
+                               forgotten=forgotten)
+        # A project the user files under is that project, even before it
+        # has a row (a team's shared project) and even if a person was once
+        # minted under its name.
+        filed = _is_filed_name(key)
+        if person_shaped and not filed and _is_known_person_name(store, key):
+            # Two Title Case words under a project/topic label, and this
+            # seat knows a person by that name: it is that person.
+            return EntityMatch("rejected", name=key, via="not_entity",
+                               person_shaped=True)
+        from app.services.entity_correction import corrector
+        # The corrector folds ASR slips ("Dell Capitol" -> "Dell Capital").
+        # An all-caps acronym from a document is not an ASR slip, and
+        # Soundex makes "ABB" a twin of "Abby" (audit 2026-11-11).
+        is_acronym = key.isupper() and key.isalpha() and len(key) <= 5
+        m = None if is_acronym else corrector.match(key, existing)
+        if m is not None:
+            return EntityMatch("existing", name=key, entity_id=int(m.ref),
+                               via="fuzzy")
+        if not filed and known_person():
+            return EntityMatch("rejected", name=key, via="known_person")
+        return EntityMatch("new", name=key)
+
+    def mint_entity(self, match: EntityMatch, kind: str | None = None, *,
+                    ts: float | None = None,
+                    kind_source: str | None = None,
+                    kind_confidence: float | None = None) -> int:
+        """The mint step: act on a match. Touches (and, for a higher-rank
+        caller, re-kinds) an existing row, creates the row for a new name,
+        and sends a person-shaped rejection to people. Returns the entity
+        id, or 0 for "no entity"."""
+        if match.status == "rejected":
+            self._reroute_person_shaped(match, ts)
+            return 0
+        with self._lock:
+            return self._mint_entity_unlocked(
+                match, kind, ts=ts, kind_source=kind_source,
+                kind_confidence=kind_confidence)
+
+    def _reroute_person_shaped(self, match: EntityMatch,
+                               ts: float | None) -> None:
+        # Person-shaped project/idea that names a person this seat knows:
+        # the sighting is that person's, skip the entity mint. It touches
+        # the person and never creates one (an entity sighting is no
+        # evidence that a new person exists). Outside `_lock`: the store
+        # takes its own.
+        if match.person_shaped:
+            try:
+                store = self._s()
+                pid = store.find_person_exact(match.name)
+                if pid is not None:
+                    store.touch_person(pid, ts)
+            except Exception:
+                pass
+
+    def _mint_entity_unlocked(self, match: EntityMatch, kind: str | None, *,
+                              ts: float | None, kind_source: str | None,
+                              kind_confidence: float | None,
+                              retry: bool = True) -> int:
+        store = self._s()
+        if match.status == "existing" and match.via == "exact":
+            if (kind or "").strip() and Store.kind_source_rank(kind_source) \
+                    > Store.kind_source_rank(match.kind_source):
+                # A higher-rank caller re-kinds the row; the store
+                # applies the rank rule and bumps last_seen itself.
+                # The raw label goes down, not the normalized kind: the
+                # store ignores a label that is not a kind ("client" would
+                # arrive as "idea" and overwrite the row's kind). It is
+                # exact-match-or-create: a row gone since is not revived.
+                return store.resolve_entity(
+                    match.canonical or match.name, kind, ts=ts,
+                    kind_source=kind_source,
+                    kind_confidence=kind_confidence)
+            if store.touch_entity(match.entity_id, ts=ts) is not False:
+                return int(match.entity_id)
+            return self._rematch_unlocked(match, kind, ts=ts,
+                                          kind_source=kind_source,
+                                          kind_confidence=kind_confidence,
+                                          retry=retry)
+        if match.status == "existing" and match.via == "fuzzy":
+            if store.touch_entity(match.entity_id, ts=ts,
+                                  alias=match.name) is not False:
+                return int(match.entity_id)
+            return self._rematch_unlocked(match, kind, ts=ts,
+                                          kind_source=kind_source,
+                                          kind_confidence=kind_confidence,
+                                          retry=retry)
+        if match.status == "new" and match.forgotten \
+                and (kind_source or "").strip().lower() != "user":
+            return 0
+        # A new name (for a forgotten one, the user is adding it back: mint
+        # under the name they gave, never as an alias of a fuzzy neighbour),
+        # or a hidden row with exactly this name: the store's
+        # exact-match-or-create mints the one and binds the other.
+        return store.resolve_entity(match.name, kind, ts=ts,
+                                    kind_source=kind_source,
+                                    kind_confidence=kind_confidence)
+
+    def _rematch_unlocked(self, match: EntityMatch, kind: str | None, *,
+                          ts: float | None, kind_source: str | None,
+                          kind_confidence: float | None,
+                          retry: bool) -> int:
+        """The row a match named was merged or deleted between the match and
+        the mint step (its touch found no row: a request thread forgot or
+        merged it while the extractor ran). Match the name again, once, and
+        act on what answers now: a merge's survivor through its confirmed
+        alias, a new row, or nothing for a forgotten name; never the dead
+        id."""
+        if not retry:
+            return 0
+        _pre, kind_n, shaped = self._entity_precheck(match.name, kind,
+                                                     store=self._store)
+        again = self._match_entity_unlocked(match.name, kind_n,
+                                            person_shaped=shaped)
+        if again.status == "rejected" or (
+                again.status == "existing"
+                and again.entity_id == match.entity_id):
+            return 0
+        return self._mint_entity_unlocked(
+            again, kind, ts=ts, kind_source=kind_source,
+            kind_confidence=kind_confidence, retry=False)
+
     def resolve_entity(self, name: str, kind: str | None = None, *,
-                       ts: float | None = None) -> int:
+                       ts: float | None = None,
+                       kind_source: str | None = None,
+                       kind_confidence: float | None = None) -> int:
         """Return a stable entity id for a named org/project/place, routing the
         raw name through the SAME correction layer as people so a mis-heard
         entity ("Dell Capitol" -> "Dell Capital") collapses instead of forking.
         Falls back to the store's exact-match-or-create for a genuinely new name.
 
-        Person-shaped names (e.g. 'Bill Clinton' mislabeled as project) are
-        routed to people instead of minting a junk entity.
+        A person-shaped name (e.g. 'Bill Clinton' mislabeled as project)
+        that names a person this seat knows goes to that person instead of
+        minting a junk entity (see `match_entity`).
+
+        `kind_source` / `kind_confidence` say who vouches for `kind` and are
+        handed to the store, which owns the rank rule. Returns 0 — "no
+        entity", never an id — for an implausible name, a person, or a name
+        the user has forgotten: a forgotten name is neither minted nor folded
+        into a similar-sounding neighbour (a forgotten "k9" must not come
+        back as an alias of "k8"). Only a `user` source brings one back.
+
+        This is `match_entity` then `mint_entity` under one lock: a name
+        that matches nothing is minted on the spot. Callers that must not
+        mint at first sight (the extractor) run the two steps apart.
         """
-        key = (name or "").strip()
-        if not key:
-            return 0
-        from app.services.name_quality import (
-            is_plausible_entity,
-            is_person_shaped_entity_name,
-            normalize_entity_kind,
-            should_mint_as_entity,
-        )
-        if not is_plausible_entity(key):
-            return 0
-        kind_n = normalize_entity_kind(kind)
-        if not should_mint_as_entity(key, kind_n):
-            # Person-shaped project/idea — land in people, skip entity mint.
-            if is_person_shaped_entity_name(key):
-                try:
-                    self.resolve_person(key, ts=ts)
-                except Exception:
-                    pass
+        pre, kind_n, shaped = self._entity_precheck(name, kind,
+                                                    store=self._store)
+        if pre is not None:
             return 0
         with self._lock:
-            store = self._s()
-            # Exact/create is cheap and handles the common case + brand-new names.
-            existing = store.all_entities()
-            exact = next((e for e in existing
-                          if (e["name"] or "").lower() == key.lower()), None)
-            if exact is not None:
-                store.touch_entity(exact["id"], ts=ts)
-                return int(exact["id"])
-            from app.services.entity_correction import corrector
-            # The corrector folds ASR slips ("Dell Capitol" -> "Dell Capital").
-            # An all-caps acronym from a document is not an ASR slip, and
-            # Soundex makes "ABB" a twin of "Abby" (audit 2026-11-11).
-            is_acronym = key.isupper() and key.isalpha() and len(key) <= 5
-            m = None if is_acronym else corrector.match(key, existing)
-            if m is not None:
-                store.touch_entity(int(m.ref), ts=ts, alias=key)
-                return int(m.ref)
-            # A name already living in the people table (canonical OR alias,
-            # hidden/merged rows included) must not fork into a project/idea
-            # node — that's how "Justin"[project] and "Marc"[project] happened.
-            # Orgs/tools/places stay allowed: a company can share a founder's
-            # name; a second project named "Marc" cannot.
-            # Audit 2026-11-11: OCR of an inbox re-minted five known people as
-            # kind=tool, so the guard now covers every non-org kind; only an
-            # org may legitimately share a person's name (a founder's firm).
-            if kind_n != "org" and _is_known_person_name(store, key):
-                return 0
-            return store.resolve_entity(key, kind_n, ts=ts)
+            match = self._match_entity_unlocked((name or "").strip(), kind_n,
+                                                person_shaped=shaped)
+            if match.status != "rejected":
+                return self._mint_entity_unlocked(
+                    match, kind, ts=ts, kind_source=kind_source,
+                    kind_confidence=kind_confidence)
+        self._reroute_person_shaped(match, ts)
+        return 0
 
 
 resolver = Resolver()

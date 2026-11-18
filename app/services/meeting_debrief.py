@@ -219,7 +219,7 @@ def suggest_relationship(email: str, user_domains: set[str]) -> tuple[str, str]:
         return "", ""
     if dom in user_domains:
         return "colleague", f"same domain as you ({dom})"
-    if user_domains - set(_FREE_MAIL):
+    if any(d not in _FREE_MAIL for d in user_domains):
         return "external", f"outside your domain ({dom})"
     return "", ""
 
@@ -294,7 +294,8 @@ def set_relationship(store: Store, *, name: str, email: str,
     if pid is None:
         if not name:
             return {"ok": False, "error": "a name is needed to remember this person"}
-        pid = store.resolve_person(name, ts=_now())
+        # The user named the person on the debrief card.
+        pid = store.resolve_person(name, ts=_now(), by_user=True)
     if rel:
         store.set_person_attr(int(pid), "relationship", rel, None, _now())
     else:

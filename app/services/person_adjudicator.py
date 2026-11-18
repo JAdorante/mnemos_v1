@@ -125,6 +125,25 @@ def _build_prompt(person: dict, ctx: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _entity_twin_verdict(store, person: dict) -> dict[str, Any] | None:
+    """A candidate whose exact name the entity side owns (an org, a row the
+    user or a filing kinded, a filed project, a forgotten org:
+    `people_pipeline.entity_blocks_person`) is that entity's twin, minted
+    before the guard existed or by a path that skipped it. It is hidden
+    without a model call (the verdict `entity` is never re-judged), and the
+    entity is left as it is."""
+    try:
+        from app.services.people_pipeline import entity_blocks_person
+        hit = entity_blocks_person(store, person.get("name") or "")
+    except Exception:
+        return None
+    if hit is None:
+        return None
+    return {"kind": "entity", "confidence": 1.0,
+            "reason": f"an entity of this seat ({hit.get('kind')}) has "
+                      "this name", "ts": time.time()}
+
+
 def adjudicate(store, person: dict) -> dict[str, Any] | None:
     """One model verdict for one candidate row, or None when the model call
     failed outright (leave the row unmarked so a later pass retries)."""
@@ -171,7 +190,8 @@ def _apply(store, person: dict, verdict: dict[str, Any]) -> str:
     if kind in ("org", "tool", "place"):
         try:
             store.resolve_entity(person.get("name") or "", kind,
-                                 ts=time.time())
+                                 ts=time.time(), kind_source="model",
+                                 kind_confidence=conf)
         except Exception as exc:
             print(f"[person_adjudicate] entity reroute failed for "
                   f"'{person.get('name')}' ({exc}); hiding anyway.")
@@ -227,7 +247,9 @@ def run_once(store=None, *, limit: int = 8) -> dict[str, Any]:
         if _person_protected(store, int(p["id"])):
             continue
         checked += 1
-        verdict = adjudicate(store, p)
+        verdict = _entity_twin_verdict(store, p)
+        if verdict is None:
+            verdict = adjudicate(store, p)
         if verdict is None:
             failed += 1
             continue

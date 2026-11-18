@@ -155,7 +155,7 @@ def plan_people(store, *, limit: int = 500) -> list[dict]:
         name = _name(p)
         # Implausible BEFORE promotion_state — speech-act / brand junk often
         # got auto-promoted to "recognized" and was then skipped forever.
-        if not is_plausible_person(name):
+        if not is_plausible_person(name, store=store):
             out.append({"id": pid, "name": name,
                         "promotion_state": (p.get("promotion_state")
                                            or "candidate"),
@@ -211,8 +211,55 @@ _FILEISH = re.compile(
     r"(?i)\.(mp3|wav|m4a|flac|aac|ogg|jsonl|pdf|docx?|xlsx?|pptx?|zip|csv)\b"
 )
 
+# Whole names that name nothing: a placeholder the extractor filled in. An
+# orphan row under one is junk on any seat.
+_PLACEHOLDER_NAMES = frozenset({"unknown", "not specified",
+                                "unknown organization"})
+# Whole names that are screen chrome on any seat (a mail or phone app's
+# sections, a software category, the product's own Capture page) or a
+# kinship word that points at a person, not a thing. Each can also be a
+# real name somewhere ("Messages" the app, a product called "Capture"), so
+# one hides an orphan row only when nothing supports it (no bound sighting,
+# no fact naming it) and no filing or user made the row. Generic words
+# only: a seat's own junk names are its `junk_entity_name` vocabulary
+# (Store.seat_vocab), which hides on the name as before.
+_CHROME_NAMES = frozenset({"contacts", "messages", "login", "crm",
+                           "capture", "mom"})
 
-def _looks_like_entity_junk(name: str, kind: str | None) -> bool:
+
+def _seat_junk_names(store) -> frozenset[str]:
+    if store is None:
+        return frozenset()
+    try:
+        return store.seat_vocab().get("junk_entity_name") or frozenset()
+    except Exception:
+        return frozenset()
+
+
+def _junk_by_name(n: str, *, store=None, entity_id: int | None = None,
+                  kind_source: str | None = None) -> bool:
+    """Is this whole name junk by the word lists alone? See
+    `_PLACEHOLDER_NAMES`, `_CHROME_NAMES` and the seat's own names. A row a
+    filing or the user made is never junk by a word list: automation does
+    not undo what the user did by hand."""
+    if (kind_source or "") in ("filing", "user"):
+        return False
+    low = " ".join(n.lower().split())
+    if low in _PLACEHOLDER_NAMES or low in _seat_junk_names(store):
+        return True
+    if low not in _CHROME_NAMES:
+        return False
+    if store is None or not entity_id:
+        return False               # cannot check support: keep it
+    try:
+        return not store.entity_has_support(int(entity_id), n)
+    except Exception:
+        return False
+
+
+def _looks_like_entity_junk(name: str, kind: str | None, *,
+                            store=None, entity_id: int | None = None,
+                            kind_source: str | None = None) -> bool:
     n = (name or "").strip()
     if not n or not is_plausible_entity(n):
         return True
@@ -220,18 +267,18 @@ def _looks_like_entity_junk(name: str, kind: str | None) -> bool:
         return True
     words = n.split()
     clean = [w.strip(".,+") for w in words]
-    low = n.lower()
-    if low in {"unknown", "not specified", "contacts", "mom",
-               "environment", "readable", "login", "messages", "flight",
-               "renewal", "beachhead", "shadowing", "unknown organization",
-               "extraction", "consolidation", "capture", "prompt", "crm"}:
+    if _junk_by_name(n, store=store, entity_id=entity_id,
+                     kind_source=kind_source):
         return True
     k = (kind or "").lower()
     # Keep places unless already failed plausible/code checks.
     if k == "place":
         return False
-    # Person-shaped names misfiled as projects/other (shared with write-time gate).
-    if k in ("other", "project", "idea", "") and is_person_shaped_entity_name(n):
+    # Person-shaped names misfiled as projects/other (shared with write-time
+    # gate); never a row the user or a filing kinded.
+    if k in ("other", "project", "idea", "label", "") \
+            and (kind_source or "") not in ("user", "filing") \
+            and is_person_shaped_entity_name(n, store=store):
         return True
     # Multi-word debris phrases (campaigns, pages, pipelines…).
     if len(clean) >= 3 and (
@@ -274,7 +321,7 @@ def _known_person_names(store) -> set[str]:
     for p in people:
         for raw in [p.get("name") or ""] + list(p.get("aliases") or []):
             raw = (raw or "").strip()
-            if not raw or not is_plausible_person(raw):
+            if not raw or not is_plausible_person(raw, store=store):
                 continue
             compact = "".join(raw.lower().split())
             if len(compact) >= 3:
@@ -292,6 +339,11 @@ def plan_entities(store, *, limit: int = 500) -> list[dict]:
         collision)
     """
     person_names = _known_person_names(store)
+    from app.services import projects
+    try:
+        filed = projects.filed_keys()
+    except Exception:
+        filed = frozenset()
     out: list[dict] = []
     for e in store.all_entities(include_hidden=False):
         if len(out) >= limit:
@@ -306,8 +358,12 @@ def plan_entities(store, *, limit: int = 500) -> list[dict]:
         #    "Bill Clinton"[project]). Tools/orgs/places are full of real
         #    two-token brands ("Hugging Face", "Y Combinator", "Boston
         #    Dynamics") — shape alone must never hide those.
-        if kind_l in ("project", "idea", "other", "") \
-                and is_person_shaped_entity_name(name):
+        #    A row the user or a filing kinded, or a project the user files
+        #    under, is never sent to people by its shape.
+        if kind_l in ("project", "idea", "label", "other", "") \
+                and is_person_shaped_entity_name(name, store=store) \
+                and (e.get("kind_source") or "") not in ("user", "filing") \
+                and projects.norm(name) not in filed:
             out.append({
                 "id": eid, "name": name, "kind": kind,
                 "action": "hide_person",
@@ -332,7 +388,7 @@ def plan_entities(store, *, limit: int = 500) -> list[dict]:
         #      but the people table can. Orgs/tools/places stay: a company may
         #      share its founder's name. The person already exists, so plain
         #      hide (no re-mint).
-        if kind_l in ("project", "idea", "other", "") \
+        if kind_l in ("project", "idea", "label", "other", "") \
                 and "".join(name.lower().split()) in person_names:
             out.append({
                 "id": eid, "name": name, "kind": kind,
@@ -361,7 +417,8 @@ def plan_entities(store, *, limit: int = 500) -> list[dict]:
             if _is_seed_tool(name, kind):
                 continue
             # Orphan single-token orgs/products stay; only clear junk debris.
-            if _looks_like_entity_junk(name, kind):
+            if _looks_like_entity_junk(name, kind, store=store, entity_id=eid,
+                                       kind_source=e.get("kind_source")):
                 out.append({
                     "id": eid, "name": name, "kind": kind,
                     "action": "hide", "reason": "orphan_junk",
@@ -409,23 +466,26 @@ def apply(store, plan_data: dict) -> dict[str, list]:
         row = dict(e)
         if action == "reclassify":
             to_kind = e.get("to_kind") or normalize_entity_kind(e.get("kind"))
-            if store.set_entity_kind(eid, to_kind):
+            # Rule rank: refused (and left out of `applied`) when the kind
+            # was set by a filing or by the user.
+            if store.set_entity_kind(eid, to_kind, source="rule",
+                                     confidence=None):
                 row["applied_kind"] = to_kind
                 applied_e.append(row)
             continue
         if action == "hide_person":
             name = _name(e)
-            if name and is_plausible_person(name):
+            if name and is_plausible_person(name, store=store):
                 try:
                     store.resolve_person(name, ts=time.time())
                     row["minted_person"] = True
                 except Exception:
                     row["minted_person"] = False
-            store.set_entity_hidden(eid, hidden=True)
+            store.set_entity_hidden(eid, hidden=True, source="rule")
             applied_e.append(row)
             continue
-        # Default: soft-hide
-        store.set_entity_hidden(eid, hidden=True)
+        # Default: soft-hide (by rule: a repair undo leaves it hidden)
+        store.set_entity_hidden(eid, hidden=True, source="rule")
         applied_e.append(row)
     return {"people": applied_p, "entities": applied_e}
 
